@@ -1,4 +1,4 @@
-name: rustdoc
+name: gh-pages
 
 on:
   push:
@@ -9,7 +9,7 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  rustdoc:
+  gh-pages:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -21,10 +21,21 @@ jobs:
       - name: rustdoc
         run: make doc
 
+      - name: mdbook
+        run: |
+          cargo install mdbook --locked
+          cd design && mdbook build
+
+      - name: stage build artifacts
+        run: |
+          mkdir site
+          mv ./target/doc site/rustdoc
+          mv design/book site/design
+
       - name: Deploy Docs
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
-          publish_dir: ./target/doc
+          publish_dir: ./site
           force_orphan: true

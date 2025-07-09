@@ -183,7 +183,8 @@ fn get_available_port() -> u16 {
 
 #[cfg(test)]
 fn get_ephemeral_port() -> std::io::Result<u16> {
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
+    use std::net::TcpStream;
 
     // Request a random available port from the OS
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;

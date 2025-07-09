@@ -61,11 +61,11 @@ impl std::fmt::Display for ServerVersion {
 
 #[cfg(test)]
 mod test {
-    use crate::config::Config;
-    use crate::proto::bridge_service_client::BridgeServiceClient;
-    use crate::proto::GetServiceInfoRequest;
     use crate::Hashi;
     use crate::ServerVersion;
+    use crate::config::Config;
+    use crate::proto::GetServiceInfoRequest;
+    use crate::proto::bridge_service_client::BridgeServiceClient;
 
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]

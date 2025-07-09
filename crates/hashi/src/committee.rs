@@ -1,4 +1,5 @@
-use sui_sdk_types::{Address, Ed25519PublicKey};
+use sui_sdk_types::Address;
+use sui_sdk_types::Ed25519PublicKey;
 
 use crate::bls::BlsCommittee;
 
