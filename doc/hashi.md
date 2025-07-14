@@ -23,10 +23,45 @@ but is essentially optional as it requires a separate on-chain registration and
 running extra services.
 
 Each committee member will register an additional network address (do we need
-an additional network key for TLS or do we reuse the same one used by sui-node)
+an additional network key for TLS or do we reuse the same one used by sui-node?)
 and an additional bls12381 public key. An aggregated bls signature from the
 committee will be used to approve various actions necessary for normal
 operations. 
+
+```
+struct PublicKey {
+    scheme: u8,
+    public_key: Vec<u8>,
+}
+
+struct CommitteeMember {
+    protocol_key: PublicKey, // bls12381
+    network_key: PublicKey,  // ed25519
+    network_address: String, // or URL
+    sui_validator_staking_pool_id: ID, // Unique id of this validator in the validator set
+    stake: u64,
+}
+
+struct Committee {
+    members: Vec<CommitteeMember>,
+    updates: Vec<CommitteeMember>, // updates that a member wants to make
+    total_stake: u64,
+}
+```
+
+The exact details of committee reconfiguration are still TBD, but one possible
+design would be:
+- immediately post sui epoch change we inspect the new sui committee and
+  determine the new committee for the bridge. This will require effort from the
+  move team to add the ability to inspect the system state using a non-mutable
+  reference.
+
+- existing committee begins the process of handing off to the new committee
+
+Reconfiguration will likely always happen while the committee has other/on
+going operations in flight. We'll need to figure out if we should complete
+pending operations or if reconfiguration should preempt those operations which
+can resume once a new committee has been installed.
 
 ### Why is the committee not exactly the set of Sui Validators?
 
@@ -76,6 +111,29 @@ stored on Sui as a part of the live object set and knowledge of any historical
 transactions or events previously emitted must not be needed for correct
 operations of the service.
 
+## Workflows
+
+For example, when processing a BTC withdrawal we could have the state of that
+withdrawal on chain as it moves through various stages:
+
+- Request withdrawal -> transaction formation -> MPC committee sig generation
+  -> waiting for confirmations -> Finalized
+
+In the system state on sui (or maybe another shared object?) we can have a
+buffer of these sort of heterogeneous ongoing or pending actions. This way a
+node can trivially list out or fetch these actions from Sui on startup or after
+a crash.
+
+TODO add workflows
+
+```
+struct Workflow {
+    id: UID,
+    name: String, // type of workflow
+    // Dynamic fields with workflow specific information
+}
+```
+
 ## How do we handle sanctioned BTC addresses?
 
 The decision to facilitate a transaction from/to bitcoin must take into account
@@ -100,7 +158,7 @@ Due to this many who interact in the bitcoin ecosystem wait for a number of
 block confirmations before recognizing that the transactions in a block are
 considered final. The industry standard seems to sit around waiting for 6
 confirmations before treating a block as final. As such we'll also use a
-minimum of 6 confirmations before our system recognizes a block as final.
+minimum of 6-10 confirmations before our system recognizes a block as final.
 
 We'll have a shared object used to track the latest bitcoin blocks. As new
 bitcoin blocks are mined, the committee will form a cert to confirm a block or
@@ -112,15 +170,61 @@ Each time a new block is finalized, the quorum will process the block and
 either mint sBTC for each new UTXO or close out any previously pending
 withdrawals on the sui side.
 
+We'll need a shared object to maintain the set of UTXOs and/or public keys
+(addresses) that the committee is managing. This will act as both an accounting
+mechanism as well as a nonce/replay protection mechanism. As UTXOs are
+deposited, entries will be added, and as UTXOs are withdrawn (spent), entries
+will be removed, all after the requisite number of confirmations.
+
 ### Alternative
 Alternatively we could implement btc block verification inside of move and have
 them all verified inside of move (block headers). To do this we'd need to
 expose a sha256 hash function to be used in move.
 
+We could also just have the committee act as an oracle and instead have users
+need to drive the formation of a cert to have btc collateral minted on the sui
+side.
+
 ## Proof of possession
+
+Depending on how we expect users to deposit to the bridge committee owned BTC
+addresses, we may want to build out some way for a user to get a proof of
+possession of the address they'll be sending to.
+
+## Bridge Node API
+
+Every committee member will be responsible for running a hashi node service.
+Each hashi node will expose an http service, secured by TLS leveraging a
+self-signed cert (ed25519 public key can be found in the Hashi System State
+object) which will serve a gRPC `HashiService`. If we want to gate some API
+surface to only be callable by other committee members then we can trivially
+leverage mTLS and a middleware auth layer that enforces that callers'
+self-signed cert must be from a member of the committee.
+
+## MPC protocol
+
+TBD
+
+## BTC account rotation
+
+TBD
+
+## Collateral object or just sBTC
+
+TBD
+
+## Fees and Incentives
+
+TBD
+
 
 # Open Questions
 
 - How do we pay for gas (on sui and bitcoin)
 - How do we handle congestion on bitcoin?
-- How often should we do reconfiguration given we wont operate in lock-step with sui's reconfiguration?
+- How often should we do reconfiguration given we wont operate in lock-step
+  with sui's reconfiguration?
+- how do we handle the catastrophic scenario where validators loose their key
+  shares
+- How do we have a validator auth themselves to the bridge system contracts for
+  the purpose of registration or updating their info
