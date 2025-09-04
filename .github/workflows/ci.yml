@@ -52,7 +52,9 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: rustfmt
-        run: make check-fmt
+        run: |
+          cargo fmt -- --check
+          buf format --diff --exit-code
 
       - name: clippy
         run: make clippy
@@ -76,5 +78,9 @@ jobs:
 
       - name: rustdoc
         run: make doc
+
+      - uses: taiki-e/install-action@mdbook
+      - name: build mdbook
+        run: cd design && mdbook build
 
       - run: make is-dirty
