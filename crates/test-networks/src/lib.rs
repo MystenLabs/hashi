@@ -1,4 +1,4 @@
-use test_cluster::{TestCluster};
+use test_cluster::TestCluster;
 
 // TODO: Add sui and hashi networks.
 pub struct TestNetworks {
