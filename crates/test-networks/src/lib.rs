@@ -1,6 +1,6 @@
 use test_cluster::TestCluster;
 
-// TODO: Add sui and hashi networks.
+// TODO: Add hashi and bitcoin networks.
 pub struct TestNetworks {
     pub sui_network: TestCluster,
 }
