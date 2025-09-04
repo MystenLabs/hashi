@@ -18,12 +18,17 @@
 
 use std::net::SocketAddr;
 
-use bitcoin::{Address, Network};
+use bitcoin::Address;
+use bitcoin::Network;
 use clap::Parser;
-use hashi_btc::{config::PoolConfig, pool::Pool};
+use hashi_btc::config::PoolConfig;
+use hashi_btc::pool::Pool;
 use kyoto::TrustedPeer;
-use tracing::{error, info};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::error;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
 
 /// Run a Bitcoin P2P pool monitoring specific addresses on testnet4
 #[derive(Parser, Debug)]

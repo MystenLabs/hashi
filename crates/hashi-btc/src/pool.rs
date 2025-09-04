@@ -1,8 +1,12 @@
 use anyhow::Result;
-use bdk_chain::{IndexedTxGraph, local_chain::LocalChain, spk_txout::SpkTxOutIndex};
+use bdk_chain::IndexedTxGraph;
+use bdk_chain::local_chain::LocalChain;
+use bdk_chain::spk_txout::SpkTxOutIndex;
 use bdk_core::BlockId;
 use bitcoin::ScriptBuf;
-use tracing::{debug, error, info};
+use tracing::debug;
+use tracing::error;
+use tracing::info;
 
 use crate::config::PoolConfig;
 
@@ -273,7 +277,8 @@ impl Pool {
     }
 
     fn dump_utxo_stats(&self) {
-        use bdk_chain::{CanonicalizationParams, ChainPosition};
+        use bdk_chain::CanonicalizationParams;
+        use bdk_chain::ChainPosition;
         use std::collections::HashMap;
 
         let chain_tip = self.local_chain.tip();
@@ -368,13 +373,22 @@ enum PoolMessage {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{
-        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
-        TxOut, Txid, Witness,
-        absolute::LockTime,
-        block::{Header, Version},
-        hashes::Hash,
-    };
+    use bitcoin::Amount;
+    use bitcoin::Block;
+    use bitcoin::BlockHash;
+    use bitcoin::CompactTarget;
+    use bitcoin::OutPoint;
+    use bitcoin::ScriptBuf;
+    use bitcoin::Sequence;
+    use bitcoin::Transaction;
+    use bitcoin::TxIn;
+    use bitcoin::TxOut;
+    use bitcoin::Txid;
+    use bitcoin::Witness;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::Header;
+    use bitcoin::block::Version;
+    use bitcoin::hashes::Hash;
 
     fn create_test_pool() -> Pool {
         create_test_pool_with_scripts(vec![])

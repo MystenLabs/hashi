@@ -1,6 +1,7 @@
 //! Configuration for the Bitcoin UTXO pool.
 
-use bitcoin::{Network, ScriptBuf};
+use bitcoin::Network;
+use bitcoin::ScriptBuf;
 
 /// Configuration for the UTXO pool.
 #[derive(Debug, Clone)]
