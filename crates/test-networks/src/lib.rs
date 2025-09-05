@@ -32,15 +32,15 @@ impl TestNetworksBuilder {
         }
     }
 
-    pub fn with_validators(mut self, sui_num_validators: usize) -> Self {
-        self.sui_builder = self.sui_builder.with_num_validators(sui_num_validators);
+    pub fn with_sui_validators(mut self, num_validators: usize) -> Self {
+        self.sui_builder = self.sui_builder.with_num_validators(num_validators);
         self
     }
 
-    pub fn with_epoch_duration_ms(mut self, sui_epoch_duration_ms: u64) -> Self {
+    pub fn with_sui_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
         self.sui_builder = self
             .sui_builder
-            .with_epoch_duration_ms(sui_epoch_duration_ms);
+            .with_epoch_duration_ms(epoch_duration_ms);
         self
     }
 
@@ -70,7 +70,7 @@ mod tests {
     #[tokio::test]
     async fn test_test_networks_with_custom_validators() -> Result<()> {
         let test_networks = TestNetworksBuilder::new()
-            .with_validators(5)
+            .with_sui_validators(5)
             .build()
             .await?;
 
@@ -81,8 +81,8 @@ mod tests {
     #[tokio::test]
     async fn test_test_networks_with_epoch_duration() -> Result<()> {
         let test_networks = TestNetworksBuilder::new()
-            .with_validators(4)
-            .with_epoch_duration_ms(10000)
+            .with_sui_validators(4)
+            .with_sui_epoch_duration_ms(10000)
             .build()
             .await?;
 
