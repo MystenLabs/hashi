@@ -38,9 +38,7 @@ impl TestNetworksBuilder {
     }
 
     pub fn with_sui_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
-        self.sui_builder = self
-            .sui_builder
-            .with_epoch_duration_ms(epoch_duration_ms);
+        self.sui_builder = self.sui_builder.with_epoch_duration_ms(epoch_duration_ms);
         self
     }
 
