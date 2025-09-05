@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 test-cluster = { git = "https://github.com/MystenLabs/sui.git"}
+anyhow = "1.0"
+tokio = { version = "1.0", features = ["full"] }

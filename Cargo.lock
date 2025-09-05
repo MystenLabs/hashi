@@ -10815,7 +10815,9 @@ dependencies = [
 name = "test-networks"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "test-cluster",
+ "tokio",
 ]
 
 [[package]]
