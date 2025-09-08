@@ -45,7 +45,7 @@ impl Metrics {
     #[cfg(feature = "test-metrics")]
     pub fn new_for_test(instance_id: u32) -> Self {
         let registry = Registry::new();
-        
+
         Self {
             inflight_requests: register_int_gauge_vec_with_registry!(
                 format!("hashi_inflight_requests_{}", instance_id),
