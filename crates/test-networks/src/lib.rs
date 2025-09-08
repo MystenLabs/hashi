@@ -60,6 +60,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_sui_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
+        self.sui_builder = self.sui_builder.with_epoch_duration_ms(epoch_duration_ms);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let sui_network = self.sui_builder.build().await;
         let hashi_network = self.hashi_builder.build().await?;
