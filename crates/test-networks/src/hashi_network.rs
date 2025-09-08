@@ -110,16 +110,18 @@ impl HashiNetworkBuilder {
         metrics_port: u16,
     ) -> Result<HashiConfig> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
-        use std::ops::Deref;
 
         let mut config = HashiConfig::default();
         let tls_private_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
         config.tls_private_key = Some(
-            tls_private_key
-                .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
-                .map_err(|e| anyhow::anyhow!("Failed to encode TLS private key: {}", e))?
-                .deref()
-                .to_owned(),
+            String::from_utf8(
+                tls_private_key
+                    .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            )
+            .expect("Invalid PEM encoding"),
         );
         config.https_address = Some(SocketAddr::from((LOCALHOST, https_port)));
         config.http_address = Some(SocketAddr::from((LOCALHOST, http_port)));
