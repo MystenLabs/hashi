@@ -27,7 +27,7 @@ public struct HashiNodeInfo has copy, drop, store {
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
-    next_epoch_public_key: Element<UncompressedG>,
+    next_epoch_public_key: Element<UncompressedG1>,
     /// The HTTPS network address where the instance of the `hashi` service for
     /// this validator can be reached.
     ///
