@@ -139,14 +139,13 @@ impl Config {
     // Creates a new config suitable for testing. In particular this config will:
     // - have randomly generated private key material
     // - localhost only listen addresses using available ports
-    #[cfg(test)]
     pub fn new_for_testing() -> Self {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         use std::ops::Deref;
 
         let mut config = Config::default();
 
-        let tls_private_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let tls_private_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
 
         config.tls_private_key = Some(
             tls_private_key
@@ -168,8 +167,7 @@ impl Config {
 /// Return an ephemeral, available port. On unix systems, the port returned will be in the
 /// TIME_WAIT state ensuring that the OS won't hand out this port for some grace period.
 /// Callers should be able to bind to this port given they use SO_REUSEADDR.
-#[cfg(test)]
-fn get_available_port() -> u16 {
+pub fn get_available_port() -> u16 {
     const MAX_PORT_RETRIES: u32 = 1000;
 
     for _ in 0..MAX_PORT_RETRIES {
@@ -181,8 +179,7 @@ fn get_available_port() -> u16 {
     panic!("Error: could not find an available port on localhost");
 }
 
-#[cfg(test)]
-fn get_ephemeral_port() -> std::io::Result<u16> {
+pub fn get_ephemeral_port() -> std::io::Result<u16> {
     use std::net::TcpListener;
     use std::net::TcpStream;
 

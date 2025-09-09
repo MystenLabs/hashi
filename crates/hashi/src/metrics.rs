@@ -3,9 +3,6 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[cfg(feature = "test-metrics")]
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use prometheus::HistogramVec;
 use prometheus::IntCounterVec;
 use prometheus::IntGaugeVec;
@@ -27,49 +24,9 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 20., 30., 60., 90.,
 ];
 
-#[cfg(feature = "test-metrics")]
-static TEST_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(0);
-
 impl Metrics {
-    #[cfg(not(feature = "test-metrics"))]
     pub fn new_default() -> Self {
         Self::new(prometheus::default_registry())
-    }
-
-    #[cfg(feature = "test-metrics")]
-    pub fn new_default() -> Self {
-        let instance_id = TEST_INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
-        Self::new_for_test(instance_id)
-    }
-
-    #[cfg(feature = "test-metrics")]
-    pub fn new_for_test(instance_id: u32) -> Self {
-        let registry = Registry::new();
-
-        Self {
-            inflight_requests: register_int_gauge_vec_with_registry!(
-                format!("hashi_inflight_requests_{}", instance_id),
-                "Total in-flight RPC requests per route",
-                &["path"],
-                &registry,
-            )
-            .unwrap(),
-            requests: register_int_counter_vec_with_registry!(
-                format!("hashi_requests_{}", instance_id),
-                "Total RPC requests per route and their http status",
-                &["path", "status"],
-                &registry,
-            )
-            .unwrap(),
-            request_latency: register_histogram_vec_with_registry!(
-                format!("hashi_request_latency_{}", instance_id),
-                "Latency of RPC requests per route",
-                &["path"],
-                LATENCY_SEC_BUCKETS.to_vec(),
-                &registry,
-            )
-            .unwrap(),
-        }
     }
 
     pub fn new(registry: &Registry) -> Self {

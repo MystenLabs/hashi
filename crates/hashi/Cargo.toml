@@ -3,9 +3,6 @@ name = "hashi"
 version = "0.0.0"
 edition = "2024"
 
-[features]
-test-metrics = []
-
 [dependencies]
 sui-sdk-types = { version = "0.0.6", features = ["serde", "hash"] }
 sui-crypto = { version = "0.0.6", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
@@ -13,7 +10,7 @@ sui-rpc = { version = "0.0.6" }
 sui-http = "0.1.0"
 
 # dependencies for the protobuf definitions
-tonic = { version = "0.13.1", features = [ "zstd", "transport", "tls-webpki-roots" ] }
+tonic = { version = "0.13.1", features = ["zstd", "transport", "tls-webpki-roots"] }
 prost = "0.13"
 prost-types = "0.13.3"
 bytes = { version = "1.5.0", features = ["serde"] }
@@ -44,6 +41,7 @@ blst = { version = "0.3.13" }
 
 rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }
+rand = "0.8"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }

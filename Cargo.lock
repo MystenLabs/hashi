@@ -10810,9 +10810,8 @@ name = "test-networks"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "ed25519-dalek",
  "hashi",
- "rand 0.8.5",
+ "prometheus",
  "test-cluster",
  "tokio",
  "tracing",

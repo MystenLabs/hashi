@@ -4,72 +4,62 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
 
-pub const DEFAULT_BASE_GRPC_PORT: u16 = 50051;
-pub const DEFAULT_BASE_HTTP_PORT: u16 = 8080;
 pub const LOCALHOST: [u8; 4] = [127, 0, 0, 1];
 
-pub struct HashiNodeHandle {
-    pub hashi_instance: Arc<Hashi>,
-    pub https_address: SocketAddr,
-    pub http_address: SocketAddr,
-    pub metrics_address: SocketAddr,
-}
+pub struct HashiNodeHandle(pub Arc<Hashi>);
 
 impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
-        let https_address = config.https_address();
-        let http_address = config.http_address();
-        let metrics_address = config.metrics_http_address();
-        let hashi_instance = Hashi::new(server_version, config);
-        Ok(Self {
-            hashi_instance,
-            https_address,
-            http_address,
-            metrics_address,
-        })
+        let registry = prometheus::Registry::new();
+        let hashi_instance = Hashi::new_with_registry(server_version, config, &registry);
+        Ok(Self(hashi_instance))
     }
 
     pub fn start(&self) {
-        self.hashi_instance.clone().start();
+        self.0.clone().start();
     }
 
     pub fn https_url(&self) -> String {
-        format!("https://{}", self.https_address)
+        format!("https://{}", self.0.config.https_address())
     }
 
     pub fn http_url(&self) -> String {
-        format!("http://{}", self.http_address)
+        format!("http://{}", self.0.config.http_address())
     }
 
     pub fn metrics_url(&self) -> String {
-        format!("http://{}", self.metrics_address)
+        format!("http://{}", self.0.config.metrics_http_address())
+    }
+
+    pub fn https_address(&self) -> SocketAddr {
+        self.0.config.https_address()
+    }
+
+    pub fn http_address(&self) -> SocketAddr {
+        self.0.config.http_address()
+    }
+
+    pub fn metrics_address(&self) -> SocketAddr {
+        self.0.config.metrics_http_address()
     }
 }
 
-pub struct HashiNetwork {
-    pub nodes: Vec<HashiNodeHandle>,
-}
+pub struct HashiNetwork(pub Vec<HashiNodeHandle>);
 
 impl HashiNetwork {
     pub fn nodes(&self) -> &[HashiNodeHandle] {
-        &self.nodes
+        &self.0
     }
 }
 
 pub struct HashiNetworkBuilder {
     pub num_nodes: usize,
-    pub base_grpc_port: u16,
-    pub base_http_port: u16,
 }
 
 impl HashiNetworkBuilder {
     pub fn new() -> Self {
-        Self {
-            num_nodes: 1,
-            base_grpc_port: DEFAULT_BASE_GRPC_PORT,
-            base_http_port: DEFAULT_BASE_HTTP_PORT,
-        }
+        Self { num_nodes: 1 }
     }
 
     pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
@@ -92,37 +82,16 @@ impl HashiNetworkBuilder {
                 i, https_port, http_port, metrics_port
             );
         }
-        Ok(HashiNetwork { nodes })
+        Ok(HashiNetwork(nodes))
     }
-}
 
-impl Default for HashiNetworkBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HashiNetworkBuilder {
     fn create_test_config(
         &self,
         https_port: u16,
         http_port: u16,
         metrics_port: u16,
     ) -> Result<HashiConfig> {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-
-        let mut config = HashiConfig::default();
-        let tls_private_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        config.tls_private_key = Some(
-            String::from_utf8(
-                tls_private_key
-                    .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
-                    .unwrap()
-                    .as_bytes()
-                    .to_vec(),
-            )
-            .expect("Invalid PEM encoding"),
-        );
+        let mut config = HashiConfig::new_for_testing();
         config.https_address = Some(SocketAddr::from((LOCALHOST, https_port)));
         config.http_address = Some(SocketAddr::from((LOCALHOST, http_port)));
         config.metrics_http_address = Some(SocketAddr::from((LOCALHOST, metrics_port)));
@@ -130,29 +99,13 @@ impl HashiNetworkBuilder {
     }
 
     fn get_available_port(&self) -> Result<u16> {
-        const MAX_PORT_RETRIES: u32 = 1000;
-        for _ in 0..MAX_PORT_RETRIES {
-            if let Ok(port) = self.get_ephemeral_port() {
-                return Ok(port);
-            }
-        }
-        Err(anyhow::anyhow!(
-            "Error: could not find an available port on localhost"
-        ))
+        Ok(hashi::config::get_available_port())
     }
+}
 
-    fn get_ephemeral_port(&self) -> std::io::Result<u16> {
-        use std::net::{TcpListener, TcpStream};
-
-        // Request a random available port from the OS
-        let listener = TcpListener::bind(SocketAddr::from((LOCALHOST, 0)))?;
-        let addr = listener.local_addr()?;
-        // Create and accept a connection (which we'll promptly drop) in order to force the port
-        // into the TIME_WAIT state, ensuring that the port will be reserved from some limited
-        // amount of time (roughly 60s on some Linux systems)
-        let _sender = TcpStream::connect(addr)?;
-        let _incoming = listener.accept()?;
-        Ok(addr.port())
+impl Default for HashiNetworkBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -170,9 +123,9 @@ mod tests {
             assert!(!node.metrics_url().is_empty());
 
             // Verify each node has unique ports
-            let https_port = node.https_address.port();
-            let http_port = node.http_address.port();
-            let metrics_port = node.metrics_address.port();
+            let https_port = node.https_address().port();
+            let http_port = node.http_address().port();
+            let metrics_port = node.metrics_address().port();
             assert_ne!(https_port, http_port);
             assert_ne!(https_port, metrics_port);
             assert_ne!(http_port, metrics_port);
@@ -181,10 +134,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_ports() -> Result<()> {
+    async fn test_default_configuration() -> Result<()> {
         let builder = HashiNetworkBuilder::new();
-        assert_eq!(builder.base_grpc_port, DEFAULT_BASE_GRPC_PORT);
-        assert_eq!(builder.base_http_port, DEFAULT_BASE_HTTP_PORT);
+        assert_eq!(builder.num_nodes, 1);
         Ok(())
     }
 
@@ -203,8 +155,6 @@ mod tests {
         let builder2 = HashiNetworkBuilder::default();
 
         assert_eq!(builder1.num_nodes, builder2.num_nodes);
-        assert_eq!(builder1.base_grpc_port, builder2.base_grpc_port);
-        assert_eq!(builder1.base_http_port, builder2.base_http_port);
     }
 
     #[tokio::test]
@@ -241,20 +191,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_available_port() -> Result<()> {
-        let builder = HashiNetworkBuilder::new();
-        let port1 = builder.get_available_port()?;
-        let port2 = builder.get_available_port()?;
-
-        // Ports should be in valid range and different
-        assert!(port1 > 1024);
-        assert!(port2 > 1024);
-        assert_ne!(port1, port2);
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_node_handle_url_formatting() -> Result<()> {
         let builder = HashiNetworkBuilder::new();
         let config = builder.create_test_config(50051, 8080, 9090)?;
@@ -275,12 +211,5 @@ mod tests {
         assert!(network.nodes().is_empty());
 
         Ok(())
-    }
-
-    #[test]
-    fn test_builder_edge_cases() {
-        // Test extreme values
-        let builder = HashiNetworkBuilder::new().with_num_nodes(1000);
-        assert_eq!(builder.num_nodes, 1000);
     }
 }

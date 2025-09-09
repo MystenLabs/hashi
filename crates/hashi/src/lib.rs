@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
+pub mod bls;
 pub mod committee;
 pub mod config;
 pub mod grpc;
 pub mod metrics;
 pub mod proto;
 pub mod tls;
-// pub mod tls_rpk;
-pub mod bls;
 
 pub struct Hashi {
     pub server_version: ServerVersion,
@@ -22,6 +21,18 @@ impl Hashi {
             server_version,
             config,
             metrics,
+        })
+    }
+
+    pub fn new_with_registry(
+        server_version: ServerVersion,
+        config: config::Config,
+        registry: &prometheus::Registry,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            server_version,
+            config,
+            metrics: Arc::new(metrics::Metrics::new(registry)),
         })
     }
 
