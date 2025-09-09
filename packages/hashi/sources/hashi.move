@@ -2,10 +2,8 @@
 module hashi::hashi;
 
 use btc::btc::BTC;
-use std::type_name::TypeName;
-use std::string::String;
-use sui::balance::Balance;
-use sui::object_bag::ObjectBag;
+use std::{string::String, type_name::TypeName};
+use sui::{balance::Balance, object_bag::ObjectBag};
 
 // For Move coding conventions, see
 // https://docs.sui.io/concepts/sui-move-concepts/conventions
@@ -52,4 +50,3 @@ public struct Settle {
     withdraws: vector<Task<Withdraw>>,
     transaction: String,
 }
-
