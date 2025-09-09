@@ -1,10 +1,11 @@
+#[allow(unused_const)]
 module hashi::bls;
 
 use sui::{
+    bcs,
     bls12381::{Self, bls12381_min_pk_verify, G1, UncompressedG1},
     group_ops::{Self, Element},
-    vec_map::{Self, VecMap},
-    bcs::{Self, BCS},
+    vec_map::{Self, VecMap}
 };
 
 const APP_ID: u8 = 4;
@@ -333,7 +334,6 @@ fun new_certified_message(
 
     CertifiedMessage { intent_type, intent_version, cert_epoch, message, stake_support }
 }
-
 
 // === Accessors for CertifiedMessage ===
 
