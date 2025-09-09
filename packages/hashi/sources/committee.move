@@ -1,19 +1,9 @@
+#[allow(unused_function, unused_field)]
 module hashi::committee;
 
 use hashi::bls::verify_proof_of_possession;
 use std::string::String;
-use sui::{
-    bls12381::{
-        Self,
-        bls12381_min_pk_verify,
-        G1,
-        UncompressedG1,
-        g1_from_bytes,
-        g1_to_uncompressed_g1
-    },
-    group_ops::{Self, Element},
-    vec_map::{Self, VecMap}
-};
+use sui::{bls12381::{UncompressedG1, g1_from_bytes, g1_to_uncompressed_g1}, group_ops::Element};
 
 public struct HashiNodeInfo has copy, drop, store {
     /// Sui Validator Address of this node
@@ -87,8 +77,8 @@ fun set_tls_public_key(self: &mut Committee, tls_public_key: vector<u8>, ctx: &T
 // === Accessors ===
 
 /// Return the address of the node.
-fun sui_address(self: &HashiNodeInfo): &address {
-    &self.sui_address
+fun validator_address(self: &HashiNodeInfo): &address {
+    &self.validator_address
 }
 
 /// Return the public key of the node.
@@ -117,6 +107,6 @@ fun epoch(self: &Committee): u64 {
 }
 
 fun lookup_sender_info(self: &mut Committee, ctx: &TxContext): &mut HashiNodeInfo {
-    let idx = self.members.find_index!(|v| v.sui_address() == ctx.sender()).destroy_some();
+    let idx = self.members.find_index!(|v| v.validator_address() == ctx.sender()).destroy_some();
     &mut self.members[idx]
 }

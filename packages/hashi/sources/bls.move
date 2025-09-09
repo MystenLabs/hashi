@@ -1,7 +1,8 @@
+#[allow(unused_const)]
 module hashi::bls;
 
 use sui::{
-    bcs::{Self, BCS},
+    bcs,
     bls12381::{Self, bls12381_min_pk_verify, G1, UncompressedG1},
     group_ops::{Self, Element},
     vec_map::{Self, VecMap}
