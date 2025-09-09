@@ -8,7 +8,7 @@ env:
 
 jobs:
   check-formatting:
-    name: Check Move formatting
+    name: Formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,3 +16,17 @@ jobs:
         with:
           prettier-plugin-move-version: "latest"
           working-directory: ${{ env.MOVE_PACKAGES_PATH }}
+  test-move-packages:
+      name: Build & Test
+      runs-on: ubuntu-latest
+      defaults:
+          run:
+              working-directory: ${{ env.MOVE_PACKAGES_PATH }}
+      steps:
+          - uses: actions/checkout@v2
+          - uses: actions-rust-lang/setup-rust-toolchain@v1
+          - run: cargo install --git https://github.com/Mystenlabs/suiup.git --locked
+          - run: suiup install sui -y; suiup install mvr -y
+          - run: sui --version; mvr --version
+          - run: ls -d ./*/ | xargs -I {} bash -c "sui move build --path '{}'"
+          - run: ls -d ./*/ | xargs -I {} bash -c "sui move test --path '{}'"
