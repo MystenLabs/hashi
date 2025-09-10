@@ -29,13 +29,19 @@ jobs:
 
       - name: Install Bitcoin Core
         run: |
-          # Download Bitcoin Core v29.1.0
-          wget -q https://bitcoincore.org/bin/bitcoin-core-29.1.0/bitcoin-29.1.0-x86_64-linux-gnu.tar.gz
-          tar -xzf bitcoin-29.1.0-x86_64-linux-gnu.tar.gz
+          # Download Bitcoin Core v29.1
+          echo "Downloading Bitcoin Core v29.1..."
+          wget https://bitcoincore.org/bin/bitcoin-core-29.1/bitcoin-29.1-x86_64-linux-gnu.tar.gz
+          echo "Extracting Bitcoin Core..."
+          tar -xzf bitcoin-29.1-x86_64-linux-gnu.tar.gz
           # Move bitcoind to PATH
-          sudo mv bitcoin-29.1.0/bin/bitcoind /usr/local/bin/
-          sudo mv bitcoin-29.1.0/bin/bitcoin-cli /usr/local/bin/
+          echo "Installing Bitcoin Core binaries..."
+          sudo mv bitcoin-29.1/bin/bitcoind /usr/local/bin/
+          sudo mv bitcoin-29.1/bin/bitcoin-cli /usr/local/bin/
+          # Cleanup
+          rm -rf bitcoin-29.1-x86_64-linux-gnu.tar.gz bitcoin-29.1/
           # Verify installation
+          echo "Verifying installation..."
           bitcoind --version
 
       - name: Run tests
