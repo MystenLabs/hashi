@@ -40,13 +40,6 @@ impl Hashi {
         tokio::spawn(async move {
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
-
-        tokio::spawn(async move {
-            loop {
-                println!("hello");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        });
     }
 }
 

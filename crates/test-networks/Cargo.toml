@@ -10,3 +10,6 @@ anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 prometheus = "0.13"
+bitcoin = "0.32"
+bitcoincore-rpc = "0.19"
+tempfile = "3.0"

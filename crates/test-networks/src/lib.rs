@@ -1,22 +1,27 @@
 use anyhow::Result;
 use test_cluster::{TestCluster, TestClusterBuilder};
 
+pub mod bitcoin_network;
 pub mod hashi_network;
+
+pub use bitcoin_network::{BitcoinNetwork, BitcoinNetworkBuilder, BitcoinNodeHandle};
 pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
 
-// TODO: Add bitcoin network.
 pub struct TestNetworks {
     pub sui_network: TestCluster,
     pub hashi_network: HashiNetwork,
+    pub bitcoin_network: BitcoinNetwork,
 }
 
 impl TestNetworks {
     pub async fn new() -> Result<Self> {
         let sui_network = TestClusterBuilder::new().build().await;
         let hashi_network = HashiNetworkBuilder::new().build().await?;
+        let bitcoin_network = BitcoinNetworkBuilder::new().build().await?;
         let test_networks = Self {
             sui_network,
             hashi_network,
+            bitcoin_network,
         };
         Ok(test_networks)
     }
@@ -32,11 +37,16 @@ impl TestNetworks {
     pub fn hashi_network(&self) -> &HashiNetwork {
         &self.hashi_network
     }
+
+    pub fn bitcoin_network(&self) -> &BitcoinNetwork {
+        &self.bitcoin_network
+    }
 }
 
 pub struct TestNetworksBuilder {
     sui_builder: TestClusterBuilder,
     hashi_builder: HashiNetworkBuilder,
+    bitcoin_builder: BitcoinNetworkBuilder,
 }
 
 impl TestNetworksBuilder {
@@ -44,12 +54,14 @@ impl TestNetworksBuilder {
         Self {
             sui_builder: TestClusterBuilder::new(),
             hashi_builder: HashiNetworkBuilder::new(),
+            bitcoin_builder: BitcoinNetworkBuilder::new(),
         }
     }
 
     pub fn with_nodes(mut self, num_nodes: usize) -> Self {
         self = self.with_hashi_nodes(num_nodes);
         self = self.with_sui_validators(num_nodes);
+        self = self.with_bitcoin_nodes(num_nodes);
         self
     }
 
@@ -63,6 +75,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_bitcoin_nodes(mut self, num_nodes: usize) -> Self {
+        self.bitcoin_builder = self.bitcoin_builder.with_num_nodes(num_nodes);
+        self
+    }
+
     pub fn with_sui_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
         self.sui_builder = self.sui_builder.with_epoch_duration_ms(epoch_duration_ms);
         self
@@ -71,9 +88,11 @@ impl TestNetworksBuilder {
     pub async fn build(self) -> Result<TestNetworks> {
         let sui_network = self.sui_builder.build().await;
         let hashi_network = self.hashi_builder.build().await?;
+        let bitcoin_network = self.bitcoin_builder.build().await?;
         let test_networks = TestNetworks {
             sui_network,
             hashi_network,
+            bitcoin_network,
         };
         Ok(test_networks)
     }
@@ -101,6 +120,10 @@ mod tests {
         assert_eq!(test_networks.hashi_network().nodes().len(), TEST_NUM_NODES);
         assert_eq!(
             test_networks.sui_network().get_validator_pubkeys().len(),
+            TEST_NUM_NODES
+        );
+        assert_eq!(
+            test_networks.bitcoin_network().nodes().len(),
             TEST_NUM_NODES
         );
 

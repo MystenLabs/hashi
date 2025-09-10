@@ -27,6 +27,17 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-nextest
 
+      - name: Install Bitcoin Core
+        run: |
+          # Download Bitcoin Core v29.1.0
+          wget -q https://bitcoincore.org/bin/bitcoin-core-29.1.0/bitcoin-29.1.0-x86_64-linux-gnu.tar.gz
+          tar -xzf bitcoin-29.1.0-x86_64-linux-gnu.tar.gz
+          # Move bitcoind to PATH
+          sudo mv bitcoin-29.1.0/bin/bitcoind /usr/local/bin/
+          sudo mv bitcoin-29.1.0/bin/bitcoin-cli /usr/local/bin/
+          # Verify installation
+          bitcoind --version
+
       - name: Run tests
         run: make test
 
