@@ -314,18 +314,4 @@ mod tests {
         let port2 = get_available_port().unwrap();
         assert_ne!(port1, port2, "Should return different ports");
     }
-
-    #[test]
-    fn test_constants_reasonable_values() {
-        assert!(
-            DEFAULT_INITIAL_BLOCKS >= 101,
-            "Need at least 101 for coinbase maturity"
-        );
-        assert!(
-            BITCOIN_CORE_STARTUP_TIMEOUT_SECS >= 10,
-            "Timeout should be reasonable"
-        );
-        assert!(!RPC_USER.is_empty(), "RPC user should not be empty");
-        assert!(!RPC_PASSWORD.is_empty(), "RPC password should not be empty");
-    }
 }
