@@ -2,7 +2,7 @@ use anyhow::Result;
 use test_cluster::{TestCluster, TestClusterBuilder};
 
 pub mod hashi_network;
-pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle, LOCALHOST};
+pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
 
 // TODO: Add bitcoin network.
 pub struct TestNetworks {

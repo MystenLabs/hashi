@@ -145,7 +145,7 @@ impl Config {
 
         let mut config = Config::default();
 
-        let tls_private_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let tls_private_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
 
         config.tls_private_key = Some(
             tls_private_key
@@ -167,7 +167,7 @@ impl Config {
 /// Return an ephemeral, available port. On unix systems, the port returned will be in the
 /// TIME_WAIT state ensuring that the OS won't hand out this port for some grace period.
 /// Callers should be able to bind to this port given they use SO_REUSEADDR.
-pub fn get_available_port() -> u16 {
+fn get_available_port() -> u16 {
     const MAX_PORT_RETRIES: u32 = 1000;
 
     for _ in 0..MAX_PORT_RETRIES {
@@ -179,7 +179,7 @@ pub fn get_available_port() -> u16 {
     panic!("Error: could not find an available port on localhost");
 }
 
-pub fn get_ephemeral_port() -> std::io::Result<u16> {
+fn get_ephemeral_port() -> std::io::Result<u16> {
     use std::net::TcpListener;
     use std::net::TcpStream;
 
@@ -194,4 +194,34 @@ pub fn get_ephemeral_port() -> std::io::Result<u16> {
     let _incoming = listener.accept()?;
 
     Ok(addr.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_for_testing() {
+        let config = Config::new_for_testing();
+        let localhost = std::net::Ipv4Addr::new(127, 0, 0, 1);
+
+        // Test addresses use localhost
+        assert_eq!(config.https_address().ip(), localhost);
+        assert_eq!(config.http_address().ip(), localhost);
+        assert_eq!(config.metrics_http_address().ip(), localhost);
+
+        // Test ports are different
+        let https_port = config.https_address().port();
+        let http_port = config.http_address().port();
+        let metrics_port = config.metrics_http_address().port();
+        assert_ne!(https_port, http_port);
+        assert_ne!(https_port, metrics_port);
+        assert_ne!(http_port, metrics_port);
+
+        // Test TLS key is generated and valid PEM format
+        assert!(config.tls_private_key.is_some());
+        let tls_key = config.tls_private_key.as_ref().unwrap();
+        assert!(tls_key.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(tls_key.ends_with("-----END PRIVATE KEY-----\n"));
+    }
 }

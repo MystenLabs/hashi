@@ -4,7 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
 
-pub const LOCALHOST: [u8; 4] = [127, 0, 0, 1];
+const HTTPS_SCHEME: &str = "https://";
+const HTTP_SCHEME: &str = "http://";
 
 pub struct HashiNodeHandle(pub Arc<Hashi>);
 
@@ -21,15 +22,15 @@ impl HashiNodeHandle {
     }
 
     pub fn https_url(&self) -> String {
-        format!("https://{}", self.0.config.https_address())
+        format!("{}{}", HTTPS_SCHEME, self.0.config.https_address())
     }
 
     pub fn http_url(&self) -> String {
-        format!("http://{}", self.0.config.http_address())
+        format!("{}{}", HTTP_SCHEME, self.0.config.http_address())
     }
 
     pub fn metrics_url(&self) -> String {
-        format!("http://{}", self.0.config.metrics_http_address())
+        format!("{}{}", HTTP_SCHEME, self.0.config.metrics_http_address())
     }
 
     pub fn https_address(&self) -> SocketAddr {
@@ -70,36 +71,19 @@ impl HashiNetworkBuilder {
     pub async fn build(self) -> Result<HashiNetwork> {
         let mut nodes = Vec::with_capacity(self.num_nodes);
         for i in 0..self.num_nodes {
-            let https_port = self.get_available_port()?;
-            let http_port = self.get_available_port()?;
-            let metrics_port = self.get_available_port()?;
-            let config = self.create_test_config(https_port, http_port, metrics_port)?;
+            let config = HashiConfig::new_for_testing();
             let node_handle = HashiNodeHandle::new(config)?;
             node_handle.start();
-            nodes.push(node_handle);
             info!(
                 "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
-                i, https_port, http_port, metrics_port
+                i,
+                node_handle.https_address(),
+                node_handle.http_address(),
+                node_handle.metrics_address()
             );
+            nodes.push(node_handle);
         }
         Ok(HashiNetwork(nodes))
-    }
-
-    fn create_test_config(
-        &self,
-        https_port: u16,
-        http_port: u16,
-        metrics_port: u16,
-    ) -> Result<HashiConfig> {
-        let mut config = HashiConfig::new_for_testing();
-        config.https_address = Some(SocketAddr::from((LOCALHOST, https_port)));
-        config.http_address = Some(SocketAddr::from((LOCALHOST, http_port)));
-        config.metrics_http_address = Some(SocketAddr::from((LOCALHOST, metrics_port)));
-        Ok(config)
-    }
-
-    fn get_available_port(&self) -> Result<u16> {
-        Ok(hashi::config::get_available_port())
     }
 }
 
@@ -158,47 +142,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_test_config() -> Result<()> {
-        const TEST_HTTPS_PORT: u16 = 50051;
-        const TEST_HTTP_PORT: u16 = 8080;
-        const TEST_METRICS_PORT: u16 = 9090;
-
-        let builder = HashiNetworkBuilder::new();
-        let config =
-            builder.create_test_config(TEST_HTTPS_PORT, TEST_HTTP_PORT, TEST_METRICS_PORT)?;
-
-        // Test addresses are set correctly
-        assert_eq!(
-            config.https_address(),
-            SocketAddr::from((LOCALHOST, TEST_HTTPS_PORT))
-        );
-        assert_eq!(
-            config.http_address(),
-            SocketAddr::from((LOCALHOST, TEST_HTTP_PORT))
-        );
-        assert_eq!(
-            config.metrics_http_address(),
-            SocketAddr::from((LOCALHOST, TEST_METRICS_PORT))
-        );
-
-        // Test TLS key is generated and valid PEM format
-        assert!(config.tls_private_key.is_some());
-        let tls_key = config.tls_private_key.unwrap();
-        assert!(tls_key.starts_with("-----BEGIN PRIVATE KEY-----"));
-        assert!(tls_key.ends_with("-----END PRIVATE KEY-----\n"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_node_handle_url_formatting() -> Result<()> {
-        let builder = HashiNetworkBuilder::new();
-        let config = builder.create_test_config(50051, 8080, 9090)?;
+        let config = HashiConfig::new_for_testing();
+        let https_port = config.https_address().port();
+        let http_port = config.http_address().port();
+        let metrics_port = config.metrics_http_address().port();
         let node_handle = HashiNodeHandle::new(config)?;
 
-        assert_eq!(node_handle.https_url(), "https://127.0.0.1:50051");
-        assert_eq!(node_handle.http_url(), "http://127.0.0.1:8080");
-        assert_eq!(node_handle.metrics_url(), "http://127.0.0.1:9090");
+        const HTTPS_URL_PREFIX: &str = "https://127.0.0.1:";
+        const HTTP_URL_PREFIX: &str = "http://127.0.0.1:";
+
+        assert_eq!(
+            node_handle.https_url(),
+            format!("{}{}", HTTPS_URL_PREFIX, https_port)
+        );
+        assert_eq!(
+            node_handle.http_url(),
+            format!("{}{}", HTTP_URL_PREFIX, http_port)
+        );
+        assert_eq!(
+            node_handle.metrics_url(),
+            format!("{}{}", HTTP_URL_PREFIX, metrics_port)
+        );
 
         Ok(())
     }
