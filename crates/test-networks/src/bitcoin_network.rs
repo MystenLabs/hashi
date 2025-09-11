@@ -98,7 +98,7 @@ impl BitcoinNodeHandle {
                         .create_wallet("test", None, None, None, None)
                     {
                         Ok(_) => info!("Created test wallet"),
-                        Err(e) => info!("Wallet creation: {}", e), // May already exist
+                        Err(e) => info!("Wallet creation: {}", e),
                     }
                     return Ok(());
                 }
@@ -263,7 +263,7 @@ fn get_available_port() -> Result<u16> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
     let addr = listener.local_addr()?;
     let port = addr.port();
-    drop(listener); // Close the listener immediately
+    drop(listener);
     Ok(port)
 }
 
