@@ -126,11 +126,11 @@ mod tests {
 
     #[test]
     fn test_builder_fluent_api() {
-        const TEST_NUM_NODES: usize = 3;
+        const NUM_NODES: usize = 3;
 
-        let builder = HashiNetworkBuilder::new().with_num_nodes(TEST_NUM_NODES);
+        let builder = HashiNetworkBuilder::new().with_num_nodes(NUM_NODES);
 
-        assert_eq!(builder.num_nodes, TEST_NUM_NODES);
+        assert_eq!(builder.num_nodes, NUM_NODES);
     }
 
     #[test]

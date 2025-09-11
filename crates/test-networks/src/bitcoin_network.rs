@@ -291,20 +291,20 @@ mod tests {
 
     #[test]
     fn test_builder_chain_methods() {
-        const TEST_NUM_NODES: usize = 5;
-        const TEST_INITIAL_BLOCKS: u64 = 200;
-        const TEST_BITCOIND_PATH: &str = "/usr/local/bin/bitcoind";
+        const NUM_NODES: usize = 5;
+        const INITIAL_BLOCKS: u64 = 200;
+        const BITCOIND_PATH: &str = "/usr/local/bin/bitcoind";
 
         let builder = BitcoinNetworkBuilder::new()
-            .with_num_nodes(TEST_NUM_NODES)
-            .with_initial_blocks(TEST_INITIAL_BLOCKS)
-            .with_bitcoin_core_path(PathBuf::from(TEST_BITCOIND_PATH));
+            .with_num_nodes(NUM_NODES)
+            .with_initial_blocks(INITIAL_BLOCKS)
+            .with_bitcoin_core_path(PathBuf::from(BITCOIND_PATH));
 
-        assert_eq!(builder.num_nodes, TEST_NUM_NODES);
-        assert_eq!(builder.initial_blocks, TEST_INITIAL_BLOCKS);
+        assert_eq!(builder.num_nodes, NUM_NODES);
+        assert_eq!(builder.initial_blocks, INITIAL_BLOCKS);
         assert_eq!(
             builder.bitcoin_core_path,
-            Some(PathBuf::from(TEST_BITCOIND_PATH))
+            Some(PathBuf::from(BITCOIND_PATH))
         );
     }
 

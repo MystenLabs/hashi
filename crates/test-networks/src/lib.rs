@@ -58,10 +58,9 @@ impl TestNetworksBuilder {
         }
     }
 
-    pub fn with_nodes(mut self, num_nodes: usize) -> Self {
+    pub fn with_sui_hashi_nodes(mut self, num_nodes: usize) -> Self {
         self = self.with_hashi_nodes(num_nodes);
         self = self.with_sui_validators(num_nodes);
-        self = self.with_bitcoin_nodes(num_nodes);
         self
     }
 
@@ -110,21 +109,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
-        const TEST_NUM_NODES: usize = 4;
+        const NUM_SUI_HASHI_NODES: usize = 4;
+        const NUM_BITCOIN_NODES: usize = 5;
 
         let test_networks = TestNetworksBuilder::new()
-            .with_nodes(TEST_NUM_NODES)
+            .with_sui_hashi_nodes(NUM_SUI_HASHI_NODES)
+            .with_bitcoin_nodes(NUM_BITCOIN_NODES)
             .build()
             .await?;
 
-        assert_eq!(test_networks.hashi_network().nodes().len(), TEST_NUM_NODES);
+        assert_eq!(
+            test_networks.hashi_network().nodes().len(),
+            NUM_SUI_HASHI_NODES
+        );
         assert_eq!(
             test_networks.sui_network().get_validator_pubkeys().len(),
-            TEST_NUM_NODES
+            NUM_SUI_HASHI_NODES
         );
         assert_eq!(
             test_networks.bitcoin_network().nodes().len(),
-            TEST_NUM_NODES
+            NUM_BITCOIN_NODES
         );
 
         Ok(())
