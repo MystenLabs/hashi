@@ -2,6 +2,9 @@
 .PHONY: all
 all:: ci ## Default target, runs the CI process
 
+# Set parallel build jobs if not already set
+CARGO_BUILD_JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
 .PHONY: check-fmt
 check-fmt: ## Check code formatting
 	cargo fmt -- --config imports_granularity=Item --config format_code_in_doc_comments=true --check
@@ -18,8 +21,8 @@ buf-lint: ## Run buf lint
 
 .PHONY: test
 test: ## Run all tests
-	cargo nextest run --all-features
-	cargo test --all-features --doc
+	CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) cargo nextest run --all-features
+	CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) cargo test --all-features --doc
 
 .PHONY: proto
 proto: ## Build proto files
@@ -27,15 +30,15 @@ proto: ## Build proto files
 
 .PHONY: clippy
 clippy: ## run cargo clippy
-	cargo clippy --all-features --all-targets
+	CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) cargo clippy --all-features --all-targets
 
 .PHONY: doc
 doc: ## Generate documentation
-	RUSTDOCFLAGS="-Dwarnings --cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --all-features --no-deps
+	CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) RUSTDOCFLAGS="-Dwarnings --cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --all-features --no-deps
 
 .PHONY: doc-open
 doc-open: ## Generate and open documentation
-	RUSTDOCFLAGS="--cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --all-features --no-deps --open
+	CARGO_BUILD_JOBS=$(CARGO_BUILD_JOBS) RUSTDOCFLAGS="--cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --all-features --no-deps --open
 
 .PHONY: ci
 ci: check-fmt buf-lint clippy test ## Run the full CI process
