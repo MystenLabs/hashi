@@ -4,7 +4,7 @@ use test_cluster::{TestCluster, TestClusterBuilder};
 pub mod bitcoin_network;
 pub mod hashi_network;
 
-pub use bitcoin_network::{BitcoinNetwork, BitcoinNetworkBuilder, BitcoinNodeHandle};
+pub use bitcoin_network::{BitcoinNetwork, BitcoinNetworkBuilder};
 pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
 
 pub struct TestNetworks {
@@ -74,11 +74,6 @@ impl TestNetworksBuilder {
         self
     }
 
-    pub fn with_bitcoin_nodes(mut self, num_nodes: usize) -> Self {
-        self.bitcoin_builder = self.bitcoin_builder.with_num_nodes(num_nodes);
-        self
-    }
-
     pub fn with_sui_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
         self.sui_builder = self.sui_builder.with_epoch_duration_ms(epoch_duration_ms);
         self
@@ -108,13 +103,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
+    async fn test_networks_setup() -> Result<()> {
         const NUM_SUI_HASHI_NODES: usize = 4;
-        const NUM_BITCOIN_NODES: usize = 5;
 
         let test_networks = TestNetworksBuilder::new()
             .with_sui_hashi_nodes(NUM_SUI_HASHI_NODES)
-            .with_bitcoin_nodes(NUM_BITCOIN_NODES)
             .build()
             .await?;
 
@@ -126,10 +119,7 @@ mod tests {
             test_networks.sui_network().get_validator_pubkeys().len(),
             NUM_SUI_HASHI_NODES
         );
-        assert_eq!(
-            test_networks.bitcoin_network().nodes().len(),
-            NUM_BITCOIN_NODES
-        );
+        assert!(!test_networks.bitcoin_network().node().rpc_url().is_empty());
 
         Ok(())
     }

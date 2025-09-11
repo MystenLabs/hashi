@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use bitcoin::{Address, Amount, BlockHash, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use std::net::{SocketAddr, TcpListener};
+use hashi::config::get_available_port;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -19,12 +19,13 @@ pub struct BitcoinNodeHandle {
     process: Child,
     rpc_url: String,
     rpc_port: u16,
+    p2p_port: u16,
 }
 
 impl BitcoinNodeHandle {
     pub fn new(rpc_port: u16, data_dir: TempDir, bitcoin_core_path: PathBuf) -> Result<Self> {
         let rpc_url = format!("http://127.0.0.1:{}", rpc_port);
-        let p2p_port = get_available_port()?;
+        let p2p_port = get_available_port();
         info!(
             "Starting Bitcoin node with RPC at {} and P2P port {}",
             rpc_url, p2p_port
@@ -41,6 +42,8 @@ impl BitcoinNodeHandle {
             .arg("-rpcallowip=127.0.0.1")
             .arg("-fallbackfee=0.0001")
             .arg("-acceptnonstdtxn=1")
+            .arg("-blockfilterindex=1") // Enable compact block filters (BIP-158)
+            .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -80,6 +83,7 @@ impl BitcoinNodeHandle {
             process,
             rpc_url,
             rpc_port,
+            p2p_port,
         })
     }
 
@@ -175,6 +179,14 @@ impl BitcoinNodeHandle {
         self.rpc_port
     }
 
+    pub fn p2p_port(&self) -> u16 {
+        self.p2p_port
+    }
+
+    pub fn p2p_address(&self) -> String {
+        format!("127.0.0.1:{}", self.p2p_port)
+    }
+
     pub fn rpc_client(&self) -> &Client {
         &self.rpc_client
     }
@@ -191,16 +203,15 @@ impl Drop for BitcoinNodeHandle {
     }
 }
 
-pub struct BitcoinNetwork(pub Vec<BitcoinNodeHandle>);
+pub struct BitcoinNetwork(pub BitcoinNodeHandle);
 
 impl BitcoinNetwork {
-    pub fn nodes(&self) -> &[BitcoinNodeHandle] {
+    pub fn node(&self) -> &BitcoinNodeHandle {
         &self.0
     }
 }
 
 pub struct BitcoinNetworkBuilder {
-    pub num_nodes: usize,
     initial_blocks: u64,
     bitcoin_core_path: Option<PathBuf>,
 }
@@ -208,15 +219,9 @@ pub struct BitcoinNetworkBuilder {
 impl BitcoinNetworkBuilder {
     pub fn new() -> Self {
         Self {
-            num_nodes: 1,
             initial_blocks: DEFAULT_INITIAL_BLOCKS,
             bitcoin_core_path: None,
         }
-    }
-
-    pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
-        self.num_nodes = num_nodes;
-        self
     }
 
     pub fn with_initial_blocks(mut self, blocks: u64) -> Self {
@@ -233,23 +238,18 @@ impl BitcoinNetworkBuilder {
         let bitcoin_core_path = self
             .bitcoin_core_path
             .unwrap_or_else(|| PathBuf::from("bitcoind"));
-        let mut nodes = Vec::with_capacity(self.num_nodes);
-        for i in 0..self.num_nodes {
-            let rpc_port = get_available_port()?;
-            let data_dir = TempDir::new()?;
-            let node_handle =
-                BitcoinNodeHandle::new(rpc_port, data_dir, bitcoin_core_path.clone())?;
-            node_handle.wait_until_ready().await?;
-            if self.initial_blocks > 0 {
-                node_handle.generate_blocks(self.initial_blocks)?;
-            }
-            info!(
-                "Created Bitcoin node {} at RPC port {} with {} initial blocks",
-                i, rpc_port, self.initial_blocks
-            );
-            nodes.push(node_handle);
+        let rpc_port = get_available_port();
+        let data_dir = TempDir::new()?;
+        let node_handle = BitcoinNodeHandle::new(rpc_port, data_dir, bitcoin_core_path)?;
+        node_handle.wait_until_ready().await?;
+        if self.initial_blocks > 0 {
+            node_handle.generate_blocks(self.initial_blocks)?;
         }
-        Ok(BitcoinNetwork(nodes))
+        info!(
+            "Created Bitcoin node at RPC port {} with {} initial blocks",
+            rpc_port, self.initial_blocks
+        );
+        Ok(BitcoinNetwork(node_handle))
     }
 }
 
@@ -257,14 +257,6 @@ impl Default for BitcoinNetworkBuilder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn get_available_port() -> Result<u16> {
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
-    let addr = listener.local_addr()?;
-    let port = addr.port();
-    drop(listener);
-    Ok(port)
 }
 
 #[cfg(test)]
@@ -276,7 +268,6 @@ mod tests {
         let builder1 = BitcoinNetworkBuilder::new();
         let builder2 = BitcoinNetworkBuilder::default();
 
-        assert_eq!(builder1.num_nodes, builder2.num_nodes);
         assert_eq!(builder1.initial_blocks, builder2.initial_blocks);
     }
 
@@ -284,34 +275,23 @@ mod tests {
     fn test_builder_default_values() {
         let builder = BitcoinNetworkBuilder::new();
 
-        assert_eq!(builder.num_nodes, 1);
         assert_eq!(builder.initial_blocks, DEFAULT_INITIAL_BLOCKS);
         assert!(builder.bitcoin_core_path.is_none());
     }
 
     #[test]
     fn test_builder_chain_methods() {
-        const NUM_NODES: usize = 5;
         const INITIAL_BLOCKS: u64 = 200;
         const BITCOIND_PATH: &str = "/usr/local/bin/bitcoind";
 
         let builder = BitcoinNetworkBuilder::new()
-            .with_num_nodes(NUM_NODES)
             .with_initial_blocks(INITIAL_BLOCKS)
             .with_bitcoin_core_path(PathBuf::from(BITCOIND_PATH));
 
-        assert_eq!(builder.num_nodes, NUM_NODES);
         assert_eq!(builder.initial_blocks, INITIAL_BLOCKS);
         assert_eq!(
             builder.bitcoin_core_path,
             Some(PathBuf::from(BITCOIND_PATH))
         );
-    }
-
-    #[test]
-    fn test_get_available_port_unique_ports() {
-        let port1 = get_available_port().unwrap();
-        let port2 = get_available_port().unwrap();
-        assert_ne!(port1, port2, "Should return different ports");
     }
 }

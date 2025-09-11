@@ -167,7 +167,7 @@ impl Config {
 /// Return an ephemeral, available port. On unix systems, the port returned will be in the
 /// TIME_WAIT state ensuring that the OS won't hand out this port for some grace period.
 /// Callers should be able to bind to this port given they use SO_REUSEADDR.
-fn get_available_port() -> u16 {
+pub fn get_available_port() -> u16 {
     const MAX_PORT_RETRIES: u32 = 1000;
 
     for _ in 0..MAX_PORT_RETRIES {
@@ -223,5 +223,12 @@ mod tests {
         let tls_key = config.tls_private_key.as_ref().unwrap();
         assert!(tls_key.starts_with("-----BEGIN PRIVATE KEY-----"));
         assert!(tls_key.ends_with("-----END PRIVATE KEY-----\n"));
+    }
+
+    #[test]
+    fn test_get_available_port_unique_ports() {
+        let port1 = get_available_port();
+        let port2 = get_available_port();
+        assert_ne!(port1, port2, "Should return different ports");
     }
 }
