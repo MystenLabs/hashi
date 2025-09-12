@@ -1,12 +1,21 @@
-use anyhow::{Result, anyhow};
-use bitcoin::{Address, Amount, BlockHash, Txid};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use anyhow::Result;
+use anyhow::anyhow;
+use bitcoin::Address;
+use bitcoin::Amount;
+use bitcoin::BlockHash;
+use bitcoin::Txid;
+use bitcoincore_rpc::Auth;
+use bitcoincore_rpc::Client;
+use bitcoincore_rpc::RpcApi;
 use hashi::config::get_available_port;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 use tempfile::TempDir;
-use tracing::{info, warn};
+use tracing::info;
+use tracing::warn;
 
 const DEFAULT_INITIAL_BLOCKS: u64 = 101;
 const BITCOIN_CORE_STARTUP_TIMEOUT_SECS: u64 = 60;
@@ -203,20 +212,12 @@ impl Drop for BitcoinNodeHandle {
     }
 }
 
-pub struct BitcoinNetwork(pub BitcoinNodeHandle);
-
-impl BitcoinNetwork {
-    pub fn node(&self) -> &BitcoinNodeHandle {
-        &self.0
-    }
-}
-
-pub struct BitcoinNetworkBuilder {
+pub struct BitcoinNodeBuilder {
     initial_blocks: u64,
     bitcoin_core_path: Option<PathBuf>,
 }
 
-impl BitcoinNetworkBuilder {
+impl BitcoinNodeBuilder {
     pub fn new() -> Self {
         Self {
             initial_blocks: DEFAULT_INITIAL_BLOCKS,
@@ -234,7 +235,7 @@ impl BitcoinNetworkBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<BitcoinNetwork> {
+    pub async fn build(self) -> Result<BitcoinNodeHandle> {
         let bitcoin_core_path = self
             .bitcoin_core_path
             .unwrap_or_else(|| PathBuf::from("bitcoind"));
@@ -249,11 +250,11 @@ impl BitcoinNetworkBuilder {
             "Created Bitcoin node at RPC port {} with {} initial blocks",
             rpc_port, self.initial_blocks
         );
-        Ok(BitcoinNetwork(node_handle))
+        Ok(node_handle)
     }
 }
 
-impl Default for BitcoinNetworkBuilder {
+impl Default for BitcoinNodeBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -265,15 +266,15 @@ mod tests {
 
     #[test]
     fn test_builder_default_trait() {
-        let builder1 = BitcoinNetworkBuilder::new();
-        let builder2 = BitcoinNetworkBuilder::default();
+        let builder1 = BitcoinNodeBuilder::new();
+        let builder2 = BitcoinNodeBuilder::default();
 
         assert_eq!(builder1.initial_blocks, builder2.initial_blocks);
     }
 
     #[test]
     fn test_builder_default_values() {
-        let builder = BitcoinNetworkBuilder::new();
+        let builder = BitcoinNodeBuilder::new();
 
         assert_eq!(builder.initial_blocks, DEFAULT_INITIAL_BLOCKS);
         assert!(builder.bitcoin_core_path.is_none());
@@ -284,7 +285,7 @@ mod tests {
         const INITIAL_BLOCKS: u64 = 200;
         const BITCOIND_PATH: &str = "/usr/local/bin/bitcoind";
 
-        let builder = BitcoinNetworkBuilder::new()
+        let builder = BitcoinNodeBuilder::new()
             .with_initial_blocks(INITIAL_BLOCKS)
             .with_bitcoin_core_path(PathBuf::from(BITCOIND_PATH));
 

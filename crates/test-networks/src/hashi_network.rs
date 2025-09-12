@@ -1,5 +1,7 @@
 use anyhow::Result;
-use hashi::{Hashi, ServerVersion, config::Config as HashiConfig};
+use hashi::Hashi;
+use hashi::ServerVersion;
+use hashi::config::Config as HashiConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
