@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bitcoin::{Address, Amount, BlockHash, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use hashi::config::get_available_port;
