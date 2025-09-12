@@ -1,21 +1,12 @@
-use anyhow::Result;
-use anyhow::anyhow;
-use bitcoin::Address;
-use bitcoin::Amount;
-use bitcoin::BlockHash;
-use bitcoin::Txid;
-use bitcoincore_rpc::Auth;
-use bitcoincore_rpc::Client;
-use bitcoincore_rpc::RpcApi;
+use anyhow::{anyhow, Result};
+use bitcoin::{Address, Amount, BlockHash, Txid};
+use bitcoincore_rpc::{Auth, Client, RpcApi};
 use hashi::config::get_available_port;
 use std::path::PathBuf;
-use std::process::Child;
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
-use tracing::info;
-use tracing::warn;
+use tracing::{info, warn};
 
 const DEFAULT_INITIAL_BLOCKS: u64 = 101;
 const BITCOIN_CORE_STARTUP_TIMEOUT_SECS: u64 = 60;

@@ -1,9 +1,6 @@
 use anyhow::Result;
-use hashi::Hashi;
-use hashi::ServerVersion;
-use hashi::config::Config as HashiConfig;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use hashi::{config::Config as HashiConfig, Hashi, ServerVersion};
+use std::{net::SocketAddr, sync::Arc};
 use tracing::info;
 
 const HTTPS_SCHEME: &str = "https://";

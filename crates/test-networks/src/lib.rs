@@ -1,15 +1,11 @@
 use anyhow::Result;
-use test_cluster::TestCluster;
-use test_cluster::TestClusterBuilder;
+use test_cluster::{TestCluster, TestClusterBuilder};
 
 pub mod bitcoin_node;
 pub mod hashi_network;
 
-pub use bitcoin_node::BitcoinNodeBuilder;
-pub use bitcoin_node::BitcoinNodeHandle;
-pub use hashi_network::HashiNetwork;
-pub use hashi_network::HashiNetworkBuilder;
-pub use hashi_network::HashiNodeHandle;
+pub use bitcoin_node::{BitcoinNodeBuilder, BitcoinNodeHandle};
+pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
 
 pub struct TestNetworks {
     pub sui_network: TestCluster,
