@@ -4,9 +4,9 @@
 
 Integration tests for Hashi need to spin up test environments including:
 
-1. **Sui network**
-2. **Bitcoin network**
-3. **Hashi network**
+1. Sui network
+2. Bitcoin network
+3. Hashi network
 
 The primary bottleneck has been the Sui network setup, which traditionally required using `TestCluster` from the Sui
 repository. Using `TestCluster` has a significant drawback:
@@ -23,9 +23,9 @@ binaries.
 
 While the binary approach solves compilation time, it comes with limitations:
 
-- **API access**: RPC-only instead of direct internal access
-- **Debugging**: Less visibility into Sui internals
-- **Features**: Limited to what the binary exposes
+- API access: RPC-only instead of direct internal access
+- Debugging: Less visibility into Sui internals
+- Features: Limited to what the binary exposes
 
 For Hashi's integration tests, these trade-offs are acceptable since tests primarily need to:
 
