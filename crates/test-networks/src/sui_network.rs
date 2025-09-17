@@ -97,16 +97,25 @@ mod binary_impl {
         }
     }
 
-    #[derive(Default)]
     pub struct SuiNetworkBuilder {
-        pub num_validators: Option<usize>, // Currently ignored (always DEFAULT_NUM_VALIDATORS)
-        pub epoch_duration_ms: Option<u64>,
+        pub num_validators: usize,
+        pub epoch_duration_ms: u64,
         pub sui_binary_path: Option<PathBuf>, // Optional custom binary
+    }
+
+    impl Default for SuiNetworkBuilder {
+        fn default() -> Self {
+            Self {
+                num_validators: DEFAULT_NUM_VALIDATORS,
+                epoch_duration_ms: DEFAULT_EPOCH_DURATION_MS,
+                sui_binary_path: None,
+            }
+        }
     }
 
     impl SuiNetworkBuilder {
         pub fn with_validators(mut self, n: usize) -> Self {
-            self.num_validators = Some(n);
+            self.num_validators = n;
             self
         }
 
@@ -115,7 +124,7 @@ mod binary_impl {
         }
 
         pub fn with_epoch_duration_ms(mut self, ms: u64) -> Self {
-            self.epoch_duration_ms = Some(ms);
+            self.epoch_duration_ms = ms;
             self
         }
 
@@ -147,8 +156,8 @@ mod binary_impl {
                 rpc_url,
                 faucet_url: format!("http://{}:{}", LOCALHOST, DEFAULT_FAUCET_PORT),
                 graphql_url: None,
-                num_validators: self.num_validators.unwrap_or(DEFAULT_NUM_VALIDATORS),
-                epoch_duration_ms: self.epoch_duration_ms.unwrap_or(DEFAULT_EPOCH_DURATION_MS),
+                num_validators: self.num_validators,
+                epoch_duration_ms: self.epoch_duration_ms,
             })
         }
 
@@ -156,18 +165,12 @@ mod binary_impl {
             let mut cmd = Command::new(sui_binary);
             cmd.arg("genesis")
                 .arg("--working-dir")
-                .arg(config_dir.path());
-            if let Some(epoch_ms) = self.epoch_duration_ms {
-                cmd.arg("--epoch-duration-ms").arg(epoch_ms.to_string());
-            }
-            if let Some(num_validators) = self.num_validators {
-                // TODO: Uncomment when --num-validators flag is added to sui genesis
-                // cmd.arg("--num-validators").arg(num_validators.to_string());
-                // Currently sui genesis only supports DEFAULT_NUM_VALIDATORS validators
-                let _ = num_validators; // Suppress unused warning
-            }
-            // Always enable faucet for testing
-            cmd.arg("--with-faucet");
+                .arg(config_dir.path())
+                .arg("--epoch-duration-ms")
+                .arg(self.epoch_duration_ms.to_string())
+                .arg("--committee-size")
+                .arg(self.num_validators.to_string())
+                .arg("--with-faucet");
             let status = cmd.status()?;
             if !status.success() {
                 return Err(anyhow::anyhow!("Failed to generate genesis"));

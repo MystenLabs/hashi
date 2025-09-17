@@ -77,8 +77,8 @@ jobs:
             head -n 1)
 
           if [ -z "$SUI_VERSION" ]; then
-            echo "Failed to detect latest mainnet version, falling back to v1.55.0"
-            SUI_VERSION="mainnet-v1.55.0"
+            echo "Failed to detect latest mainnet version, falling back to mainnet-v1.56.2"
+            SUI_VERSION="mainnet-v1.56.2"
           fi
 
           echo "Installing Sui binary ${SUI_VERSION}..."

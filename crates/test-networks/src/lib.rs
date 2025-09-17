@@ -113,7 +113,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[cfg(not(feature = "binary-sui"))]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
@@ -123,10 +122,15 @@ mod tests {
             .await?;
 
         assert_eq!(test_networks.hashi_network().nodes().len(), TEST_NUM_NODES);
+
+        #[cfg(not(feature = "binary-sui"))]
         assert_eq!(
             test_networks.sui_network().get_validator_pubkeys().len(),
             TEST_NUM_NODES
         );
+        #[cfg(feature = "binary-sui")]
+        assert_eq!(test_networks.sui_network().num_validators, TEST_NUM_NODES);
+
         assert!(!test_networks.bitcoin_node().rpc_url().is_empty());
 
         Ok(())
@@ -134,16 +138,33 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "binary-sui")]
-    async fn test_binary_sui_network() -> Result<()> {
+    async fn test_default_binary_sui_network() -> Result<()> {
         let sui_network = SuiNetworkBuilder::default().build().await?;
 
-        // sui genesis only supports 4 validators by default
         assert_eq!(sui_network.num_validators, 4);
         assert!(!sui_network.rpc_url.is_empty());
         assert!(!sui_network.faucet_url.is_empty());
 
         let connected = std::net::TcpStream::connect("127.0.0.1:9000").is_ok();
         assert!(connected, "Should be able to connect to RPC port");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "binary-sui")]
+    async fn test_with_sui_epoch_duration_ms() -> Result<()> {
+        const CUSTOM_EPOCH_MS: u64 = 120_000;
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_sui_epoch_duration_ms(CUSTOM_EPOCH_MS)
+            .build()
+            .await?;
+
+        assert_eq!(
+            test_networks.sui_network().epoch_duration_ms,
+            CUSTOM_EPOCH_MS
+        );
 
         Ok(())
     }
