@@ -42,17 +42,12 @@ impl SuiNetworkHandle {
 
     /// Ensure sui binary exists
     fn ensure_sui_binary(custom_path: &Option<PathBuf>) -> Result<PathBuf> {
-        // 1. Check custom path if provided
         if let Some(path) = custom_path {
             return Ok(path.clone());
         }
-
-        // 2. Check SUI_BINARY env var
         if let Ok(path) = std::env::var("SUI_BINARY") {
             return Ok(PathBuf::from(path));
         }
-
-        // 3. Check if sui is in PATH
         if let Ok(output) = Command::new("which").arg("sui").output()
             && output.status.success()
         {
@@ -61,14 +56,11 @@ impl SuiNetworkHandle {
                 return Ok(PathBuf::from(path));
             }
         }
-
-        // 4. Check common locations
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let common_path = PathBuf::from(format!("{}/bin/sui", home));
         if common_path.exists() {
             return Ok(common_path);
         }
-
         anyhow::bail!("sui binary not found. Please install sui or set SUI_BINARY env var")
     }
 
@@ -111,22 +103,12 @@ impl SuiNetworkBuilder {
     }
 
     pub async fn build(self) -> Result<SuiNetworkHandle> {
-        // Step 1: Create temporary directory for this network
         let config_dir = tempfile::Builder::new().prefix(TEMP_DIR_PREFIX).tempdir()?;
-
-        // Step 2: Ensure sui binary exists
         let sui_binary = SuiNetworkHandle::ensure_sui_binary(&self.sui_binary_path)?;
-
-        // Step 3: Generate genesis with configuration
         self.generate_genesis(&sui_binary, &config_dir)?;
-
-        // Step 4: Start the network
         let process = self.start_network(&sui_binary, &config_dir)?;
-
-        // Step 5: Wait for network to be ready
         let rpc_url = format!("http://{}:{}", LOCALHOST, DEFAULT_RPC_PORT);
         SuiNetworkHandle::wait_for_ready(&rpc_url).await?;
-
         Ok(SuiNetworkHandle {
             process,
             _config_dir: config_dir,
