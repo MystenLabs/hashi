@@ -142,10 +142,9 @@ impl SuiNetworkBuilder {
         cmd.arg("start")
             .arg("--network.config")
             .arg(config_dir.path())
+            .arg("--with-faucet")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Always enable faucet for testing
-        cmd.arg("--with-faucet");
         Ok(cmd.spawn()?)
     }
 }
