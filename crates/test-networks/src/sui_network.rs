@@ -36,10 +36,6 @@ impl Drop for SuiNetworkHandle {
 }
 
 impl SuiNetworkHandle {
-    pub async fn new() -> Result<Self> {
-        SuiNetworkBuilder::default().build().await
-    }
-
     /// Ensure sui binary exists
     fn ensure_sui_binary(custom_path: &Option<PathBuf>) -> Result<PathBuf> {
         if let Some(path) = custom_path {
