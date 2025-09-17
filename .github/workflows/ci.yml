@@ -109,9 +109,6 @@ jobs:
       - name: Run tests
         run: make test
 
-      - name: Run tests with binary-sui feature
-        run: cargo test -p test-networks --features binary-sui
-
       - run: make is-dirty
 
   lint:

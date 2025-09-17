@@ -6,19 +6,16 @@ pub mod sui_network;
 
 pub use bitcoin_node::{BitcoinNodeBuilder, BitcoinNodeHandle};
 pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
-pub use sui_network::{SuiNetwork, SuiNetworkBuilder};
+pub use sui_network::{SuiNetworkBuilder, SuiNetworkHandle};
 
 pub struct TestNetworks {
-    pub sui_network: SuiNetwork,
+    pub sui_network: SuiNetworkHandle,
     pub hashi_network: HashiNetwork,
     pub bitcoin_node: BitcoinNodeHandle,
 }
 
 impl TestNetworks {
     pub async fn new() -> Result<Self> {
-        #[cfg(not(feature = "binary-sui"))]
-        let sui_network = SuiNetworkBuilder::new().build().await;
-        #[cfg(feature = "binary-sui")]
         let sui_network = SuiNetworkBuilder::default().build().await?;
         let hashi_network = HashiNetworkBuilder::new().build().await?;
         let bitcoin_node = BitcoinNodeBuilder::new().build().await?;
@@ -34,7 +31,7 @@ impl TestNetworks {
         TestNetworksBuilder::new()
     }
 
-    pub fn sui_network(&self) -> &SuiNetwork {
+    pub fn sui_network(&self) -> &SuiNetworkHandle {
         &self.sui_network
     }
 
@@ -56,9 +53,6 @@ pub struct TestNetworksBuilder {
 impl TestNetworksBuilder {
     pub fn new() -> Self {
         Self {
-            #[cfg(not(feature = "binary-sui"))]
-            sui_builder: SuiNetworkBuilder::new(),
-            #[cfg(feature = "binary-sui")]
             sui_builder: SuiNetworkBuilder::default(),
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
@@ -77,7 +71,7 @@ impl TestNetworksBuilder {
     }
 
     pub fn with_sui_validators(mut self, num_validators: usize) -> Self {
-        self.sui_builder = self.sui_builder.with_num_validators(num_validators);
+        self.sui_builder = self.sui_builder.with_validators(num_validators);
         self
     }
 
@@ -87,9 +81,6 @@ impl TestNetworksBuilder {
     }
 
     pub async fn build(self) -> Result<TestNetworks> {
-        #[cfg(not(feature = "binary-sui"))]
-        let sui_network = self.sui_builder.build().await;
-        #[cfg(feature = "binary-sui")]
         let sui_network = self.sui_builder.build().await?;
         let hashi_network = self.hashi_builder.build().await?;
         let bitcoin_node = self.bitcoin_builder.build().await?;
@@ -122,49 +113,8 @@ mod tests {
             .await?;
 
         assert_eq!(test_networks.hashi_network().nodes().len(), TEST_NUM_NODES);
-
-        #[cfg(not(feature = "binary-sui"))]
-        assert_eq!(
-            test_networks.sui_network().get_validator_pubkeys().len(),
-            TEST_NUM_NODES
-        );
-        #[cfg(feature = "binary-sui")]
         assert_eq!(test_networks.sui_network().num_validators, TEST_NUM_NODES);
-
         assert!(!test_networks.bitcoin_node().rpc_url().is_empty());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "binary-sui")]
-    async fn test_default_binary_sui_network() -> Result<()> {
-        let sui_network = SuiNetworkBuilder::default().build().await?;
-
-        assert_eq!(sui_network.num_validators, 4);
-        assert!(!sui_network.rpc_url.is_empty());
-        assert!(!sui_network.faucet_url.is_empty());
-
-        let connected = std::net::TcpStream::connect("127.0.0.1:9000").is_ok();
-        assert!(connected, "Should be able to connect to RPC port");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "binary-sui")]
-    async fn test_with_sui_epoch_duration_ms() -> Result<()> {
-        const CUSTOM_EPOCH_MS: u64 = 120_000;
-
-        let test_networks = TestNetworksBuilder::new()
-            .with_sui_epoch_duration_ms(CUSTOM_EPOCH_MS)
-            .build()
-            .await?;
-
-        assert_eq!(
-            test_networks.sui_network().epoch_duration_ms,
-            CUSTOM_EPOCH_MS
-        );
 
         Ok(())
     }

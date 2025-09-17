@@ -3,13 +3,7 @@ name = "test-networks"
 version = "0.0.0"
 edition = "2024"
 
-[features]
-default = []
-# Use pre-compiled sui binary instead of compiling TestCluster
-binary-sui = []
-
 [dependencies]
-test-cluster = { git = "https://github.com/MystenLabs/sui.git" }
 hashi = { path = "../hashi" }
 anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }
@@ -18,3 +12,6 @@ prometheus = "0.13"
 bitcoin = "0.32"
 bitcoincore-rpc = "0.19"
 tempfile = "3.0"
+
+[dev-dependencies]
+futures = "0.3"
