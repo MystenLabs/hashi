@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-  schedule: [cron: "40 1 * * *"]
+  schedule: [ cron: "40 1 * * *" ]
 
 permissions:
   contents: read
@@ -90,7 +90,7 @@ jobs:
           }
 
           echo "Extracting Sui binary..."
-          tar -xzf sui-*.tgz
+          tar -xzf sui-*.tgz sui
 
           # Move sui binary to PATH
           echo "Installing Sui binary..."
