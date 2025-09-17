@@ -90,7 +90,7 @@ jobs:
           }
 
           echo "Extracting Sui binary..."
-          tar -xzf sui-*.tgz sui
+          tar -xzf sui-*.tgz ./sui
 
           # Move sui binary to PATH
           echo "Installing Sui binary..."
