@@ -36,8 +36,7 @@ impl Drop for SuiNetworkHandle {
 }
 
 impl SuiNetworkHandle {
-    /// Ensure sui binary exists
-    fn ensure_sui_binary(custom_path: &Option<PathBuf>) -> Result<PathBuf> {
+    fn ensure_sui_binary_exists(custom_path: &Option<PathBuf>) -> Result<PathBuf> {
         if let Some(path) = custom_path {
             return Ok(path.clone());
         }
@@ -100,7 +99,7 @@ impl SuiNetworkBuilder {
 
     pub async fn build(self) -> Result<SuiNetworkHandle> {
         let config_dir = tempfile::Builder::new().prefix(TEMP_DIR_PREFIX).tempdir()?;
-        let sui_binary = SuiNetworkHandle::ensure_sui_binary(&self.sui_binary_path)?;
+        let sui_binary = SuiNetworkHandle::ensure_sui_binary_exists(&self.sui_binary_path)?;
         self.generate_genesis(&sui_binary, &config_dir)?;
         let process = self.start_network(&sui_binary, &config_dir)?;
         let rpc_url = format!("http://{}:{}", LOCALHOST, DEFAULT_RPC_PORT);
