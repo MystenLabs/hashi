@@ -202,7 +202,7 @@ mod tests {
         use futures::future::join_all;
 
         const NUM_PARALLEL_NETWORKS: usize = 3;
-        const NUM_VALIDATORS: usize = 4;
+        const NUM_VALIDATORS: usize = 7;
 
         // Spawn multiple networks in parallel
         let network_futures: Vec<_> = (0..NUM_PARALLEL_NETWORKS)
