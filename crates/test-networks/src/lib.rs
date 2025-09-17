@@ -71,7 +71,7 @@ impl TestNetworksBuilder {
     }
 
     pub fn with_sui_validators(mut self, num_validators: usize) -> Self {
-        self.sui_builder = self.sui_builder.with_validators(num_validators);
+        self.sui_builder = self.sui_builder.with_num_validators(num_validators);
         self
     }
 

@@ -95,7 +95,7 @@ impl Default for SuiNetworkBuilder {
 }
 
 impl SuiNetworkBuilder {
-    pub fn with_validators(mut self, n: usize) -> Self {
+    pub fn with_num_validators(mut self, n: usize) -> Self {
         self.num_validators = n;
         self
     }
@@ -208,7 +208,7 @@ mod tests {
         let network_futures: Vec<_> = (0..NUM_PARALLEL_NETWORKS)
             .map(|i| async move {
                 let network = SuiNetworkBuilder::default()
-                    .with_validators(NUM_VALIDATORS)
+                    .with_num_validators(NUM_VALIDATORS)
                     .build()
                     .await;
                 (i, network)
