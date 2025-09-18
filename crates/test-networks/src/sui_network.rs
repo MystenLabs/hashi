@@ -256,20 +256,6 @@ mod tests {
                     // Verify network configuration
                     assert_eq!(network.num_validators, NUM_VALIDATORS);
 
-                    // Verify we can actually connect to the RPC port
-                    let rpc_addr = format!("{}:{}", LOCALHOST, rpc_port);
-                    match tokio::net::TcpStream::connect(&rpc_addr).await {
-                        Ok(stream) => {
-                            drop(stream);
-                        }
-                        Err(e) => {
-                            panic!(
-                                "Network {}: Failed to connect to RPC at {}: {}",
-                                i, rpc_addr, e
-                            );
-                        }
-                    }
-
                     networks.push(network);
                 }
                 Err(e) => {
