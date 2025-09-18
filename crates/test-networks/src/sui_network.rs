@@ -200,7 +200,7 @@ mod tests {
         use std::collections::HashSet;
 
         const NUM_PARALLEL_NETWORKS: usize = 3;
-        const NUM_VALIDATORS: usize = 4;
+        const NUM_VALIDATORS: usize = 5;
 
         // Spawn multiple networks in parallel
         let network_futures: Vec<_> = (0..NUM_PARALLEL_NETWORKS)
