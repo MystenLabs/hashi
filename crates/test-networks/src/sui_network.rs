@@ -62,16 +62,18 @@ impl SuiNetworkHandle {
     }
 
     async fn wait_for_ready(rpc_url: &str) -> Result<()> {
+        let tcp_addr = rpc_url.replace(HTTP_PREFIX, "");
         for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
-            if let Ok(stream) =
-                tokio::net::TcpStream::connect(rpc_url.replace(HTTP_PREFIX, "")).await
-            {
+            if let Ok(stream) = tokio::net::TcpStream::connect(&tcp_addr).await {
                 drop(stream);
                 return Ok(());
             }
             sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
         }
-        anyhow::bail!("Network failed to start within timeout")
+        anyhow::bail!(
+            "Network failed to start within {}s timeout",
+            NETWORK_STARTUP_TIMEOUT_SECS
+        )
     }
 }
 
@@ -116,7 +118,7 @@ impl SuiNetworkBuilder {
         let process = self.start_network(&sui_binary, &config_dir, rpc_port, faucet_port)?;
         let rpc_url = format!("{}{}:{}", HTTP_PREFIX, LOCALHOST, rpc_port);
         let faucet_url = format!("{}{}:{}", HTTP_PREFIX, LOCALHOST, faucet_port);
-        SuiNetworkHandle::wait_for_ready(&format!("{}:{}", LOCALHOST, rpc_port)).await?;
+        SuiNetworkHandle::wait_for_ready(&rpc_url).await?;
         Ok(SuiNetworkHandle {
             process,
             _config_dir: config_dir,
