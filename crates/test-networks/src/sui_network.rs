@@ -227,13 +227,13 @@ mod tests {
                     let rpc_port: u16 = network
                         .rpc_url
                         .split(':')
-                        .last()
+                        .next_back()
                         .and_then(|p| p.parse().ok())
                         .expect("Failed to parse RPC port");
                     let faucet_port: u16 = network
                         .faucet_url
                         .split(':')
-                        .last()
+                        .next_back()
                         .and_then(|p| p.parse().ok())
                         .expect("Failed to parse faucet port");
 
