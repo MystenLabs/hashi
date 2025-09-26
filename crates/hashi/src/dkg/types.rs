@@ -103,7 +103,7 @@ impl SessionContext {
 
     /// Convert to bytes for use in `fastcrypto` (as sid parameter)
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("SessionId serialization should not fail")
+        bincode::serialize(self).expect("SessionContext serialization should not fail")
     }
 }
 
