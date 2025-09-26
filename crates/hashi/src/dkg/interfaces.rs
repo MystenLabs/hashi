@@ -1,6 +1,8 @@
 //! Interfaces for DKG protocol components
 
-use crate::dkg::types::{DkgMessage, DkgOutput, DkgProtocolState, DkgResult, SessionContext, ValidatorId};
+use crate::dkg::types::{
+    DkgMessage, DkgOutput, DkgProtocolState, DkgResult, SessionContext, ValidatorId,
+};
 use async_trait::async_trait;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
