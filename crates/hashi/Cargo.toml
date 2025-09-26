@@ -42,6 +42,16 @@ blst = { version = "0.3.13" }
 rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }
 
+# DKG dependencies
+fastcrypto = { path = "../../../fastcrypto/fastcrypto" }
+fastcrypto-tbls = { path = "../../../fastcrypto/fastcrypto-tbls", features = ["experimental"] }
+async-trait = "0.1"
+thiserror = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+bincode = "1.3"
+rand = "0.8"
+
 [dev-dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 test-strategy = "0.4"
