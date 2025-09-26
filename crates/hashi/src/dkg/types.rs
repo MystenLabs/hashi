@@ -216,3 +216,132 @@ impl From<FastCryptoError> for DkgError {
         DkgError::CryptoError(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_validator(party_id: u16, weight: u16) -> ValidatorInfo {
+        use fastcrypto::groups::ristretto255::RistrettoPoint;
+        use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
+
+        let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let public_key = PublicKey::from_private_key(&private_key);
+        ValidatorInfo {
+            id: ValidatorId([party_id as u8; 32]),
+            party_id,
+            weight,
+            ecies_public_key: public_key,
+        }
+    }
+
+    #[test]
+    fn test_dkg_config_valid_equal_weight() {
+        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 3, 2);
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert_eq!(config.epoch, 100);
+        assert_eq!(config.threshold, 3);
+        assert_eq!(config.max_faulty, 2);
+        assert_eq!(config.total_weight(), 7);
+    }
+
+    #[test]
+    fn test_dkg_config_valid_weighted() {
+        let validators = vec![
+            create_test_validator(0, 3),
+            create_test_validator(1, 2),
+            create_test_validator(2, 2),
+            create_test_validator(3, 1),
+            create_test_validator(4, 1),
+        ];
+        let config = DkgConfig::new(42, validators, 5, 2);
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert_eq!(config.total_weight(), 9);
+    }
+
+    #[test]
+    fn test_dkg_config_threshold_too_low() {
+        let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 2, 2);
+        assert!(config.is_err());
+        match config.unwrap_err() {
+            DkgError::InvalidThreshold(msg) => {
+                assert!(msg.contains("threshold must be greater than max_faulty"));
+            }
+            _ => panic!("Wrong error type"),
+        }
+    }
+
+    #[test]
+    fn test_dkg_config_threshold_equals_faulty() {
+        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 3, 3);
+        assert!(config.is_err());
+        match config.unwrap_err() {
+            DkgError::InvalidThreshold(msg) => {
+                assert!(msg.contains("threshold must be greater than max_faulty"));
+            }
+            _ => panic!("Wrong error type"),
+        }
+    }
+
+    #[test]
+    fn test_dkg_config_byzantine_constraint_violated() {
+        let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 4, 2);
+        assert!(config.is_err());
+        match config.unwrap_err() {
+            DkgError::InvalidThreshold(msg) => {
+                assert!(msg.contains("t + 2f (8) must be <= total weight (5)"));
+            }
+            _ => panic!("Wrong error type"),
+        }
+    }
+
+    #[test]
+    fn test_dkg_config_minimum_validators() {
+        let validators = (0..3).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 2, 0);
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn test_dkg_config_single_validator() {
+        let validators = vec![create_test_validator(0, 1)];
+        let config = DkgConfig::new(100, validators, 1, 0);
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn test_dkg_config_zero_weight_sum() {
+        let validators = vec![create_test_validator(0, 0), create_test_validator(1, 0)];
+        let config = DkgConfig::new(100, validators, 1, 0);
+        assert!(config.is_err());
+    }
+
+    #[test]
+    fn test_dkg_config_get_validator() {
+        let validators = (0..3).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 2, 0).unwrap();
+
+        // Test finding existing validator
+        let validator_id = ValidatorId([0; 32]);
+        let validator = config.get_validator(&validator_id);
+        assert!(validator.is_some());
+        assert_eq!(validator.unwrap().party_id, 0);
+
+        // Test finding non-existent validator
+        let unknown_id = ValidatorId([99; 32]);
+        assert!(config.get_validator(&unknown_id).is_none());
+    }
+
+    #[test]
+    fn test_optimal_byzantine_tolerance() {
+        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 3, 2);
+        assert!(config.is_ok());
+    }
+}
