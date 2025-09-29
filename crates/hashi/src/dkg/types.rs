@@ -5,7 +5,7 @@ use fastcrypto_tbls::{
     ecies_v1::PublicKey,
     nodes::PartyId,
     polynomial::Eval,
-    threshold_schnorr::{G, avss},
+    threshold_schnorr::{G, avss, complaint},
 };
 
 type EG = fastcrypto::groups::ristretto255::RistrettoPoint;
@@ -133,11 +133,11 @@ pub enum DkgMessage {
     Certificate(DkgCertificate),
     Complaint {
         accuser: ValidatorId,
-        complaint_bytes: Vec<u8>,
+        complaint: complaint::Complaint,
     },
     ComplaintResponse {
         responder: ValidatorId,
-        response_bytes: Vec<u8>,
+        response: complaint::ComplaintResponse,
     },
 }
 
@@ -171,8 +171,8 @@ pub struct DkgProtocolState {
     pub received_messages: BTreeMap<ValidatorId, avss::Message>,
     pub processed_shares: BTreeMap<ValidatorId, avss::SharesForNode>,
     pub processed_commitments: BTreeMap<ValidatorId, Vec<Eval<G>>>,
-    pub complaints: Vec<Vec<u8>>,
-    pub complaint_responses: Vec<Vec<u8>>,
+    pub complaints: Vec<complaint::Complaint>,
+    pub complaint_responses: Vec<complaint::ComplaintResponse>,
     pub certificates: Vec<DkgCertificate>,
 }
 
