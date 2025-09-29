@@ -87,8 +87,7 @@ impl BroadcastChannel for InMemoryBroadcastChannel {
         loop {
             let mut queue = self.my_queue.lock().await;
             if let Some(msg) = queue.pop_front() {
-                let sender = msg.sender().clone();
-                return Ok((sender, msg));
+                return Ok((msg.sender().clone(), msg));
             }
             drop(queue);
             // Sleep briefly to avoid busy-waiting
@@ -103,7 +102,7 @@ impl BroadcastChannel for InMemoryBroadcastChannel {
         match timeout(duration, self.receive()).await {
             Ok(Ok(msg)) => Ok(Some(msg)),
             Ok(Err(e)) => Err(e),
-            Err(_) => Ok(None), // Timeout
+            Err(_) => Ok(None),
         }
     }
 
