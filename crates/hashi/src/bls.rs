@@ -525,7 +525,7 @@ impl BitMap {
         committee_size: usize,
         bitmap: &[u8],
     ) -> Result<impl Iterator<Item = usize>, SignatureError> {
-        let max_bitmap_len_bytes = if committee_size % 8 == 0 {
+        let max_bitmap_len_bytes = if committee_size.is_multiple_of(8) {
             committee_size / 8
         } else {
             (committee_size / 8) + 1

@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 const DEFAULT_INITIAL_BLOCKS: u64 = 101;
 const BITCOIN_CORE_STARTUP_TIMEOUT_SECS: u64 = 60;
+const STARTUP_LOG_INTERVAL_SECS: u64 = 5;
 const RPC_USER: &str = "test";
 const RPC_PASSWORD: &str = "test";
 
@@ -108,7 +109,7 @@ impl BitcoinNodeHandle {
                 }
                 Err(e) => {
                     let elapsed = start.elapsed().as_secs();
-                    if elapsed % 5 == 0 {
+                    if elapsed.is_multiple_of(STARTUP_LOG_INTERVAL_SECS) {
                         info!("Waiting for Bitcoin node to be ready ({}s): {}", elapsed, e);
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
