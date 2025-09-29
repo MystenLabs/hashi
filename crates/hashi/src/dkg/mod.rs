@@ -4,7 +4,7 @@ pub mod broadcast;
 pub mod interfaces;
 pub mod types;
 
-pub use broadcast::InMemoryBroadcast;
+pub use broadcast::InMemoryBroadcastChannel;
 pub use interfaces::{DkgStorage, OrderedBroadcastChannel, P2PChannel};
 pub use types::{
     DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, MessageType,

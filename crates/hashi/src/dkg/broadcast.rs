@@ -18,13 +18,13 @@ type SharedMessageQueues = Arc<RwLock<HashMap<ValidatorId, MessageQueue>>>;
 ///
 /// This implementation simulates a network where all validators can broadcast
 /// messages to each other. Messages are stored in per-validator queues.
-pub struct InMemoryBroadcast {
+pub struct InMemoryBroadcastChannel {
     validator_id: ValidatorId,
     message_queues: SharedMessageQueues,
     my_queue: MessageQueue,
 }
 
-impl InMemoryBroadcast {
+impl InMemoryBroadcastChannel {
     pub fn new_network(validator_ids: Vec<ValidatorId>) -> HashMap<ValidatorId, Self> {
         let mut queues = HashMap::new();
         for id in &validator_ids {
@@ -71,7 +71,7 @@ impl InMemoryBroadcast {
 }
 
 #[async_trait]
-impl BroadcastChannel for InMemoryBroadcast {
+impl BroadcastChannel for InMemoryBroadcastChannel {
     async fn broadcast(&self, message: DkgMessage) -> DkgResult<()> {
         let queues = self.message_queues.read().await;
         for (id, queue) in queues.iter() {
@@ -129,7 +129,7 @@ mod tests {
             ValidatorId([2; 32]),
             ValidatorId([3; 32]),
         ];
-        let mut channels = InMemoryBroadcast::new_network(validator_ids.clone());
+        let mut channels = InMemoryBroadcastChannel::new_network(validator_ids.clone());
 
         // Validator 1 broadcasts a message
         let msg = DkgMessage::Approval(MessageApproval {
@@ -163,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn test_timeout_receive() {
         let validator_ids = vec![ValidatorId([1; 32])];
-        let mut channels = InMemoryBroadcast::new_network(validator_ids.clone());
+        let mut channels = InMemoryBroadcastChannel::new_network(validator_ids.clone());
         let channel = channels.get_mut(&validator_ids[0]).unwrap();
         let result = channel
             .try_receive_timeout(Duration::from_millis(100))
@@ -176,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn test_pending_messages() {
         let validator_ids = vec![ValidatorId([1; 32]), ValidatorId([2; 32])];
-        let channels = InMemoryBroadcast::new_network(validator_ids.clone());
+        let channels = InMemoryBroadcastChannel::new_network(validator_ids.clone());
 
         // Initially no pending messages
         assert_eq!(
@@ -213,8 +213,10 @@ mod tests {
         let message_queues = Arc::new(RwLock::new(HashMap::new()));
         let validator1 = ValidatorId([1; 32]);
         let validator2 = ValidatorId([2; 32]);
-        let channel1 = InMemoryBroadcast::new(validator1.clone(), message_queues.clone()).await;
-        let mut channel2 = InMemoryBroadcast::new(validator2.clone(), message_queues.clone()).await;
+        let channel1 =
+            InMemoryBroadcastChannel::new(validator1.clone(), message_queues.clone()).await;
+        let mut channel2 =
+            InMemoryBroadcastChannel::new(validator2.clone(), message_queues.clone()).await;
 
         // Validator 1 broadcasts a message
         let message_hash = [42; 32];
