@@ -112,7 +112,26 @@ pub enum ProtocolType {
     DkgKeyGeneration,
     DkgKeyRotation,
     NonceGeneration(u32),
-    Signing([u8; 32]), // transaction hash
+    Signing {
+        message_hash: [u8; 32],
+        sighash_type: SighashType,
+    },
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SighashType {
+    All = 0x01,
+    None = 0x02,
+    Single = 0x03,
+    AllAnyoneCanPay = 0x81,
+    NoneAnyoneCanPay = 0x82,
+    SingleAnyoneCanPay = 0x83,
+}
+
+impl Default for SighashType {
+    fn default() -> Self {
+        SighashType::All
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

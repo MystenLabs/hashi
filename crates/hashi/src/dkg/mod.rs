@@ -6,5 +6,5 @@ pub mod types;
 pub use interfaces::{BroadcastChannel, DkgStorage};
 pub use types::{
     DkgCertificate, DkgConfig, DkgError, DkgMessage, DkgOutput, DkgResult, MessageApproval,
-    MessageType, SessionContext, ValidatorId, ValidatorInfo,
+    MessageType, SessionContext, SighashType, ValidatorId, ValidatorInfo,
 };
