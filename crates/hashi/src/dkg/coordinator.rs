@@ -233,7 +233,7 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
             start_time: Instant::now(),
             processed_validators: HashSet::new(),
         };
-        for (sender_id, _message) in &self.received_messages {
+        for sender_id in self.received_messages.keys() {
             // TODO: Verify and process the shares when implementing the full protocol flow
             // For now, just mark as processed
             if let DkgState::Processing {
@@ -263,10 +263,10 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
             self.state = DkgState::Completed {
                 output: output.clone(),
             };
-            if let Some(storage) = &self.storage {
-                if self.coordinator_config.enable_persistence {
-                    storage.save_output(&self.session, &output).await?;
-                }
+            if let Some(storage) = &self.storage
+                && self.coordinator_config.enable_persistence
+            {
+                storage.save_output(&self.session, &output).await?;
             }
             Ok(())
         } else {
@@ -277,10 +277,10 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
     async fn check_complaint_resolution(&mut self) -> DkgResult<()> {
         // TODO: Implement the actual complaint verification when adding complaint handling for all protocols
         // Assume resolved if we have any responses for now
-        if let DkgState::ComplaintHandling { response_count, .. } = &self.state {
-            if *response_count > 0 {
-                self.check_completion().await?;
-            }
+        if let DkgState::ComplaintHandling { response_count, .. } = &self.state
+            && *response_count > 0
+        {
+            self.check_completion().await?;
         }
         Ok(())
     }
@@ -386,9 +386,8 @@ mod tests {
         }
 
         fn with_validators(num_validators: u16, threshold: u16, max_faulty: u16) -> Self {
-            let validators: Vec<ValidatorInfo> = (0..num_validators)
-                .map(|i| create_test_validator(i))
-                .collect();
+            let validators: Vec<ValidatorInfo> =
+                (0..num_validators).map(create_test_validator).collect();
             let config = DkgConfig::new(1, validators.clone(), threshold, max_faulty).unwrap();
             let session = SessionContext::new(1, ProtocolType::DkgKeyGeneration, 0);
             let storage = MockStorage::new();
@@ -590,21 +589,21 @@ mod tests {
 
         coordinator.start().await.unwrap();
 
-        if let Some(storage) = &coordinator.storage {
-            if coordinator.coordinator_config.enable_persistence {
-                storage
-                    .save_output(
-                        &setup.session,
-                        &DkgOutput {
-                            public_key: G::zero(),
-                            key_shares: avss::SharesForNode { shares: vec![] },
-                            commitments: vec![],
-                            session_context: setup.session.clone(),
-                        },
-                    )
-                    .await
-                    .unwrap();
-            }
+        if let Some(storage) = &coordinator.storage
+            && coordinator.coordinator_config.enable_persistence
+        {
+            storage
+                .save_output(
+                    &setup.session,
+                    &DkgOutput {
+                        public_key: G::zero(),
+                        key_shares: avss::SharesForNode { shares: vec![] },
+                        commitments: vec![],
+                        session_context: setup.session.clone(),
+                    },
+                )
+                .await
+                .unwrap();
         }
 
         assert!(save_count_clone.load(Ordering::SeqCst) > 0);
