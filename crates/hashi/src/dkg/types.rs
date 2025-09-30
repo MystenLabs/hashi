@@ -115,6 +115,9 @@ pub enum ProtocolType {
     Signing {
         message_hash: [u8; 32],
         sighash_type: SighashType,
+        /// Derivation path indexes for each UTXO being signed
+        /// Empty vector means using the root key (no derivation)
+        derivation_indexes: Vec<u32>,
     },
 }
 
