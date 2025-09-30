@@ -47,7 +47,6 @@ fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ea5a
 fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ea5a0b07573fc9bdf65edf190a3059ef7549a26c", features = ["experimental"] }
 async-trait = "0.1"
 thiserror = "1.0"
-sha2 = "0.10"
 hex = "0.4"
 bincode = "1.3"
 rand = "0.8"

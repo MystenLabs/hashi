@@ -1614,7 +1614,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_derive",
- "sha2 0.10.9",
  "sui-crypto",
  "sui-http",
  "sui-rpc",
