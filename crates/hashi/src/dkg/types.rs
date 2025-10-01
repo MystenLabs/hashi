@@ -103,7 +103,7 @@ impl SessionContext {
 
     /// Convert to bytes for use in `fastcrypto` (as sid parameter)
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("SessionContext serialization should not fail")
+        bcs::to_bytes(self).expect("SessionContext serialization should not fail")
     }
 }
 
@@ -360,5 +360,45 @@ mod tests {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
         let config = DkgConfig::new(100, validators, 3, 2);
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn test_session_context_serialization() {
+        let ctx = SessionContext::new(42, ProtocolType::DkgKeyGeneration, 1);
+
+        // Test that to_bytes works (uses BCS internally)
+        let bytes = ctx.to_bytes();
+        assert!(!bytes.is_empty());
+
+        // Test that we can deserialize it back
+        let deserialized: SessionContext =
+            bcs::from_bytes(&bytes).expect("Should be able to deserialize SessionContext");
+        assert_eq!(deserialized.epoch, ctx.epoch);
+        assert_eq!(deserialized.protocol_type, ctx.protocol_type);
+        assert_eq!(deserialized.round, ctx.round);
+        assert_eq!(deserialized.nonce, ctx.nonce);
+    }
+
+    #[test]
+    fn test_session_context_deterministic_serialization() {
+        let epoch = 100;
+        let protocol_type = ProtocolType::DkgKeyGeneration;
+        let round = 5;
+        let nonce = [1; 16];
+
+        let ctx1 = SessionContext {
+            epoch,
+            protocol_type: protocol_type.clone(),
+            round,
+            nonce,
+        };
+        let ctx2 = SessionContext {
+            epoch,
+            protocol_type,
+            round,
+            nonce,
+        };
+
+        assert_eq!(ctx1.to_bytes(), ctx2.to_bytes());
     }
 }
