@@ -141,13 +141,11 @@ pub struct DkgOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum DkgMessage {
+pub enum P2PMessage {
     Share {
         sender: ValidatorId,
         message: Box<avss::Message>,
     },
-    Approval(MessageApproval),
-    Certificate(DkgCertificate),
     Complaint {
         accuser: ValidatorId,
         complaint: complaint::Complaint,
@@ -155,6 +153,17 @@ pub enum DkgMessage {
     ComplaintResponse {
         responder: ValidatorId,
         response: complaint::ComplaintResponse,
+    },
+    Approval(MessageApproval),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OrderedBroadcastMessage {
+    Certificate(DkgCertificate),
+    Presignature {
+        sender: ValidatorId,
+        session_context: SessionContext,
+        data: Vec<u8>,
     },
 }
 

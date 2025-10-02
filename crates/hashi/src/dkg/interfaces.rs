@@ -1,21 +1,47 @@
 //! Interfaces for DKG protocol components
 
 use crate::dkg::types::{
-    DkgMessage, DkgOutput, DkgProtocolState, DkgResult, SessionContext, ValidatorId,
+    DkgOutput, DkgProtocolState, DkgResult, OrderedBroadcastMessage, P2PMessage, SessionContext,
+    ValidatorId,
 };
 use async_trait::async_trait;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
+/// Point-to-point channel for direct validator-to-validator messaging
 #[async_trait]
-pub trait BroadcastChannel: Send + Sync {
-    async fn broadcast(&self, message: DkgMessage) -> DkgResult<()>;
+pub trait P2PChannel: Send + Sync {
+    async fn send_to(&self, recipient: &ValidatorId, message: P2PMessage) -> DkgResult<()>;
 
-    async fn receive(&mut self) -> DkgResult<(ValidatorId, DkgMessage)>;
+    /// Send the same message to all validators (each receives it as a separate P2P message)
+    /// This is NOT consensus-ordered broadcast
+    async fn broadcast(&self, message: P2PMessage) -> DkgResult<()>;
+
+    /// Receive the next available message from any validator
+    async fn receive(&mut self) -> DkgResult<P2PMessage>;
 
     async fn try_receive_timeout(
         &mut self,
         timeout: std::time::Duration,
-    ) -> DkgResult<Option<(ValidatorId, DkgMessage)>>;
+    ) -> DkgResult<Option<P2PMessage>>;
+
+    fn pending_messages(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// Ordered broadcast channel for consensus-critical messages
+#[async_trait]
+pub trait OrderedBroadcastChannel: Send + Sync {
+    /// Broadcast a message with guaranteed ordering across all validators
+    async fn broadcast(&self, message: OrderedBroadcastMessage) -> DkgResult<()>;
+
+    /// Receive the next message in the total order
+    async fn receive(&mut self) -> DkgResult<OrderedBroadcastMessage>;
+
+    async fn try_receive_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> DkgResult<Option<OrderedBroadcastMessage>>;
 
     fn pending_messages(&self) -> Option<usize> {
         None

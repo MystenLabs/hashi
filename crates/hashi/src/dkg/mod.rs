@@ -3,8 +3,8 @@
 pub mod interfaces;
 pub mod types;
 
-pub use interfaces::{BroadcastChannel, DkgStorage};
+pub use interfaces::{DkgStorage, OrderedBroadcastChannel, P2PChannel};
 pub use types::{
-    DkgCertificate, DkgConfig, DkgError, DkgMessage, DkgOutput, DkgResult, MessageApproval,
-    MessageType, SessionContext, SighashType, ValidatorId, ValidatorInfo,
+    OrderedBroadcastMessage, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval,
+    MessageType, P2PMessage, SessionContext, SighashType, ValidatorId, ValidatorInfo,
 };
