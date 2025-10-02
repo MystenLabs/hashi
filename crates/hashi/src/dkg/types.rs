@@ -167,18 +167,6 @@ pub enum OrderedBroadcastMessage {
     },
 }
 
-impl DkgMessage {
-    pub fn sender(&self) -> &ValidatorId {
-        match self {
-            DkgMessage::Share { sender, .. } => sender,
-            DkgMessage::Approval(approval) => &approval.approver,
-            DkgMessage::Certificate(cert) => &cert.sender,
-            DkgMessage::Complaint { accuser, .. } => accuser,
-            DkgMessage::ComplaintResponse { responder, .. } => responder,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageApproval {
     pub message_hash: [u8; 32],
