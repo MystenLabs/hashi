@@ -1,35 +1,43 @@
 //! DKG coordinator that manages the protocol state machine
 
-use crate::dkg::interfaces::{DkgStorage, OrderedBroadcastChannel};
+use crate::dkg::interfaces::{DkgStorage, OrderedBroadcastChannel, P2PChannel};
 use crate::dkg::types::{
-    DkgConfig, DkgError, DkgMessage, DkgOutput, DkgResult, SessionContext, ValidatorId,
-    ValidatorInfo,
+    DkgConfig, DkgError, DkgOutput, DkgResult, OrderedBroadcastMessage, P2PMessage, SessionContext,
+    ValidatorId, ValidatorInfo,
 };
 use fastcrypto::groups::GroupElement;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
+pub enum DealerState {
+    /// Waiting for share from this dealer
+    WaitingForShare { start_time: Instant },
+    /// Received share, now processing/verifying
+    Processing { received_at: Instant },
+    /// Handling complaint about this dealer's share
+    ComplaintHandling {
+        complaint_time: Instant,
+        complaint_count: usize,
+        response_count: usize,
+    },
+    /// Successfully processed this dealer's share
+    Completed,
+    /// Failed to get valid share from this dealer
+    Failed { reason: String },
+}
 
 #[derive(Debug, Clone)]
 pub enum DkgState {
     /// Initial state, waiting to start
     Idle,
-    /// Sharing phase - validators exchange encrypted shares
-    Sharing {
+    /// Running phase - tracking each dealer's state separately
+    Running {
         start_time: Instant,
-        received_from: HashSet<ValidatorId>,
-    },
-    /// Processing phase - validators verify and process received shares
-    Processing {
-        start_time: Instant,
-        processed_validators: HashSet<ValidatorId>,
-    },
-    /// Complaint phase - handle any complaints about invalid shares
-    ComplaintHandling {
-        start_time: Instant,
-        complaint_count: usize,
-        response_count: usize,
+        /// State for each dealer's DKG instance
+        dealer_states: BTreeMap<ValidatorId, DealerState>,
     },
     /// Success state - DKG completed successfully
     Completed { output: DkgOutput },
@@ -58,15 +66,18 @@ impl Default for CoordinatorConfig {
     }
 }
 
-pub struct DkgCoordinator<B, S: DkgStorage> {
+pub struct DkgCoordinator<P, S: DkgStorage>
+where
+    P: P2PChannel,
+{
     pub validator: ValidatorInfo,
     pub dkg_config: DkgConfig,
     pub session: SessionContext,
     pub coordinator_config: CoordinatorConfig,
     pub state: DkgState,
-    pub broadcast: B,
+    pub p2p_channel: P,
     pub storage: Option<S>,
-    ///  Raw AVSS messages as received from other validators
+    /// Raw AVSS messages as received from other validators
     pub received_messages: BTreeMap<ValidatorId, avss::Message>,
     ///  Decrypted and validated shares after processing received messages
     pub processed_shares: BTreeMap<ValidatorId, avss::SharesForNode>,
@@ -74,13 +85,16 @@ pub struct DkgCoordinator<B, S: DkgStorage> {
     pub processed_commitments: BTreeMap<ValidatorId, Vec<Eval<G>>>,
 }
 
-impl<B, S: DkgStorage> DkgCoordinator<B, S> {
+impl<P, S: DkgStorage> DkgCoordinator<P, S>
+where
+    P: P2PChannel,
+{
     pub fn new(
         validator: ValidatorInfo,
         config: DkgConfig,
         session: SessionContext,
         coordinator_config: CoordinatorConfig,
-        broadcast: B,
+        p2p_channel: P,
         storage: Option<S>,
     ) -> Self {
         Self {
@@ -89,7 +103,7 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
             session,
             coordinator_config,
             state: DkgState::Idle,
-            broadcast,
+            p2p_channel,
             storage,
             received_messages: BTreeMap::new(),
             processed_shares: BTreeMap::new(),
@@ -100,9 +114,17 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
     pub async fn start(&mut self) -> DkgResult<()> {
         match &self.state {
             DkgState::Idle => {
-                self.state = DkgState::Sharing {
-                    start_time: Instant::now(),
-                    received_from: HashSet::new(),
+                let mut dealer_states = BTreeMap::new();
+                let now = Instant::now();
+                for validator in &self.dkg_config.validators {
+                    dealer_states.insert(
+                        validator.id.clone(),
+                        DealerState::WaitingForShare { start_time: now },
+                    );
+                }
+                self.state = DkgState::Running {
+                    start_time: now,
+                    dealer_states,
                 };
                 Ok(())
             }
@@ -115,7 +137,7 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
     pub async fn handle_message(
         &mut self,
         sender: ValidatorId,
-        message: DkgMessage,
+        message: P2PMessage,
     ) -> DkgResult<()> {
         if !self.dkg_config.validators.iter().any(|v| v.id == sender) {
             return Err(DkgError::InvalidMessage {
@@ -124,7 +146,7 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
             });
         }
         match message {
-            DkgMessage::Share {
+            P2PMessage::Share {
                 sender: msg_sender,
                 message,
             } => {
@@ -136,7 +158,7 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
                 }
                 self.handle_share(sender, *message).await
             }
-            DkgMessage::Complaint { accuser, complaint } => {
+            P2PMessage::Complaint { accuser, complaint } => {
                 if accuser != sender {
                     return Err(DkgError::InvalidMessage {
                         sender,
@@ -145,7 +167,7 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
                 }
                 self.handle_complaint(accuser, complaint).await
             }
-            DkgMessage::ComplaintResponse {
+            P2PMessage::ComplaintResponse {
                 responder,
                 response,
             } => {
@@ -157,29 +179,84 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
                 }
                 self.handle_complaint_response(responder, response).await
             }
-            _ => {
-                // TODO: Handle Approval and Certificate messages
-                // - Approval: needs share validation logic first
-                // - Certificate: needs approval collection and threshold checking
-                // Both will be added when implementing the full protocol flow
+            P2PMessage::Approval(_) => {
+                // TODO: Handle Approval messages
+                // - Receivers validate shares and send approvals back to dealer
+                // - Dealers collect 2f+1 approvals to create certificates
+                // - Certificates are broadcast via OrderedBroadcastChannel
                 Ok(())
             }
         }
     }
 
-    async fn handle_share(&mut self, sender: ValidatorId, message: avss::Message) -> DkgResult<()> {
-        match &mut self.state {
-            DkgState::Sharing { received_from, .. } => {
-                self.received_messages.insert(sender.clone(), message);
-                received_from.insert(sender);
-                if received_from.len() >= self.required_shares() {
-                    self.transition_to_processing().await?;
-                }
+    /// Handle consensus-ordered messages from OrderedBroadcastChannel
+    pub async fn handle_ordered_message(
+        &mut self,
+        message: OrderedBroadcastMessage,
+    ) -> DkgResult<()> {
+        match message {
+            OrderedBroadcastMessage::Certificate(_cert) => {
+                // TODO: Implement certificate handling
+                // Certificates prove that 2f+1 validators approved a share
+                // They complete the AVSS protocol for a dealer's share
+                // Will need to:
+                // 1. Verify the certificate signatures
+                // 2. Store the certificate as proof of share validity
+                // 3. Update protocol state accordingly
                 Ok(())
             }
+            OrderedBroadcastMessage::Presignature {
+                sender: _,
+                session_context: _,
+                data: _,
+            } => {
+                // TODO: Implement presignature handling
+                // Presignatures are used in the signing protocol
+                // Will need to:
+                // 1. Verify the presignature is valid
+                // 2. Store it for the signing phase
+                // 3. Check if we have enough presignatures to proceed
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_share(&mut self, dealer: ValidatorId, message: avss::Message) -> DkgResult<()> {
+        match &mut self.state {
+            DkgState::Running { dealer_states, .. } => {
+                if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
+                    match dealer_state {
+                        DealerState::WaitingForShare { .. } => {
+                            self.received_messages.insert(dealer.clone(), message);
+                            *dealer_state = DealerState::Processing {
+                                received_at: Instant::now(),
+                            };
+
+                            // TODO: Implement the full AVSS protocol flow here:
+                            // 1. Process the AVSS message (decrypt share with ECIES private key)
+                            // 2. Verify the share against the commitment
+                            // 3. If valid, send an approval signature back to the dealer
+                            // 4. The dealer will collect 2f+1 approvals and create a certificate
+                            // 5. The certificate will be broadcast via OrderedBroadcastChannel
+
+                            self.check_progress().await?;
+                            Ok(())
+                        }
+                        _ => Err(DkgError::InvalidMessage {
+                            sender: dealer,
+                            reason: "Already processed share from this dealer".to_string(),
+                        }),
+                    }
+                } else {
+                    Err(DkgError::InvalidMessage {
+                        sender: dealer,
+                        reason: "Unknown dealer".to_string(),
+                    })
+                }
+            }
             _ => Err(DkgError::InvalidMessage {
-                sender,
-                reason: "Not in sharing phase".to_string(),
+                sender: dealer,
+                reason: "Not in running state".to_string(),
             }),
         }
     }
@@ -190,18 +267,37 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
         _complaint: complaint::Complaint,
     ) -> DkgResult<()> {
         match &mut self.state {
-            DkgState::ComplaintHandling {
-                complaint_count, ..
-            } => {
-                *complaint_count += 1;
-                Ok(())
-            }
-            DkgState::Processing { .. } => {
-                self.state = DkgState::ComplaintHandling {
-                    start_time: Instant::now(),
-                    complaint_count: 1,
-                    response_count: 0,
-                };
+            DkgState::Running { dealer_states, .. } => {
+                // TODO: Get actual dealer ID from complaint structure
+                // This is a placeholder - the actual complaint structure should identify the dealer
+                for (_dealer_id, dealer_state) in dealer_states.iter_mut() {
+                    match dealer_state {
+                        DealerState::Processing { .. } => {
+                            *dealer_state = DealerState::ComplaintHandling {
+                                complaint_time: Instant::now(),
+                                complaint_count: 1,
+                                response_count: 0,
+                            };
+
+                            // TODO: Implement complaint verification and response:
+                            // 1. Verify the complaint is valid (check the proof)
+                            // 2. If we're the accused dealer, create and send a complaint response
+                            //    revealing the share for the complaining party
+                            // 3. If we're a receiver, verify the complaint and potentially
+                            //    mark the accused dealer as faulty
+                            // 4. Broadcast our own complaint response if needed
+
+                            break;
+                        }
+                        DealerState::ComplaintHandling {
+                            complaint_count, ..
+                        } => {
+                            *complaint_count += 1;
+                            break;
+                        }
+                        _ => continue,
+                    }
+                }
                 Ok(())
             }
             _ => Err(DkgError::InvalidMessage {
@@ -217,34 +313,43 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
         _response: complaint::ComplaintResponse,
     ) -> DkgResult<()> {
         match &mut self.state {
-            DkgState::ComplaintHandling { response_count, .. } => {
-                *response_count += 1;
+            DkgState::Running { dealer_states, .. } => {
+                // TODO: Identify which dealer this response is for
+                for dealer_state in dealer_states.values_mut() {
+                    if let DealerState::ComplaintHandling { response_count, .. } = dealer_state {
+                        *response_count += 1;
+
+                        // TODO: Process complaint response:
+                        // 1. Verify the response is valid (check revealed share matches commitment)
+                        // 2. If we're the original complainer, use the revealed share to recover
+                        //    our missing/invalid share
+                        // 3. All receivers can verify the response to ensure the dealer is honest
+                        // 4. If response is invalid, mark the dealer as faulty
+                        // 5. Once all complaints are resolved, transition back to processing
+
+                        break;
+                    }
+                }
                 self.check_complaint_resolution().await
             }
             _ => Err(DkgError::InvalidMessage {
                 sender: responder,
-                reason: "Not in complaint handling phase".to_string(),
+                reason: "Not in running state".to_string(),
             }),
         }
     }
 
-    async fn transition_to_processing(&mut self) -> DkgResult<()> {
-        self.state = DkgState::Processing {
-            start_time: Instant::now(),
-            processed_validators: HashSet::new(),
-        };
-        for sender_id in self.received_messages.keys() {
-            // TODO: Verify and process the shares when implementing the full protocol flow
-            // For now, just mark as processed
-            if let DkgState::Processing {
-                processed_validators,
-                ..
-            } = &mut self.state
-            {
-                processed_validators.insert(sender_id.clone());
+    async fn check_progress(&mut self) -> DkgResult<()> {
+        if let DkgState::Running { dealer_states, .. } = &self.state {
+            let completed_count = dealer_states
+                .values()
+                .filter(|state| matches!(state, DealerState::Completed))
+                .count();
+            if completed_count >= self.required_shares() {
+                self.check_completion().await?;
             }
         }
-        self.check_completion().await
+        Ok(())
     }
 
     pub async fn check_completion(&mut self) -> DkgResult<()> {
@@ -276,13 +381,18 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
 
     async fn check_complaint_resolution(&mut self) -> DkgResult<()> {
         // TODO: Implement the actual complaint verification when adding complaint handling for all protocols
-        // Assume resolved if we have any responses for now
-        if let DkgState::ComplaintHandling { response_count, .. } = &self.state
-            && *response_count > 0
-        {
-            self.check_completion().await?;
+        if let DkgState::Running { dealer_states, .. } = &mut self.state {
+            // Check if any dealers are still in complaint handling with sufficient responses
+            for dealer_state in dealer_states.values_mut() {
+                if let DealerState::ComplaintHandling { response_count, .. } = dealer_state
+                    && *response_count > 0
+                {
+                    // For now, assume successful resolution
+                    *dealer_state = DealerState::Completed;
+                }
+            }
         }
-        Ok(())
+        self.check_progress().await
     }
 
     fn required_shares(&self) -> usize {
@@ -292,25 +402,36 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
     pub fn check_timeout(&mut self) -> bool {
         let timeout = self.coordinator_config.phase_timeout;
         match &self.state {
-            DkgState::Sharing { start_time, .. }
-            | DkgState::Processing { start_time, .. }
-            | DkgState::ComplaintHandling { start_time, .. } => start_time.elapsed() > timeout,
+            DkgState::Running { start_time, .. } => start_time.elapsed() > timeout,
             _ => false,
         }
     }
 
     pub fn handle_timeout(&mut self) {
-        let timed_out = self.check_timeout();
-        if timed_out {
-            let phase = match &self.state {
-                DkgState::Sharing { .. } => "sharing",
-                DkgState::Processing { .. } => "processing",
-                DkgState::ComplaintHandling { .. } => "complaint handling",
-                _ => "unknown",
-            };
-            self.state = DkgState::Failed {
-                reason: format!("Timeout in {} phase", phase),
-            };
+        if self.check_timeout()
+            && let DkgState::Running { dealer_states, .. } = &self.state
+        {
+            let mut timed_out_dealers = Vec::new();
+            for (dealer_id, dealer_state) in dealer_states.iter() {
+                if let DealerState::WaitingForShare { start_time } = dealer_state
+                    && start_time.elapsed() > self.coordinator_config.phase_timeout
+                {
+                    timed_out_dealers.push(dealer_id.clone());
+                }
+            }
+
+            if !timed_out_dealers.is_empty() {
+                self.state = DkgState::Failed {
+                    reason: format!(
+                        "Timeout waiting for shares from dealers: {:?}",
+                        timed_out_dealers
+                    ),
+                };
+            } else {
+                self.state = DkgState::Failed {
+                    reason: "Timeout in DKG protocol".to_string(),
+                };
+            }
         }
     }
 
@@ -329,12 +450,16 @@ impl<B, S: DkgStorage> DkgCoordinator<B, S> {
     pub fn is_idle(&self) -> bool {
         matches!(self.state, DkgState::Idle)
     }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, DkgState::Running { .. })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::communication::InMemoryOrderedBroadcastChannel;
+    use crate::communication::InMemoryP2PChannels;
     use crate::dkg::interfaces::DkgStorage;
     use crate::dkg::types::{
         DkgConfig, DkgOutput, DkgProtocolState, DkgResult, ProtocolType, SessionContext,
@@ -400,7 +525,7 @@ mod tests {
         }
 
         /// Create a coordinator for the first validator
-        fn create_coordinator(&self) -> DkgCoordinator<InMemoryOrderedBroadcastChannel<DkgMessage>, MockStorage> {
+        fn create_coordinator(&self) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
             self.create_coordinator_with_config(CoordinatorConfig::default())
         }
 
@@ -408,18 +533,18 @@ mod tests {
         fn create_coordinator_with_config(
             &self,
             coordinator_config: CoordinatorConfig,
-        ) -> DkgCoordinator<InMemoryOrderedBroadcastChannel<DkgMessage>, MockStorage> {
+        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
             use crate::types::ValidatorAddress;
             let validator_addresses: Vec<ValidatorAddress> =
                 self.validators.iter().map(|v| ValidatorAddress(v.id.0)).collect();
-            let channels = InMemoryOrderedBroadcastChannel::new_network(validator_addresses);
-            let broadcast = channels.into_iter().next().unwrap().1;
+            let channels = InMemoryP2PChannels::new_network(validator_addresses);
+            let p2p_channel = channels.into_iter().next().unwrap().1;
             DkgCoordinator::new(
                 self.validators[0].clone(),
                 self.config.clone(),
                 self.session.clone(),
                 coordinator_config,
-                broadcast,
+                p2p_channel,
                 Some(self.storage.clone()),
             )
         }
@@ -482,11 +607,16 @@ mod tests {
 
         coordinator.start().await.unwrap();
 
-        // Should transition to Sharing state
-        assert!(matches!(
-            coordinator.current_state(),
-            DkgState::Sharing { .. }
-        ));
+        // Should transition to Running state
+        assert!(coordinator.is_running());
+
+        // All dealers should be in WaitingForShare state
+        if let DkgState::Running { dealer_states, .. } = coordinator.current_state() {
+            assert_eq!(dealer_states.len(), 1); // Single validator setup
+            for state in dealer_states.values() {
+                assert!(matches!(state, DealerState::WaitingForShare { .. }));
+            }
+        }
     }
 
     #[tokio::test]
@@ -536,7 +666,6 @@ mod tests {
     #[tokio::test]
     async fn test_transition_to_completed() {
         use fastcrypto_tbls::threshold_schnorr::avss;
-        use std::collections::HashSet;
         use std::time::Instant;
 
         let num_validators = 3;
@@ -554,18 +683,21 @@ mod tests {
                 .insert(validator_id, vec![]);
         }
 
-        // Set state to Processing with other validators processed
-        let mut processed = HashSet::new();
-        for i in 1..num_validators {
-            processed.insert(setup.validators[i as usize].id.clone());
+        // Set state to Running with all dealers marked as completed
+        let mut dealer_states = BTreeMap::new();
+        for i in 0..num_validators {
+            dealer_states.insert(
+                setup.validators[i as usize].id.clone(),
+                DealerState::Completed,
+            );
         }
-        coordinator.state = DkgState::Processing {
+        coordinator.state = DkgState::Running {
             start_time: Instant::now(),
-            processed_validators: processed,
+            dealer_states,
         };
 
-        // Check completion should transition to Completed
-        coordinator.check_completion().await.unwrap();
+        // Check progress should transition to Completed
+        coordinator.check_progress().await.unwrap();
         assert!(matches!(coordinator.state, DkgState::Completed { .. }));
 
         // Verify output has correct session context
