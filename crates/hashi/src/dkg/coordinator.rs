@@ -396,7 +396,10 @@ where
     }
 
     fn required_shares(&self) -> usize {
-        self.dkg_config.threshold as usize
+        self.dkg_config
+            .validators
+            .len()
+            .saturating_sub(self.dkg_config.max_faulty as usize)
     }
 
     pub fn check_timeout(&mut self) -> bool {
@@ -656,11 +659,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_required_shares_calculation() {
+        let num_validators = 5;
         let threshold = 3;
-        let setup = TestSetup::with_validators(5, threshold, 1);
+        let max_faulty = 1;
+        let setup = TestSetup::with_validators(num_validators, threshold, max_faulty);
         let coordinator = setup.create_coordinator();
+        assert_eq!(
+            coordinator.required_shares(),
+            (num_validators - max_faulty) as usize
+        );
 
-        assert_eq!(coordinator.required_shares(), threshold as usize);
+        let setup2 = TestSetup::with_validators(7, 4, 1);
+        let coordinator2 = setup2.create_coordinator();
+        assert_eq!(coordinator2.required_shares(), 6);
     }
 
     #[tokio::test]
@@ -668,12 +679,13 @@ mod tests {
         use fastcrypto_tbls::threshold_schnorr::avss;
         use std::time::Instant;
 
-        let num_validators = 3;
-        let setup = TestSetup::with_validators(num_validators, 2, 0);
+        let num_validators = 4;
+        let threshold = 2;
+        let max_faulty = 1;
+        let setup = TestSetup::with_validators(num_validators, threshold, max_faulty);
         let mut coordinator = setup.create_coordinator();
 
-        // Manually add processed shares from other validators (skip validator 0 which is self)
-        for i in 1..num_validators {
+        for i in 0..3 {
             let validator_id = setup.validators[i as usize].id.clone();
             coordinator
                 .processed_shares
