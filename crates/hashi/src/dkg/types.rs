@@ -9,6 +9,10 @@ use fastcrypto_tbls::{
 };
 
 type EG = fastcrypto::groups::ristretto255::RistrettoPoint;
+
+pub type MessageHash = [u8; 32];
+pub type SignatureBytes = Vec<u8>;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -143,7 +147,7 @@ pub enum ProtocolType {
     DkgKeyRotation,
     NonceGeneration(u32),
     Signing {
-        message_hash: [u8; 32],
+        message_hash: MessageHash,
         sighash_type: SighashType,
         /// Derivation path indexes for each UTXO being signed
         /// None means using the root key (no derivation)
@@ -188,19 +192,19 @@ pub enum P2PMessage {
     DataAvailabilitySignature {
         signer: ValidatorId,
         dealer: ValidatorId,
-        message_hash: [u8; 32],
-        signature: Vec<u8>,
+        message_hash: MessageHash,
+        signature: SignatureBytes,
     },
     DkgSignature {
         signer: ValidatorId,
         dealer: ValidatorId,
-        message_hash: [u8; 32],
-        signature: Vec<u8>,
+        message_hash: MessageHash,
+        signature: SignatureBytes,
     },
     ShareRequest {
         requester: ValidatorId,
         dealer: ValidatorId,
-        message_hash: [u8; 32],
+        message_hash: MessageHash,
     },
 }
 
@@ -216,23 +220,23 @@ pub enum OrderedBroadcastMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageApproval {
-    pub message_hash: [u8; 32],
+    pub message_hash: MessageHash,
     pub approver: ValidatorId,
     // TODO: Will be replaced with proper signature type when certificate management is implemented.
-    pub signature: Vec<u8>,
+    pub signature: SignatureBytes,
     pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator: ValidatorId,
-    pub signature: Vec<u8>,
+    pub signature: SignatureBytes,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgCertificate {
     pub dealer: ValidatorId,
-    pub message_hash: [u8; 32],
+    pub message_hash: MessageHash,
     pub data_availability_signatures: Vec<ValidatorSignature>,
     pub dkg_signatures: Vec<ValidatorSignature>,
     pub session_context: SessionContext,
