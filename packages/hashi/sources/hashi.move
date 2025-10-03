@@ -1,10 +1,15 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 #[allow(unused_function, unused_field)]
 /// Module: hashi
 module hashi::hashi;
-
 use btc::btc::BTC;
+use hashi::committee::Committee;
+use hashi::config::Config;
 use std::string::String;
-use sui::{balance::Balance, object_bag::ObjectBag};
+use sui::balance::Balance;
+use sui::object_bag::ObjectBag;
 
 // For Move coding conventions, see
 // https://docs.sui.io/concepts/sui-move-concepts/conventions
@@ -14,6 +19,8 @@ public struct Hashi has key {
     /// Contract version of Hashi.
     /// Used to disallow usage with old contract versions.
     version: u32,
+    committee: Committee,
+    config: Config,
 }
 
 public struct Task<T> has key {
@@ -50,4 +57,16 @@ public struct UtxoId {
 public struct Settle {
     withdraws: vector<Task<Withdraw>>,
     transaction: String,
+}
+
+public(package) fun committee_ref(self: &Hashi): &Committee {
+    &self.committee
+}
+
+public(package) fun config_ref(self: &Hashi): &Config {
+    &self.config
+}
+
+public(package) fun config(self: &mut Hashi): &mut Config {
+    &mut self.config
 }

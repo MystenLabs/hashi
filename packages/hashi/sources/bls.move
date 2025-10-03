@@ -1,12 +1,12 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 #[allow(unused_const)]
 module hashi::bls;
-
-use sui::{
-    bcs,
-    bls12381::{Self, bls12381_min_pk_verify, G1, UncompressedG1},
-    group_ops::{Self, Element},
-    vec_map::{Self, VecMap}
-};
+use sui::bcs;
+use sui::bls12381::{Self, bls12381_min_pk_verify, G1, UncompressedG1};
+use sui::group_ops::{Self, Element};
+use sui::vec_map::{Self, VecMap};
 
 const APP_ID: u8 = 4;
 const INTENT_VERSION: u8 = 0;
@@ -71,11 +71,13 @@ public(package) fun new_bls_committee(
 ): BlsCommittee {
     // Compute the total weight
     let mut total_weight = 0;
-    members.do_ref!(|member| {
-        let weight = member.weight;
-        assert!(weight > 0, EIncorrectCommittee);
-        total_weight = total_weight + weight;
-    });
+    members.do_ref!(
+        |member| {
+            let weight = member.weight;
+            assert!(weight > 0, EIncorrectCommittee);
+            total_weight = total_weight + weight;
+        },
+    );
 
     // Compute the total aggregated key, e.g. the sum of all public keys in the committee.
     let total_aggregated_key = bls12381::uncompressed_g1_to_g1(
@@ -126,31 +128,52 @@ public(package) fun n_members(self: &BlsCommittee): u64 {
 }
 
 /// Returns the member at given index.
-public(package) fun get_idx(self: &BlsCommittee, idx: u64): &BlsCommitteeMember {
+public(package) fun get_idx(
+    self: &BlsCommittee,
+    idx: u64,
+): &BlsCommitteeMember {
     &self.members[idx]
 }
 
 /// Checks if the committee contains a given node.
-public(package) fun contains(self: &BlsCommittee, validator_address: &address): bool {
+public(package) fun contains(
+    self: &BlsCommittee,
+    validator_address: &address,
+): bool {
     self.find_index(validator_address).is_some()
 }
 
 /// Returns the member weight if it is part of the committee or 0 otherwise
-public(package) fun get_member_weight(self: &BlsCommittee, validator_address: &address): u16 {
-    self.find_index(validator_address).map!(|idx| self.members[idx].weight).destroy_or!(0)
+public(package) fun get_member_weight(
+    self: &BlsCommittee,
+    validator_address: &address,
+): u16 {
+    self
+        .find_index(validator_address)
+        .map!(|idx| self.members[idx].weight)
+        .destroy_or!(0)
 }
 
 /// Finds the index of the member by validator_address
-public(package) fun find_index(self: &BlsCommittee, validator_address: &address): Option<u64> {
-    self.members.find_index!(|member| &member.validator_address == validator_address)
+public(package) fun find_index(
+    self: &BlsCommittee,
+    validator_address: &address,
+): Option<u64> {
+    self
+        .members
+        .find_index!(|member| &member.validator_address == validator_address)
 }
 
 /// Returns the members of the committee with their weights.
 public(package) fun to_vec_map(self: &BlsCommittee): VecMap<address, u16> {
     let mut result = vec_map::empty();
-    self.members.do_ref!(|member| {
-        result.insert(member.validator_address, member.weight)
-    });
+    self
+        .members
+        .do_ref!(
+            |member| {
+                result.insert(member.validator_address, member.weight)
+            },
+        );
     result
 }
 
@@ -207,7 +230,10 @@ public(package) fun verify_one_correct_node_in_epoch(
 }
 
 /// Returns true if the weight is enough to ensure that at least one honest node contributed.
-public(package) fun includes_one_correct_node(self: &BlsCommittee, weight: u16): bool {
+public(package) fun includes_one_correct_node(
+    self: &BlsCommittee,
+    weight: u16,
+): bool {
     3 * (weight as u64) >= self.total_weight as u64 + 1
 }
 
@@ -227,7 +253,9 @@ fun verify_certificate_and_weight(
     // Use the signers_bitmap to construct the key and the weights.
 
     let mut non_signer_aggregate_weight = 0;
-    let mut non_signer_public_keys: vector<Element<UncompressedG1>> = vector::empty();
+    let mut non_signer_public_keys: vector<
+        Element<UncompressedG1>,
+    > = vector::empty();
     let mut offset: u64 = 0;
     let n_members = self.n_members();
     let max_bitmap_len_bytes = n_members.divide_and_round_up(8);
@@ -237,35 +265,40 @@ fun verify_certificate_and_weight(
     assert!(signers_bitmap.length() <= max_bitmap_len_bytes, EInvalidBitmap);
 
     // Iterate over the signers bitmap and check if each member is a signer.
-    max_bitmap_len_bytes.do!(|i| {
-        // Get the current byte or 0 if we've reached the end of the bitmap.
-        let byte = if (i < signers_bitmap.length()) {
-            signers_bitmap[i]
-        } else {
-            0
-        };
-
-        (8u8).do!(|i| {
-            let index = offset + (i as u64);
-            let is_signer = (byte >> i) & 1 == 1;
-
-            // If the index is out of bounds, the bit must be 0 to ensure
-            // uniqueness of the signers_bitmap.
-            if (index >= n_members) {
-                assert!(!is_signer, EInvalidBitmap);
-                return
+    max_bitmap_len_bytes.do!(
+        |i| {
+            // Get the current byte or 0 if we've reached the end of the bitmap.
+            let byte = if (i < signers_bitmap.length()) {
+                signers_bitmap[i]
+            } else {
+                0
             };
 
-            // There will be fewer non-signers than signers, so we handle
-            // non-signers here.
-            if (!is_signer) {
-                let member = self.members[index];
-                non_signer_aggregate_weight = non_signer_aggregate_weight + member.weight;
-                non_signer_public_keys.push_back(member.public_key);
-            };
-        });
-        offset = offset + 8;
-    });
+            (8u8).do!(
+                |i| {
+                    let index = offset + (i as u64);
+                    let is_signer = (byte >> i) & 1 == 1;
+
+                    // If the index is out of bounds, the bit must be 0 to ensure
+                    // uniqueness of the signers_bitmap.
+                    if (index >= n_members) {
+                        assert!(!is_signer, EInvalidBitmap);
+                        return
+                    };
+
+                    // There will be fewer non-signers than signers, so we handle
+                    // non-signers here.
+                    if (!is_signer) {
+                        let member = self.members[index];
+                        non_signer_aggregate_weight =
+                            non_signer_aggregate_weight + member.weight;
+                        non_signer_public_keys.push_back(member.public_key);
+                    };
+                },
+            );
+            offset = offset + 8;
+        },
+    );
 
     // Compute the aggregate weight as the difference between the total weight
     // and the total weight of the non-signers.
@@ -273,7 +306,10 @@ fun verify_certificate_and_weight(
 
     // Check if the aggregate weight is enough to satisfy the required weight.
     match (required_weight) {
-        RequiredWeight::Quorum => assert!(self.is_quorum(aggregate_weight), ENotEnoughStake),
+        RequiredWeight::Quorum => assert!(
+            self.is_quorum(aggregate_weight),
+            ENotEnoughStake,
+        ),
         RequiredWeight::OneCorrectNode => assert!(
             self.includes_one_correct_node(aggregate_weight),
             ENotEnoughStake,
@@ -332,7 +368,13 @@ fun new_certified_message(
 
     let message = bcs_message.into_remainder_bytes();
 
-    CertifiedMessage { intent_type, intent_version, cert_epoch, message, stake_support }
+    CertifiedMessage {
+        intent_type,
+        intent_version,
+        cert_epoch,
+        message,
+        stake_support,
+    }
 }
 
 // === Accessors for CertifiedMessage ===
@@ -375,7 +417,12 @@ public fun verify_certificate(
     signers_bitmap: &vector<u8>,
     message: &vector<u8>,
 ): u16 {
-    self.verify_certificate_and_weight(signature, signers_bitmap, message, RequiredWeight::Quorum)
+    self.verify_certificate_and_weight(
+        signature,
+        signers_bitmap,
+        message,
+        RequiredWeight::Quorum,
+    )
 }
 
 public(package) fun verify_proof_of_possession(

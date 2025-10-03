@@ -1,9 +1,12 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 #[allow(unused_function, unused_field)]
 module hashi::committee;
-
 use hashi::bls::verify_proof_of_possession;
 use std::string::String;
-use sui::{bls12381::{UncompressedG1, g1_from_bytes, g1_to_uncompressed_g1}, group_ops::Element};
+use sui::bls12381::{UncompressedG1, g1_from_bytes, g1_to_uncompressed_g1};
+use sui::group_ops::Element;
 
 public struct HashiNodeInfo has copy, drop, store {
     /// Sui Validator Address of this node
@@ -29,13 +32,14 @@ public struct HashiNodeInfo has copy, drop, store {
     /// This public key can be rotated and any such updates will take effect
     /// immediately.
     tls_public_key: vector<u8>,
+    voting_power: u64,
 }
 
-public struct Committee has copy, drop, store {
+public struct Committee has store {
     members: vector<HashiNodeInfo>,
     /// The current epoch.
     epoch: u64,
-    // active_committee: BlsCommittee,
+    total_voting_power: u64,
 }
 
 // updates
@@ -56,20 +60,30 @@ fun set_next_epoch_public_key(
         ),
     );
 
-    let public_key = g1_to_uncompressed_g1(&g1_from_bytes(&next_epoch_public_key));
+    let public_key = g1_to_uncompressed_g1(
+        &g1_from_bytes(&next_epoch_public_key),
+    );
 
     let node = self.lookup_sender_info(ctx);
     node.next_epoch_public_key = public_key;
 }
 
 /// Set the https_address of the node.
-fun set_https_address(self: &mut Committee, https_address: String, ctx: &TxContext) {
+fun set_https_address(
+    self: &mut Committee,
+    https_address: String,
+    ctx: &TxContext,
+) {
     let node = self.lookup_sender_info(ctx);
     node.https_address = https_address;
 }
 
 /// Set the tls_public_key of the node.
-fun set_tls_public_key(self: &mut Committee, tls_public_key: vector<u8>, ctx: &TxContext) {
+fun set_tls_public_key(
+    self: &mut Committee,
+    tls_public_key: vector<u8>,
+    ctx: &TxContext,
+) {
     let node = self.lookup_sender_info(ctx);
     node.tls_public_key = tls_public_key;
 }
@@ -77,7 +91,7 @@ fun set_tls_public_key(self: &mut Committee, tls_public_key: vector<u8>, ctx: &T
 // === Accessors ===
 
 /// Return the address of the node.
-fun validator_address(self: &HashiNodeInfo): &address {
+public(package) fun validator_address(self: &HashiNodeInfo): &address {
     &self.validator_address
 }
 
@@ -106,7 +120,35 @@ fun epoch(self: &Committee): u64 {
     self.epoch
 }
 
-fun lookup_sender_info(self: &mut Committee, ctx: &TxContext): &mut HashiNodeInfo {
-    let idx = self.members.find_index!(|v| v.validator_address() == ctx.sender()).destroy_some();
+public(package) fun total_voting_power(self: &Committee): u64 {
+    self.total_voting_power
+}
+
+public(package) fun lookup_sender_info(
+    self: &mut Committee,
+    ctx: &TxContext,
+): &mut HashiNodeInfo {
+    let idx = self
+        .members
+        .find_index!(|v| v.validator_address() == ctx.sender())
+        .destroy_some();
     &mut self.members[idx]
+}
+
+public(package) fun member_in_committee(
+    self: &Committee,
+    member: &address,
+): bool {
+    self.members.find_index!(|v| v.validator_address() == member).is_some()
+}
+
+public(package) fun member_voting_power(
+    self: &Committee,
+    member: &address,
+): u64 {
+    self
+        .members
+        .find_index!(|v| v.validator_address() == member)
+        .map!(|idx| self.members[idx].voting_power)
+        .destroy_or!(0)
 }
