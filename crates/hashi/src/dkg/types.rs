@@ -38,6 +38,16 @@ pub struct DkgConfig {
     pub threshold: u16,
     /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
+    /// Data availability threshold configuration
+    pub data_availability_threshold: DataAvailabilityThreshold,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DataAvailabilityThreshold {
+    /// Minimal: f+1 signatures
+    Minimal,
+    /// Robust: 2f+1 signatures
+    Robust,
 }
 
 impl DkgConfig {
@@ -65,6 +75,7 @@ impl DkgConfig {
             validators,
             threshold,
             max_faulty,
+            data_availability_threshold: DataAvailabilityThreshold::Robust,
         })
     }
 
@@ -74,6 +85,25 @@ impl DkgConfig {
 
     pub fn get_validator(&self, id: &ValidatorId) -> Option<&ValidatorInfo> {
         self.validators.iter().find(|v| v.id == *id)
+    }
+
+    pub fn with_data_availability_threshold(
+        mut self,
+        data_availability_threshold: DataAvailabilityThreshold,
+    ) -> Self {
+        self.data_availability_threshold = data_availability_threshold;
+        self
+    }
+
+    pub fn required_data_availability_signatures(&self) -> usize {
+        match self.data_availability_threshold {
+            DataAvailabilityThreshold::Minimal => (self.max_faulty + 1) as usize,
+            DataAvailabilityThreshold::Robust => (2 * self.max_faulty + 1) as usize,
+        }
+    }
+
+    pub fn required_dkg_signatures(&self) -> usize {
+        (self.threshold + self.max_faulty) as usize
     }
 }
 
@@ -155,6 +185,23 @@ pub enum P2PMessage {
         response: complaint::ComplaintResponse,
     },
     Approval(MessageApproval),
+    DataAvailabilitySignature {
+        signer: ValidatorId,
+        dealer: ValidatorId,
+        message_hash: [u8; 32],
+        signature: Vec<u8>,
+    },
+    DkgSignature {
+        signer: ValidatorId,
+        dealer: ValidatorId,
+        message_hash: [u8; 32],
+        signature: Vec<u8>,
+    },
+    ShareRequest {
+        requester: ValidatorId,
+        dealer: ValidatorId,
+        message_hash: [u8; 32],
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -177,12 +224,18 @@ pub struct MessageApproval {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorSignature {
+    pub validator: ValidatorId,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgCertificate {
+    pub dealer: ValidatorId,
     pub message_hash: [u8; 32],
-    pub approvals: Vec<MessageApproval>,
-    pub message_type: MessageType,
+    pub data_availability_signatures: Vec<ValidatorSignature>,
+    pub dkg_signatures: Vec<ValidatorSignature>,
     pub session_context: SessionContext,
-    pub sender: ValidatorId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -409,5 +462,53 @@ mod tests {
         };
 
         assert_eq!(ctx1.to_bytes(), ctx2.to_bytes());
+    }
+
+    #[test]
+    fn test_with_data_availability_threshold() {
+        let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 3, 1).unwrap();
+
+        assert!(matches!(
+            config.data_availability_threshold,
+            DataAvailabilityThreshold::Robust
+        ));
+
+        let config_minimal = config
+            .clone()
+            .with_data_availability_threshold(DataAvailabilityThreshold::Minimal);
+        assert!(matches!(
+            config_minimal.data_availability_threshold,
+            DataAvailabilityThreshold::Minimal
+        ));
+
+        let config_robust =
+            config_minimal.with_data_availability_threshold(DataAvailabilityThreshold::Robust);
+        assert!(matches!(
+            config_robust.data_availability_threshold,
+            DataAvailabilityThreshold::Robust
+        ));
+    }
+
+    #[test]
+    fn test_required_data_availability_signatures() {
+        let validators: Vec<ValidatorInfo> = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators.clone(), 3, 2).unwrap();
+
+        // Robust mode: 2f+1 = 2*2+1 = 5
+        assert_eq!(config.required_data_availability_signatures(), 5);
+
+        // Minimal mode: f+1 = 2+1 = 3
+        let config_minimal =
+            config.with_data_availability_threshold(DataAvailabilityThreshold::Minimal);
+        assert_eq!(config_minimal.required_data_availability_signatures(), 3);
+    }
+
+    #[test]
+    fn test_required_dkg_signatures() {
+        let validators: Vec<ValidatorInfo> = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config1 = DkgConfig::new(100, validators.clone(), 3, 2).unwrap();
+
+        assert_eq!(config1.required_dkg_signatures(), 5);
     }
 }
