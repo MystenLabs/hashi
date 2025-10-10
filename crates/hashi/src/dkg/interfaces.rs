@@ -2,7 +2,7 @@
 
 use crate::dkg::types::{
     DkgOutput, DkgProtocolState, DkgResult, OrderedBroadcastMessage, P2PMessage, SessionContext,
-    ValidatorId,
+    ValidatorAddress,
 };
 use async_trait::async_trait;
 use fastcrypto_tbls::threshold_schnorr::avss;
@@ -10,7 +10,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 /// Point-to-point channel for direct validator-to-validator messaging
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
-    async fn send_to(&self, recipient: &ValidatorId, message: P2PMessage) -> DkgResult<()>;
+    async fn send_to(&self, recipient: &ValidatorAddress, message: P2PMessage) -> DkgResult<()>;
 
     /// Send the same message to all validators (each receives it as a separate P2P message)
     /// This is NOT consensus-ordered broadcast
@@ -73,9 +73,9 @@ pub trait DkgStorage: Send + Sync {
 pub trait Signer: Send + Sync {
     fn sign(&self, message_hash: &[u8; 32]) -> Vec<u8>;
 
-    fn verify(&self, message_hash: &[u8; 32], signature: &[u8], signer: &ValidatorId) -> bool;
+    fn verify(&self, message_hash: &[u8; 32], signature: &[u8], signer: &ValidatorAddress) -> bool;
 
-    fn validator_id(&self) -> ValidatorId;
+    fn validator_address(&self) -> ValidatorAddress;
 }
 
 #[async_trait]
@@ -109,7 +109,7 @@ pub trait ReceiverOperations: Send + Sync {
 pub trait DkgMonitor: Send + Sync {
     fn on_start(&self, session_id: &SessionContext);
 
-    fn on_message_received(&self, from: &ValidatorId, message_type: &str);
+    fn on_message_received(&self, from: &ValidatorAddress, message_type: &str);
 
     fn on_message_sent(&self, message_type: &str);
 
