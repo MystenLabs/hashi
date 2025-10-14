@@ -1,9 +1,28 @@
 //! Generic communication channel interfaces
 
-use crate::communication::error::ChannelResult;
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::time::Duration;
+use thiserror::Error;
+
+/// Result type for channel operations
+pub type ChannelResult<T> = Result<T, ChannelError>;
+
+/// Error type for channel operations
+#[derive(Debug, Error)]
+pub enum ChannelError {
+    #[error("Send failed: {0}")]
+    SendFailed(String),
+
+    #[error("Receive timeout")]
+    Timeout,
+
+    #[error("Channel closed")]
+    Closed,
+
+    #[error("Channel error: {0}")]
+    Other(String),
+}
 
 /// An authenticated message with cryptographically verified sender
 ///

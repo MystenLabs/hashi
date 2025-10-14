@@ -4,10 +4,10 @@
 //! - P2P channels for direct validator-to-validator messaging
 //! - Ordered broadcast channels for consensus-critical messages
 
-pub mod error;
 pub mod in_memory;
 pub mod interfaces;
 
-pub use error::{ChannelError, ChannelResult};
 pub use in_memory::{InMemoryOrderedBroadcastChannel, InMemoryP2PChannels};
-pub use interfaces::{AuthenticatedMessage, OrderedBroadcastChannel, P2PChannel};
+pub use interfaces::{
+    AuthenticatedMessage, ChannelError, ChannelResult, OrderedBroadcastChannel, P2PChannel,
+};

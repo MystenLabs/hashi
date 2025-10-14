@@ -1,7 +1,8 @@
 //! In-memory channel implementations for testing
 
-use crate::communication::error::ChannelResult;
-use crate::communication::interfaces::{AuthenticatedMessage, OrderedBroadcastChannel, P2PChannel};
+use crate::communication::interfaces::{
+    AuthenticatedMessage, ChannelResult, OrderedBroadcastChannel, P2PChannel,
+};
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
