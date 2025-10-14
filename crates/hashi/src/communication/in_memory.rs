@@ -1,0 +1,370 @@
+//! In-memory channel implementations for testing
+
+use crate::communication::error::ChannelResult;
+use crate::communication::interfaces::{OrderedBroadcastChannel, P2PChannel};
+use crate::types::ValidatorAddress;
+use async_trait::async_trait;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::timeout;
+
+const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
+
+type MessageQueue<M> = Arc<Mutex<VecDeque<M>>>;
+type SharedQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
+
+fn get_pending_count<T>(queue: &Arc<Mutex<VecDeque<T>>>) -> Option<usize> {
+    queue.try_lock().ok().map(|q| q.len())
+}
+
+async fn try_receive_with_timeout<T, F, Fut>(
+    duration: Duration,
+    receive_fn: F,
+) -> ChannelResult<Option<T>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ChannelResult<T>>,
+{
+    match timeout(duration, receive_fn()).await {
+        Ok(Ok(msg)) => Ok(Some(msg)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+/// In-memory P2P channel for testing
+///
+/// This implementation simulates direct validator-to-validator messaging.
+/// Messages are stored in per-validator queues without ordering guarantees.
+#[derive(Clone)]
+pub struct InMemoryP2PChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    validator_address: ValidatorAddress,
+    message_queues: SharedQueues<M>,
+    my_queue: MessageQueue<M>,
+}
+
+impl<M> InMemoryP2PChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    pub fn new_network(
+        validator_addresses: Vec<ValidatorAddress>,
+    ) -> HashMap<ValidatorAddress, Self> {
+        let mut queues = HashMap::new();
+        for addr in &validator_addresses {
+            queues.insert(addr.clone(), Arc::new(Mutex::new(VecDeque::new())));
+        }
+        let message_queues = Arc::new(RwLock::new(queues.clone()));
+        let mut channels = HashMap::new();
+        for addr in validator_addresses {
+            let my_queue = queues.get(&addr).unwrap().clone();
+            channels.insert(
+                addr.clone(),
+                Self {
+                    validator_address: addr.clone(),
+                    message_queues: message_queues.clone(),
+                    my_queue,
+                },
+            );
+        }
+        channels
+    }
+
+    pub async fn new(validator_address: ValidatorAddress, message_queues: SharedQueues<M>) -> Self {
+        let my_queue = {
+            let queues = message_queues.read().await;
+            queues.get(&validator_address).cloned()
+        }
+        .unwrap_or_else(|| Arc::new(Mutex::new(VecDeque::new())));
+        {
+            let mut queues = message_queues.write().await;
+            queues
+                .entry(validator_address.clone())
+                .or_insert_with(|| my_queue.clone());
+        }
+        Self {
+            validator_address,
+            message_queues,
+            my_queue,
+        }
+    }
+}
+
+#[async_trait]
+impl<M> P2PChannel<M> for InMemoryP2PChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    async fn send_to(&self, recipient: &ValidatorAddress, message: M) -> ChannelResult<()> {
+        let queues = self.message_queues.read().await;
+        if let Some(queue) = queues.get(recipient) {
+            let mut q = queue.lock().await;
+            q.push_back(message);
+        }
+        Ok(())
+    }
+
+    async fn broadcast(&self, message: M) -> ChannelResult<()> {
+        let queues = self.message_queues.read().await;
+        for (addr, queue) in queues.iter() {
+            if *addr != self.validator_address {
+                let mut q = queue.lock().await;
+                q.push_back(message.clone());
+            }
+        }
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> ChannelResult<M> {
+        loop {
+            let mut queue = self.my_queue.lock().await;
+            if let Some(msg) = queue.pop_front() {
+                return Ok(msg);
+            }
+            drop(queue);
+            // Sleep briefly to avoid busy-waiting
+            tokio::time::sleep(Duration::from_millis(RECEIVE_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    async fn try_receive_timeout(&mut self, duration: Duration) -> ChannelResult<Option<M>> {
+        try_receive_with_timeout(duration, || self.receive()).await
+    }
+
+    fn pending_messages(&self) -> Option<usize> {
+        get_pending_count(&self.my_queue)
+    }
+}
+
+/// In-memory ordered broadcast channel for testing
+///
+/// This implementation simulates consensus-ordered broadcast where all validators
+/// see messages in the same order.
+#[derive(Clone)]
+pub struct InMemoryOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    shared_queue: Arc<Mutex<VecDeque<M>>>,
+    read_position: Arc<Mutex<usize>>,
+}
+
+impl<M> InMemoryOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    pub fn new_network(
+        validator_addresses: Vec<ValidatorAddress>,
+    ) -> HashMap<ValidatorAddress, Self> {
+        let shared_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let mut channels = HashMap::new();
+        for addr in validator_addresses {
+            channels.insert(
+                addr.clone(),
+                Self {
+                    shared_queue: shared_queue.clone(),
+                    read_position: Arc::new(Mutex::new(0)),
+                },
+            );
+        }
+        channels
+    }
+}
+
+#[async_trait]
+impl<M> OrderedBroadcastChannel<M> for InMemoryOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    async fn broadcast(&self, message: M) -> ChannelResult<()> {
+        // In a real implementation, this would go through consensus to establish ordering
+        // For testing, we simulate ordering by adding to a single shared queue
+        let mut queue = self.shared_queue.lock().await;
+        queue.push_back(message);
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> ChannelResult<M> {
+        loop {
+            let queue = self.shared_queue.lock().await;
+            let mut pos = self.read_position.lock().await;
+            if *pos < queue.len() {
+                let msg = queue[*pos].clone();
+                *pos += 1;
+                return Ok(msg);
+            }
+            drop(queue);
+            drop(pos);
+            // Sleep briefly to avoid busy-waiting
+            tokio::time::sleep(Duration::from_millis(RECEIVE_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    async fn try_receive_timeout(&mut self, duration: Duration) -> ChannelResult<Option<M>> {
+        try_receive_with_timeout(duration, || self.receive()).await
+    }
+
+    fn pending_messages(&self) -> Option<usize> {
+        let queue = self.shared_queue.try_lock().ok()?;
+        let pos = self.read_position.try_lock().ok()?;
+        Some(queue.len().saturating_sub(*pos))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct TestMessage {
+        id: u32,
+        data: String,
+    }
+
+    fn create_validator_addresses(count: usize) -> Vec<ValidatorAddress> {
+        (1..=count)
+            .map(|i| ValidatorAddress([i as u8; 32]))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_p2p_send_and_receive() {
+        let validators = create_validator_addresses(2);
+        let mut channels = InMemoryP2PChannel::new_network(validators.clone());
+
+        let msg = TestMessage {
+            id: 1,
+            data: "test".to_string(),
+        };
+
+        channels
+            .get(&validators[0])
+            .unwrap()
+            .send_to(&validators[1], msg.clone())
+            .await
+            .unwrap();
+
+        let received = channels
+            .get_mut(&validators[1])
+            .unwrap()
+            .receive()
+            .await
+            .unwrap();
+        assert_eq!(received, msg);
+    }
+
+    #[tokio::test]
+    async fn test_p2p_broadcast() {
+        let validators = create_validator_addresses(3);
+        let mut channels = InMemoryP2PChannel::new_network(validators.clone());
+
+        let msg = TestMessage {
+            id: 1,
+            data: "broadcast".to_string(),
+        };
+
+        channels
+            .get(&validators[0])
+            .unwrap()
+            .broadcast(msg.clone())
+            .await
+            .unwrap();
+
+        // Validators 1 and 2 should receive it (not validator 0)
+        for addr in &validators[1..] {
+            let received = channels.get_mut(addr).unwrap().receive().await.unwrap();
+            assert_eq!(received, msg);
+        }
+
+        // Validator 0 should not have received it
+        assert_eq!(
+            channels.get(&validators[0]).unwrap().pending_messages(),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ordered_broadcast_total_order() {
+        const NUM_VALIDATORS: usize = 3;
+        let validators = create_validator_addresses(NUM_VALIDATORS);
+        let mut channels = InMemoryOrderedBroadcastChannel::new_network(validators.clone());
+
+        // Each validator broadcasts messages
+        for (i, sender) in validators.iter().enumerate() {
+            let msg = TestMessage {
+                id: i as u32,
+                data: format!("message from {}", i),
+            };
+            channels.get(sender).unwrap().broadcast(msg).await.unwrap();
+        }
+
+        // All validators should receive messages in the same order
+        let mut first_order = vec![];
+        for _ in 0..NUM_VALIDATORS {
+            let msg = channels
+                .get_mut(&validators[0])
+                .unwrap()
+                .receive()
+                .await
+                .unwrap();
+            first_order.push(msg.id);
+        }
+
+        // Check all other validators see the same order
+        for validator in &validators[1..] {
+            for expected_id in &first_order {
+                let msg = channels
+                    .get_mut(validator)
+                    .unwrap()
+                    .receive()
+                    .await
+                    .unwrap();
+                assert_eq!(msg.id, *expected_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_p2p_timeout_no_message() {
+        let validators = vec![ValidatorAddress([1; 32])];
+        let mut channels = InMemoryP2PChannel::<TestMessage>::new_network(validators.clone());
+
+        let result = channels
+            .get_mut(&validators[0])
+            .unwrap()
+            .try_receive_timeout(Duration::from_millis(100))
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ordered_broadcast_pending_messages() {
+        let validators = create_validator_addresses(2);
+        let channels = InMemoryOrderedBroadcastChannel::new_network(validators.clone());
+
+        let msg = TestMessage {
+            id: 1,
+            data: "test".to_string(),
+        };
+
+        channels
+            .get(&validators[0])
+            .unwrap()
+            .broadcast(msg)
+            .await
+            .unwrap();
+
+        // Both validators should see 1 pending message
+        for addr in &validators {
+            assert_eq!(channels.get(addr).unwrap().pending_messages(), Some(1));
+        }
+    }
+}

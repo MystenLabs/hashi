@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 pub mod bls;
 pub mod committee;
+pub mod communication;
 pub mod config;
 pub mod dkg;
 pub mod grpc;
 pub mod metrics;
 pub mod proto;
 pub mod tls;
+pub mod types;
 
 pub struct Hashi {
     pub server_version: ServerVersion,
