@@ -7,10 +7,8 @@ use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
-/// Type alias for DKG P2P channel
 pub type P2PChannel = dyn crate::communication::P2PChannel<P2PMessage>;
 
-/// Type alias for DKG ordered broadcast channel
 pub type OrderedBroadcastChannel =
     dyn crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>;
 
