@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 
 const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
+const INITIAL_READ_POSITION: usize = 0;
 
 type MessageQueue<M> = Arc<Mutex<VecDeque<M>>>;
 type SharedQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
@@ -169,7 +170,7 @@ where
                 addr.clone(),
                 Self {
                     shared_queue: shared_queue.clone(),
-                    read_position: Arc::new(Mutex::new(0)),
+                    read_position: Arc::new(Mutex::new(INITIAL_READ_POSITION)),
                 },
             );
         }
