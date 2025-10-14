@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Validator address (32-byte identifier)
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ValidatorAddress(pub [u8; 32]);
 
