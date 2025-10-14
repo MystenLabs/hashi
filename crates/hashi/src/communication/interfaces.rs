@@ -53,13 +53,11 @@ where
     /// Receive the next available message with authenticated sender
     async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>>;
 
-    /// Try to receive an authenticated message with a timeout
     async fn try_receive_timeout(
         &mut self,
         timeout: Duration,
     ) -> ChannelResult<Option<AuthenticatedMessage<M>>>;
 
-    /// Get the number of pending messages in the queue, if available
     fn pending_messages(&self) -> Option<usize> {
         None
     }
@@ -80,13 +78,11 @@ where
     /// Receive the next message in the total order with authenticated sender
     async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>>;
 
-    /// Try to receive an authenticated message with a timeout
     async fn try_receive_timeout(
         &mut self,
         timeout: Duration,
     ) -> ChannelResult<Option<AuthenticatedMessage<M>>>;
 
-    /// Get the number of pending messages in the queue, if available
     fn pending_messages(&self) -> Option<usize> {
         None
     }
