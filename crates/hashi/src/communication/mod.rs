@@ -9,5 +9,5 @@ pub mod in_memory;
 pub mod interfaces;
 
 pub use error::{ChannelError, ChannelResult};
-pub use in_memory::{InMemoryOrderedBroadcastChannel, InMemoryP2PChannel};
-pub use interfaces::{OrderedBroadcastChannel, P2PChannel};
+pub use in_memory::{InMemoryOrderedBroadcastChannel, InMemoryP2PChannels};
+pub use interfaces::{AuthenticatedMessage, OrderedBroadcastChannel, P2PChannel};

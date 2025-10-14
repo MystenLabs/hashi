@@ -1,7 +1,7 @@
 //! In-memory channel implementations for testing
 
 use crate::communication::error::ChannelResult;
-use crate::communication::interfaces::{OrderedBroadcastChannel, P2PChannel};
+use crate::communication::interfaces::{AuthenticatedMessage, OrderedBroadcastChannel, P2PChannel};
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -14,8 +14,14 @@ use tokio::time::timeout;
 const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
 const INITIAL_READ_POSITION: usize = 0;
 
-type MessageQueue<M> = Arc<Mutex<VecDeque<M>>>;
-type SharedQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
+#[derive(Clone, Debug)]
+pub struct SenderMessage<M> {
+    pub sender: ValidatorAddress,
+    pub message: M,
+}
+
+type MessageQueue<M> = Arc<Mutex<VecDeque<SenderMessage<M>>>>;
+type SharedP2PQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
 
 fn get_pending_count<T>(queue: &MessageQueue<T>) -> Option<usize> {
     queue.try_lock().ok().map(|q| q.len())
@@ -36,21 +42,21 @@ where
     }
 }
 
-/// In-memory P2P channel for testing
+/// In-memory P2P channels for testing
 ///
 /// This implementation simulates direct validator-to-validator messaging.
 /// Messages are stored in per-validator queues without ordering guarantees.
 #[derive(Clone)]
-pub struct InMemoryP2PChannel<M>
+pub struct InMemoryP2PChannels<M>
 where
     M: Clone + Send + Sync + 'static,
 {
     validator_address: ValidatorAddress,
-    message_queues: SharedQueues<M>,
+    message_queues: SharedP2PQueues<M>,
     my_queue: MessageQueue<M>,
 }
 
-impl<M> InMemoryP2PChannel<M>
+impl<M> InMemoryP2PChannels<M>
 where
     M: Clone + Send + Sync + 'static,
 {
@@ -76,29 +82,10 @@ where
         }
         channels
     }
-
-    pub async fn new(validator_address: ValidatorAddress, message_queues: SharedQueues<M>) -> Self {
-        let my_queue = {
-            let queues = message_queues.read().await;
-            queues.get(&validator_address).cloned()
-        }
-        .unwrap_or_else(|| Arc::new(Mutex::new(VecDeque::new())));
-        {
-            let mut queues = message_queues.write().await;
-            queues
-                .entry(validator_address.clone())
-                .or_insert_with(|| my_queue.clone());
-        }
-        Self {
-            validator_address,
-            message_queues,
-            my_queue,
-        }
-    }
 }
 
 #[async_trait]
-impl<M> P2PChannel<M> for InMemoryP2PChannel<M>
+impl<M> P2PChannel<M> for InMemoryP2PChannels<M>
 where
     M: Clone + Send + Sync + 'static,
 {
@@ -106,7 +93,10 @@ where
         let queues = self.message_queues.read().await;
         if let Some(queue) = queues.get(recipient) {
             let mut q = queue.lock().await;
-            q.push_back(message);
+            q.push_back(SenderMessage {
+                sender: self.validator_address.clone(),
+                message,
+            });
         }
         Ok(())
     }
@@ -116,17 +106,23 @@ where
         for (addr, queue) in queues.iter() {
             if *addr != self.validator_address {
                 let mut q = queue.lock().await;
-                q.push_back(message.clone());
+                q.push_back(SenderMessage {
+                    sender: self.validator_address.clone(),
+                    message: message.clone(),
+                });
             }
         }
         Ok(())
     }
 
-    async fn receive(&mut self) -> ChannelResult<M> {
+    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>> {
         loop {
             let mut queue = self.my_queue.lock().await;
-            if let Some(msg) = queue.pop_front() {
-                return Ok(msg);
+            if let Some(sender_msg) = queue.pop_front() {
+                return Ok(AuthenticatedMessage {
+                    sender: sender_msg.sender,
+                    message: sender_msg.message,
+                });
             }
             drop(queue);
             // Sleep briefly to avoid busy-waiting
@@ -134,7 +130,10 @@ where
         }
     }
 
-    async fn try_receive_timeout(&mut self, duration: Duration) -> ChannelResult<Option<M>> {
+    async fn try_receive_timeout(
+        &mut self,
+        duration: Duration,
+    ) -> ChannelResult<Option<AuthenticatedMessage<M>>> {
         try_receive_with_timeout(duration, || self.receive()).await
     }
 
@@ -152,6 +151,7 @@ pub struct InMemoryOrderedBroadcastChannel<M>
 where
     M: Clone + Send + Sync + 'static,
 {
+    validator_address: ValidatorAddress,
     shared_queue: MessageQueue<M>,
     read_position: Arc<Mutex<usize>>,
 }
@@ -169,6 +169,7 @@ where
             channels.insert(
                 addr.clone(),
                 Self {
+                    validator_address: addr.clone(),
                     shared_queue: shared_queue.clone(),
                     read_position: Arc::new(Mutex::new(INITIAL_READ_POSITION)),
                 },
@@ -183,22 +184,28 @@ impl<M> OrderedBroadcastChannel<M> for InMemoryOrderedBroadcastChannel<M>
 where
     M: Clone + Send + Sync + 'static,
 {
-    async fn broadcast(&self, message: M) -> ChannelResult<()> {
+    async fn publish(&self, message: M) -> ChannelResult<()> {
         // In a real implementation, this would go through consensus to establish ordering
         // For testing, we simulate ordering by adding to a single shared queue
         let mut queue = self.shared_queue.lock().await;
-        queue.push_back(message);
+        queue.push_back(SenderMessage {
+            sender: self.validator_address.clone(),
+            message,
+        });
         Ok(())
     }
 
-    async fn receive(&mut self) -> ChannelResult<M> {
+    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>> {
         loop {
             let queue = self.shared_queue.lock().await;
             let mut pos = self.read_position.lock().await;
             if *pos < queue.len() {
-                let msg = queue[*pos].clone();
+                let sender_msg = queue[*pos].clone();
                 *pos += 1;
-                return Ok(msg);
+                return Ok(AuthenticatedMessage {
+                    sender: sender_msg.sender,
+                    message: sender_msg.message,
+                });
             }
             drop(queue);
             drop(pos);
@@ -207,7 +214,10 @@ where
         }
     }
 
-    async fn try_receive_timeout(&mut self, duration: Duration) -> ChannelResult<Option<M>> {
+    async fn try_receive_timeout(
+        &mut self,
+        duration: Duration,
+    ) -> ChannelResult<Option<AuthenticatedMessage<M>>> {
         try_receive_with_timeout(duration, || self.receive()).await
     }
 
@@ -237,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn test_p2p_send_and_receive() {
         let validators = create_validator_addresses(2);
-        let mut channels = InMemoryP2PChannel::new_network(validators.clone());
+        let mut channels = InMemoryP2PChannels::new_network(validators.clone());
 
         let msg = TestMessage {
             id: 1,
@@ -251,19 +261,22 @@ mod tests {
             .await
             .unwrap();
 
-        let received = channels
+        let authenticated = channels
             .get_mut(&validators[1])
             .unwrap()
             .receive()
             .await
             .unwrap();
-        assert_eq!(received, msg);
+
+        // Verify the sender is authenticated correctly
+        assert_eq!(authenticated.sender, validators[0]);
+        assert_eq!(authenticated.message, msg);
     }
 
     #[tokio::test]
     async fn test_p2p_broadcast() {
         let validators = create_validator_addresses(3);
-        let mut channels = InMemoryP2PChannel::new_network(validators.clone());
+        let mut channels = InMemoryP2PChannels::new_network(validators.clone());
 
         let msg = TestMessage {
             id: 1,
@@ -279,8 +292,10 @@ mod tests {
 
         // Validators 1 and 2 should receive it (not validator 0)
         for addr in &validators[1..] {
-            let received = channels.get_mut(addr).unwrap().receive().await.unwrap();
-            assert_eq!(received, msg);
+            let authenticated = channels.get_mut(addr).unwrap().receive().await.unwrap();
+            // Verify sender is authenticated as validator 0
+            assert_eq!(authenticated.sender, validators[0]);
+            assert_eq!(authenticated.message, msg);
         }
 
         // Validator 0 should not have received it
@@ -302,31 +317,36 @@ mod tests {
                 id: i as u32,
                 data: format!("message from {}", i),
             };
-            channels.get(sender).unwrap().broadcast(msg).await.unwrap();
+            channels.get(sender).unwrap().publish(msg).await.unwrap();
         }
 
         // All validators should receive messages in the same order
         let mut first_order = vec![];
-        for _ in 0..NUM_VALIDATORS {
-            let msg = channels
+        let mut first_senders = vec![];
+        for i in 0..NUM_VALIDATORS {
+            let authenticated = channels
                 .get_mut(&validators[0])
                 .unwrap()
                 .receive()
                 .await
                 .unwrap();
-            first_order.push(msg.id);
+            // Verify the sender is authenticated correctly
+            assert_eq!(authenticated.sender, validators[i]);
+            first_order.push(authenticated.message.id);
+            first_senders.push(authenticated.sender.clone());
         }
 
-        // Check all other validators see the same order
+        // Check all other validators see the same order and same senders
         for validator in &validators[1..] {
-            for expected_id in &first_order {
-                let msg = channels
+            for (i, expected_id) in first_order.iter().enumerate() {
+                let authenticated = channels
                     .get_mut(validator)
                     .unwrap()
                     .receive()
                     .await
                     .unwrap();
-                assert_eq!(msg.id, *expected_id);
+                assert_eq!(authenticated.sender, first_senders[i]);
+                assert_eq!(authenticated.message.id, *expected_id);
             }
         }
     }
@@ -334,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn test_p2p_timeout_no_message() {
         let validators = vec![ValidatorAddress([1; 32])];
-        let mut channels = InMemoryP2PChannel::<TestMessage>::new_network(validators.clone());
+        let mut channels = InMemoryP2PChannels::<TestMessage>::new_network(validators.clone());
 
         let result = channels
             .get_mut(&validators[0])
@@ -359,7 +379,7 @@ mod tests {
         channels
             .get(&validators[0])
             .unwrap()
-            .broadcast(msg)
+            .publish(msg)
             .await
             .unwrap();
 

@@ -5,6 +5,16 @@ use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::time::Duration;
 
+/// An authenticated message with cryptographically verified sender
+///
+/// The `sender` field is verified by the channel layer. The protocol layer should verify
+/// that the authenticated sender matches any sender claims in the message payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthenticatedMessage<M> {
+    pub sender: ValidatorAddress,
+    pub message: M,
+}
+
 /// Point-to-point channel for direct validator-to-validator messaging
 ///
 /// This is a generic interface that can work with any message type.
@@ -21,11 +31,14 @@ where
     /// This is NOT consensus-ordered broadcast
     async fn broadcast(&self, message: M) -> ChannelResult<()>;
 
-    /// Receive the next available message from any validator
-    async fn receive(&mut self) -> ChannelResult<M>;
+    /// Receive the next available message with authenticated sender
+    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>>;
 
-    /// Try to receive a message with a timeout
-    async fn try_receive_timeout(&mut self, timeout: Duration) -> ChannelResult<Option<M>>;
+    /// Try to receive an authenticated message with a timeout
+    async fn try_receive_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> ChannelResult<Option<AuthenticatedMessage<M>>>;
 
     /// Get the number of pending messages in the queue, if available
     fn pending_messages(&self) -> Option<usize> {
@@ -43,13 +56,16 @@ where
     M: Clone + Send + Sync + 'static,
 {
     /// Broadcast a message with guaranteed ordering across all validators
-    async fn broadcast(&self, message: M) -> ChannelResult<()>;
+    async fn publish(&self, message: M) -> ChannelResult<()>;
 
-    /// Receive the next message in the total order
-    async fn receive(&mut self) -> ChannelResult<M>;
+    /// Receive the next message in the total order with authenticated sender
+    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>>;
 
-    /// Try to receive a message with a timeout
-    async fn try_receive_timeout(&mut self, timeout: Duration) -> ChannelResult<Option<M>>;
+    /// Try to receive an authenticated message with a timeout
+    async fn try_receive_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> ChannelResult<Option<AuthenticatedMessage<M>>>;
 
     /// Get the number of pending messages in the queue, if available
     fn pending_messages(&self) -> Option<usize> {
