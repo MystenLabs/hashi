@@ -15,13 +15,7 @@ use tokio::time::timeout;
 const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
 const INITIAL_READ_POSITION: usize = 0;
 
-#[derive(Clone, Debug)]
-pub struct SenderMessage<M> {
-    pub sender: ValidatorAddress,
-    pub message: M,
-}
-
-type MessageQueue<M> = Arc<Mutex<VecDeque<SenderMessage<M>>>>;
+type MessageQueue<M> = Arc<Mutex<VecDeque<AuthenticatedMessage<M>>>>;
 type SharedP2PQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
 
 fn get_pending_count<T>(queue: &MessageQueue<T>) -> Option<usize> {
@@ -94,7 +88,7 @@ where
         let queues = self.message_queues.read().await;
         if let Some(queue) = queues.get(recipient) {
             let mut q = queue.lock().await;
-            q.push_back(SenderMessage {
+            q.push_back(AuthenticatedMessage {
                 sender: self.validator_address.clone(),
                 message,
             });
@@ -107,7 +101,7 @@ where
         for (addr, queue) in queues.iter() {
             if *addr != self.validator_address {
                 let mut q = queue.lock().await;
-                q.push_back(SenderMessage {
+                q.push_back(AuthenticatedMessage {
                     sender: self.validator_address.clone(),
                     message: message.clone(),
                 });
@@ -119,11 +113,8 @@ where
     async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>> {
         loop {
             let mut queue = self.my_queue.lock().await;
-            if let Some(sender_msg) = queue.pop_front() {
-                return Ok(AuthenticatedMessage {
-                    sender: sender_msg.sender,
-                    message: sender_msg.message,
-                });
+            if let Some(authenticated_msg) = queue.pop_front() {
+                return Ok(authenticated_msg);
             }
             drop(queue);
             // Sleep briefly to avoid busy-waiting
@@ -187,9 +178,9 @@ where
 {
     async fn publish(&self, message: M) -> ChannelResult<()> {
         // In a real implementation, this would go through consensus to establish ordering
-        // For testing, we simulate ordering by adding to a single shared queue
+        // For testing, we simulate ordering by adding to a single shared queue with authenticated sender
         let mut queue = self.shared_queue.lock().await;
-        queue.push_back(SenderMessage {
+        queue.push_back(AuthenticatedMessage {
             sender: self.validator_address.clone(),
             message,
         });
@@ -201,12 +192,9 @@ where
             let queue = self.shared_queue.lock().await;
             let mut pos = self.read_position.lock().await;
             if *pos < queue.len() {
-                let sender_msg = queue[*pos].clone();
+                let authenticated_msg = queue[*pos].clone();
                 *pos += 1;
-                return Ok(AuthenticatedMessage {
-                    sender: sender_msg.sender,
-                    message: sender_msg.message,
-                });
+                return Ok(authenticated_msg);
             }
             drop(queue);
             drop(pos);
