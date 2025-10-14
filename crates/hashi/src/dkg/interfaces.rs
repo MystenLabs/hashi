@@ -11,7 +11,8 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 pub type P2PChannel = dyn crate::communication::P2PChannel<P2PMessage>;
 
 /// Type alias for DKG ordered broadcast channel
-pub type OrderedBroadcastChannel = dyn crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>;
+pub type OrderedBroadcastChannel =
+    dyn crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>;
 
 #[async_trait]
 pub trait DkgStorage: Send + Sync {
