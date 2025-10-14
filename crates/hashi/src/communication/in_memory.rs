@@ -16,7 +16,7 @@ const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
 type MessageQueue<M> = Arc<Mutex<VecDeque<M>>>;
 type SharedQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
 
-fn get_pending_count<T>(queue: &Arc<Mutex<VecDeque<T>>>) -> Option<usize> {
+fn get_pending_count<T>(queue: &MessageQueue<T>) -> Option<usize> {
     queue.try_lock().ok().map(|q| q.len())
 }
 
@@ -151,7 +151,7 @@ pub struct InMemoryOrderedBroadcastChannel<M>
 where
     M: Clone + Send + Sync + 'static,
 {
-    shared_queue: Arc<Mutex<VecDeque<M>>>,
+    shared_queue: MessageQueue<M>,
     read_position: Arc<Mutex<usize>>,
 }
 
