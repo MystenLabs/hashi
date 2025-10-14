@@ -6,17 +6,24 @@ use hashi::governance_events;
 use hashi::hashi::Hashi;
 use std::string::String;
 use std::type_name;
+use sui::derived_object;
 use sui::vec_map::VecMap;
 
 // ~~~~~~~ Structs ~~~~~~~
 
 public struct Proposal<T> has key, store {
     id: UID,
-    creator: address,
     hashi: ID,
+    creator: address,
     votes: vector<address>,
     metadata: VecMap<String, String>,
+    seq_num: u64,
     data: T,
+}
+
+// add a seq_num to the proposal key to make it deterministic
+public struct ProposalKey<phantom T> has copy, drop, store {
+    seq_num: u64,
 }
 
 // ~~~~~~~ Errors ~~~~~~~
@@ -47,15 +54,25 @@ public fun new<T: store>(
         EUnauthorizedCaller,
     );
     let votes = vector[ctx.sender()];
+    let seq_num = hashi.seq_num();
 
     let proposal = Proposal {
-        id: object::new(ctx),
+        id: derived_object::claim(
+            hashi.id(),
+            ProposalKey<T> {
+                seq_num,
+            },
+        ),
         creator: ctx.sender(),
         hashi: object::id(hashi),
         votes,
+        seq_num,
         metadata,
         data,
     };
+
+    hashi.increment_seq_num<T>();
+
     transfer::share_object(proposal);
 }
 
@@ -65,6 +82,7 @@ public(package) fun execute<T>(proposal: Proposal<T>, hashi: &Hashi): T {
         proposal.hashi == object::id(hashi),
         EProposalCommitteeMismatch,
     );
+
     governance_events::emit_proposal_executed_event(proposal.id.to_inner());
     proposal.delete()
 }
@@ -83,6 +101,7 @@ public fun vote<T>(
         ctx.sender(),
     );
     if (proposal.quorum_reached(hashi)) {
+        // assign sequence number
         governance_events::emit_quorum_reached_event(proposal.id.to_inner());
     }
 }
@@ -141,6 +160,10 @@ public(package) fun delete<T>(proposal: Proposal<T>): T {
     data
 }
 
+public(package) fun id<T>(proposal: &Proposal<T>): ID {
+    proposal.id.to_inner()
+}
+
 macro fun validate_proposal<$T>(
     $hashi: &Hashi,
     $proposal: &Proposal<$T>,
@@ -158,39 +181,6 @@ macro fun validate_proposal<$T>(
         EProposalCommitteeMismatch,
     );
 }
-
-// public fun voter_is_validator(
-//     voter: &address,
-//     sui_system: &SuiSystemState,
-// ): bool {
-//     sui_system.active_validator_addresses_ref().contains(voter)
-// }
-
-// public fun validator_voting_power(
-//     voter: &address,
-//     sui_system: &SuiSystemState,
-// ): u64 {
-//     sui_system.active_validator_voting_powers()[voter]
-// }
-
-// public fun total_active_validator_voting_power(
-//     committee: &Committee,
-//     sui_system: &SuiSystemState,
-// ): u64 {
-//     let (validators, powers) = sui_system
-//         .active_validator_voting_powers()
-//         .into_keys_values();
-//     let mut total_power = 0;
-//     validators.zip_do!(
-//         powers,
-//         |validator, power| {
-//             if (committee.member_in_committee(&validator)) {
-//                 total_power = total_power + power;
-//             }
-//         },
-//     );
-//     total_power
-// }
 
 // ~~~~~~~ Getters ~~~~~~~                                                                                                                                                                                                                                                                                                                                                              ~~~~~~~
 

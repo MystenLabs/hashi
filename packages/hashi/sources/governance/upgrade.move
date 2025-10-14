@@ -28,5 +28,6 @@ public fun register_proposal_type(hashi: &mut Hashi) {
         .register_proposal_type(
             type_name::with_defining_ids<Upgrade>(),
             THRESHOLD,
+            true,
         );
 }
