@@ -19,20 +19,30 @@ pub type MessageHash = [u8; 32];
 pub type SignatureBytes = Vec<u8>;
 pub type SessionId = Digest<64>;
 
+// Domain separation constants for RandomOracle
+const DOMAIN_HASHI: &str = "hashi";
+const DOMAIN_DKG: &str = "dkg";
+const DOMAIN_SHARE: &str = "share";
+const DOMAIN_ROTATION: &str = "rotation";
+const DOMAIN_NONCE: &str = "nonce";
+const DOMAIN_GENERATION: &str = "generation";
+const DOMAIN_SIGNING: &str = "signing";
+const DOMAIN_DEALER: &str = "dealer";
+
 fn evaluate_oracle<T: serde::Serialize>(oracle: &RandomOracle, input: &T) -> SessionId {
     Digest::new(oracle.evaluate(input))
 }
 
 fn base_oracle(protocol_type: &ProtocolType) -> RandomOracle {
     match protocol_type {
-        ProtocolType::DkgKeyGeneration => RandomOracle::new("hashi").extend("dkg"),
-        ProtocolType::DkgShareRotation => RandomOracle::new("hashi")
-            .extend("share")
-            .extend("rotation"),
-        ProtocolType::NonceGeneration(_) => RandomOracle::new("hashi")
-            .extend("nonce")
-            .extend("generation"),
-        ProtocolType::Signing { .. } => RandomOracle::new("hashi").extend("signing"),
+        ProtocolType::DkgKeyGeneration => RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DKG),
+        ProtocolType::DkgShareRotation => RandomOracle::new(DOMAIN_HASHI)
+            .extend(DOMAIN_SHARE)
+            .extend(DOMAIN_ROTATION),
+        ProtocolType::NonceGeneration(_) => RandomOracle::new(DOMAIN_HASHI)
+            .extend(DOMAIN_NONCE)
+            .extend(DOMAIN_GENERATION),
+        ProtocolType::Signing { .. } => RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_SIGNING),
     }
 }
 
@@ -166,7 +176,7 @@ impl SessionContext {
 
     /// Sub-session ID for a specific dealer, derived from the session ID
     pub fn dealer_session_id(&self, dealer: &ValidatorAddress) -> SessionId {
-        let oracle = RandomOracle::new("hashi").extend("dealer");
+        let oracle = RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DEALER);
         evaluate_oracle(&oracle, &(self.session_id(), dealer.0))
     }
 }
