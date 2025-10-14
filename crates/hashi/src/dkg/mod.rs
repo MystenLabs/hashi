@@ -7,6 +7,7 @@ pub mod types;
 pub use in_memory_broadcast::{InMemoryOrderedBroadcastChannel, InMemoryP2PChannel};
 pub use interfaces::{DkgStorage, OrderedBroadcastChannel, P2PChannel};
 pub use types::{
-    DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, MessageType,
-    OrderedBroadcastMessage, P2PMessage, SessionContext, SighashType, ValidatorId, ValidatorInfo,
+    DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, MessageHash,
+    MessageType, OrderedBroadcastMessage, P2PMessage, SessionContext, SessionId, SighashType,
+    SignatureBytes, ValidatorAddress, ValidatorInfo, ValidatorSignature,
 };

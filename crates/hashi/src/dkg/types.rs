@@ -1,22 +1,55 @@
 //! Core types for the DKG protocol
 
 use fastcrypto::error::FastCryptoError;
+use fastcrypto::hash::Digest;
 use fastcrypto_tbls::{
     ecies_v1::PublicKey,
     nodes::PartyId,
     polynomial::Eval,
+    random_oracle::RandomOracle,
     threshold_schnorr::{G, avss, complaint},
 };
-
-type EG = fastcrypto::groups::ristretto255::RistrettoPoint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct ValidatorId(pub [u8; 32]);
+type EG = fastcrypto::groups::ristretto255::RistrettoPoint;
 
-impl fmt::Display for ValidatorId {
+pub type MessageHash = [u8; 32];
+pub type SignatureBytes = Vec<u8>;
+pub type SessionId = Digest<64>;
+
+// Domain separation constants for RandomOracle
+const DOMAIN_HASHI: &str = "hashi";
+const DOMAIN_DKG: &str = "dkg";
+const DOMAIN_SHARE: &str = "share";
+const DOMAIN_ROTATION: &str = "rotation";
+const DOMAIN_NONCE: &str = "nonce";
+const DOMAIN_GENERATION: &str = "generation";
+const DOMAIN_SIGNING: &str = "signing";
+const DOMAIN_DEALER: &str = "dealer";
+
+fn evaluate_oracle<T: serde::Serialize>(oracle: &RandomOracle, input: &T) -> SessionId {
+    Digest::new(oracle.evaluate(input))
+}
+
+fn base_oracle(protocol_type: &ProtocolType) -> RandomOracle {
+    match protocol_type {
+        ProtocolType::DkgKeyGeneration => RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DKG),
+        ProtocolType::DkgShareRotation => RandomOracle::new(DOMAIN_HASHI)
+            .extend(DOMAIN_SHARE)
+            .extend(DOMAIN_ROTATION),
+        ProtocolType::NonceGeneration(_) => RandomOracle::new(DOMAIN_HASHI)
+            .extend(DOMAIN_NONCE)
+            .extend(DOMAIN_GENERATION),
+        ProtocolType::Signing { .. } => RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_SIGNING),
+    }
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct ValidatorAddress(pub [u8; 32]);
+
+impl fmt::Display for ValidatorAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", hex::encode(&self.0[..8]))
     }
@@ -24,7 +57,8 @@ impl fmt::Display for ValidatorId {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorInfo {
-    pub id: ValidatorId,
+    pub address: ValidatorAddress,
+    /// Index in the validator set
     pub party_id: PartyId,
     pub weight: u16,
     pub ecies_public_key: PublicKey<EG>,
@@ -72,48 +106,88 @@ impl DkgConfig {
         self.validators.iter().map(|v| v.weight).sum()
     }
 
-    pub fn get_validator(&self, id: &ValidatorId) -> Option<&ValidatorInfo> {
-        self.validators.iter().find(|v| v.id == *id)
+    pub fn required_data_availability_signatures(&self) -> usize {
+        (2 * self.max_faulty + 1) as usize
+    }
+
+    pub fn required_dkg_signatures(&self) -> usize {
+        (self.threshold + self.max_faulty) as usize
     }
 }
 
-/// Unique session context for a DKG protocol instance
+/// Unique deterministic session context for a DKG protocol instance
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionContext {
     pub epoch: u64,
     pub protocol_type: ProtocolType,
-    /// Attempt number
-    pub round: u32,
-    /// Random nonce for uniqueness (in the case of multiple networks)
-    pub nonce: [u8; 16],
+    pub chain_id: String,
+}
+
+/// Inputs for session ID generation
+#[derive(Serialize)]
+struct SessionIdInputs {
+    epoch: u64,
+    nonce_id: Option<u32>,
+    message_hash: Option<[u8; 32]>,
+    sighash_type: Option<u8>,
+    derivation_indexes: Option<Vec<u32>>,
 }
 
 impl SessionContext {
-    pub fn new(epoch: u64, protocol_type: ProtocolType, round: u32) -> Self {
-        use rand::Rng;
-        let mut nonce = [0u8; 16];
-        rand::thread_rng().fill(&mut nonce);
+    pub fn new(epoch: u64, protocol_type: ProtocolType, chain_id: String) -> Self {
         Self {
             epoch,
             protocol_type,
-            round,
-            nonce,
+            chain_id,
         }
     }
 
-    /// Convert to bytes for use in `fastcrypto` (as sid parameter)
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bcs::to_bytes(self).expect("SessionContext serialization should not fail")
+    pub fn session_id(&self) -> SessionId {
+        let oracle = base_oracle(&self.protocol_type).extend(&self.chain_id);
+        let input = match &self.protocol_type {
+            ProtocolType::DkgKeyGeneration | ProtocolType::DkgShareRotation => SessionIdInputs {
+                epoch: self.epoch,
+                nonce_id: None,
+                message_hash: None,
+                sighash_type: None,
+                derivation_indexes: None,
+            },
+            ProtocolType::NonceGeneration(nonce_id) => SessionIdInputs {
+                epoch: self.epoch,
+                nonce_id: Some(*nonce_id),
+                message_hash: None,
+                sighash_type: None,
+                derivation_indexes: None,
+            },
+            ProtocolType::Signing {
+                message_hash,
+                sighash_type,
+                derivation_indexes,
+            } => SessionIdInputs {
+                epoch: self.epoch,
+                nonce_id: None,
+                message_hash: Some(*message_hash),
+                sighash_type: Some(*sighash_type as u8),
+                derivation_indexes: derivation_indexes.clone(),
+            },
+        };
+        evaluate_oracle(&oracle, &input)
+    }
+
+    /// Sub-session ID for a specific dealer, derived from the session ID
+    pub fn dealer_session_id(&self, dealer: &ValidatorAddress) -> SessionId {
+        let oracle = RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DEALER);
+        evaluate_oracle(&oracle, &(self.session_id(), dealer.0))
     }
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ProtocolType {
     DkgKeyGeneration,
-    DkgKeyRotation,
+    DkgShareRotation,
     NonceGeneration(u32),
     Signing {
-        message_hash: [u8; 32],
+        message_hash: MessageHash,
         sighash_type: SighashType,
         /// Derivation path indexes for each UTXO being signed
         /// None means using the root key (no derivation)
@@ -121,7 +195,7 @@ pub enum ProtocolType {
     },
 }
 
-#[derive(Clone, Debug, Default, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SighashType {
     #[default]
     All = 0x01,
@@ -142,26 +216,49 @@ pub struct DkgOutput {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum P2PMessage {
-    Share {
-        sender: ValidatorId,
+    ShareV1 {
+        session_id: SessionId,
+        sender: ValidatorAddress,
         message: Box<avss::Message>,
     },
-    Complaint {
-        accuser: ValidatorId,
+    ComplaintV1 {
+        session_id: SessionId,
+        accuser: ValidatorAddress,
         complaint: complaint::Complaint,
     },
-    ComplaintResponse {
-        responder: ValidatorId,
+    ComplaintResponseV1 {
+        session_id: SessionId,
+        responder: ValidatorAddress,
         response: complaint::ComplaintResponse,
     },
-    Approval(MessageApproval),
+    ApprovalV1(MessageApproval),
+    DataAvailabilitySignatureV1 {
+        session_id: SessionId,
+        signer: ValidatorAddress,
+        dealer: ValidatorAddress,
+        message_hash: MessageHash,
+        signature: SignatureBytes,
+    },
+    DkgSignatureV1 {
+        session_id: SessionId,
+        signer: ValidatorAddress,
+        dealer: ValidatorAddress,
+        message_hash: MessageHash,
+        signature: SignatureBytes,
+    },
+    ShareRequestV1 {
+        session_id: SessionId,
+        requester: ValidatorAddress,
+        dealer: ValidatorAddress,
+        message_hash: MessageHash,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OrderedBroadcastMessage {
-    Certificate(DkgCertificate),
-    Presignature {
-        sender: ValidatorId,
+    CertificateV1(DkgCertificate),
+    PresignatureV1 {
+        sender: ValidatorAddress,
         session_context: SessionContext,
         data: Vec<u8>,
     },
@@ -169,20 +266,26 @@ pub enum OrderedBroadcastMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageApproval {
-    pub message_hash: [u8; 32],
-    pub approver: ValidatorId,
+    pub message_hash: MessageHash,
+    pub approver: ValidatorAddress,
     // TODO: Will be replaced with proper signature type when certificate management is implemented.
-    pub signature: Vec<u8>,
+    pub signature: SignatureBytes,
     pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorSignature {
+    pub validator: ValidatorAddress,
+    pub signature: SignatureBytes,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgCertificate {
-    pub message_hash: [u8; 32],
-    pub approvals: Vec<MessageApproval>,
-    pub message_type: MessageType,
+    pub dealer: ValidatorAddress,
+    pub message_hash: MessageHash,
+    pub data_availability_signatures: Vec<ValidatorSignature>,
+    pub dkg_signatures: Vec<ValidatorSignature>,
     pub session_context: SessionContext,
-    pub sender: ValidatorId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -194,9 +297,9 @@ pub enum MessageType {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgProtocolState {
-    pub received_messages: BTreeMap<ValidatorId, avss::Message>,
-    pub processed_shares: BTreeMap<ValidatorId, avss::SharesForNode>,
-    pub processed_commitments: BTreeMap<ValidatorId, Vec<Eval<G>>>,
+    pub received_messages: BTreeMap<ValidatorAddress, avss::Message>,
+    pub processed_shares: BTreeMap<ValidatorAddress, avss::SharesForNode>,
+    pub processed_commitments: BTreeMap<ValidatorAddress, Vec<Eval<G>>>,
     pub complaints: Vec<complaint::Complaint>,
     pub complaint_responses: Vec<complaint::ComplaintResponse>,
     pub certificates: Vec<DkgCertificate>,
@@ -213,7 +316,10 @@ pub enum DkgError {
     NotEnoughParticipants { expected: usize, got: usize },
 
     #[error("Invalid message from {sender}: {reason}")]
-    InvalidMessage { sender: ValidatorId, reason: String },
+    InvalidMessage {
+        sender: ValidatorAddress,
+        reason: String,
+    },
 
     #[error("Protocol timeout after {seconds} seconds")]
     Timeout { seconds: u64 },
@@ -254,7 +360,7 @@ mod tests {
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
         ValidatorInfo {
-            id: ValidatorId([party_id as u8; 32]),
+            address: ValidatorAddress([party_id as u8; 32]),
             party_id,
             weight,
             ecies_public_key: public_key,
@@ -349,22 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_config_get_validator() {
-        let validators = (0..3).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 2, 0).unwrap();
-
-        // Test finding existing validator
-        let validator_id = ValidatorId([0; 32]);
-        let validator = config.get_validator(&validator_id);
-        assert!(validator.is_some());
-        assert_eq!(validator.unwrap().party_id, 0);
-
-        // Test finding non-existent validator
-        let unknown_id = ValidatorId([99; 32]);
-        assert!(config.get_validator(&unknown_id).is_none());
-    }
-
-    #[test]
     fn test_optimal_byzantine_tolerance() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
         let config = DkgConfig::new(100, validators, 3, 2);
@@ -372,42 +462,79 @@ mod tests {
     }
 
     #[test]
-    fn test_session_context_serialization() {
-        let ctx = SessionContext::new(42, ProtocolType::DkgKeyGeneration, 1);
+    fn test_required_data_availability_signatures() {
+        let validators: Vec<ValidatorInfo> = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators.clone(), 3, 2).unwrap();
 
-        // Test that to_bytes works (uses BCS internally)
-        let bytes = ctx.to_bytes();
-        assert!(!bytes.is_empty());
+        assert_eq!(config.required_data_availability_signatures(), 5);
+    }
 
-        // Test that we can deserialize it back
-        let deserialized: SessionContext =
-            bcs::from_bytes(&bytes).expect("Should be able to deserialize SessionContext");
-        assert_eq!(deserialized.epoch, ctx.epoch);
-        assert_eq!(deserialized.protocol_type, ctx.protocol_type);
-        assert_eq!(deserialized.round, ctx.round);
-        assert_eq!(deserialized.nonce, ctx.nonce);
+    #[test]
+    fn test_required_dkg_signatures() {
+        let validators: Vec<ValidatorInfo> = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config1 = DkgConfig::new(100, validators.clone(), 3, 2).unwrap();
+
+        assert_eq!(config1.required_dkg_signatures(), 5);
     }
 
     #[test]
     fn test_session_context_deterministic_serialization() {
         let epoch = 100;
         let protocol_type = ProtocolType::DkgKeyGeneration;
-        let round = 5;
-        let nonce = [1; 16];
-
+        let chain_id = "testnet".to_string();
         let ctx1 = SessionContext {
             epoch,
             protocol_type: protocol_type.clone(),
-            round,
-            nonce,
+            chain_id: chain_id.clone(),
         };
         let ctx2 = SessionContext {
             epoch,
             protocol_type,
-            round,
-            nonce,
+            chain_id,
         };
 
-        assert_eq!(ctx1.to_bytes(), ctx2.to_bytes());
+        assert_eq!(ctx1.session_id(), ctx2.session_id());
+    }
+
+    #[test]
+    fn test_session_id_different_for_different_protocols() {
+        let epoch = 100;
+        let chain_id = "testnet".to_string();
+
+        let dkg_ctx = SessionContext::new(epoch, ProtocolType::DkgKeyGeneration, chain_id.clone());
+        let rotation_ctx =
+            SessionContext::new(epoch, ProtocolType::DkgShareRotation, chain_id.clone());
+        let nonce_ctx =
+            SessionContext::new(epoch, ProtocolType::NonceGeneration(1), chain_id.clone());
+
+        assert_ne!(dkg_ctx.session_id(), rotation_ctx.session_id());
+        assert_ne!(dkg_ctx.session_id(), nonce_ctx.session_id());
+        assert_ne!(rotation_ctx.session_id(), nonce_ctx.session_id());
+    }
+
+    #[test]
+    fn test_session_id_different_chains() {
+        let epoch = 100;
+        let protocol_type = ProtocolType::DkgKeyGeneration;
+        let mainnet_ctx = SessionContext::new(epoch, protocol_type.clone(), "mainnet".to_string());
+        let testnet_ctx = SessionContext::new(epoch, protocol_type, "testnet".to_string());
+
+        assert_ne!(mainnet_ctx.session_id(), testnet_ctx.session_id());
+    }
+
+    #[test]
+    fn test_dealer_session_serialization() {
+        let ctx = SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+        let dealer1 = ValidatorAddress([1; 32]);
+        let dealer2 = ValidatorAddress([2; 32]);
+        let dealer1_session = ctx.dealer_session_id(&dealer1);
+        let dealer2_session = ctx.dealer_session_id(&dealer2);
+
+        // Different dealers should have different sub-session IDs
+        assert_ne!(dealer1_session, dealer2_session);
+
+        // Same dealer should produce same session ID
+        let dealer1_session2 = ctx.dealer_session_id(&dealer1);
+        assert_eq!(dealer1_session, dealer1_session2);
     }
 }
