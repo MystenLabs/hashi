@@ -1,5 +1,6 @@
 //! DKG-specific protocol interfaces
 
+use crate::communication;
 use crate::dkg::types::{
     DkgOutput, DkgProtocolState, DkgResult, OrderedBroadcastMessage, P2PMessage, SessionContext,
 };
@@ -7,10 +8,10 @@ use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
-pub type P2PChannel = dyn crate::communication::P2PChannel<P2PMessage>;
+pub type P2PChannel = dyn communication::P2PChannel<P2PMessage>;
 
 pub type OrderedBroadcastChannel =
-    dyn crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>;
+    dyn communication::OrderedBroadcastChannel<OrderedBroadcastMessage>;
 
 #[async_trait]
 pub trait DkgStorage: Send + Sync {
