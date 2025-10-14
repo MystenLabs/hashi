@@ -123,12 +123,6 @@ struct SessionIdInputs {
     derivation_indexes: Option<Vec<u32>>,
 }
 
-#[derive(Serialize)]
-struct DealerSessionInputs {
-    session_context: SessionContext,
-    dealer_address: [u8; 32],
-}
-
 impl SessionContext {
     pub fn new(epoch: u64, protocol_type: ProtocolType, chain_id: String) -> Self {
         Self {
@@ -170,16 +164,10 @@ impl SessionContext {
         evaluate_oracle(&oracle, &input)
     }
 
-    /// Sub-session ID for a specific dealer
+    /// Sub-session ID for a specific dealer, derived from the session ID
     pub fn dealer_session_id(&self, dealer: &ValidatorAddress) -> SessionId {
-        let oracle = base_oracle(&self.protocol_type)
-            .extend(&self.chain_id)
-            .extend("dealer");
-        let input = DealerSessionInputs {
-            session_context: self.clone(),
-            dealer_address: dealer.0,
-        };
-        evaluate_oracle(&oracle, &input)
+        let oracle = RandomOracle::new("hashi").extend("dealer");
+        evaluate_oracle(&oracle, &(self.session_id(), dealer.0))
     }
 }
 
