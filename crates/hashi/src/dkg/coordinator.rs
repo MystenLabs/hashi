@@ -78,17 +78,12 @@ pub struct DkgCoordinator<P, O, S: DkgStorage> {
     pub p2p_channel: P,
     pub ordered_broadcast_channel: Option<O>,
     pub storage: Option<S>,
-    /// Raw AVSS messages as received from other validators
     pub received_messages: BTreeMap<ValidatorAddress, avss::Message>,
     ///  Decrypted and validated shares after processing received messages
     pub processed_shares: BTreeMap<ValidatorAddress, avss::SharesForNode>,
-    ///  Commitments from each validator
     pub processed_commitments: BTreeMap<ValidatorAddress, Vec<Eval<G>>>,
-    /// Data availability signatures for each dealer
     pub data_availability_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
-    /// DKG signatures for each dealer
     pub dkg_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
-    /// Approvals for shares
     pub share_approvals: BTreeMap<ValidatorAddress, HashSet<ValidatorAddress>>,
 }
 
