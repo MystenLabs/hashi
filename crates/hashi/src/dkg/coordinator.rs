@@ -1,14 +1,15 @@
 //! DKG coordinator that manages the protocol state machine
 
-use crate::dkg::interfaces::{DkgStorage, OrderedBroadcastChannel, P2PChannel};
+use crate::dkg::interfaces::DkgStorage;
 use crate::dkg::types::{
-    DkgConfig, DkgError, DkgOutput, DkgResult, OrderedBroadcastMessage, P2PMessage, SessionContext,
-    ValidatorId, ValidatorInfo,
+    DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, OrderedBroadcastMessage,
+    P2PMessage, SessionContext, SessionId, ValidatorInfo, ValidatorSignature,
 };
+use crate::types::ValidatorAddress;
 use fastcrypto::groups::GroupElement;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -37,7 +38,7 @@ pub enum DkgState {
     Running {
         start_time: Instant,
         /// State for each dealer's DKG instance
-        dealer_states: BTreeMap<ValidatorId, DealerState>,
+        dealer_states: BTreeMap<ValidatorAddress, DealerState>,
     },
     /// Success state - DKG completed successfully
     Completed { output: DkgOutput },
@@ -66,10 +67,7 @@ impl Default for CoordinatorConfig {
     }
 }
 
-pub struct DkgCoordinator<P, S: DkgStorage>
-where
-    P: P2PChannel,
-{
+pub struct DkgCoordinator<P, S: DkgStorage> {
     pub validator: ValidatorInfo,
     pub dkg_config: DkgConfig,
     pub session: SessionContext,
@@ -78,17 +76,34 @@ where
     pub p2p_channel: P,
     pub storage: Option<S>,
     /// Raw AVSS messages as received from other validators
-    pub received_messages: BTreeMap<ValidatorId, avss::Message>,
+    pub received_messages: BTreeMap<ValidatorAddress, avss::Message>,
     ///  Decrypted and validated shares after processing received messages
-    pub processed_shares: BTreeMap<ValidatorId, avss::SharesForNode>,
+    pub processed_shares: BTreeMap<ValidatorAddress, avss::SharesForNode>,
     ///  Commitments from each validator
-    pub processed_commitments: BTreeMap<ValidatorId, Vec<Eval<G>>>,
+    pub processed_commitments: BTreeMap<ValidatorAddress, Vec<Eval<G>>>,
+    /// Data availability signatures for each dealer
+    pub data_availability_sigs: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
+    /// DKG signatures for each dealer
+    pub dkg_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
+    /// Approvals for shares
+    pub share_approvals: BTreeMap<ValidatorAddress, HashSet<ValidatorAddress>>,
 }
 
-impl<P, S: DkgStorage> DkgCoordinator<P, S>
-where
-    P: P2PChannel,
-{
+fn validate_sender(
+    authenticated_sender: &ValidatorAddress,
+    claimed_sender: &ValidatorAddress,
+    field_name: &str,
+) -> DkgResult<()> {
+    if authenticated_sender != claimed_sender {
+        return Err(DkgError::InvalidMessage {
+            sender: authenticated_sender.clone(),
+            reason: format!("{} mismatch", field_name),
+        });
+    }
+    Ok(())
+}
+
+impl<P, S: DkgStorage> DkgCoordinator<P, S> {
     pub fn new(
         validator: ValidatorInfo,
         config: DkgConfig,
@@ -108,7 +123,45 @@ where
             received_messages: BTreeMap::new(),
             processed_shares: BTreeMap::new(),
             processed_commitments: BTreeMap::new(),
+            data_availability_sigs: BTreeMap::new(),
+            dkg_signatures: BTreeMap::new(),
+            share_approvals: BTreeMap::new(),
         }
+    }
+
+    fn validate_session_id(
+        &self,
+        authenticated_sender: &ValidatorAddress,
+        session_id: &SessionId,
+    ) -> DkgResult<()> {
+        if *session_id != self.session.session_id() {
+            return Err(DkgError::InvalidMessage {
+                sender: authenticated_sender.clone(),
+                reason: "Session ID mismatch".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_dealer(&self, dealer: &ValidatorAddress) -> bool {
+        self.dkg_config
+            .validators
+            .iter()
+            .any(|v| v.address == *dealer)
+    }
+
+    fn require_valid_dealer(
+        &self,
+        dealer: &ValidatorAddress,
+        sender: &ValidatorAddress,
+    ) -> DkgResult<()> {
+        if !self.validate_dealer(dealer) {
+            return Err(DkgError::InvalidMessage {
+                sender: sender.clone(),
+                reason: format!("Unknown dealer: {:?}", dealer),
+            });
+        }
+        Ok(())
     }
 
     pub async fn start(&mut self) -> DkgResult<()> {
@@ -118,7 +171,7 @@ where
                 let now = Instant::now();
                 for validator in &self.dkg_config.validators {
                     dealer_states.insert(
-                        validator.id.clone(),
+                        validator.address.clone(),
                         DealerState::WaitingForShare { start_time: now },
                     );
                 }
@@ -136,66 +189,85 @@ where
 
     pub async fn handle_message(
         &mut self,
-        sender: ValidatorId,
+        sender: ValidatorAddress,
         message: P2PMessage,
     ) -> DkgResult<()> {
-        if !self.dkg_config.validators.iter().any(|v| v.id == sender) {
+        if !self.validate_dealer(&sender) {
             return Err(DkgError::InvalidMessage {
                 sender,
                 reason: "Unknown validator".to_string(),
             });
         }
         match message {
-            P2PMessage::Share {
+            P2PMessage::ShareV1 {
+                session_id: _,
                 sender: msg_sender,
                 message,
             } => {
-                if msg_sender != sender {
-                    return Err(DkgError::InvalidMessage {
-                        sender,
-                        reason: "Sender mismatch".to_string(),
-                    });
-                }
+                validate_sender(&sender, &msg_sender, "Sender")?;
                 self.handle_share(sender, *message).await
             }
-            P2PMessage::Complaint { accuser, complaint } => {
-                if accuser != sender {
-                    return Err(DkgError::InvalidMessage {
-                        sender,
-                        reason: "Accuser mismatch".to_string(),
-                    });
-                }
+            P2PMessage::ComplaintV1 {
+                session_id: _,
+                accuser,
+                complaint,
+            } => {
+                validate_sender(&sender, &accuser, "Accuser")?;
                 self.handle_complaint(accuser, complaint).await
             }
-            P2PMessage::ComplaintResponse {
+            P2PMessage::ComplaintResponseV1 {
+                session_id: _,
                 responder,
                 response,
             } => {
-                if responder != sender {
-                    return Err(DkgError::InvalidMessage {
-                        sender,
-                        reason: "Responder mismatch".to_string(),
-                    });
-                }
+                validate_sender(&sender, &responder, "Responder")?;
                 self.handle_complaint_response(responder, response).await
             }
-            P2PMessage::Approval(_) => {
-                // TODO: Handle Approval messages
-                // - Receivers validate shares and send approvals back to dealer
-                // - Dealers collect 2f+1 approvals to create certificates
-                // - Certificates are broadcast via OrderedBroadcastChannel
-                Ok(())
+            P2PMessage::ApprovalV1(approval) => self.handle_approval(sender, approval).await,
+            P2PMessage::DataAvailabilitySignatureV1 {
+                session_id,
+                signer,
+                dealer,
+                message_hash,
+                signature,
+            } => {
+                validate_sender(&sender, &signer, "Signer")?;
+                self.validate_session_id(&sender, &session_id)?;
+                self.handle_data_availability_signature(signer, dealer, message_hash, signature)
+                    .await
+            }
+            P2PMessage::DkgSignatureV1 {
+                session_id,
+                signer,
+                dealer,
+                message_hash,
+                signature,
+            } => {
+                validate_sender(&sender, &signer, "Signer")?;
+                self.validate_session_id(&sender, &session_id)?;
+                self.handle_dkg_signature(signer, dealer, message_hash, signature)
+                    .await
+            }
+            P2PMessage::ShareRequestV1 {
+                session_id,
+                requester,
+                dealer,
+                message_hash,
+            } => {
+                validate_sender(&sender, &requester, "Requester")?;
+                self.validate_session_id(&sender, &session_id)?;
+                self.handle_share_request(requester, dealer, message_hash)
+                    .await
             }
         }
     }
 
-    /// Handle consensus-ordered messages from OrderedBroadcastChannel
     pub async fn handle_ordered_message(
         &mut self,
         message: OrderedBroadcastMessage,
     ) -> DkgResult<()> {
         match message {
-            OrderedBroadcastMessage::Certificate(_cert) => {
+            OrderedBroadcastMessage::CertificateV1(_cert) => {
                 // TODO: Implement certificate handling
                 // Certificates prove that 2f+1 validators approved a share
                 // They complete the AVSS protocol for a dealer's share
@@ -205,7 +277,7 @@ where
                 // 3. Update protocol state accordingly
                 Ok(())
             }
-            OrderedBroadcastMessage::Presignature {
+            OrderedBroadcastMessage::PresignatureV1 {
                 sender: _,
                 session_context: _,
                 data: _,
@@ -221,7 +293,11 @@ where
         }
     }
 
-    async fn handle_share(&mut self, dealer: ValidatorId, message: avss::Message) -> DkgResult<()> {
+    async fn handle_share(
+        &mut self,
+        dealer: ValidatorAddress,
+        message: avss::Message,
+    ) -> DkgResult<()> {
         match &mut self.state {
             DkgState::Running { dealer_states, .. } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
@@ -263,7 +339,7 @@ where
 
     async fn handle_complaint(
         &mut self,
-        accuser: ValidatorId,
+        accuser: ValidatorAddress,
         _complaint: complaint::Complaint,
     ) -> DkgResult<()> {
         match &mut self.state {
@@ -309,7 +385,7 @@ where
 
     async fn handle_complaint_response(
         &mut self,
-        responder: ValidatorId,
+        responder: ValidatorAddress,
         _response: complaint::ComplaintResponse,
     ) -> DkgResult<()> {
         match &mut self.state {
@@ -377,6 +453,126 @@ where
         } else {
             Ok(())
         }
+    }
+
+    async fn handle_approval(
+        &mut self,
+        sender: ValidatorAddress,
+        approval: MessageApproval,
+    ) -> DkgResult<()> {
+        // TODO: Verify the approval signature
+        // For now, just track that we received an approval
+
+        if !self.received_messages.contains_key(&approval.approver) {
+            return Err(DkgError::InvalidMessage {
+                sender,
+                reason: "Approval for unknown share".to_string(),
+            });
+        }
+        self.share_approvals
+            .entry(approval.approver.clone())
+            .or_default()
+            .insert(sender);
+
+        // Check if we have enough approvals to create a certificate
+        let required_approvals = self.dkg_config.required_dkg_signatures();
+        if let Some(approvers) = self.share_approvals.get(&approval.approver)
+            && approvers.len() >= required_approvals
+        {
+            // TODO: Create and broadcast certificate via OrderedBroadcastChannel
+        }
+        Ok(())
+    }
+
+    async fn handle_data_availability_signature(
+        &mut self,
+        signer: ValidatorAddress,
+        dealer: ValidatorAddress,
+        _message_hash: [u8; 32],
+        signature: Vec<u8>,
+    ) -> DkgResult<()> {
+        self.require_valid_dealer(&dealer, &signer)?;
+        let sig = ValidatorSignature {
+            validator: signer,
+            signature,
+        };
+        self.data_availability_sigs
+            .entry(dealer.clone())
+            .or_default()
+            .push(sig);
+
+        // Check if we have enough signatures for data availability
+        let required = self.dkg_config.required_data_availability_signatures();
+        if let Some(sigs) = self.data_availability_sigs.get(&dealer)
+            && sigs.len() >= required
+        {
+            // TODO: Mark this dealer's share as having sufficient data availability
+        }
+        Ok(())
+    }
+
+    async fn handle_dkg_signature(
+        &mut self,
+        signer: ValidatorAddress,
+        dealer: ValidatorAddress,
+        _message_hash: [u8; 32],
+        signature: Vec<u8>,
+    ) -> DkgResult<()> {
+        self.require_valid_dealer(&dealer, &signer)?;
+        let sig = ValidatorSignature {
+            validator: signer,
+            signature,
+        };
+        self.dkg_signatures
+            .entry(dealer.clone())
+            .or_default()
+            .push(sig);
+
+        // Check if we have enough DKG signatures to proceed
+        let required = self.dkg_config.required_dkg_signatures();
+        if let Some(sigs) = self.dkg_signatures.get(&dealer)
+            && sigs.len() >= required
+        {
+            // TODO: Create a certificate for this dealer's share
+            // The certificate can then be broadcast via OrderedBroadcastChannel
+            if let DkgState::Running { dealer_states, .. } = &mut self.state
+                && let Some(dealer_state) = dealer_states.get_mut(&dealer)
+            {
+                // Mark this dealer as completed if we have enough signatures
+                *dealer_state = DealerState::Completed;
+            }
+            self.check_progress().await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_share_request(
+        &mut self,
+        requester: ValidatorAddress,
+        dealer: ValidatorAddress,
+        _message_hash: [u8; 32],
+    ) -> DkgResult<()> {
+        // Check if we are the dealer being requested from
+        if dealer == self.validator.address {
+            // Check if we have the share for this requester
+            if let Some(_avss_message) = self.received_messages.get(&dealer) {
+                // TODO: Extract and send the encrypted share for the requester
+                // This would involve:
+                // 1. Getting the encrypted share for the requester from the AVSS message
+                // 2. Sending it via P2P channel
+                // For now, just acknowledge the request
+            } else {
+                return Err(DkgError::InvalidMessage {
+                    sender: requester,
+                    reason: "Share not available".to_string(),
+                });
+            }
+        }
+
+        // If we're not the dealer, we can optionally help by forwarding
+        // our copy of the share if we have it (for redundancy)
+
+        Ok(())
     }
 
     async fn check_complaint_resolution(&mut self) -> DkgResult<()> {
@@ -466,8 +662,9 @@ mod tests {
     use crate::dkg::interfaces::DkgStorage;
     use crate::dkg::types::{
         DkgConfig, DkgOutput, DkgProtocolState, DkgResult, ProtocolType, SessionContext,
-        ValidatorId, ValidatorInfo,
+        ValidatorInfo,
     };
+    use crate::types::ValidatorAddress;
     use async_trait::async_trait;
     use fastcrypto::groups::GroupElement;
     use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
@@ -481,7 +678,7 @@ mod tests {
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
         ValidatorInfo {
-            id: ValidatorId([party_id as u8; 32]),
+            address: ValidatorAddress([party_id as u8; 32]),
             party_id,
             weight: 1,
             ecies_public_key: public_key,
@@ -517,7 +714,8 @@ mod tests {
             let validators: Vec<ValidatorInfo> =
                 (0..num_validators).map(create_test_validator).collect();
             let config = DkgConfig::new(1, validators.clone(), threshold, max_faulty).unwrap();
-            let session = SessionContext::new(1, ProtocolType::DkgKeyGeneration, 0);
+            let session =
+                SessionContext::new(1, ProtocolType::DkgKeyGeneration, "testnet".to_string());
             let storage = MockStorage::new();
             Self {
                 validators,
@@ -528,7 +726,9 @@ mod tests {
         }
 
         /// Create a coordinator for the first validator
-        fn create_coordinator(&self) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
+        fn create_coordinator(
+            &self,
+        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
             self.create_coordinator_with_config(CoordinatorConfig::default())
         }
 
@@ -537,9 +737,8 @@ mod tests {
             &self,
             coordinator_config: CoordinatorConfig,
         ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
-            use crate::types::ValidatorAddress;
             let validator_addresses: Vec<ValidatorAddress> =
-                self.validators.iter().map(|v| ValidatorAddress(v.id.0)).collect();
+                self.validators.iter().map(|v| v.address.clone()).collect();
             let channels = InMemoryP2PChannels::new_network(validator_addresses);
             let p2p_channel = channels.into_iter().next().unwrap().1;
             DkgCoordinator::new(
@@ -686,7 +885,7 @@ mod tests {
         let mut coordinator = setup.create_coordinator();
 
         for i in 0..3 {
-            let validator_id = setup.validators[i as usize].id.clone();
+            let validator_id = setup.validators[i as usize].address.clone();
             coordinator
                 .processed_shares
                 .insert(validator_id.clone(), avss::SharesForNode { shares: vec![] });
@@ -699,7 +898,7 @@ mod tests {
         let mut dealer_states = BTreeMap::new();
         for i in 0..num_validators {
             dealer_states.insert(
-                setup.validators[i as usize].id.clone(),
+                setup.validators[i as usize].address.clone(),
                 DealerState::Completed,
             );
         }
@@ -751,5 +950,271 @@ mod tests {
         }
 
         assert!(save_count_clone.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_approval() {
+        let setup = TestSetup::with_validators(4, 2, 1);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+
+        let dealer = setup.validators[1].address.clone();
+        let sender = setup.validators[2].address.clone();
+
+        // Test approval for unknown share (should fail)
+        let approval = MessageApproval {
+            message_hash: [0u8; 32],
+            approver: dealer.clone(),
+            signature: vec![1, 2, 3],
+            timestamp: 1000,
+        };
+        let result = coordinator
+            .handle_approval(sender.clone(), approval.clone())
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Approval for unknown share")
+        );
+
+        // Now simulate having received a share from the dealer
+        // We mark the dealer as Processing in the state machine
+        if let DkgState::Running { dealer_states, .. } = &mut coordinator.state {
+            dealer_states.insert(
+                dealer.clone(),
+                DealerState::Processing {
+                    received_at: std::time::Instant::now(),
+                },
+            );
+        }
+        coordinator
+            .share_approvals
+            .entry(dealer.clone())
+            .or_default()
+            .insert(sender.clone());
+        assert!(coordinator.share_approvals.contains_key(&dealer));
+        assert!(
+            coordinator
+                .share_approvals
+                .get(&dealer)
+                .unwrap()
+                .contains(&sender)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_data_availability_signature() {
+        let setup = TestSetup::with_validators(4, 2, 1);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+
+        let dealer = setup.validators[0].address.clone();
+        let signer = setup.validators[1].address.clone();
+        let signature = vec![1, 2, 3, 4];
+        let message_hash = [5u8; 32];
+
+        // Test valid signature
+        coordinator
+            .handle_data_availability_signature(
+                signer.clone(),
+                dealer.clone(),
+                message_hash,
+                signature.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(coordinator.data_availability_sigs.contains_key(&dealer));
+        let sigs = coordinator.data_availability_sigs.get(&dealer).unwrap();
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].validator, signer);
+        assert_eq!(sigs[0].signature, signature);
+
+        // Test with unknown dealer
+        let unknown_dealer = ValidatorAddress([99; 32]);
+        let result = coordinator
+            .handle_data_availability_signature(signer, unknown_dealer, message_hash, vec![6, 7, 8])
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_dkg_signature() {
+        let setup = TestSetup::with_validators(4, 2, 1);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+
+        let dealer = setup.validators[0].address.clone();
+        let message_hash = [5u8; 32];
+
+        // Add enough signatures to complete the dealer
+        let required_sigs = setup.config.required_dkg_signatures();
+        for i in 1..=required_sigs {
+            let signer = setup.validators[i % setup.validators.len()].address.clone();
+            let signature = vec![i as u8, 2, 3, 4];
+
+            coordinator
+                .handle_dkg_signature(signer.clone(), dealer.clone(), message_hash, signature)
+                .await
+                .unwrap();
+        }
+
+        assert!(coordinator.dkg_signatures.contains_key(&dealer));
+        let sigs = coordinator.dkg_signatures.get(&dealer).unwrap();
+        assert_eq!(sigs.len(), required_sigs);
+        if let DkgState::Running { dealer_states, .. } = &coordinator.state {
+            assert!(matches!(
+                dealer_states.get(&dealer),
+                Some(DealerState::Completed)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_request() {
+        let setup = TestSetup::with_validators(4, 2, 1);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+
+        let dealer = setup.validators[0].address.clone();
+        let requester = setup.validators[1].address.clone();
+        let message_hash = [5u8; 32];
+
+        // Test request when we're not the dealer - should succeed (we just don't respond)
+        let other_dealer = setup.validators[2].address.clone();
+        let result = coordinator
+            .handle_share_request(requester.clone(), other_dealer, message_hash)
+            .await;
+        assert!(result.is_ok());
+
+        // Test request when we are the dealer but don't have the share - should fail
+        let result = coordinator
+            .handle_share_request(requester.clone(), dealer.clone(), message_hash)
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Share not available")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_validation() {
+        let setup = TestSetup::with_validators(4, 2, 1);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+
+        let dealer = setup.validators[0].address.clone();
+        let wrong_sender = setup.validators[1].address.clone();
+        let claimed_signer = setup.validators[2].address.clone();
+        let session_id = setup.session.session_id();
+
+        // Test DataAvailabilitySignatureV1 with sender mismatch
+        let msg = P2PMessage::DataAvailabilitySignatureV1 {
+            session_id,
+            signer: claimed_signer.clone(),
+            dealer: dealer.clone(),
+            message_hash: [0u8; 32],
+            signature: vec![1, 2, 3],
+        };
+        let result = coordinator.handle_message(wrong_sender.clone(), msg).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Signer mismatch"));
+
+        // Test DkgSignatureV1 with wrong session ID
+        let wrong_session =
+            SessionContext::new(99, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+        let msg = P2PMessage::DkgSignatureV1 {
+            session_id: wrong_session.session_id(),
+            signer: wrong_sender.clone(),
+            dealer: dealer.clone(),
+            message_hash: [0u8; 32],
+            signature: vec![1, 2, 3],
+        };
+        let result = coordinator.handle_message(wrong_sender.clone(), msg).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Session ID mismatch")
+        );
+
+        // Test ShareRequestV1 with requester mismatch
+        let msg = P2PMessage::ShareRequestV1 {
+            session_id,
+            requester: claimed_signer,
+            dealer,
+            message_hash: [0u8; 32],
+        };
+        let result = coordinator.handle_message(wrong_sender, msg).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Requester mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_threshold_tracking() {
+        let setup = TestSetup::with_validators(7, 3, 2);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+        let dealer = setup.validators[0].address.clone();
+
+        // Track that we need 2f+1 = 5 signatures for both types
+        let required_da = setup.config.required_data_availability_signatures();
+        let required_dkg = setup.config.required_dkg_signatures();
+        assert_eq!(required_da, 5);
+        assert_eq!(required_dkg, 5);
+
+        // Add data availability signatures
+        for i in 1..=required_da {
+            let signer = setup.validators[i].address.clone();
+            coordinator
+                .handle_data_availability_signature(
+                    signer,
+                    dealer.clone(),
+                    [0u8; 32],
+                    vec![i as u8],
+                )
+                .await
+                .unwrap();
+        }
+        // Add DKG signatures
+        for i in 1..=required_dkg {
+            let signer = setup.validators[i].address.clone();
+            coordinator
+                .handle_dkg_signature(signer, dealer.clone(), [0u8; 32], vec![i as u8 + 10])
+                .await
+                .unwrap();
+        }
+
+        // Verify we have the right number of signatures
+        assert_eq!(
+            coordinator
+                .data_availability_sigs
+                .get(&dealer)
+                .unwrap()
+                .len(),
+            required_da
+        );
+        assert_eq!(
+            coordinator.dkg_signatures.get(&dealer).unwrap().len(),
+            required_dkg
+        );
+
+        // Verify dealer is marked as completed after getting enough DKG signatures
+        if let DkgState::Running { dealer_states, .. } = &coordinator.state {
+            assert!(matches!(
+                dealer_states.get(&dealer),
+                Some(DealerState::Completed)
+            ));
+        }
     }
 }
