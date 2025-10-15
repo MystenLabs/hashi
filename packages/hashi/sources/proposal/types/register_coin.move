@@ -5,48 +5,54 @@ module hashi::register_coin;
 use hashi::hashi::Hashi;
 use hashi::proposal::Proposal;
 use std::string::String;
-use std::type_name;
+use std::type_name::{Self, TypeName};
 use sui::coin_registry::CoinRegistry;
 
-const THRESHOLD: u64 = 10000;
+#[error]
+const ETypeNameMismatch: vector<u8> = b"Type name mismatch";
 
-public struct RegisterCoin<phantom T> has store, drop {
+public struct RegisterCoin has store, drop {
     decimals: u8,
     symbol: String,
     name: String,
     description: String,
     icon_url: String,
+    type_name: TypeName,
 }
 
-public fun new<T>(
+public fun new(
     decimals: u8,
     symbol: String,
     name: String,
     description: String,
     icon_url: String,
-): RegisterCoin<T> {
-    RegisterCoin<T> {
+    type_name: TypeName,
+): RegisterCoin {
+    RegisterCoin {
         decimals,
         symbol,
         name,
         description,
         icon_url,
+        type_name,
     }
 }
 
 public fun execute<T: key>(
-    self: Proposal<RegisterCoin<T>>,
+    self: Proposal<RegisterCoin>,
     hashi: &mut Hashi,
     coin_registry: &mut CoinRegistry,
     ctx: &mut TxContext,
 ) {
-    let RegisterCoin<T> {
+    let RegisterCoin {
         decimals,
         symbol,
         name,
         description,
         icon_url,
+        type_name,
     } = self.execute(hashi);
+    assert!(type_name == type_name::with_defining_ids<T>(), ETypeNameMismatch);
     hashi
         .treasury()
         .register_new_token<T>(
@@ -57,17 +63,5 @@ public fun execute<T: key>(
             description,
             icon_url,
             ctx,
-        );
-}
-
-// NOTE: This will need to be called for each coin type before the register proposal
-// of that coin type can be executed
-public fun register_proposal_type<T>(hashi: &mut Hashi) {
-    hashi
-        .config()
-        .register_proposal_type(
-            type_name::with_defining_ids<T>(),
-            THRESHOLD,
-            false,
         );
 }

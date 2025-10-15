@@ -5,7 +5,6 @@ module hashi::proposal;
 use hashi::governance_events;
 use hashi::hashi::Hashi;
 use std::string::String;
-use std::type_name;
 use sui::derived_object;
 use sui::vec_map::VecMap;
 
@@ -31,8 +30,6 @@ public struct ProposalKey<phantom T> has copy, drop, store {
 const EUnauthorizedCaller: vector<u8> = b"Caller must be a quorum voter";
 #[error]
 const EVoteAlreadyCounted: vector<u8> = b"Vote already counted";
-#[error]
-const ECallerNotCreator: vector<u8> = b"Caller must be the proposal creator";
 #[error]
 const EQuorumNotReached: vector<u8> = b"Quorum not reached";
 #[error]
@@ -100,6 +97,7 @@ public fun vote<T>(
         proposal.id.to_inner(),
         ctx.sender(),
     );
+
     if (proposal.quorum_reached(hashi)) {
         // assign sequence number
         governance_events::emit_quorum_reached_event(proposal.id.to_inner());
@@ -133,21 +131,11 @@ public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
             },
         );
 
-    let proposal_threshold = hashi
-        .config_ref()
-        .proposal_threshold(&type_name::with_defining_ids<T>());
     let total_voting_power = hashi.committee_ref().total_voting_power();
 
-    valid_voting_power * 10000 / total_voting_power >= proposal_threshold
-}
-
-public fun delete_by_creator<T: drop>(
-    proposal: Proposal<T>,
-    ctx: &mut TxContext,
-) {
-    assert!(proposal.creator == ctx.sender(), ECallerNotCreator);
-    governance_events::emit_proposal_deleted_event(proposal.id.to_inner());
-    proposal.delete();
+    valid_voting_power * 10000 / total_voting_power >= hashi
+        .config_ref()
+        .proposal_threshold_for<T>()
 }
 
 public(package) fun delete<T>(proposal: Proposal<T>): T {

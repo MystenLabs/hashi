@@ -4,9 +4,6 @@
 module hashi::deny;
 use hashi::hashi::Hashi;
 use hashi::proposal::Proposal;
-use std::type_name;
-
-const THRESHOLD: u64 = 10000;
 
 // ~~~~~~~ Errors ~~~~~~~
 #[error]
@@ -28,14 +25,4 @@ public fun execute<T: drop>(
     let Deny { proposal_id } = self.execute(hashi);
     assert!(proposal.id() == proposal_id, EProposalIdMismatch);
     proposal.delete<T>();
-}
-
-public fun register_proposal_type(hashi: &mut Hashi) {
-    hashi
-        .config()
-        .register_proposal_type(
-            type_name::with_defining_ids<Deny>(),
-            THRESHOLD,
-            false,
-        );
 }
