@@ -134,7 +134,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         }
     }
 
-    // TODO: add unit tests after all other to-do's are completed
+    // TODO: Add unit tests after all the other to-do's are completed
     pub async fn run<'a>(&'a mut self) -> DkgResult<()>
     where
         P: crate::communication::P2PChannel<P2PMessage> + 'a,
@@ -203,7 +203,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 }
             }
         }
-
         if self.is_complete() {
             Ok(())
         } else {
