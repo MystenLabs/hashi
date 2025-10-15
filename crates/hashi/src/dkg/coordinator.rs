@@ -70,11 +70,11 @@ impl Default for CoordinatorConfig {
 }
 
 pub struct DkgCoordinator<P, O, S: DkgStorage> {
-    pub validator: ValidatorInfo,
+    pub validator_info: ValidatorInfo,
     pub dkg_config: DkgConfig,
-    pub session: SessionContext,
+    pub session_context: SessionContext,
     pub coordinator_config: CoordinatorConfig,
-    pub state: DkgState,
+    pub dkg_state: DkgState,
     pub p2p_channel: P,
     pub ordered_broadcast_channel: Option<O>,
     pub storage: Option<S>,
@@ -117,11 +117,11 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         storage: Option<S>,
     ) -> Self {
         Self {
-            validator,
+            validator_info: validator,
             dkg_config: config,
-            session,
+            session_context: session,
             coordinator_config,
-            state: DkgState::Idle,
+            dkg_state: DkgState::Idle,
             p2p_channel,
             ordered_broadcast_channel,
             storage,
@@ -287,34 +287,34 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
     pub fn check_timeout(&mut self) -> bool {
         let timeout = self.coordinator_config.phase_timeout;
-        match &self.state {
+        match &self.dkg_state {
             DkgState::Running { start_time, .. } => start_time.elapsed() > timeout,
             _ => false,
         }
     }
 
     pub fn current_state(&self) -> &DkgState {
-        &self.state
+        &self.dkg_state
     }
 
     pub fn is_complete(&self) -> bool {
-        matches!(self.state, DkgState::Completed { .. })
+        matches!(self.dkg_state, DkgState::Completed { .. })
     }
 
     pub fn is_failed(&self) -> bool {
-        matches!(self.state, DkgState::Failed { .. })
+        matches!(self.dkg_state, DkgState::Failed { .. })
     }
 
     pub fn is_idle(&self) -> bool {
-        matches!(self.state, DkgState::Idle)
+        matches!(self.dkg_state, DkgState::Idle)
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self.state, DkgState::Running { .. })
+        matches!(self.dkg_state, DkgState::Running { .. })
     }
 
     async fn start(&mut self) -> DkgResult<()> {
-        match &self.state {
+        match &self.dkg_state {
             DkgState::Idle => {
                 let mut dealer_states = BTreeMap::new();
                 let now = Instant::now();
@@ -324,7 +324,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                         DealerState::WaitingForShare { start_time: now },
                     );
                 }
-                self.state = DkgState::Running {
+                self.dkg_state = DkgState::Running {
                     start_time: now,
                     dealer_states,
                 };
@@ -348,7 +348,9 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 .share_approvals
                 .iter()
                 .filter_map(|(dealer, approvers)| {
-                    if approvers.len() >= required_approvals && *dealer == self.validator.address {
+                    if approvers.len() >= required_approvals
+                        && *dealer == self.validator_info.address
+                    {
                         Some(dealer.clone())
                     } else {
                         None
@@ -377,7 +379,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                         message_hash,
                         data_availability_signatures: vec![], // TODO: Collect from data_availability_sigs
                         dkg_signatures: signatures,
-                        session_context: self.session.clone(),
+                        session_context: self.session_context.clone(),
                     };
 
                     // Publish to ordered broadcast channel
@@ -396,7 +398,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
     fn handle_timeout(&mut self) {
         if self.check_timeout()
-            && let DkgState::Running { dealer_states, .. } = &self.state
+            && let DkgState::Running { dealer_states, .. } = &self.dkg_state
         {
             let mut timed_out_dealers = Vec::new();
             for (dealer_id, dealer_state) in dealer_states.iter() {
@@ -408,14 +410,14 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             }
 
             if !timed_out_dealers.is_empty() {
-                self.state = DkgState::Failed {
+                self.dkg_state = DkgState::Failed {
                     reason: format!(
                         "Timeout waiting for shares from dealers: {:?}",
                         timed_out_dealers
                     ),
                 };
             } else {
-                self.state = DkgState::Failed {
+                self.dkg_state = DkgState::Failed {
                     reason: "Timeout in DKG protocol".to_string(),
                 };
             }
@@ -455,7 +457,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         dealer: ValidatorAddress,
         message: avss::Message,
     ) -> DkgResult<()> {
-        match &mut self.state {
+        match &mut self.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
                     match dealer_state {
@@ -499,7 +501,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         accuser: ValidatorAddress,
         _complaint: complaint::Complaint,
     ) -> DkgResult<()> {
-        match &mut self.state {
+        match &mut self.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 // TODO: Get actual dealer ID from complaint structure
                 // This is a placeholder - the actual complaint structure should identify the dealer
@@ -545,7 +547,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         responder: ValidatorAddress,
         _response: complaint::ComplaintResponse,
     ) -> DkgResult<()> {
-        match &mut self.state {
+        match &mut self.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 // TODO: Identify which dealer this response is for
                 for dealer_state in dealer_states.values_mut() {
@@ -573,7 +575,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     async fn check_progress(&mut self) -> DkgResult<()> {
-        if let DkgState::Running { dealer_states, .. } = &self.state {
+        if let DkgState::Running { dealer_states, .. } = &self.dkg_state {
             let completed_count = dealer_states
                 .values()
                 .filter(|state| matches!(state, DealerState::Completed))
@@ -596,15 +598,15 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 public_key,
                 key_shares,
                 commitments: vec![],
-                session_context: self.session.clone(),
+                session_context: self.session_context.clone(),
             };
-            self.state = DkgState::Completed {
+            self.dkg_state = DkgState::Completed {
                 output: output.clone(),
             };
             if let Some(storage) = &self.storage
                 && self.coordinator_config.enable_persistence
             {
-                storage.save_output(&self.session, &output).await?;
+                storage.save_output(&self.session_context, &output).await?;
             }
             Ok(())
         } else {
@@ -635,7 +637,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         let required_approvals = self.dkg_config.required_dkg_signatures();
         if let Some(approvers) = self.share_approvals.get(&approval.approver)
             && approvers.len() >= required_approvals
-            && approval.approver == self.validator.address
+            && approval.approver == self.validator_info.address
         {
             // TODO: Create and publish certificate via OrderedBroadcastChannel
             // This will be called from the run() method where we have the trait bound
@@ -695,7 +697,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         {
             // TODO: Create a certificate for this dealer's share
             // The certificate can then be broadcast via OrderedBroadcastChannel
-            if let DkgState::Running { dealer_states, .. } = &mut self.state
+            if let DkgState::Running { dealer_states, .. } = &mut self.dkg_state
                 && let Some(dealer_state) = dealer_states.get_mut(&dealer)
             {
                 // Mark this dealer as completed if we have enough signatures
@@ -713,7 +715,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         _message_hash: [u8; 32],
     ) -> DkgResult<()> {
         // Check if we are the dealer being requested from
-        if dealer == self.validator.address {
+        if dealer == self.validator_info.address {
             // Check if we have the share for this requester
             if let Some(_avss_message) = self.received_messages.get(&dealer) {
                 // TODO: Extract and send the encrypted share for the requester
@@ -737,7 +739,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
     async fn check_complaint_resolution(&mut self) -> DkgResult<()> {
         // TODO: Implement the actual complaint verification when adding complaint handling for all protocols
-        if let DkgState::Running { dealer_states, .. } = &mut self.state {
+        if let DkgState::Running { dealer_states, .. } = &mut self.dkg_state {
             // Check if any dealers are still in complaint handling with sufficient responses
             for dealer_state in dealer_states.values_mut() {
                 if let DealerState::ComplaintHandling { response_count, .. } = dealer_state
@@ -763,7 +765,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         authenticated_sender: &ValidatorAddress,
         session_id: &SessionId,
     ) -> DkgResult<()> {
-        if *session_id != self.session.session_id() {
+        if *session_id != self.session_context.session_id() {
             return Err(DkgError::InvalidMessage {
                 sender: authenticated_sender.clone(),
                 reason: "Session ID mismatch".to_string(),
@@ -1042,17 +1044,17 @@ mod tests {
                 DealerState::Completed,
             );
         }
-        coordinator.state = DkgState::Running {
+        coordinator.dkg_state = DkgState::Running {
             start_time: Instant::now(),
             dealer_states,
         };
 
         // Check progress should transition to Completed
         coordinator.check_progress().await.unwrap();
-        assert!(matches!(coordinator.state, DkgState::Completed { .. }));
+        assert!(matches!(coordinator.dkg_state, DkgState::Completed { .. }));
 
         // Verify output has correct session context
-        if let DkgState::Completed { output } = &coordinator.state {
+        if let DkgState::Completed { output } = &coordinator.dkg_state {
             assert_eq!(output.session_context.epoch, setup.session.epoch);
         }
     }
@@ -1121,7 +1123,7 @@ mod tests {
 
         // Now simulate having received a share from the dealer
         // We mark the dealer as Processing in the state machine
-        if let DkgState::Running { dealer_states, .. } = &mut coordinator.state {
+        if let DkgState::Running { dealer_states, .. } = &mut coordinator.dkg_state {
             dealer_states.insert(
                 dealer.clone(),
                 DealerState::Processing {
@@ -1210,7 +1212,7 @@ mod tests {
         assert!(coordinator.dkg_signatures.contains_key(&dealer));
         let sigs = coordinator.dkg_signatures.get(&dealer).unwrap();
         assert_eq!(sigs.len(), required_sigs);
-        if let DkgState::Running { dealer_states, .. } = &coordinator.state {
+        if let DkgState::Running { dealer_states, .. } = &coordinator.dkg_state {
             assert!(matches!(
                 dealer_states.get(&dealer),
                 Some(DealerState::Completed)
@@ -1357,7 +1359,7 @@ mod tests {
         );
 
         // Verify dealer is marked as completed after getting enough DKG signatures
-        if let DkgState::Running { dealer_states, .. } = &coordinator.state {
+        if let DkgState::Running { dealer_states, .. } = &coordinator.dkg_state {
             assert!(matches!(
                 dealer_states.get(&dealer),
                 Some(DealerState::Completed)
