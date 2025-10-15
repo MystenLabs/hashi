@@ -1,5 +1,6 @@
 //! DKG coordinator that manages the protocol state machine
 
+use crate::communication::{AuthenticatedMessage, ChannelError};
 use crate::dkg::interfaces::DkgStorage;
 use crate::dkg::types::{
     DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, OrderedBroadcastMessage,
@@ -11,6 +12,7 @@ use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
+use tokio::select;
 
 #[derive(Debug, Clone)]
 pub enum DealerState {
@@ -67,13 +69,14 @@ impl Default for CoordinatorConfig {
     }
 }
 
-pub struct DkgCoordinator<P, S: DkgStorage> {
+pub struct DkgCoordinator<P, O, S: DkgStorage> {
     pub validator: ValidatorInfo,
     pub dkg_config: DkgConfig,
     pub session: SessionContext,
     pub coordinator_config: CoordinatorConfig,
     pub state: DkgState,
     pub p2p_channel: P,
+    pub ordered_broadcast_channel: Option<O>,
     pub storage: Option<S>,
     /// Raw AVSS messages as received from other validators
     pub received_messages: BTreeMap<ValidatorAddress, avss::Message>,
@@ -103,13 +106,14 @@ fn validate_sender(
     Ok(())
 }
 
-impl<P, S: DkgStorage> DkgCoordinator<P, S> {
+impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     pub fn new(
         validator: ValidatorInfo,
         config: DkgConfig,
         session: SessionContext,
         coordinator_config: CoordinatorConfig,
         p2p_channel: P,
+        ordered_broadcast_channel: Option<O>,
         storage: Option<S>,
     ) -> Self {
         Self {
@@ -119,6 +123,7 @@ impl<P, S: DkgStorage> DkgCoordinator<P, S> {
             coordinator_config,
             state: DkgState::Idle,
             p2p_channel,
+            ordered_broadcast_channel,
             storage,
             received_messages: BTreeMap::new(),
             processed_shares: BTreeMap::new(),
@@ -129,61 +134,80 @@ impl<P, S: DkgStorage> DkgCoordinator<P, S> {
         }
     }
 
-    fn validate_session_id(
-        &self,
-        authenticated_sender: &ValidatorAddress,
-        session_id: &SessionId,
-    ) -> DkgResult<()> {
-        if *session_id != self.session.session_id() {
-            return Err(DkgError::InvalidMessage {
-                sender: authenticated_sender.clone(),
-                reason: "Session ID mismatch".to_string(),
-            });
+    // TODO: add unit tests after all other to-do's are completed
+    pub async fn run<'a>(&'a mut self) -> DkgResult<()>
+    where
+        P: crate::communication::P2PChannel<P2PMessage> + 'a,
+        O: crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage> + 'a,
+    {
+        if self.is_idle() {
+            self.start().await?;
         }
-        Ok(())
-    }
-
-    fn validate_dealer(&self, dealer: &ValidatorAddress) -> bool {
-        self.dkg_config
-            .validators
-            .iter()
-            .any(|v| v.address == *dealer)
-    }
-
-    fn require_valid_dealer(
-        &self,
-        dealer: &ValidatorAddress,
-        sender: &ValidatorAddress,
-    ) -> DkgResult<()> {
-        if !self.validate_dealer(dealer) {
-            return Err(DkgError::InvalidMessage {
-                sender: sender.clone(),
-                reason: format!("Unknown dealer: {:?}", dealer),
-            });
+        if !self.is_running() {
+            return Err(DkgError::ProtocolFailed(
+                "Coordinator is not in a runnable state".to_string(),
+            ));
         }
-        Ok(())
-    }
-
-    pub async fn start(&mut self) -> DkgResult<()> {
-        match &self.state {
-            DkgState::Idle => {
-                let mut dealer_states = BTreeMap::new();
-                let now = Instant::now();
-                for validator in &self.dkg_config.validators {
-                    dealer_states.insert(
-                        validator.address.clone(),
-                        DealerState::WaitingForShare { start_time: now },
-                    );
-                }
-                self.state = DkgState::Running {
-                    start_time: now,
-                    dealer_states,
-                };
-                Ok(())
+        loop {
+            if self.check_timeout() {
+                self.handle_timeout();
+                break;
             }
-            _ => Err(DkgError::ProtocolFailed(
-                "Cannot start: already in progress".to_string(),
-            )),
+            if self.is_complete() || self.is_failed() {
+                break;
+            }
+            self.publish_pending_certificates().await?;
+            select! {
+                p2p_result = self.p2p_channel.receive() => {
+                    match p2p_result {
+                        Ok(AuthenticatedMessage { sender, message }) => {
+                            if let Err(e) = self.handle_message(sender, message).await {
+                                eprintln!("Error handling P2P message: {}", e);
+                            }
+                        }
+                        Err(ChannelError::Timeout) => {
+                            // Continue waiting
+                        }
+                        Err(ChannelError::Closed) => {
+                            return Err(DkgError::ProtocolFailed("P2P channel closed".to_string()));
+                        }
+                        Err(e) => {
+                            eprintln!("P2P channel error: {}", e);
+                        }
+                    }
+                }
+                ordered_result = async {
+                    if let Some(ref mut channel) = self.ordered_broadcast_channel {
+                        channel.receive().await
+                    } else {
+                        // If no ordered channel, just wait forever
+                        std::future::pending().await
+                    }
+                }, if self.ordered_broadcast_channel.is_some() => {
+                    match ordered_result {
+                        Ok(AuthenticatedMessage { sender: _, message }) => {
+                            if let Err(e) = self.handle_ordered_message(message).await {
+                                eprintln!("Error handling ordered broadcast message: {}", e);
+                            }
+                        }
+                        Err(ChannelError::Timeout) => {
+                            // Continue waiting
+                        }
+                        Err(ChannelError::Closed) => {
+                            return Err(DkgError::ProtocolFailed("Ordered broadcast channel closed".to_string()));
+                        }
+                        Err(e) => {
+                            eprintln!("Ordered broadcast channel error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.is_complete() {
+            Ok(())
+        } else {
+            Err(DkgError::ProtocolFailed("DKG protocol failed".to_string()))
         }
     }
 
@@ -262,10 +286,144 @@ impl<P, S: DkgStorage> DkgCoordinator<P, S> {
         }
     }
 
-    pub async fn handle_ordered_message(
-        &mut self,
-        message: OrderedBroadcastMessage,
-    ) -> DkgResult<()> {
+    pub fn check_timeout(&mut self) -> bool {
+        let timeout = self.coordinator_config.phase_timeout;
+        match &self.state {
+            DkgState::Running { start_time, .. } => start_time.elapsed() > timeout,
+            _ => false,
+        }
+    }
+
+    pub fn current_state(&self) -> &DkgState {
+        &self.state
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(self.state, DkgState::Completed { .. })
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self.state, DkgState::Failed { .. })
+    }
+
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, DkgState::Idle)
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, DkgState::Running { .. })
+    }
+
+    async fn start(&mut self) -> DkgResult<()> {
+        match &self.state {
+            DkgState::Idle => {
+                let mut dealer_states = BTreeMap::new();
+                let now = Instant::now();
+                for validator in &self.dkg_config.validators {
+                    dealer_states.insert(
+                        validator.address.clone(),
+                        DealerState::WaitingForShare { start_time: now },
+                    );
+                }
+                self.state = DkgState::Running {
+                    start_time: now,
+                    dealer_states,
+                };
+                Ok(())
+            }
+            _ => Err(DkgError::ProtocolFailed(
+                "Cannot start: already in progress".to_string(),
+            )),
+        }
+    }
+
+    async fn publish_pending_certificates(&mut self) -> DkgResult<()>
+    where
+        O: crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>,
+    {
+        if let Some(ref mut channel) = self.ordered_broadcast_channel {
+            let required_approvals = self.dkg_config.required_dkg_signatures();
+
+            // Check all dealers that have enough approvals
+            let dealers_to_publish: Vec<ValidatorAddress> = self
+                .share_approvals
+                .iter()
+                .filter_map(|(dealer, approvers)| {
+                    if approvers.len() >= required_approvals && *dealer == self.validator.address {
+                        Some(dealer.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for dealer in dealers_to_publish {
+                if let Some(approvers) = self.share_approvals.get(&dealer) {
+                    let signatures: Vec<ValidatorSignature> = approvers
+                        .iter()
+                        .map(|approver| ValidatorSignature {
+                            validator: approver.clone(),
+                            signature: vec![], // TODO: Store actual signatures from approvals
+                        })
+                        .collect();
+
+                    // Create the certificate
+                    // TODO: Calculate actual message hash from the dealer's share
+                    let message_hash = [0u8; 32];
+
+                    // For now, use the collected signatures as DKG signatures
+                    // In practice, we'd separate DA and DKG signatures
+                    let certificate = crate::dkg::types::DkgCertificate {
+                        dealer: dealer.clone(),
+                        message_hash,
+                        data_availability_signatures: vec![], // TODO: Collect from data_availability_sigs
+                        dkg_signatures: signatures,
+                        session_context: self.session.clone(),
+                    };
+
+                    // Publish to ordered broadcast channel
+                    let message = OrderedBroadcastMessage::CertificateV1(certificate);
+                    channel.publish(message).await.map_err(|e| {
+                        DkgError::ProtocolFailed(format!("Failed to publish certificate: {}", e))
+                    })?;
+
+                    // Remove from pending after publishing
+                    self.share_approvals.remove(&dealer);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_timeout(&mut self) {
+        if self.check_timeout()
+            && let DkgState::Running { dealer_states, .. } = &self.state
+        {
+            let mut timed_out_dealers = Vec::new();
+            for (dealer_id, dealer_state) in dealer_states.iter() {
+                if let DealerState::WaitingForShare { start_time } = dealer_state
+                    && start_time.elapsed() > self.coordinator_config.phase_timeout
+                {
+                    timed_out_dealers.push(dealer_id.clone());
+                }
+            }
+
+            if !timed_out_dealers.is_empty() {
+                self.state = DkgState::Failed {
+                    reason: format!(
+                        "Timeout waiting for shares from dealers: {:?}",
+                        timed_out_dealers
+                    ),
+                };
+            } else {
+                self.state = DkgState::Failed {
+                    reason: "Timeout in DKG protocol".to_string(),
+                };
+            }
+        }
+    }
+
+    async fn handle_ordered_message(&mut self, message: OrderedBroadcastMessage) -> DkgResult<()> {
         match message {
             OrderedBroadcastMessage::CertificateV1(_cert) => {
                 // TODO: Implement certificate handling
@@ -478,8 +636,11 @@ impl<P, S: DkgStorage> DkgCoordinator<P, S> {
         let required_approvals = self.dkg_config.required_dkg_signatures();
         if let Some(approvers) = self.share_approvals.get(&approval.approver)
             && approvers.len() >= required_approvals
+            && approval.approver == self.validator.address
         {
-            // TODO: Create and broadcast certificate via OrderedBroadcastChannel
+            // TODO: Create and publish certificate via OrderedBroadcastChannel
+            // This will be called from the run() method where we have the trait bound
+            // For now, just mark that we're ready to publish
         }
         Ok(())
     }
@@ -598,60 +759,39 @@ impl<P, S: DkgStorage> DkgCoordinator<P, S> {
             .saturating_sub(self.dkg_config.max_faulty as usize)
     }
 
-    pub fn check_timeout(&mut self) -> bool {
-        let timeout = self.coordinator_config.phase_timeout;
-        match &self.state {
-            DkgState::Running { start_time, .. } => start_time.elapsed() > timeout,
-            _ => false,
+    fn validate_session_id(
+        &self,
+        authenticated_sender: &ValidatorAddress,
+        session_id: &SessionId,
+    ) -> DkgResult<()> {
+        if *session_id != self.session.session_id() {
+            return Err(DkgError::InvalidMessage {
+                sender: authenticated_sender.clone(),
+                reason: "Session ID mismatch".to_string(),
+            });
         }
+        Ok(())
     }
 
-    pub fn handle_timeout(&mut self) {
-        if self.check_timeout()
-            && let DkgState::Running { dealer_states, .. } = &self.state
-        {
-            let mut timed_out_dealers = Vec::new();
-            for (dealer_id, dealer_state) in dealer_states.iter() {
-                if let DealerState::WaitingForShare { start_time } = dealer_state
-                    && start_time.elapsed() > self.coordinator_config.phase_timeout
-                {
-                    timed_out_dealers.push(dealer_id.clone());
-                }
-            }
+    fn validate_dealer(&self, dealer: &ValidatorAddress) -> bool {
+        self.dkg_config
+            .validators
+            .iter()
+            .any(|v| v.address == *dealer)
+    }
 
-            if !timed_out_dealers.is_empty() {
-                self.state = DkgState::Failed {
-                    reason: format!(
-                        "Timeout waiting for shares from dealers: {:?}",
-                        timed_out_dealers
-                    ),
-                };
-            } else {
-                self.state = DkgState::Failed {
-                    reason: "Timeout in DKG protocol".to_string(),
-                };
-            }
+    fn require_valid_dealer(
+        &self,
+        dealer: &ValidatorAddress,
+        sender: &ValidatorAddress,
+    ) -> DkgResult<()> {
+        if !self.validate_dealer(dealer) {
+            return Err(DkgError::InvalidMessage {
+                sender: sender.clone(),
+                reason: format!("Unknown dealer: {:?}", dealer),
+            });
         }
-    }
-
-    pub fn current_state(&self) -> &DkgState {
-        &self.state
-    }
-
-    pub fn is_complete(&self) -> bool {
-        matches!(self.state, DkgState::Completed { .. })
-    }
-
-    pub fn is_failed(&self) -> bool {
-        matches!(self.state, DkgState::Failed { .. })
-    }
-
-    pub fn is_idle(&self) -> bool {
-        matches!(self.state, DkgState::Idle)
-    }
-
-    pub fn is_running(&self) -> bool {
-        matches!(self.state, DkgState::Running { .. })
+        Ok(())
     }
 }
 
@@ -728,7 +868,7 @@ mod tests {
         /// Create a coordinator for the first validator
         fn create_coordinator(
             &self,
-        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
+        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage> {
             self.create_coordinator_with_config(CoordinatorConfig::default())
         }
 
@@ -736,7 +876,7 @@ mod tests {
         fn create_coordinator_with_config(
             &self,
             coordinator_config: CoordinatorConfig,
-        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, MockStorage> {
+        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage> {
             let validator_addresses: Vec<ValidatorAddress> =
                 self.validators.iter().map(|v| v.address.clone()).collect();
             let channels = InMemoryP2PChannels::new_network(validator_addresses);
@@ -747,6 +887,7 @@ mod tests {
                 self.session.clone(),
                 coordinator_config,
                 p2p_channel,
+                None, // No ordered broadcast channel for tests currently
                 Some(self.storage.clone()),
             )
         }
