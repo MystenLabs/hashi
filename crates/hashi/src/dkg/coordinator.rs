@@ -14,6 +14,20 @@ use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::select;
 
+fn validate_sender(
+    authenticated_sender: &ValidatorAddress,
+    claimed_sender: &ValidatorAddress,
+    field_name: &str,
+) -> DkgResult<()> {
+    if authenticated_sender != claimed_sender {
+        return Err(DkgError::InvalidMessage {
+            sender: authenticated_sender.clone(),
+            reason: format!("{} mismatch", field_name),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub enum DealerState {
     /// Waiting for share from this dealer
@@ -181,20 +195,6 @@ pub struct DkgCoordinator<P, O, S: DkgStorage> {
     pub state: DkgRuntimeState,
     pub channels: DkgCommunicationChannels<P, O>,
     pub storage: Option<S>,
-}
-
-fn validate_sender(
-    authenticated_sender: &ValidatorAddress,
-    claimed_sender: &ValidatorAddress,
-    field_name: &str,
-) -> DkgResult<()> {
-    if authenticated_sender != claimed_sender {
-        return Err(DkgError::InvalidMessage {
-            sender: authenticated_sender.clone(),
-            reason: format!("{} mismatch", field_name),
-        });
-    }
-    Ok(())
 }
 
 impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
