@@ -110,6 +110,12 @@ impl DkgProtocolData {
     }
 }
 
+impl Default for DkgProtocolData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DkgSignatureTracker {
     pub data_availability_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
@@ -124,6 +130,12 @@ impl DkgSignatureTracker {
             dkg_signatures: BTreeMap::new(),
             share_approvals: BTreeMap::new(),
         }
+    }
+}
+
+impl Default for DkgSignatureTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -155,6 +167,12 @@ impl DkgRuntimeState {
             protocol_data: DkgProtocolData::new(),
             signature_tracker: DkgSignatureTracker::new(),
         }
+    }
+}
+
+impl Default for DkgRuntimeState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
