@@ -1,6 +1,8 @@
 //! DKG coordinator that manages the protocol state machine
 
-use crate::communication::{AuthenticatedMessage, ChannelError, P2PChannel, OrderedBroadcastChannel};
+use crate::communication::{
+    AuthenticatedMessage, ChannelError, OrderedBroadcastChannel, P2PChannel,
+};
 use crate::dkg::interfaces::DkgStorage;
 use crate::dkg::types::{
     DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, OrderedBroadcastMessage,
@@ -10,9 +12,10 @@ use crate::types::ValidatorAddress;
 use fastcrypto::groups::GroupElement;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::select;
+use tracing::{error, warn};
 
 fn validate_sender(
     authenticated_sender: &ValidatorAddress,
@@ -26,6 +29,13 @@ fn validate_sender(
         });
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct DkgErrorRecord {
+    pub timestamp: Instant,
+    pub error: String,
+    pub context: String,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +80,8 @@ pub struct CoordinatorConfig {
     pub max_send_retries: u32,
     /// Whether to persist state to storage
     pub enable_persistence: bool,
+    /// Maximum number of errors to keep in history
+    pub max_error_history: usize,
 }
 
 impl Default for CoordinatorConfig {
@@ -79,6 +91,7 @@ impl Default for CoordinatorConfig {
             phase_timeout: Duration::from_secs(30),
             max_send_retries: 3,
             enable_persistence: true,
+            max_error_history: 100,
         }
     }
 }
@@ -172,6 +185,7 @@ pub struct DkgRuntimeState {
     pub dkg_state: DkgState,
     pub protocol_data: DkgProtocolData,
     pub signature_tracker: DkgSignatureTracker,
+    pub error_history: VecDeque<DkgErrorRecord>,
 }
 
 impl DkgRuntimeState {
@@ -180,6 +194,19 @@ impl DkgRuntimeState {
             dkg_state: DkgState::Idle,
             protocol_data: DkgProtocolData::new(),
             signature_tracker: DkgSignatureTracker::new(),
+            error_history: VecDeque::new(),
+        }
+    }
+
+    pub fn record_error(&mut self, error: String, context: String, max_history: usize) {
+        let error_record = DkgErrorRecord {
+            timestamp: Instant::now(),
+            error,
+            context,
+        };
+        self.error_history.push_back(error_record);
+        while self.error_history.len() > max_history {
+            self.error_history.pop_front();
         }
     }
 }
@@ -242,8 +269,11 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 p2p_result = self.channels.p2p.receive() => {
                     match p2p_result {
                         Ok(AuthenticatedMessage { sender, message }) => {
-                            if let Err(e) = self.handle_message(sender, message).await {
-                                eprintln!("Error handling P2P message: {}", e);
+                            if let Err(e) = self.handle_message(sender.clone(), message).await {
+                                self.handle_dkg_error(
+                                    e,
+                                    format!("P2P message from {:?}", sender),
+                                ).await?;
                             }
                         }
                         Err(ChannelError::Timeout) => {
@@ -253,7 +283,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                             return Err(DkgError::ProtocolFailed("P2P channel closed".to_string()));
                         }
                         Err(e) => {
-                            eprintln!("P2P channel error: {}", e);
+                            self.handle_channel_error(e, "P2P channel").await?;
                         }
                     }
                 }
@@ -266,9 +296,12 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                     }
                 }, if self.channels.ordered_broadcast.is_some() => {
                     match ordered_result {
-                        Ok(AuthenticatedMessage { sender: _, message }) => {
+                        Ok(AuthenticatedMessage { sender, message }) => {
                             if let Err(e) = self.handle_ordered_message(message).await {
-                                eprintln!("Error handling ordered broadcast message: {}", e);
+                                self.handle_dkg_error(
+                                    e,
+                                    format!("Ordered broadcast message from {:?}", sender),
+                                ).await?;
                             }
                         }
                         Err(ChannelError::Timeout) => {
@@ -278,7 +311,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                             return Err(DkgError::ProtocolFailed("Ordered broadcast channel closed".to_string()));
                         }
                         Err(e) => {
-                            eprintln!("Ordered broadcast channel error: {}", e);
+                            self.handle_channel_error(e, "Ordered broadcast channel").await?;
                         }
                     }
                 }
@@ -906,6 +939,62 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         }
         Ok(())
     }
+
+    async fn handle_dkg_error(&mut self, error: DkgError, context: String) -> DkgResult<()> {
+        let error_str = error.to_string();
+        match &error {
+            DkgError::InvalidMessage { sender, reason } => {
+                warn!(
+                    sender = ?sender,
+                    reason = %reason,
+                    context = %context,
+                    "Invalid message received"
+                );
+            }
+            DkgError::ProtocolFailed(msg) => {
+                error!(
+                    message = %msg,
+                    context = %context,
+                    "Protocol failure"
+                );
+            }
+            _ => {
+                warn!(
+                    error = %error_str,
+                    context = %context,
+                    "Processing error"
+                );
+            }
+        }
+        self.state.record_error(
+            error_str,
+            context,
+            self.config.coordinator_config.max_error_history,
+        );
+        // Always log and continue - resilient to Byzantine behavior
+        Ok(())
+    }
+
+    async fn handle_channel_error(
+        &mut self,
+        error: ChannelError,
+        channel_name: &str,
+    ) -> DkgResult<()> {
+        let context = format!("{} error", channel_name);
+        let error_str = format!("{:?}", error);
+        warn!(
+            channel = %channel_name,
+            error = %error_str,
+            "Channel error occurred"
+        );
+        self.state.record_error(
+            error_str,
+            context,
+            self.config.coordinator_config.max_error_history,
+        );
+        // Continue processing - channel errors are typically transient
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1084,6 +1173,7 @@ mod tests {
             phase_timeout: Duration::from_millis(50),
             enable_persistence: false,
             max_send_retries: 3,
+            max_error_history: 100,
         };
 
         let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
@@ -1188,6 +1278,7 @@ mod tests {
             phase_timeout: Duration::from_secs(30),
             enable_persistence: true,
             max_send_retries: 3,
+            max_error_history: 100,
         };
         let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
 
@@ -1517,5 +1608,90 @@ mod tests {
                 Some(DealerState::Completed)
             ));
         }
+    }
+
+    fn create_test_coordinator_config(max_error_history: usize) -> CoordinatorConfig {
+        CoordinatorConfig {
+            phase_timeout: Duration::from_secs(30),
+            enable_persistence: false,
+            max_send_retries: 3,
+            max_error_history,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_error_handling_and_tracking() {
+        const TEST_ERROR_COUNT_SMALL: usize = 5;
+
+        let setup = TestSetup::with_validators(2, 1, 0);
+
+        let coordinator_config = create_test_coordinator_config(10);
+        let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
+        coordinator.start().await.unwrap();
+
+        // Test that invalid messages are handled gracefully
+        let invalid_sender = ValidatorAddress([99; 32]);
+        let result = coordinator
+            .handle_message(
+                invalid_sender.clone(),
+                P2PMessage::ApprovalV1(MessageApproval {
+                    message_hash: [0u8; 32],
+                    approver: invalid_sender.clone(),
+                    signature: vec![],
+                    timestamp: 0,
+                }),
+            )
+            .await;
+
+        // Should return error (invalid validator)
+        assert!(result.is_err());
+
+        // But coordinator should still be running
+        assert!(coordinator.is_running());
+
+        // Generate some errors to test tracking
+        for i in 0..TEST_ERROR_COUNT_SMALL {
+            let error = DkgError::InvalidMessage {
+                sender: ValidatorAddress([i as u8; 32]),
+                reason: format!("test error {}", i),
+            };
+            let _ = coordinator
+                .handle_dkg_error(error, format!("test context {}", i))
+                .await;
+        }
+
+        // Verify errors are being tracked
+        assert_eq!(
+            coordinator.state.error_history.len(),
+            TEST_ERROR_COUNT_SMALL
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_history_limit() {
+        const TEST_ERROR_LIMIT: usize = 5;
+
+        let setup = TestSetup::single_validator();
+        let coordinator_config = create_test_coordinator_config(TEST_ERROR_LIMIT);
+        let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
+        coordinator.start().await.unwrap();
+
+        // Generate more errors than the limit
+        for i in 0..10 {
+            let error = DkgError::InvalidMessage {
+                sender: ValidatorAddress([i as u8; 32]),
+                reason: format!("error {}", i),
+            };
+            let _ = coordinator
+                .handle_dkg_error(error, format!("context {}", i))
+                .await;
+        }
+
+        // Should only keep the last TEST_SMALL_ERROR_LIMIT errors
+        assert_eq!(coordinator.state.error_history.len(), TEST_ERROR_LIMIT);
+
+        // Most recent error should be the last one added
+        let last_error = coordinator.state.error_history.back().unwrap();
+        assert!(last_error.error.contains("error 9"));
     }
 }
