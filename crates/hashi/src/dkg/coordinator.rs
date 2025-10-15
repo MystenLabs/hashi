@@ -85,7 +85,7 @@ pub struct DkgCoordinator<P, O, S: DkgStorage> {
     ///  Commitments from each validator
     pub processed_commitments: BTreeMap<ValidatorAddress, Vec<Eval<G>>>,
     /// Data availability signatures for each dealer
-    pub data_availability_sigs: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
+    pub data_availability_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
     /// DKG signatures for each dealer
     pub dkg_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
     /// Approvals for shares
@@ -128,7 +128,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             received_messages: BTreeMap::new(),
             processed_shares: BTreeMap::new(),
             processed_commitments: BTreeMap::new(),
-            data_availability_sigs: BTreeMap::new(),
+            data_availability_signatures: BTreeMap::new(),
             dkg_signatures: BTreeMap::new(),
             share_approvals: BTreeMap::new(),
         }
@@ -656,14 +656,14 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             validator: signer,
             signature,
         };
-        self.data_availability_sigs
+        self.data_availability_signatures
             .entry(dealer.clone())
             .or_default()
             .push(sig);
 
         // Check if we have enough signatures for data availability
         let required = self.dkg_config.required_data_availability_signatures();
-        if let Some(sigs) = self.data_availability_sigs.get(&dealer)
+        if let Some(sigs) = self.data_availability_signatures.get(&dealer)
             && sigs.len() >= required
         {
             // TODO: Mark this dealer's share as having sufficient data availability
@@ -1165,8 +1165,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(coordinator.data_availability_sigs.contains_key(&dealer));
-        let sigs = coordinator.data_availability_sigs.get(&dealer).unwrap();
+        assert!(
+            coordinator
+                .data_availability_signatures
+                .contains_key(&dealer)
+        );
+        let sigs = coordinator
+            .data_availability_signatures
+            .get(&dealer)
+            .unwrap();
         assert_eq!(sigs.len(), 1);
         assert_eq!(sigs[0].validator, signer);
         assert_eq!(sigs[0].signature, signature);
@@ -1338,7 +1345,7 @@ mod tests {
         // Verify we have the right number of signatures
         assert_eq!(
             coordinator
-                .data_availability_sigs
+                .data_availability_signatures
                 .get(&dealer)
                 .unwrap()
                 .len(),
