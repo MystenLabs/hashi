@@ -226,18 +226,15 @@ pub struct DkgCoordinator<P, O, S: DkgStorage> {
 
 impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     pub fn new(
-        validator: ValidatorInfo,
-        dkg_config: DkgConfig,
-        session: SessionContext,
-        coordinator_config: CoordinatorConfig,
-        p2p_channel: P,
-        ordered_broadcast_channel: Option<O>,
+        config: DkgConfiguration,
+        state: DkgRuntimeState,
+        channels: DkgCommunicationChannels<P, O>,
         storage: Option<S>,
     ) -> Self {
         Self {
-            config: DkgConfiguration::new(validator, dkg_config, session, coordinator_config),
-            state: DkgRuntimeState::new(),
-            channels: DkgCommunicationChannels::new(p2p_channel, ordered_broadcast_channel),
+            config,
+            state,
+            channels,
             storage,
         }
     }
@@ -1063,14 +1060,12 @@ mod tests {
             }
         }
 
-        /// Create a coordinator for the first validator
         fn create_coordinator(
             &self,
         ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage> {
             self.create_coordinator_with_config(CoordinatorConfig::default())
         }
 
-        /// Create a coordinator with custom config
         fn create_coordinator_with_config(
             &self,
             coordinator_config: CoordinatorConfig,
@@ -1079,13 +1074,18 @@ mod tests {
                 self.validators.iter().map(|v| v.address.clone()).collect();
             let channels = InMemoryP2PChannels::new_network(validator_addresses);
             let p2p_channel = channels.into_iter().next().unwrap().1;
-            DkgCoordinator::new(
+            let config = DkgConfiguration::new(
                 self.validators[0].clone(),
                 self.config.clone(),
                 self.session.clone(),
                 coordinator_config,
-                p2p_channel,
-                None, // No ordered broadcast channel for tests currently
+            );
+            let state = DkgRuntimeState::new();
+            let communication_channels = DkgCommunicationChannels::new(p2p_channel, None);
+            DkgCoordinator::new(
+                config,
+                state,
+                communication_channels,
                 Some(self.storage.clone()),
             )
         }
