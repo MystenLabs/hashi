@@ -1,6 +1,6 @@
 //! DKG coordinator that manages the protocol state machine
 
-use crate::communication::{AuthenticatedMessage, ChannelError};
+use crate::communication::{AuthenticatedMessage, ChannelError, P2PChannel, OrderedBroadcastChannel};
 use crate::dkg::interfaces::DkgStorage;
 use crate::dkg::types::{
     DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, OrderedBroadcastMessage,
@@ -218,8 +218,8 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     // TODO: Add unit tests after all the other to-do's are completed
     pub async fn run<'a>(&'a mut self) -> DkgResult<()>
     where
-        P: crate::communication::P2PChannel<P2PMessage> + 'a,
-        O: crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage> + 'a,
+        P: P2PChannel<P2PMessage> + 'a,
+        O: OrderedBroadcastChannel<OrderedBroadcastMessage> + 'a,
     {
         if self.is_idle() {
             self.start().await?;
