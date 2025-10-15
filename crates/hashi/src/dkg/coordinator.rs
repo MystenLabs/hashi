@@ -69,22 +69,100 @@ impl Default for CoordinatorConfig {
     }
 }
 
-pub struct DkgCoordinator<P, O, S: DkgStorage> {
+#[derive(Clone, Debug)]
+pub struct DkgConfiguration {
     pub validator_info: ValidatorInfo,
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub coordinator_config: CoordinatorConfig,
-    pub dkg_state: DkgState,
-    pub p2p_channel: P,
-    pub ordered_broadcast_channel: Option<O>,
-    pub storage: Option<S>,
+}
+
+impl DkgConfiguration {
+    pub fn new(
+        validator_info: ValidatorInfo,
+        dkg_config: DkgConfig,
+        session_context: SessionContext,
+        coordinator_config: CoordinatorConfig,
+    ) -> Self {
+        Self {
+            validator_info,
+            dkg_config,
+            session_context,
+            coordinator_config,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DkgProtocolData {
     pub received_messages: BTreeMap<ValidatorAddress, avss::Message>,
-    ///  Decrypted and validated shares after processing received messages
     pub processed_shares: BTreeMap<ValidatorAddress, avss::SharesForNode>,
     pub processed_commitments: BTreeMap<ValidatorAddress, Vec<Eval<G>>>,
+}
+
+impl DkgProtocolData {
+    pub fn new() -> Self {
+        Self {
+            received_messages: BTreeMap::new(),
+            processed_shares: BTreeMap::new(),
+            processed_commitments: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DkgSignatureTracker {
     pub data_availability_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
     pub dkg_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
     pub share_approvals: BTreeMap<ValidatorAddress, HashSet<ValidatorAddress>>,
+}
+
+impl DkgSignatureTracker {
+    pub fn new() -> Self {
+        Self {
+            data_availability_signatures: BTreeMap::new(),
+            dkg_signatures: BTreeMap::new(),
+            share_approvals: BTreeMap::new(),
+        }
+    }
+}
+
+pub struct DkgCommunicationChannels<P, O> {
+    pub p2p: P,
+    pub ordered_broadcast: Option<O>,
+}
+
+impl<P, O> DkgCommunicationChannels<P, O> {
+    pub fn new(p2p: P, ordered_broadcast: Option<O>) -> Self {
+        Self {
+            p2p,
+            ordered_broadcast,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DkgRuntimeState {
+    pub dkg_state: DkgState,
+    pub protocol_data: DkgProtocolData,
+    pub signature_tracker: DkgSignatureTracker,
+}
+
+impl DkgRuntimeState {
+    pub fn new() -> Self {
+        Self {
+            dkg_state: DkgState::Idle,
+            protocol_data: DkgProtocolData::new(),
+            signature_tracker: DkgSignatureTracker::new(),
+        }
+    }
+}
+
+pub struct DkgCoordinator<P, O, S: DkgStorage> {
+    pub config: DkgConfiguration,
+    pub state: DkgRuntimeState,
+    pub channels: DkgCommunicationChannels<P, O>,
+    pub storage: Option<S>,
 }
 
 fn validate_sender(
@@ -104,7 +182,7 @@ fn validate_sender(
 impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     pub fn new(
         validator: ValidatorInfo,
-        config: DkgConfig,
+        dkg_config: DkgConfig,
         session: SessionContext,
         coordinator_config: CoordinatorConfig,
         p2p_channel: P,
@@ -112,20 +190,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         storage: Option<S>,
     ) -> Self {
         Self {
-            validator_info: validator,
-            dkg_config: config,
-            session_context: session,
-            coordinator_config,
-            dkg_state: DkgState::Idle,
-            p2p_channel,
-            ordered_broadcast_channel,
+            config: DkgConfiguration::new(validator, dkg_config, session, coordinator_config),
+            state: DkgRuntimeState::new(),
+            channels: DkgCommunicationChannels::new(p2p_channel, ordered_broadcast_channel),
             storage,
-            received_messages: BTreeMap::new(),
-            processed_shares: BTreeMap::new(),
-            processed_commitments: BTreeMap::new(),
-            data_availability_signatures: BTreeMap::new(),
-            dkg_signatures: BTreeMap::new(),
-            share_approvals: BTreeMap::new(),
         }
     }
 
@@ -153,7 +221,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             }
             self.publish_pending_certificates().await?;
             select! {
-                p2p_result = self.p2p_channel.receive() => {
+                p2p_result = self.channels.p2p.receive() => {
                     match p2p_result {
                         Ok(AuthenticatedMessage { sender, message }) => {
                             if let Err(e) = self.handle_message(sender, message).await {
@@ -172,13 +240,13 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                     }
                 }
                 ordered_result = async {
-                    if let Some(ref mut channel) = self.ordered_broadcast_channel {
+                    if let Some(ref mut channel) = self.channels.ordered_broadcast {
                         channel.receive().await
                     } else {
                         // If no ordered channel, just wait forever
                         std::future::pending().await
                     }
-                }, if self.ordered_broadcast_channel.is_some() => {
+                }, if self.channels.ordered_broadcast.is_some() => {
                     match ordered_result {
                         Ok(AuthenticatedMessage { sender: _, message }) => {
                             if let Err(e) = self.handle_ordered_message(message).await {
@@ -281,45 +349,45 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     pub fn check_timeout(&mut self) -> bool {
-        let timeout = self.coordinator_config.phase_timeout;
-        match &self.dkg_state {
+        let timeout = self.config.coordinator_config.phase_timeout;
+        match &self.state.dkg_state {
             DkgState::Running { start_time, .. } => start_time.elapsed() > timeout,
             _ => false,
         }
     }
 
     pub fn current_state(&self) -> &DkgState {
-        &self.dkg_state
+        &self.state.dkg_state
     }
 
     pub fn is_complete(&self) -> bool {
-        matches!(self.dkg_state, DkgState::Completed { .. })
+        matches!(self.state.dkg_state, DkgState::Completed { .. })
     }
 
     pub fn is_failed(&self) -> bool {
-        matches!(self.dkg_state, DkgState::Failed { .. })
+        matches!(self.state.dkg_state, DkgState::Failed { .. })
     }
 
     pub fn is_idle(&self) -> bool {
-        matches!(self.dkg_state, DkgState::Idle)
+        matches!(self.state.dkg_state, DkgState::Idle)
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self.dkg_state, DkgState::Running { .. })
+        matches!(self.state.dkg_state, DkgState::Running { .. })
     }
 
     async fn start(&mut self) -> DkgResult<()> {
-        match &self.dkg_state {
+        match &self.state.dkg_state {
             DkgState::Idle => {
                 let mut dealer_states = BTreeMap::new();
                 let now = Instant::now();
-                for validator in &self.dkg_config.validators {
+                for validator in &self.config.dkg_config.validators {
                     dealer_states.insert(
                         validator.address.clone(),
                         DealerState::WaitingForShare { start_time: now },
                     );
                 }
-                self.dkg_state = DkgState::Running {
+                self.state.dkg_state = DkgState::Running {
                     start_time: now,
                     dealer_states,
                 };
@@ -335,16 +403,18 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     where
         O: crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>,
     {
-        if let Some(ref mut channel) = self.ordered_broadcast_channel {
-            let required_approvals = self.dkg_config.required_dkg_signatures();
+        if let Some(ref mut channel) = self.channels.ordered_broadcast {
+            let required_approvals = self.config.dkg_config.required_dkg_signatures();
 
             // Check all dealers that have enough approvals
             let dealers_to_publish: Vec<ValidatorAddress> = self
+                .state
+                .signature_tracker
                 .share_approvals
                 .iter()
                 .filter_map(|(dealer, approvers)| {
                     if approvers.len() >= required_approvals
-                        && *dealer == self.validator_info.address
+                        && *dealer == self.config.validator_info.address
                     {
                         Some(dealer.clone())
                     } else {
@@ -354,7 +424,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 .collect();
 
             for dealer in dealers_to_publish {
-                if let Some(approvers) = self.share_approvals.get(&dealer) {
+                if let Some(approvers) = self.state.signature_tracker.share_approvals.get(&dealer) {
                     let signatures: Vec<ValidatorSignature> = approvers
                         .iter()
                         .map(|approver| ValidatorSignature {
@@ -374,7 +444,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                         message_hash,
                         data_availability_signatures: vec![], // TODO: Collect from data_availability_sigs
                         dkg_signatures: signatures,
-                        session_context: self.session_context.clone(),
+                        session_context: self.config.session_context.clone(),
                     };
 
                     // Publish to ordered broadcast channel
@@ -384,7 +454,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                     })?;
 
                     // Remove from pending after publishing
-                    self.share_approvals.remove(&dealer);
+                    self.state.signature_tracker.share_approvals.remove(&dealer);
                 }
             }
         }
@@ -393,26 +463,26 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
     fn handle_timeout(&mut self) {
         if self.check_timeout()
-            && let DkgState::Running { dealer_states, .. } = &self.dkg_state
+            && let DkgState::Running { dealer_states, .. } = &self.state.dkg_state
         {
             let mut timed_out_dealers = Vec::new();
             for (dealer_id, dealer_state) in dealer_states.iter() {
                 if let DealerState::WaitingForShare { start_time } = dealer_state
-                    && start_time.elapsed() > self.coordinator_config.phase_timeout
+                    && start_time.elapsed() > self.config.coordinator_config.phase_timeout
                 {
                     timed_out_dealers.push(dealer_id.clone());
                 }
             }
 
             if !timed_out_dealers.is_empty() {
-                self.dkg_state = DkgState::Failed {
+                self.state.dkg_state = DkgState::Failed {
                     reason: format!(
                         "Timeout waiting for shares from dealers: {:?}",
                         timed_out_dealers
                     ),
                 };
             } else {
-                self.dkg_state = DkgState::Failed {
+                self.state.dkg_state = DkgState::Failed {
                     reason: "Timeout in DKG protocol".to_string(),
                 };
             }
@@ -452,12 +522,15 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         dealer: ValidatorAddress,
         message: avss::Message,
     ) -> DkgResult<()> {
-        match &mut self.dkg_state {
+        match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
                     match dealer_state {
                         DealerState::WaitingForShare { .. } => {
-                            self.received_messages.insert(dealer.clone(), message);
+                            self.state
+                                .protocol_data
+                                .received_messages
+                                .insert(dealer.clone(), message);
                             *dealer_state = DealerState::Processing {
                                 received_at: Instant::now(),
                             };
@@ -496,7 +569,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         accuser: ValidatorAddress,
         _complaint: complaint::Complaint,
     ) -> DkgResult<()> {
-        match &mut self.dkg_state {
+        match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 // TODO: Get actual dealer ID from complaint structure
                 // This is a placeholder - the actual complaint structure should identify the dealer
@@ -542,7 +615,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         responder: ValidatorAddress,
         _response: complaint::ComplaintResponse,
     ) -> DkgResult<()> {
-        match &mut self.dkg_state {
+        match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 // TODO: Identify which dealer this response is for
                 for dealer_state in dealer_states.values_mut() {
@@ -570,7 +643,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     async fn check_progress(&mut self) -> DkgResult<()> {
-        if let DkgState::Running { dealer_states, .. } = &self.dkg_state {
+        if let DkgState::Running { dealer_states, .. } = &self.state.dkg_state {
             let completed_count = dealer_states
                 .values()
                 .filter(|state| matches!(state, DealerState::Completed))
@@ -583,7 +656,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     pub async fn check_completion(&mut self) -> DkgResult<()> {
-        if self.processed_shares.len() >= self.required_shares() {
+        if self.state.protocol_data.processed_shares.len() >= self.required_shares() {
             // TODO: Compute from the polynomial commitments when implementing the full protocol flow
             // Use zero element as placeholder for now
             let public_key = G::zero();
@@ -593,15 +666,17 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 public_key,
                 key_shares,
                 commitments: vec![],
-                session_context: self.session_context.clone(),
+                session_context: self.config.session_context.clone(),
             };
-            self.dkg_state = DkgState::Completed {
+            self.state.dkg_state = DkgState::Completed {
                 output: output.clone(),
             };
             if let Some(storage) = &self.storage
-                && self.coordinator_config.enable_persistence
+                && self.config.coordinator_config.enable_persistence
             {
-                storage.save_output(&self.session_context, &output).await?;
+                storage
+                    .save_output(&self.config.session_context, &output)
+                    .await?;
             }
             Ok(())
         } else {
@@ -617,22 +692,33 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         // TODO: Verify the approval signature
         // For now, just track that we received an approval
 
-        if !self.received_messages.contains_key(&approval.approver) {
+        if !self
+            .state
+            .protocol_data
+            .received_messages
+            .contains_key(&approval.approver)
+        {
             return Err(DkgError::InvalidMessage {
                 sender,
                 reason: "Approval for unknown share".to_string(),
             });
         }
-        self.share_approvals
+        self.state
+            .signature_tracker
+            .share_approvals
             .entry(approval.approver.clone())
             .or_default()
             .insert(sender);
 
         // Check if we have enough approvals to create a certificate
-        let required_approvals = self.dkg_config.required_dkg_signatures();
-        if let Some(approvers) = self.share_approvals.get(&approval.approver)
+        let required_approvals = self.config.dkg_config.required_dkg_signatures();
+        if let Some(approvers) = self
+            .state
+            .signature_tracker
+            .share_approvals
+            .get(&approval.approver)
             && approvers.len() >= required_approvals
-            && approval.approver == self.validator_info.address
+            && approval.approver == self.config.validator_info.address
         {
             // TODO: Create and publish certificate via OrderedBroadcastChannel
             // This will be called from the run() method where we have the trait bound
@@ -653,14 +739,23 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             validator: signer,
             signature,
         };
-        self.data_availability_signatures
+        self.state
+            .signature_tracker
+            .data_availability_signatures
             .entry(dealer.clone())
             .or_default()
             .push(sig);
 
         // Check if we have enough signatures for data availability
-        let required = self.dkg_config.required_data_availability_signatures();
-        if let Some(sigs) = self.data_availability_signatures.get(&dealer)
+        let required = self
+            .config
+            .dkg_config
+            .required_data_availability_signatures();
+        if let Some(sigs) = self
+            .state
+            .signature_tracker
+            .data_availability_signatures
+            .get(&dealer)
             && sigs.len() >= required
         {
             // TODO: Mark this dealer's share as having sufficient data availability
@@ -680,19 +775,21 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             validator: signer,
             signature,
         };
-        self.dkg_signatures
+        self.state
+            .signature_tracker
+            .dkg_signatures
             .entry(dealer.clone())
             .or_default()
             .push(sig);
 
         // Check if we have enough DKG signatures to proceed
-        let required = self.dkg_config.required_dkg_signatures();
-        if let Some(sigs) = self.dkg_signatures.get(&dealer)
+        let required = self.config.dkg_config.required_dkg_signatures();
+        if let Some(sigs) = self.state.signature_tracker.dkg_signatures.get(&dealer)
             && sigs.len() >= required
         {
             // TODO: Create a certificate for this dealer's share
             // The certificate can then be broadcast via OrderedBroadcastChannel
-            if let DkgState::Running { dealer_states, .. } = &mut self.dkg_state
+            if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state
                 && let Some(dealer_state) = dealer_states.get_mut(&dealer)
             {
                 // Mark this dealer as completed if we have enough signatures
@@ -710,9 +807,9 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         _message_hash: [u8; 32],
     ) -> DkgResult<()> {
         // Check if we are the dealer being requested from
-        if dealer == self.validator_info.address {
+        if dealer == self.config.validator_info.address {
             // Check if we have the share for this requester
-            if let Some(_avss_message) = self.received_messages.get(&dealer) {
+            if let Some(_avss_message) = self.state.protocol_data.received_messages.get(&dealer) {
                 // TODO: Extract and send the encrypted share for the requester
                 // This would involve:
                 // 1. Getting the encrypted share for the requester from the AVSS message
@@ -734,7 +831,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
     async fn check_complaint_resolution(&mut self) -> DkgResult<()> {
         // TODO: Implement the actual complaint verification when adding complaint handling for all protocols
-        if let DkgState::Running { dealer_states, .. } = &mut self.dkg_state {
+        if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state {
             // Check if any dealers are still in complaint handling with sufficient responses
             for dealer_state in dealer_states.values_mut() {
                 if let DealerState::ComplaintHandling { response_count, .. } = dealer_state
@@ -749,10 +846,11 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     fn required_shares(&self) -> usize {
-        self.dkg_config
+        self.config
+            .dkg_config
             .validators
             .len()
-            .saturating_sub(self.dkg_config.max_faulty as usize)
+            .saturating_sub(self.config.dkg_config.max_faulty as usize)
     }
 
     fn validate_session_id(
@@ -760,7 +858,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         authenticated_sender: &ValidatorAddress,
         session_id: &SessionId,
     ) -> DkgResult<()> {
-        if *session_id != self.session_context.session_id() {
+        if *session_id != self.config.session_context.session_id() {
             return Err(DkgError::InvalidMessage {
                 sender: authenticated_sender.clone(),
                 reason: "Session ID mismatch".to_string(),
@@ -770,7 +868,8 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     fn validate_dealer(&self, dealer: &ValidatorAddress) -> bool {
-        self.dkg_config
+        self.config
+            .dkg_config
             .validators
             .iter()
             .any(|v| v.address == *dealer)
@@ -1024,9 +1123,13 @@ mod tests {
         for i in 0..3 {
             let validator_id = setup.validators[i as usize].address.clone();
             coordinator
+                .state
+                .protocol_data
                 .processed_shares
                 .insert(validator_id.clone(), avss::SharesForNode { shares: vec![] });
             coordinator
+                .state
+                .protocol_data
                 .processed_commitments
                 .insert(validator_id, vec![]);
         }
@@ -1039,17 +1142,20 @@ mod tests {
                 DealerState::Completed,
             );
         }
-        coordinator.dkg_state = DkgState::Running {
+        coordinator.state.dkg_state = DkgState::Running {
             start_time: Instant::now(),
             dealer_states,
         };
 
         // Check progress should transition to Completed
         coordinator.check_progress().await.unwrap();
-        assert!(matches!(coordinator.dkg_state, DkgState::Completed { .. }));
+        assert!(matches!(
+            coordinator.state.dkg_state,
+            DkgState::Completed { .. }
+        ));
 
         // Verify output has correct session context
-        if let DkgState::Completed { output } = &coordinator.dkg_state {
+        if let DkgState::Completed { output } = &coordinator.state.dkg_state {
             assert_eq!(output.session_context.epoch, setup.session.epoch);
         }
     }
@@ -1070,7 +1176,7 @@ mod tests {
         coordinator.start().await.unwrap();
 
         if let Some(storage) = &coordinator.storage
-            && coordinator.coordinator_config.enable_persistence
+            && coordinator.config.coordinator_config.enable_persistence
         {
             storage
                 .save_output(
@@ -1118,7 +1224,7 @@ mod tests {
 
         // Now simulate having received a share from the dealer
         // We mark the dealer as Processing in the state machine
-        if let DkgState::Running { dealer_states, .. } = &mut coordinator.dkg_state {
+        if let DkgState::Running { dealer_states, .. } = &mut coordinator.state.dkg_state {
             dealer_states.insert(
                 dealer.clone(),
                 DealerState::Processing {
@@ -1127,13 +1233,23 @@ mod tests {
             );
         }
         coordinator
+            .state
+            .signature_tracker
             .share_approvals
             .entry(dealer.clone())
             .or_default()
             .insert(sender.clone());
-        assert!(coordinator.share_approvals.contains_key(&dealer));
         assert!(
             coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .contains_key(&dealer)
+        );
+        assert!(
+            coordinator
+                .state
+                .signature_tracker
                 .share_approvals
                 .get(&dealer)
                 .unwrap()
@@ -1164,10 +1280,14 @@ mod tests {
             .unwrap();
         assert!(
             coordinator
+                .state
+                .signature_tracker
                 .data_availability_signatures
                 .contains_key(&dealer)
         );
         let sigs = coordinator
+            .state
+            .signature_tracker
             .data_availability_signatures
             .get(&dealer)
             .unwrap();
@@ -1204,10 +1324,21 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(coordinator.dkg_signatures.contains_key(&dealer));
-        let sigs = coordinator.dkg_signatures.get(&dealer).unwrap();
+        assert!(
+            coordinator
+                .state
+                .signature_tracker
+                .dkg_signatures
+                .contains_key(&dealer)
+        );
+        let sigs = coordinator
+            .state
+            .signature_tracker
+            .dkg_signatures
+            .get(&dealer)
+            .unwrap();
         assert_eq!(sigs.len(), required_sigs);
-        if let DkgState::Running { dealer_states, .. } = &coordinator.dkg_state {
+        if let DkgState::Running { dealer_states, .. } = &coordinator.state.dkg_state {
             assert!(matches!(
                 dealer_states.get(&dealer),
                 Some(DealerState::Completed)
@@ -1342,6 +1473,8 @@ mod tests {
         // Verify we have the right number of signatures
         assert_eq!(
             coordinator
+                .state
+                .signature_tracker
                 .data_availability_signatures
                 .get(&dealer)
                 .unwrap()
@@ -1349,12 +1482,18 @@ mod tests {
             required_da
         );
         assert_eq!(
-            coordinator.dkg_signatures.get(&dealer).unwrap().len(),
+            coordinator
+                .state
+                .signature_tracker
+                .dkg_signatures
+                .get(&dealer)
+                .unwrap()
+                .len(),
             required_dkg
         );
 
         // Verify dealer is marked as completed after getting enough DKG signatures
-        if let DkgState::Running { dealer_states, .. } = &coordinator.dkg_state {
+        if let DkgState::Running { dealer_states, .. } = &coordinator.state.dkg_state {
             assert!(matches!(
                 dealer_states.get(&dealer),
                 Some(DealerState::Completed)
