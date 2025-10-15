@@ -15,6 +15,7 @@ use tokio::time::timeout;
 const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
 const INITIAL_READ_POSITION: usize = 0;
 
+// TODO: Replacing in-memory implementation with RPC-based loopback testing
 type MessageQueue<M> = Arc<Mutex<VecDeque<AuthenticatedMessage<M>>>>;
 type SharedP2PQueues<M> = Arc<RwLock<HashMap<ValidatorAddress, MessageQueue<M>>>>;
 
