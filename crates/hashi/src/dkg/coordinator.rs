@@ -537,8 +537,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         match message {
             OrderedBroadcastMessage::CertificateV1(_cert) => {
                 // TODO: Implement certificate handling
-                // Certificates prove that 2f+1 validators approved a share
-                // They complete the AVSS protocol for a dealer's share
                 // Will need to:
                 // 1. Verify the certificate signatures
                 // 2. Store the certificate as proof of share validity
@@ -551,7 +549,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 data: _,
             } => {
                 // TODO: Implement presignature handling
-                // Presignatures are used in the signing protocol
                 // Will need to:
                 // 1. Verify the presignature is valid
                 // 2. Store it for the signing phase
@@ -855,7 +852,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             // Check if we have the share for this requester
             if let Some(_avss_message) = self.state.protocol_data.received_messages.get(&dealer) {
                 // TODO: Extract and send the encrypted share for the requester
-                // This would involve:
                 // 1. Getting the encrypted share for the requester from the AVSS message
                 // 2. Sending it via P2P channel
                 // For now, just acknowledge the request
