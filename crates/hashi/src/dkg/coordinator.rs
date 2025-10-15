@@ -1687,7 +1687,7 @@ mod tests {
                 .await;
         }
 
-        // Should only keep the last TEST_SMALL_ERROR_LIMIT errors
+        // Should only keep the last TEST_ERROR_LIMIT errors
         assert_eq!(coordinator.state.error_history.len(), TEST_ERROR_LIMIT);
 
         // Most recent error should be the last one added
