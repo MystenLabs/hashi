@@ -452,12 +452,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
     async fn publish_pending_certificates(&mut self) -> DkgResult<()>
     where
-        O: crate::communication::OrderedBroadcastChannel<OrderedBroadcastMessage>,
+        O: OrderedBroadcastChannel<OrderedBroadcastMessage>,
     {
         if let Some(ref mut channel) = self.channels.ordered_broadcast {
             let required_approvals = self.config.dkg_config.required_dkg_signatures();
-
-            // Check all dealers that have enough approvals
             let dealers_to_publish: Vec<ValidatorAddress> = self
                 .state
                 .signature_tracker
@@ -473,7 +471,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                     }
                 })
                 .collect();
-
             for dealer in dealers_to_publish {
                 if let Some(approvers) = self.state.signature_tracker.share_approvals.get(&dealer) {
                     let signatures: Vec<ValidatorSignature> = approvers
@@ -524,7 +521,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                     timed_out_dealers.push(dealer_id.clone());
                 }
             }
-
             if !timed_out_dealers.is_empty() {
                 self.state.dkg_state = DkgState::Failed {
                     reason: format!(
