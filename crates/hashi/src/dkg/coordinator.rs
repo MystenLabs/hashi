@@ -10,6 +10,9 @@ use crate::dkg::types::{
 };
 use crate::types::ValidatorAddress;
 use fastcrypto::groups::GroupElement;
+use fastcrypto::groups::ristretto255::RistrettoPoint;
+use fastcrypto_tbls::ecies_v1::PrivateKey;
+use fastcrypto_tbls::nodes::{Node, Nodes};
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -29,6 +32,19 @@ fn validate_sender(
         });
     }
     Ok(())
+}
+
+fn convert_dkg_config_to_fastcrypto_nodes(config: &DkgConfig) -> DkgResult<Nodes<RistrettoPoint>> {
+    let nodes: Vec<Node<RistrettoPoint>> = config
+        .validators
+        .iter()
+        .map(|v| Node {
+            id: v.party_id,
+            pk: v.ecies_public_key.clone(),
+            weight: v.weight,
+        })
+        .collect();
+    Nodes::new(nodes).map_err(|e| DkgError::CryptoError(e.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +118,7 @@ pub struct DkgConfiguration {
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub coordinator_config: CoordinatorConfig,
+    pub ecies_private_key: PrivateKey<RistrettoPoint>,
 }
 
 impl DkgConfiguration {
@@ -110,12 +127,14 @@ impl DkgConfiguration {
         dkg_config: DkgConfig,
         session_context: SessionContext,
         coordinator_config: CoordinatorConfig,
+        ecies_private_key: PrivateKey<RistrettoPoint>,
     ) -> Self {
         Self {
             validator_info,
             dkg_config,
             session_context,
             coordinator_config,
+            ecies_private_key,
         }
     }
 }
@@ -563,13 +582,54 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                             self.state
                                 .protocol_data
                                 .received_messages
-                                .insert(dealer.clone(), message);
+                                .insert(dealer.clone(), message.clone());
                             *dealer_state = DealerState::Processing {
                                 received_at: Instant::now(),
                             };
-                            // TODO: Implement the full AVSS protocol flow
-                            self.check_progress().await?;
-                            Ok(())
+                            let nodes =
+                                convert_dkg_config_to_fastcrypto_nodes(&self.config.dkg_config)?;
+                            let sid = self
+                                .config
+                                .session_context
+                                .dealer_session_id(&dealer)
+                                .digest
+                                .to_vec();
+                            let receiver = avss::Receiver::new(
+                                nodes,
+                                self.config.validator_info.party_id,
+                                self.config.dkg_config.threshold,
+                                sid,
+                                None, // No previous round commitment for initial DKG (shares still verified against Feldman commitment in message)
+                                self.config.ecies_private_key.clone(),
+                            );
+                            match receiver.process_message(&message)? {
+                                avss::ProcessedMessage::Valid(output) => {
+                                    self.state
+                                        .protocol_data
+                                        .processed_shares
+                                        .insert(dealer.clone(), output.my_shares);
+                                    self.state
+                                        .protocol_data
+                                        .processed_commitments
+                                        .insert(dealer.clone(), output.commitments);
+                                    // TODO: Send approval signature back to the dealer
+                                    // For now, mark dealer as completed
+                                    *dealer_state = DealerState::Completed;
+                                    self.check_progress().await?;
+                                    Ok(())
+                                }
+                                avss::ProcessedMessage::Complaint(_complaint) => {
+                                    // TODO: Send complaint to all parties
+                                    // For now, mark dealer as failed
+                                    *dealer_state = DealerState::Failed {
+                                        reason: "Invalid share received".to_string(),
+                                    };
+                                    Err(DkgError::InvalidMessage {
+                                        sender: dealer,
+                                        reason: "Share verification failed".to_string(),
+                                    })
+                                }
+                            }
                         }
                         _ => Err(DkgError::InvalidMessage {
                             sender: dealer,
@@ -1033,16 +1093,19 @@ mod tests {
         ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage> {
             let validator_addresses: Vec<ValidatorAddress> =
                 self.validators.iter().map(|v| v.address.clone()).collect();
-            let channels = InMemoryP2PChannels::new_network(validator_addresses);
+            let channels = InMemoryP2PChannels::<P2PMessage>::new_network(validator_addresses);
             let p2p_channel = channels.into_iter().next().unwrap().1;
+            let ecies_private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
             let config = DkgConfiguration::new(
                 self.validators[0].clone(),
                 self.config.clone(),
                 self.session.clone(),
                 coordinator_config,
+                ecies_private_key,
             );
             let state = DkgRuntimeState::new();
-            let communication_channels = DkgCommunicationChannels::new(p2p_channel, None);
+            let communication_channels =
+                DkgCommunicationChannels::new(p2p_channel, Option::<()>::None);
             DkgCoordinator::new(
                 config,
                 state,
@@ -1650,5 +1713,317 @@ mod tests {
         // Most recent error should be the last one added
         let last_error = coordinator.state.error_history.back().unwrap();
         assert!(last_error.error.contains("error 9"));
+    }
+
+    mod avss_test_utils {
+        use super::*;
+
+        pub struct AvssTestSetup {
+            pub validators: Vec<ValidatorInfo>,
+            pub ecies_keys: Vec<PrivateKey<RistrettoPoint>>,
+            pub nodes: Nodes<RistrettoPoint>,
+            pub threshold: u16,
+            pub max_faulty: u16,
+        }
+
+        pub struct CoordinatorTestContext {
+            pub coordinator: DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage>,
+            pub avss_setup: AvssTestSetup,
+            pub session: SessionContext,
+        }
+
+        impl AvssTestSetup {
+            pub fn new(num_validators: u16, threshold: u16, max_faulty: u16) -> Self {
+                let mut rng = rand::thread_rng();
+                let mut validators = Vec::new();
+                let mut ecies_keys = Vec::new();
+                for party_id in 0..num_validators {
+                    let ecies_private = PrivateKey::<RistrettoPoint>::new(&mut rng);
+                    let ecies_public = PublicKey::from_private_key(&ecies_private);
+                    validators.push(ValidatorInfo {
+                        address: ValidatorAddress([party_id as u8; 32]),
+                        party_id,
+                        weight: 1,
+                        ecies_public_key: ecies_public,
+                    });
+                    ecies_keys.push(ecies_private);
+                }
+                let nodes = Nodes::new(
+                    validators
+                        .iter()
+                        .map(|v| Node {
+                            id: v.party_id,
+                            pk: v.ecies_public_key.clone(),
+                            weight: v.weight,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                    .unwrap();
+                Self {
+                    validators,
+                    ecies_keys,
+                    nodes,
+                    threshold,
+                    max_faulty,
+                }
+            }
+
+            pub fn create_valid_message(
+                &self,
+                dealer_index: usize,
+                session_context: &SessionContext,
+            ) -> avss::Message {
+                let dealer_address = &self.validators[dealer_index].address;
+                let sid = session_context
+                    .dealer_session_id(dealer_address)
+                    .digest
+                    .to_vec();
+                let dealer = avss::Dealer::new(
+                    None,
+                    self.nodes.clone(),
+                    self.threshold,
+                    self.max_faulty,
+                    sid,
+                )
+                    .unwrap();
+                dealer.create_message(&mut rand::thread_rng()).unwrap()
+            }
+        }
+
+        pub fn create_test_coordinator(
+            num_validators: u16,
+            threshold: u16,
+            max_faulty: u16,
+        ) -> CoordinatorTestContext {
+            let avss_setup = AvssTestSetup::new(num_validators, threshold, max_faulty);
+            let config =
+                DkgConfig::new(1, avss_setup.validators.clone(), threshold, max_faulty).unwrap();
+            let session =
+                SessionContext::new(1, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+            let validator_addresses: Vec<ValidatorAddress> = avss_setup
+                .validators
+                .iter()
+                .map(|v| v.address.clone())
+                .collect();
+            let channels = InMemoryP2PChannels::<P2PMessage>::new_network(validator_addresses);
+            let p2p_channel = channels.into_iter().next().unwrap().1;
+            let dkg_config = DkgConfiguration::new(
+                avss_setup.validators[0].clone(),
+                config,
+                session.clone(),
+                CoordinatorConfig::default(),
+                avss_setup.ecies_keys[0].clone(),
+            );
+            let state = DkgRuntimeState::new();
+            let communication_channels =
+                DkgCommunicationChannels::new(p2p_channel, Option::<()>::None);
+            let coordinator = DkgCoordinator::new(
+                dkg_config,
+                state,
+                communication_channels,
+                Some(MockStorage::new()),
+            );
+            CoordinatorTestContext {
+                coordinator,
+                avss_setup,
+                session,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_valid() {
+        let mut ctx = avss_test_utils::create_test_coordinator(4, 2, 1);
+        ctx.coordinator.start().await.unwrap();
+        // Create a valid AVSS message from validator 1 (dealer)
+        let dealer = ctx.avss_setup.validators[1].address.clone();
+        let message = ctx.avss_setup.create_valid_message(1, &ctx.session);
+
+        let result = ctx
+            .coordinator
+            .handle_share(dealer.clone(), message.clone())
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "handle_share should succeed for valid message"
+        );
+        if let DkgState::Running { dealer_states, .. } = &ctx.coordinator.state.dkg_state {
+            assert!(
+                matches!(dealer_states.get(&dealer), Some(DealerState::Completed)),
+                "Dealer should be in Completed state"
+            );
+        }
+        assert!(
+            ctx.coordinator
+                .state
+                .protocol_data
+                .received_messages
+                .contains_key(&dealer),
+            "Message should be stored in received_messages"
+        );
+        assert!(
+            ctx.coordinator
+                .state
+                .protocol_data
+                .processed_shares
+                .contains_key(&dealer),
+            "Shares should be stored in processed_shares"
+        );
+        assert!(
+            ctx.coordinator
+                .state
+                .protocol_data
+                .processed_commitments
+                .contains_key(&dealer),
+            "Commitments should be stored in processed_commitments"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_unknown_dealer() {
+        let setup = TestSetup::with_validators(4, 2, 1);
+        let mut coordinator = setup.create_coordinator();
+        coordinator.start().await.unwrap();
+        // Create a dealer address that's not in the validator set
+        let unknown_dealer = ValidatorAddress([99; 32]);
+        // Create a dummy AVSS message (it won't be processed due to unknown dealer)
+        let avss_setup = avss_test_utils::AvssTestSetup::new(4, 2, 1);
+        let message = avss_setup.create_valid_message(0, &setup.session);
+
+        let result = coordinator
+            .handle_share(unknown_dealer.clone(), message)
+            .await;
+
+        assert!(result.is_err(), "Should reject unknown dealer");
+        assert!(
+            result.unwrap_err().to_string().contains("Unknown dealer"),
+            "Error should mention unknown dealer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_already_processed() {
+        let mut ctx = avss_test_utils::create_test_coordinator(3, 2, 0);
+        ctx.coordinator.start().await.unwrap();
+        let dealer = ctx.avss_setup.validators[1].address.clone();
+        let message = ctx.avss_setup.create_valid_message(1, &ctx.session);
+
+        // First call should succeed
+        let result = ctx
+            .coordinator
+            .handle_share(dealer.clone(), message.clone())
+            .await;
+        assert!(result.is_ok(), "First handle_share should succeed");
+
+        // Second call with same dealer should fail
+        let result = ctx.coordinator.handle_share(dealer, message).await;
+        assert!(result.is_err(), "Second handle_share should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Already processed"),
+            "Error should mention already processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_not_running() {
+        let mut ctx = avss_test_utils::create_test_coordinator(3, 2, 0);
+        // Don't start the coordinator - leave it in Idle state
+        assert!(ctx.coordinator.is_idle());
+        let dealer = ctx.avss_setup.validators[1].address.clone();
+        let message = ctx.avss_setup.create_valid_message(1, &ctx.session);
+
+        let result = ctx.coordinator.handle_share(dealer, message).await;
+
+        assert!(result.is_err(), "Should reject when not running");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Not in running state"),
+            "Error should mention state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_state_transitions() {
+        let mut ctx = avss_test_utils::create_test_coordinator(4, 2, 1);
+        ctx.coordinator.start().await.unwrap();
+        let dealer = ctx.avss_setup.validators[1].address.clone();
+
+        // Verify initial state is WaitingForShare
+        if let DkgState::Running { dealer_states, .. } = &ctx.coordinator.state.dkg_state {
+            assert!(
+                matches!(
+                    dealer_states.get(&dealer),
+                    Some(DealerState::WaitingForShare { .. })
+                ),
+                "Dealer should start in WaitingForShare state"
+            );
+        }
+
+        let message = ctx.avss_setup.create_valid_message(1, &ctx.session);
+        ctx.coordinator
+            .handle_share(dealer.clone(), message)
+            .await
+            .unwrap();
+
+        // Verify final state is Completed
+        if let DkgState::Running { dealer_states, .. } = &ctx.coordinator.state.dkg_state {
+            assert!(
+                matches!(dealer_states.get(&dealer), Some(DealerState::Completed)),
+                "Dealer should transition to Completed state"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_share_multiple_dealers() {
+        let mut ctx = avss_test_utils::create_test_coordinator(5, 3, 1);
+        ctx.coordinator.start().await.unwrap();
+
+        // Process shares from dealers 1, 2, and 3
+        for i in 1..4 {
+            let dealer = ctx.avss_setup.validators[i].address.clone();
+            let message = ctx.avss_setup.create_valid_message(i, &ctx.session);
+
+            let result = ctx.coordinator.handle_share(dealer.clone(), message).await;
+            assert!(
+                result.is_ok(),
+                "Share processing should succeed for dealer {}",
+                i
+            );
+        }
+
+        // Verify all three dealers are completed
+        if let DkgState::Running { dealer_states, .. } = &ctx.coordinator.state.dkg_state {
+            for i in 1..4 {
+                let dealer = ctx.avss_setup.validators[i].address.clone();
+                assert!(
+                    matches!(dealer_states.get(&dealer), Some(DealerState::Completed)),
+                    "Dealer {} should be completed",
+                    i
+                );
+            }
+        }
+
+        // Verify we have shares from all three dealers
+        assert_eq!(
+            ctx.coordinator.state.protocol_data.processed_shares.len(),
+            3,
+            "Should have shares from 3 dealers"
+        );
+        assert_eq!(
+            ctx.coordinator
+                .state
+                .protocol_data
+                .processed_commitments
+                .len(),
+            3,
+            "Should have commitments from 3 dealers"
+        );
     }
 }
