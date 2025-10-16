@@ -11,6 +11,7 @@ use crate::dkg::types::{
 use crate::types::ValidatorAddress;
 use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::ristretto255::RistrettoPoint;
+use fastcrypto::hash::{HashFunction, Sha3_256};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::{Node, Nodes};
 use fastcrypto_tbls::polynomial::Eval;
@@ -574,6 +575,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         dealer: ValidatorAddress,
         message: avss::Message,
     ) -> DkgResult<()> {
+        let message_hash = self.compute_message_hash(&message);
         match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
@@ -612,8 +614,18 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                                         .protocol_data
                                         .processed_commitments
                                         .insert(dealer.clone(), output.commitments);
-                                    // TODO: Send approval signature back to the dealer
-                                    // For now, mark dealer as completed
+                                    let _approval = MessageApproval {
+                                        message_hash,
+                                        approver: dealer.clone(),
+                                        signature: vec![], // TODO: Sign the message_hash with our validator key
+                                        timestamp: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs(),
+                                    };
+
+                                    // TODO: Send approval to all parties via P2P channel
+
                                     *dealer_state = DealerState::Completed;
                                     self.check_progress().await?;
                                     Ok(())
@@ -952,6 +964,11 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             });
         }
         Ok(())
+    }
+
+    fn compute_message_hash(&self, message: &avss::Message) -> [u8; 32] {
+        let serialized = bcs::to_bytes(message).expect("Failed to serialize AVSS message");
+        Sha3_256::digest(&serialized).digest
     }
 
     async fn handle_dkg_error(&mut self, error: DkgError, context: String) -> DkgResult<()> {
@@ -1758,7 +1775,7 @@ mod tests {
                         })
                         .collect::<Vec<_>>(),
                 )
-                    .unwrap();
+                .unwrap();
                 Self {
                     validators,
                     ecies_keys,
@@ -1785,7 +1802,7 @@ mod tests {
                     self.max_faulty,
                     sid,
                 )
-                    .unwrap();
+                .unwrap();
                 dealer.create_message(&mut rand::thread_rng()).unwrap()
             }
         }
