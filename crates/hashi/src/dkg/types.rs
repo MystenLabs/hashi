@@ -1,5 +1,6 @@
 //! Core types for the DKG protocol
 
+use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
 use fastcrypto_tbls::{
@@ -11,7 +12,6 @@ use fastcrypto_tbls::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fmt;
 
 type EG = fastcrypto::groups::ristretto255::RistrettoPoint;
 
@@ -43,15 +43,6 @@ fn base_oracle(protocol_type: &ProtocolType) -> RandomOracle {
             .extend(DOMAIN_NONCE)
             .extend(DOMAIN_GENERATION),
         ProtocolType::Signing { .. } => RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_SIGNING),
-    }
-}
-
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct ValidatorAddress(pub [u8; 32]);
-
-impl fmt::Display for ValidatorAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", hex::encode(&self.0[..8]))
     }
 }
 
@@ -346,6 +337,12 @@ pub enum DkgError {
 impl From<FastCryptoError> for DkgError {
     fn from(e: FastCryptoError) -> Self {
         DkgError::CryptoError(e.to_string())
+    }
+}
+
+impl From<crate::communication::ChannelError> for DkgError {
+    fn from(e: crate::communication::ChannelError) -> Self {
+        DkgError::BroadcastError(e.to_string())
     }
 }
 
