@@ -5,8 +5,9 @@ use crate::communication::{
 };
 use crate::dkg::interfaces::DkgStorage;
 use crate::dkg::types::{
-    DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, OrderedBroadcastMessage,
-    P2PMessage, SessionContext, SessionId, ValidatorInfo, ValidatorSignature,
+    DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, MessageHash,
+    OrderedBroadcastMessage, P2PMessage, SessionContext, SessionId, ValidatorInfo,
+    ValidatorSignature,
 };
 use crate::types::ValidatorAddress;
 use fastcrypto::groups::GroupElement;
@@ -46,6 +47,11 @@ fn convert_dkg_config_to_fastcrypto_nodes(config: &DkgConfig) -> DkgResult<Nodes
         })
         .collect();
     Nodes::new(nodes).map_err(|e| DkgError::CryptoError(e.to_string()))
+}
+
+fn compute_message_hash(message: &avss::Message) -> MessageHash {
+    let serialized = bcs::to_bytes(message).expect("Failed to serialize AVSS message");
+    Sha3_256::digest(&serialized).digest
 }
 
 #[derive(Debug, Clone)]
@@ -575,7 +581,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         dealer: ValidatorAddress,
         message: avss::Message,
     ) -> DkgResult<()> {
-        let message_hash = self.compute_message_hash(&message);
+        let message_hash = compute_message_hash(&message);
         match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
@@ -964,11 +970,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             });
         }
         Ok(())
-    }
-
-    fn compute_message_hash(&self, message: &avss::Message) -> [u8; 32] {
-        let serialized = bcs::to_bytes(message).expect("Failed to serialize AVSS message");
-        Sha3_256::digest(&serialized).digest
     }
 
     async fn handle_dkg_error(&mut self, error: DkgError, context: String) -> DkgResult<()> {
