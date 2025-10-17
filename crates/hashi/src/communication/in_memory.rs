@@ -234,7 +234,7 @@ where
 }
 
 type HookFn<M> = Box<
-    dyn Fn(M) -> std::pin::Pin<Box<dyn Future<Output=ChannelResult<()>> + Send>> + Send + Sync,
+    dyn Fn(M) -> std::pin::Pin<Box<dyn Future<Output = ChannelResult<()>> + Send>> + Send + Sync,
 >;
 
 pub struct MockP2PChannel<M>
@@ -260,7 +260,7 @@ where
     pub fn set_broadcast_hook<F, Fut>(&mut self, hook: F)
     where
         F: Fn(M) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output=ChannelResult<()>> + Send + 'static,
+        Fut: Future<Output = ChannelResult<()>> + Send + 'static,
     {
         self.broadcast_hook = Some(Box::new(move |msg| Box::pin(hook(msg))));
     }
@@ -327,7 +327,7 @@ where
     pub fn set_publish_hook<F, Fut>(&mut self, hook: F)
     where
         F: Fn(M) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output=ChannelResult<()>> + Send + 'static,
+        Fut: Future<Output = ChannelResult<()>> + Send + 'static,
     {
         self.publish_hook = Some(Box::new(move |msg| Box::pin(hook(msg))));
     }
