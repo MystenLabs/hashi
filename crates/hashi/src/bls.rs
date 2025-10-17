@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use base64ct::Base64;
+use base64ct::Encoding;
 use blst::min_pk::AggregatePublicKey;
 use blst::min_pk::AggregateSignature;
 use blst::min_pk::PublicKey;
@@ -12,6 +14,29 @@ use sui_sdk_types::Address;
 use sui_sdk_types::SignatureScheme;
 
 const DST_G2: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+
+fn serialize_bytes_to_base64<S, const N: usize>(
+    bytes: &[u8; N],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize;
+    let b64 = Base64::encode_string(bytes);
+    b64.serialize(serializer)
+}
+
+fn deserialize_base64_to_bytes<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let b64: std::borrow::Cow<'de, str> = serde::Deserialize::deserialize(deserializer)?;
+    let bytes = Base64::decode_vec(&b64).map_err(serde::de::Error::custom)?;
+    bytes
+        .try_into()
+        .map_err(|_| serde::de::Error::custom(format!("invalid length, expected {} bytes", N)))
+}
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -170,6 +195,25 @@ impl std::fmt::Display for Bls12381PublicKey {
     }
 }
 
+impl serde::Serialize for Bls12381PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_bytes_to_base64(&self.bytes, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Bls12381PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = deserialize_base64_to_bytes::<D, { Self::LENGTH }>(deserializer)?;
+        Self::new(bytes).map_err(serde::de::Error::custom)
+    }
+}
+
 impl Bls12381PublicKey {
     /// The length of an bls12381 min_pk public key in bytes.
     pub const LENGTH: usize = 48;
@@ -182,8 +226,28 @@ impl Bls12381PublicKey {
     }
 }
 
-#[derive(Debug)]
-pub struct Bls12381Signature(Signature);
+#[derive(Debug, Clone)]
+pub struct Bls12381Signature(pub(crate) Signature);
+
+impl serde::Serialize for Bls12381Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes = self.0.to_bytes();
+        serialize_bytes_to_base64(&bytes, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Bls12381Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = deserialize_base64_to_bytes::<D, { Self::LENGTH }>(deserializer)?;
+        Self::new(bytes).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Bls12381Signature {
     /// The length of a bls12381 min_pk signature in bytes.
@@ -232,9 +296,9 @@ pub struct BlsCommittee {
 #[derive(Debug)]
 #[allow(unused)]
 pub struct BlsCommitteeMember {
-    validator_address: Address,
-    public_key: Bls12381PublicKey,
-    weight: u16,
+    pub validator_address: Address,
+    pub public_key: Bls12381PublicKey,
+    pub weight: u16,
 }
 
 struct MemberInfo<'a> {
@@ -301,16 +365,16 @@ impl BlsCommittee {
 
 #[derive(Debug)]
 pub struct HashiSignature {
-    epoch: u64,
-    public_key: Bls12381PublicKey,
-    signature: Bls12381Signature,
+    pub epoch: u64,
+    pub public_key: Bls12381PublicKey,
+    pub signature: Bls12381Signature,
 }
 
 #[derive(Debug)]
 pub struct HashiAggregatedSignature {
-    epoch: u64,
-    signature: Bls12381Signature,
-    bitmap: Vec<u8>,
+    pub epoch: u64,
+    pub signature: Bls12381Signature,
+    pub bitmap: Vec<u8>,
 }
 
 impl Verifier<HashiSignature> for BlsCommittee {
@@ -544,15 +608,300 @@ impl BitMap {
     }
 }
 
+pub fn sign_message_hash(
+    message_hash: &[u8; 32],
+    bls_signing_key: &Bls12381PrivateKey,
+) -> Bls12381Signature {
+    bls_signing_key
+        .try_sign(message_hash)
+        .expect("BLS signing should not fail")
+}
+
+pub fn verify_approval_signature(
+    message_hash: &[u8; 32],
+    signature: &Bls12381Signature,
+    validator_address: &crate::types::ValidatorAddress,
+    dkg_config: &crate::dkg::types::DkgConfig,
+) -> Result<(), crate::dkg::types::DkgError> {
+    let validator_info = dkg_config
+        .validators
+        .iter()
+        .find(|v| v.address == *validator_address)
+        .ok_or_else(|| crate::dkg::types::DkgError::InvalidMessage {
+            sender: validator_address.clone(),
+            reason: "Unknown validator address".to_string(),
+        })?;
+    validator_info
+        .signature_verification_key
+        .verify(message_hash, signature)
+        .map_err(|e| {
+            crate::dkg::types::DkgError::CryptoError(format!(
+                "BLS signature verification failed: {}",
+                e
+            ))
+        })
+}
+
+pub fn aggregate_approval_signatures(
+    approvals: &[(crate::types::ValidatorAddress, Bls12381Signature)],
+    dkg_config: &crate::dkg::types::DkgConfig,
+    epoch: u64,
+    message_hash: &[u8; 32],
+) -> Result<(Bls12381Signature, Vec<u8>), crate::dkg::types::DkgError> {
+    let members: Vec<BlsCommitteeMember> = dkg_config
+        .validators
+        .iter()
+        .map(|v| BlsCommitteeMember {
+            validator_address: Address::ZERO, // Not used in aggregation
+            public_key: v.signature_verification_key.clone(),
+            weight: v.weight,
+        })
+        .collect();
+    let committee = BlsCommittee::new(members, epoch);
+    let mut aggregator = HashiSignatureAggregator::new(committee, message_hash.to_vec());
+    for (addr, sig) in approvals {
+        let validator = dkg_config
+            .validators
+            .iter()
+            .find(|v| v.address == *addr)
+            .ok_or_else(|| crate::dkg::types::DkgError::InvalidMessage {
+                sender: addr.clone(),
+                reason: "Unknown validator".to_string(),
+            })?;
+        let hashi_sig = HashiSignature {
+            epoch,
+            public_key: validator.signature_verification_key.clone(),
+            signature: sig.clone(),
+        };
+        aggregator.add_signature(hashi_sig).map_err(|e| {
+            crate::dkg::types::DkgError::CryptoError(format!("Failed to add signature: {}", e))
+        })?;
+    }
+    let aggregated = aggregator.finish(RequiredWeight::Quorum).map_err(|e| {
+        crate::dkg::types::DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
+    })?;
+    Ok((aggregated.signature, aggregated.bitmap))
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::dkg::types::{DkgConfig, DkgError, ValidatorInfo};
+    use crate::types::ValidatorAddress;
+    use fastcrypto::groups::ristretto255::RistrettoPoint;
+    use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
     use test_strategy::proptest;
+
+    fn create_test_validator(index: u8, bls_signing_key: Bls12381PrivateKey) -> ValidatorInfo {
+        let ecies_private = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let ecies_public = PublicKey::from_private_key(&ecies_private);
+        ValidatorInfo {
+            address: ValidatorAddress([index; 32]),
+            party_id: index as u16,
+            weight: 1,
+            communication_key: ecies_public,
+            signature_verification_key: bls_signing_key.public_key(),
+        }
+    }
+
+    fn create_validators_with_keys(count: usize) -> (Vec<ValidatorInfo>, Vec<Bls12381PrivateKey>) {
+        let mut validators = Vec::new();
+        let mut bls_keys = Vec::new();
+        for i in 0..count {
+            let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+            let validator = create_test_validator(i as u8, bls_signing_key.clone());
+            validators.push(validator);
+            bls_keys.push(bls_signing_key);
+        }
+        (validators, bls_keys)
+    }
+
+    fn create_single_validator_config(
+        bls_signing_key: Bls12381PrivateKey,
+    ) -> (ValidatorAddress, DkgConfig) {
+        let validator = create_test_validator(1, bls_signing_key);
+        let validator_address = validator.address.clone();
+        let dkg_config = DkgConfig::new(1, vec![validator], 1, 0).unwrap();
+        (validator_address, dkg_config)
+    }
+
+    const TEST_MESSAGE_HASH: [u8; 32] = [42u8; 32];
 
     #[proptest]
     fn basic_signing(signer: Bls12381PrivateKey, message: Vec<u8>) {
         let signature = signer.sign(&message);
         signer.public_key().verify(&message, &signature).unwrap();
+    }
+
+    #[test]
+    fn test_sign_message_hash() {
+        let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let bls_public_key = bls_signing_key.public_key();
+        let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_signing_key);
+
+        assert!(
+            bls_public_key
+                .verify(&TEST_MESSAGE_HASH, &signature)
+                .is_ok(),
+            "Signature should verify successfully"
+        );
+
+        // Verify that a different message produces a different signature
+        let different_hash: [u8; 32] = [99u8; 32];
+        let different_signature = sign_message_hash(&different_hash, &bls_signing_key);
+
+        assert!(
+            bls_public_key.verify(&different_hash, &signature).is_err(),
+            "Original signature should not verify with different message"
+        );
+        assert!(
+            bls_public_key
+                .verify(&different_hash, &different_signature)
+                .is_ok(),
+            "Different signature should verify with its own message"
+        );
+    }
+
+    #[test]
+    fn test_verify_approval_signature_valid() {
+        let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let (validator_address, dkg_config) =
+            create_single_validator_config(bls_signing_key.clone());
+        let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_signing_key);
+
+        let result = verify_approval_signature(
+            &TEST_MESSAGE_HASH,
+            &signature,
+            &validator_address,
+            &dkg_config,
+        );
+
+        assert!(result.is_ok(), "Valid signature should verify successfully");
+    }
+
+    #[test]
+    fn test_verify_approval_signature_wrong_signer() {
+        let bls_signing_key1 = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let bls_signing_key2 = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        // Create a validator with public key 1
+        let (validator_address, dkg_config) = create_single_validator_config(bls_signing_key1);
+        // Sign with key 2 (wrong key)
+        let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_signing_key2);
+
+        // Verify should fail
+        let result = verify_approval_signature(
+            &TEST_MESSAGE_HASH,
+            &signature,
+            &validator_address,
+            &dkg_config,
+        );
+        assert!(result.is_err(), "Wrong signature should fail verification");
+
+        if let Err(DkgError::CryptoError(msg)) = result {
+            assert!(msg.contains("BLS signature verification failed"));
+        } else {
+            panic!("Expected CryptoError");
+        }
+    }
+
+    #[test]
+    fn test_verify_approval_signature_unknown_validator() {
+        let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let (_, dkg_config) = create_single_validator_config(bls_signing_key.clone());
+        // Try to verify with unknown validator address
+        let unknown_address = ValidatorAddress([99u8; 32]);
+        let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_signing_key);
+
+        // Verify should fail
+        let result = verify_approval_signature(
+            &TEST_MESSAGE_HASH,
+            &signature,
+            &unknown_address,
+            &dkg_config,
+        );
+        assert!(
+            result.is_err(),
+            "Unknown validator should fail verification"
+        );
+
+        if let Err(DkgError::InvalidMessage { reason, .. }) = result {
+            assert!(reason.contains("Unknown validator address"));
+        } else {
+            panic!("Expected InvalidMessage error");
+        }
+    }
+
+    #[test]
+    fn test_aggregate_approval_signatures() {
+        let (validators, bls_keys) = create_validators_with_keys(4);
+        let mut approvals = Vec::new();
+        let dkg_config = DkgConfig::new(1, validators.clone(), 2, 1).unwrap();
+        for i in 0..3 {
+            let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_keys[i]);
+            approvals.push((validators[i].address.clone(), signature));
+        }
+
+        let result = aggregate_approval_signatures(&approvals, &dkg_config, 1, &TEST_MESSAGE_HASH);
+        assert!(
+            result.is_ok(),
+            "Aggregation should succeed: {:?}",
+            result.err()
+        );
+
+        let (aggregated_sig, bitmap) = result.unwrap();
+
+        assert!(!bitmap.is_empty(), "Bitmap should not be empty");
+        assert_eq!(aggregated_sig.0.to_bytes().len(), Bls12381Signature::LENGTH);
+    }
+
+    #[test]
+    fn test_aggregate_approval_signatures_insufficient_weight() {
+        let (validators, bls_keys) = create_validators_with_keys(4);
+        let dkg_config = DkgConfig::new(1, validators.clone(), 2, 1).unwrap();
+        // Only have 1 validator sign (insufficient)
+        let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_keys[0]);
+        let approvals = vec![(validators[0].address.clone(), signature)];
+
+        let result = aggregate_approval_signatures(&approvals, &dkg_config, 1, &TEST_MESSAGE_HASH);
+        assert!(
+            result.is_err(),
+            "Aggregation should fail with insufficient weight"
+        );
+
+        if let Err(DkgError::CryptoError(msg)) = result {
+            assert!(
+                msg.contains("insufficient") || msg.contains("weight") || msg.contains("threshold"),
+                "Expected error about insufficient weight, got: {}",
+                msg
+            );
+        } else {
+            panic!(
+                "Expected CryptoError about insufficient weight, got: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_aggregate_approval_signatures_unknown_validator() {
+        let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let (_, dkg_config) = create_single_validator_config(bls_signing_key.clone());
+        // Create approval from unknown validator
+        let unknown_address = ValidatorAddress([99u8; 32]);
+        let signature = sign_message_hash(&TEST_MESSAGE_HASH, &bls_signing_key);
+        let approvals = vec![(unknown_address, signature)];
+
+        let result = aggregate_approval_signatures(&approvals, &dkg_config, 1, &TEST_MESSAGE_HASH);
+        assert!(
+            result.is_err(),
+            "Aggregation should fail with unknown validator"
+        );
+
+        if let Err(DkgError::InvalidMessage { reason, .. }) = result {
+            assert!(reason.contains("Unknown validator"));
+        } else {
+            panic!("Expected InvalidMessage error");
+        }
     }
 
     #[proptest]
@@ -619,6 +968,27 @@ mod test {
         aggregator
             .committee()
             .verify(&message, &(&signature, required_weight))
+            .unwrap();
+    }
+
+    #[proptest]
+    fn roundtrip_public_key_serialization(private_key: Bls12381PrivateKey) {
+        let public_key = private_key.public_key();
+        let bytes = bincode::serialize(&public_key).unwrap();
+        let deserialized: Bls12381PublicKey = bincode::deserialize(&bytes).unwrap();
+
+        assert_eq!(public_key, deserialized);
+    }
+
+    #[proptest]
+    fn roundtrip_signature_serialization(private_key: Bls12381PrivateKey, message: Vec<u8>) {
+        let signature = private_key.try_sign(&message).unwrap();
+        let bytes = bincode::serialize(&signature).unwrap();
+        let deserialized: Bls12381Signature = bincode::deserialize(&bytes).unwrap();
+
+        private_key
+            .public_key()
+            .verify(&message, &deserialized)
             .unwrap();
     }
 }

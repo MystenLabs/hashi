@@ -33,7 +33,7 @@ toml = "0.9.2"
 futures = "0.3.31"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 rustls = { version = "0.23.29", default-features = false, features = ["ring"] }
-ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
+ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core", "serde"] }
 tonic-rustls = "0.2.0"
 x509-parser = { version = "0.17.0", features = ["verify"] }
 rcgen = "0.13"
@@ -52,6 +52,6 @@ bcs = "0.1.6"
 rand = "0.8"
 
 [dev-dependencies]
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
+bincode = "1.3"

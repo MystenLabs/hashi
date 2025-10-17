@@ -1,5 +1,9 @@
 //! DKG coordinator that manages the protocol state machine
 
+use crate::bls::{
+    Bls12381PrivateKey, Bls12381Signature, aggregate_approval_signatures, sign_message_hash,
+    verify_approval_signature,
+};
 use crate::communication::{
     AuthenticatedMessage, ChannelError, OrderedBroadcastChannel, P2PChannel,
 };
@@ -17,7 +21,7 @@ use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::{Node, Nodes};
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::select;
 use tracing::{error, warn};
@@ -42,7 +46,7 @@ fn convert_dkg_config_to_fastcrypto_nodes(config: &DkgConfig) -> DkgResult<Nodes
         .iter()
         .map(|v| Node {
             id: v.party_id,
-            pk: v.ecies_public_key.clone(),
+            pk: v.communication_key.clone(),
             weight: v.weight,
         })
         .collect();
@@ -126,6 +130,7 @@ pub struct DkgConfiguration {
     pub session_context: SessionContext,
     pub coordinator_config: CoordinatorConfig,
     pub ecies_private_key: PrivateKey<RistrettoPoint>,
+    pub bls_signing_key: Bls12381PrivateKey,
 }
 
 impl DkgConfiguration {
@@ -135,6 +140,7 @@ impl DkgConfiguration {
         session_context: SessionContext,
         coordinator_config: CoordinatorConfig,
         ecies_private_key: PrivateKey<RistrettoPoint>,
+        bls_signing_key: Bls12381PrivateKey,
     ) -> Self {
         Self {
             validator_info,
@@ -142,6 +148,7 @@ impl DkgConfiguration {
             session_context,
             coordinator_config,
             ecies_private_key,
+            bls_signing_key,
         }
     }
 }
@@ -173,7 +180,7 @@ impl Default for DkgProtocolData {
 pub struct DkgSignatureTracker {
     pub data_availability_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
     pub dkg_signatures: BTreeMap<ValidatorAddress, Vec<ValidatorSignature>>,
-    pub share_approvals: BTreeMap<ValidatorAddress, HashSet<ValidatorAddress>>,
+    pub share_approvals: BTreeMap<ValidatorAddress, BTreeMap<ValidatorAddress, Bls12381Signature>>,
 }
 
 impl DkgSignatureTracker {
@@ -351,7 +358,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         &mut self,
         sender: ValidatorAddress,
         message: P2PMessage,
-    ) -> DkgResult<()> {
+    ) -> DkgResult<()>
+    where
+        P: P2PChannel<P2PMessage>,
+    {
         if !self.validate_dealer(&sender) {
             return Err(DkgError::InvalidMessage {
                 sender,
@@ -496,35 +506,36 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 .collect();
             for dealer in dealers_to_publish {
                 if let Some(approvers) = self.state.signature_tracker.share_approvals.get(&dealer) {
-                    let signatures: Vec<ValidatorSignature> = approvers
+                    let message_hash = if let Some(avss_message) =
+                        self.state.protocol_data.received_messages.get(&dealer)
+                    {
+                        compute_message_hash(avss_message)
+                    } else {
+                        // This shouldn't happen as we check for message existence in handle_approval
+                        continue;
+                    };
+                    let approvals: Vec<(ValidatorAddress, Bls12381Signature)> = approvers
                         .iter()
-                        .map(|approver| ValidatorSignature {
-                            validator: approver.clone(),
-                            signature: vec![], // TODO: Store actual signatures from approvals
-                        })
+                        .map(|(addr, sig)| (addr.clone(), sig.clone()))
                         .collect();
-
-                    // Create the certificate
-                    // TODO: Retrieve actual message hash from the AVSS message we received as dealer
-                    let message_hash = [0u8; 32];
-
-                    // For now, use the collected signatures as DKG signatures
-                    // In practice, we'd separate DA and DKG signatures
+                    let (aggregated_signature, signers_bitmap) = aggregate_approval_signatures(
+                        &approvals,
+                        &self.config.dkg_config,
+                        self.config.dkg_config.epoch,
+                        &message_hash,
+                    )?;
                     let certificate = crate::dkg::types::DkgCertificate {
                         dealer: dealer.clone(),
                         message_hash,
-                        data_availability_signatures: vec![], // TODO: Collect from data_availability_signatures in signature_tracker
-                        dkg_signatures: signatures,
+                        data_availability_signatures: vec![], // TODO: Collect from data_availability_sigs if needed
+                        aggregated_signature,
+                        signers_bitmap,
                         session_context: self.config.session_context.clone(),
                     };
-
-                    // Publish to ordered broadcast channel
-                    let message = OrderedBroadcastMessage::CertificateV1(certificate);
+                    let message = OrderedBroadcastMessage::CertificateV1(Box::new(certificate));
                     channel.publish(message).await.map_err(|e| {
                         DkgError::ProtocolFailed(format!("Failed to publish certificate: {}", e))
                     })?;
-
-                    // Remove from pending after publishing
                     self.state.signature_tracker.share_approvals.remove(&dealer);
                 }
             }
@@ -580,7 +591,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         &mut self,
         dealer: ValidatorAddress,
         message: avss::Message,
-    ) -> DkgResult<()> {
+    ) -> DkgResult<()>
+    where
+        P: P2PChannel<P2PMessage>,
+    {
         let message_hash = compute_message_hash(&message);
         match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
@@ -620,18 +634,29 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                                         .protocol_data
                                         .processed_commitments
                                         .insert(dealer.clone(), output.commitments);
-                                    let _approval = MessageApproval {
+                                    let signature = sign_message_hash(
+                                        &message_hash,
+                                        &self.config.bls_signing_key,
+                                    );
+                                    let approval = MessageApproval {
                                         message_hash,
                                         approver: dealer.clone(),
-                                        signature: vec![], // TODO: Sign the message_hash with our validator key
+                                        signature,
                                         timestamp: std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap()
                                             .as_secs(),
                                     };
-
-                                    // TODO: Send approval to all parties via P2P channel
-
+                                    self.channels
+                                        .p2p
+                                        .broadcast(P2PMessage::ApprovalV1(approval))
+                                        .await
+                                        .map_err(|e| {
+                                            DkgError::ProtocolFailed(format!(
+                                                "Failed to broadcast approval: {}",
+                                                e
+                                            ))
+                                        })?;
                                     *dealer_state = DealerState::Completed;
                                     self.check_progress().await?;
                                     Ok(())
@@ -780,8 +805,12 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         sender: ValidatorAddress,
         approval: MessageApproval,
     ) -> DkgResult<()> {
-        // TODO: Verify the approval signature
-        // For now, just track that we received an approval
+        verify_approval_signature(
+            &approval.message_hash,
+            &approval.signature,
+            &sender,
+            &self.config.dkg_config,
+        )?;
         if !self
             .state
             .protocol_data
@@ -798,9 +827,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             .share_approvals
             .entry(approval.approver.clone())
             .or_default()
-            .insert(sender);
-
-        // Check if we have enough approvals to create a certificate
+            .insert(sender, approval.signature);
         let required_approvals = self.config.dkg_config.required_dkg_signatures();
         if let Some(approvers) = self
             .state
@@ -1032,7 +1059,9 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls::sign_message_hash;
     use crate::communication::InMemoryP2PChannels;
+    use crate::communication::{MockOrderedBroadcastChannel, MockP2PChannel};
     use crate::dkg::interfaces::DkgStorage;
     use crate::dkg::types::{
         DkgConfig, DkgOutput, DkgProtocolState, DkgResult, ProtocolType, SessionContext,
@@ -1045,17 +1074,21 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
     fn create_test_validator(party_id: u16) -> ValidatorInfo {
         use fastcrypto::groups::ristretto255::RistrettoPoint;
 
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
+        let bls_private_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let bls_public_key = bls_private_key.public_key();
         ValidatorInfo {
             address: ValidatorAddress([party_id as u8; 32]),
             party_id,
             weight: 1,
-            ecies_public_key: public_key,
+            communication_key: public_key,
+            signature_verification_key: bls_public_key,
         }
     }
 
@@ -1114,12 +1147,14 @@ mod tests {
             let channels = InMemoryP2PChannels::<P2PMessage>::new_network(validator_addresses);
             let p2p_channel = channels.into_iter().next().unwrap().1;
             let ecies_private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+            let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
             let config = DkgConfiguration::new(
                 self.validators[0].clone(),
                 self.config.clone(),
                 self.session.clone(),
                 coordinator_config,
                 ecies_private_key,
+                bls_signing_key,
             );
             let state = DkgRuntimeState::new();
             let communication_channels =
@@ -1347,15 +1382,21 @@ mod tests {
         let setup = TestSetup::with_validators(4, 2, 1);
         let mut coordinator = setup.create_coordinator();
         coordinator.start().await.unwrap();
-
         let dealer = setup.validators[1].address.clone();
         let sender = setup.validators[2].address.clone();
+        // Create a BLS signing key and update the validator's public key in the config
+        let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let bls_verifying_key = bls_signing_key.public_key();
+        // Update validator[2]'s BLS public key to match our signing key
+        coordinator.config.dkg_config.validators[2].signature_verification_key = bls_verifying_key;
+        let message_hash = [0u8; 32];
+        let signature = sign_message_hash(&message_hash, &bls_signing_key);
 
         // Test approval for unknown share (should fail)
         let approval = MessageApproval {
-            message_hash: [0u8; 32],
+            message_hash,
             approver: dealer.clone(),
-            signature: vec![1, 2, 3],
+            signature: signature.clone(),
             timestamp: 1000,
         };
         let result = coordinator
@@ -1370,6 +1411,14 @@ mod tests {
         );
 
         // Now simulate having received a share from the dealer
+        let avss_setup = avss_test_utils::AvssTestSetup::new(4, 2, 1);
+        let avss_message = avss_setup.create_valid_message(1, &setup.session);
+        coordinator
+            .state
+            .protocol_data
+            .received_messages
+            .insert(dealer.clone(), avss_message);
+
         // We mark the dealer as Processing in the state machine
         if let DkgState::Running { dealer_states, .. } = &mut coordinator.state.dkg_state {
             dealer_states.insert(
@@ -1385,7 +1434,7 @@ mod tests {
             .share_approvals
             .entry(dealer.clone())
             .or_default()
-            .insert(sender.clone());
+            .insert(sender.clone(), signature.clone());
         assert!(
             coordinator
                 .state
@@ -1400,7 +1449,7 @@ mod tests {
                 .share_approvals
                 .get(&dealer)
                 .unwrap()
-                .contains(&sender)
+                .contains_key(&sender)
         );
     }
 
@@ -1669,13 +1718,15 @@ mod tests {
 
         // Test that invalid messages are handled gracefully
         let invalid_sender = ValidatorAddress([99; 32]);
+        let dummy_bls_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let dummy_signature = sign_message_hash(&[0u8; 32], &dummy_bls_key);
         let result = coordinator
             .handle_message(
                 invalid_sender.clone(),
                 P2PMessage::ApprovalV1(MessageApproval {
                     message_hash: [0u8; 32],
                     approver: invalid_sender.clone(),
-                    signature: vec![],
+                    signature: dummy_signature,
                     timestamp: 0,
                 }),
             )
@@ -1758,11 +1809,14 @@ mod tests {
                 for party_id in 0..num_validators {
                     let ecies_private = PrivateKey::<RistrettoPoint>::new(&mut rng);
                     let ecies_public = PublicKey::from_private_key(&ecies_private);
+                    let bls_private_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+                    let bls_public_key = bls_private_key.public_key();
                     validators.push(ValidatorInfo {
                         address: ValidatorAddress([party_id as u8; 32]),
                         party_id,
                         weight: 1,
-                        ecies_public_key: ecies_public,
+                        communication_key: ecies_public,
+                        signature_verification_key: bls_public_key,
                     });
                     ecies_keys.push(ecies_private);
                 }
@@ -1771,7 +1825,7 @@ mod tests {
                         .iter()
                         .map(|v| Node {
                             id: v.party_id,
-                            pk: v.ecies_public_key.clone(),
+                            pk: v.communication_key.clone(),
                             weight: v.weight,
                         })
                         .collect::<Vec<_>>(),
@@ -1825,12 +1879,14 @@ mod tests {
                 .collect();
             let channels = InMemoryP2PChannels::<P2PMessage>::new_network(validator_addresses);
             let p2p_channel = channels.into_iter().next().unwrap().1;
+            let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
             let dkg_config = DkgConfiguration::new(
                 avss_setup.validators[0].clone(),
                 config,
                 session.clone(),
                 CoordinatorConfig::default(),
                 avss_setup.ecies_keys[0].clone(),
+                bls_signing_key,
             );
             let state = DkgRuntimeState::new();
             let communication_channels =
@@ -2042,6 +2098,496 @@ mod tests {
                 .len(),
             3,
             "Should have commitments from 3 dealers"
+        );
+    }
+
+    fn create_validators_with_bls_keys(
+        count: usize,
+    ) -> (Vec<ValidatorInfo>, Vec<Bls12381PrivateKey>) {
+        let mut validators = Vec::new();
+        let mut bls_keys = Vec::new();
+        for party_id in 0..count {
+            let ecies_private = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+            let ecies_public = PublicKey::from_private_key(&ecies_private);
+            let bls_private_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+            let bls_public_key = bls_private_key.public_key();
+            validators.push(ValidatorInfo {
+                address: ValidatorAddress([party_id as u8; 32]),
+                party_id: party_id as u16,
+                weight: 1,
+                communication_key: ecies_public,
+                signature_verification_key: bls_public_key,
+            });
+            bls_keys.push(bls_private_key);
+        }
+        (validators, bls_keys)
+    }
+
+    fn create_mock_p2p_with_capture(
+        validator_address: ValidatorAddress,
+    ) -> (MockP2PChannel<P2PMessage>, Arc<Mutex<Vec<P2PMessage>>>) {
+        let broadcast_messages = Arc::new(Mutex::new(Vec::new()));
+        let broadcast_messages_clone = broadcast_messages.clone();
+        let mut mock_p2p = MockP2PChannel::new(validator_address);
+        mock_p2p.set_broadcast_hook(move |msg: P2PMessage| {
+            let messages = broadcast_messages_clone.clone();
+            let msg = msg.clone();
+            Box::pin(async move {
+                messages.lock().await.push(msg);
+                Ok(())
+            })
+        });
+        (mock_p2p, broadcast_messages)
+    }
+
+    fn create_mock_broadcast_with_capture() -> (
+        MockOrderedBroadcastChannel<OrderedBroadcastMessage>,
+        Arc<Mutex<Vec<OrderedBroadcastMessage>>>,
+    ) {
+        let published_messages = Arc::new(Mutex::new(Vec::new()));
+        let published_messages_clone = published_messages.clone();
+        let mut mock_broadcast = MockOrderedBroadcastChannel::new();
+        mock_broadcast.set_publish_hook(move |msg: OrderedBroadcastMessage| {
+            let messages = published_messages_clone.clone();
+            let msg = msg.clone();
+            Box::pin(async move {
+                messages.lock().await.push(msg);
+                Ok(())
+            })
+        });
+        (mock_broadcast, published_messages)
+    }
+
+    fn add_approval_signatures(
+        state: &mut DkgRuntimeState,
+        dealer: &ValidatorAddress,
+        message_hash: &[u8; 32],
+        validators: &[ValidatorInfo],
+        bls_keys: &[Bls12381PrivateKey],
+        count: usize,
+    ) {
+        for i in 0..count {
+            let approver = validators[i].address.clone();
+            let signature = sign_message_hash(message_hash, &bls_keys[i]);
+            state
+                .signature_tracker
+                .share_approvals
+                .entry(dealer.clone())
+                .or_default()
+                .insert(approver, signature);
+        }
+    }
+
+    // Type alias for the complex return type
+    type TestCoordinatorWithApprovals = (
+        DkgCoordinator<
+            InMemoryP2PChannels<P2PMessage>,
+            MockOrderedBroadcastChannel<OrderedBroadcastMessage>,
+            MockStorage,
+        >,
+        Arc<Mutex<Vec<OrderedBroadcastMessage>>>,
+        [u8; 32],
+        ValidatorAddress,
+    );
+
+    fn setup_coordinator_with_approvals(
+        validators: Vec<ValidatorInfo>,
+        bls_keys: Vec<Bls12381PrivateKey>,
+        num_approvals: usize,
+    ) -> TestCoordinatorWithApprovals {
+        let config = DkgConfig::new(1, validators.clone(), 2, 1).unwrap();
+        let session = SessionContext::new(1, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+
+        // Create mock channels
+        let p2p_channel = InMemoryP2PChannels::<P2PMessage>::new(validators[0].address.clone());
+        let (mock_broadcast, published_messages) = create_mock_broadcast_with_capture();
+
+        let ecies_private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let dkg_config = DkgConfiguration::new(
+            validators[0].clone(),
+            config.clone(),
+            session.clone(),
+            CoordinatorConfig::default(),
+            ecies_private_key,
+            bls_keys[0].clone(),
+        );
+        let mut state = DkgRuntimeState::new();
+
+        // Setup AVSS message
+        let dealer = validators[0].address.clone();
+        let avss_setup = avss_test_utils::AvssTestSetup::new(4, 2, 1);
+        let avss_message = avss_setup.create_valid_message(0, &session);
+        state
+            .protocol_data
+            .received_messages
+            .insert(dealer.clone(), avss_message);
+
+        // Calculate message hash and add approvals
+        let message_hash =
+            compute_message_hash(state.protocol_data.received_messages.get(&dealer).unwrap());
+        add_approval_signatures(
+            &mut state,
+            &dealer,
+            &message_hash,
+            &validators,
+            &bls_keys,
+            num_approvals,
+        );
+
+        let communication_channels =
+            DkgCommunicationChannels::new(p2p_channel, Some(mock_broadcast));
+        let coordinator = DkgCoordinator::new(
+            dkg_config,
+            state,
+            communication_channels,
+            Some(MockStorage::new()),
+        );
+        (coordinator, published_messages, message_hash, dealer)
+    }
+
+    #[tokio::test]
+    async fn test_approval_broadcast_on_valid_share() {
+        // Setup AVSS with proper ECIES keys for message validation
+        let avss_setup = avss_test_utils::AvssTestSetup::new(4, 2, 1);
+        let config = DkgConfig::new(1, avss_setup.validators.clone(), 2, 1).unwrap();
+        let session = SessionContext::new(1, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+
+        // Create mock P2P channel with message capture
+        let (mock_p2p, broadcast_messages) =
+            create_mock_p2p_with_capture(avss_setup.validators[0].address.clone());
+
+        // Create coordinator with the mock P2P channel
+        let bls_signing_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let dkg_config = DkgConfiguration::new(
+            avss_setup.validators[0].clone(),
+            config,
+            session.clone(),
+            CoordinatorConfig::default(),
+            avss_setup.ecies_keys[0].clone(),
+            bls_signing_key,
+        );
+        let state = DkgRuntimeState::new();
+        let communication_channels = DkgCommunicationChannels::new(mock_p2p, Option::<()>::None);
+        let mut coordinator = DkgCoordinator::new(
+            dkg_config,
+            state,
+            communication_channels,
+            Some(MockStorage::new()),
+        );
+
+        coordinator.start().await.unwrap();
+
+        // Create a valid AVSS message using the validator's own ECIES key
+        let dealer = avss_setup.validators[0].address.clone();
+        let message = avss_setup.create_valid_message(0, &session);
+
+        // Process the share - should trigger approval broadcast
+        let avss_message_hash = compute_message_hash(&message);
+        coordinator
+            .handle_share(dealer.clone(), message)
+            .await
+            .unwrap();
+
+        // Check that an approval was broadcast
+        let messages = broadcast_messages.lock().await;
+        assert_eq!(
+            messages.len(),
+            1,
+            "Should have broadcast exactly one message"
+        );
+
+        if let P2PMessage::ApprovalV1(approval) = &messages[0] {
+            assert_eq!(
+                approval.approver, dealer,
+                "Approval should be from the dealer"
+            );
+            // Verify the message hash matches the AVSS message hash
+            assert_eq!(
+                approval.message_hash, avss_message_hash,
+                "Approval message hash should match AVSS message hash"
+            );
+            assert!(approval.timestamp > 0, "Timestamp should be set");
+        } else {
+            panic!("Expected ApprovalV1 message, got {:?}", messages[0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_certificate_publishing_with_enough_approvals() {
+        // Setup coordinator with 3 approvals (enough for threshold)
+        let (validators, bls_keys) = create_validators_with_bls_keys(4);
+        let (mut coordinator, published_messages, message_hash, dealer) =
+            setup_coordinator_with_approvals(validators, bls_keys, 3);
+
+        // Publish pending certificates
+        coordinator.publish_pending_certificates().await.unwrap();
+
+        // Check that a certificate was published
+        let messages = published_messages.lock().await;
+        assert_eq!(
+            messages.len(),
+            1,
+            "Should have published exactly one certificate"
+        );
+
+        if let OrderedBroadcastMessage::CertificateV1(cert) = &messages[0] {
+            assert_eq!(cert.dealer, dealer, "Certificate should be for our dealer");
+            assert_eq!(cert.message_hash, message_hash, "Message hash should match");
+            assert_eq!(cert.session_context.epoch, 1, "Epoch should match");
+            assert!(
+                !cert.signers_bitmap.is_empty(),
+                "Signers bitmap should not be empty"
+            );
+        } else {
+            panic!("Expected CertificateV1 message, got {:?}", messages[0]);
+        }
+
+        // Verify approvals were cleared after publishing
+        assert!(
+            !coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .contains_key(&dealer),
+            "Approvals should be cleared after publishing certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_certificate_published_without_enough_approvals() {
+        // Setup coordinator with only 2 approvals (insufficient)
+        let (validators, bls_keys) = create_validators_with_bls_keys(4);
+        let (mut coordinator, published_messages, _, dealer) =
+            setup_coordinator_with_approvals(validators, bls_keys, 2);
+
+        // Try to publish pending certificates
+        coordinator.publish_pending_certificates().await.unwrap();
+
+        // Check that no certificate was published
+        let messages = published_messages.lock().await;
+        assert_eq!(
+            messages.len(),
+            0,
+            "Should not publish certificate without enough approvals"
+        );
+
+        // Verify approvals are still present
+        assert!(
+            coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .contains_key(&dealer),
+            "Approvals should remain if not published"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_approval_with_invalid_signature() {
+        // Create validators with known BLS keys
+        let (validators, bls_keys) = create_validators_with_bls_keys(4);
+        let config = DkgConfig::new(1, validators.clone(), 2, 1).unwrap();
+        let session = SessionContext::new(1, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+
+        // Create coordinator
+        let ecies_private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let dkg_config = DkgConfiguration::new(
+            validators[0].clone(),
+            config.clone(),
+            session.clone(),
+            CoordinatorConfig::default(),
+            ecies_private_key,
+            bls_keys[0].clone(),
+        );
+        let mut state = DkgRuntimeState::new();
+
+        // Setup AVSS message from dealer
+        let dealer = validators[1].address.clone();
+        let avss_setup = avss_test_utils::AvssTestSetup::new(4, 2, 1);
+        let avss_message = avss_setup.create_valid_message(1, &session);
+        state
+            .protocol_data
+            .received_messages
+            .insert(dealer.clone(), avss_message);
+
+        let message_hash =
+            compute_message_hash(state.protocol_data.received_messages.get(&dealer).unwrap());
+
+        let p2p_channel = InMemoryP2PChannels::<P2PMessage>::new(validators[0].address.clone());
+        let communication_channels = DkgCommunicationChannels::new(p2p_channel, Option::<()>::None);
+        let mut coordinator = DkgCoordinator::new(
+            dkg_config,
+            state,
+            communication_channels,
+            Some(MockStorage::new()),
+        );
+
+        coordinator.start().await.unwrap();
+
+        // Test Case 1: Wrong BLS key (signature doesn't match sender's public key)
+        let sender = validators[2].address.clone();
+        let wrong_bls_key = Bls12381PrivateKey::generate(rand::rngs::OsRng); // Different key
+        let invalid_signature = sign_message_hash(&message_hash, &wrong_bls_key);
+
+        let approval_wrong_key = MessageApproval {
+            message_hash,
+            approver: dealer.clone(),
+            signature: invalid_signature,
+            timestamp: 1000,
+        };
+
+        let result = coordinator
+            .handle_approval(sender.clone(), approval_wrong_key)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Should reject approval with wrong signature"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("BLS signature verification failed")
+                || error_msg.contains("Invalid BLS signature")
+                || error_msg.contains("Signature verification failed"),
+            "Error should mention signature verification failure, got: {}",
+            error_msg
+        );
+
+        // Verify no approval was stored
+        assert!(
+            !coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .contains_key(&dealer),
+            "Should not store approval with invalid signature"
+        );
+
+        // Test Case 2: Correct signature but for wrong message
+        let wrong_message_hash = [99u8; 32]; // Different message hash
+        let signature_wrong_message = sign_message_hash(&wrong_message_hash, &bls_keys[2]);
+
+        let approval_wrong_message = MessageApproval {
+            message_hash, // Claiming it's for the original message
+            approver: dealer.clone(),
+            signature: signature_wrong_message, // But signature is for different message
+            timestamp: 1000,
+        };
+
+        let result = coordinator
+            .handle_approval(sender.clone(), approval_wrong_message)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Should reject approval with signature for wrong message"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("BLS signature verification failed")
+                || error_msg.contains("Invalid BLS signature")
+                || error_msg.contains("Signature verification failed"),
+            "Error should mention signature verification failure, got: {}",
+            error_msg
+        );
+
+        // Test Case 3: Valid signature from correct sender should work
+        let valid_signature = sign_message_hash(&message_hash, &bls_keys[2]);
+        let valid_approval = MessageApproval {
+            message_hash,
+            approver: dealer.clone(),
+            signature: valid_signature,
+            timestamp: 1000,
+        };
+
+        let result = coordinator
+            .handle_approval(sender.clone(), valid_approval)
+            .await;
+
+        assert!(result.is_ok(), "Should accept valid approval");
+
+        // Verify approval was stored
+        assert!(
+            coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .contains_key(&dealer),
+            "Should store valid approval"
+        );
+        assert_eq!(
+            coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .get(&dealer)
+                .unwrap()
+                .len(),
+            1,
+            "Should have exactly one approval"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_approval_for_unknown_share() {
+        let (validators, bls_keys) = create_validators_with_bls_keys(3);
+        let config = DkgConfig::new(1, validators.clone(), 2, 0).unwrap();
+        let session = SessionContext::new(1, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+
+        let ecies_private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let dkg_config = DkgConfiguration::new(
+            validators[0].clone(),
+            config.clone(),
+            session.clone(),
+            CoordinatorConfig::default(),
+            ecies_private_key,
+            bls_keys[0].clone(),
+        );
+        let state = DkgRuntimeState::new();
+
+        let p2p_channel = InMemoryP2PChannels::<P2PMessage>::new(validators[0].address.clone());
+        let communication_channels = DkgCommunicationChannels::new(p2p_channel, Option::<()>::None);
+        let mut coordinator = DkgCoordinator::new(
+            dkg_config,
+            state,
+            communication_channels,
+            Some(MockStorage::new()),
+        );
+
+        coordinator.start().await.unwrap();
+
+        // Create approval for a share we haven't received
+        let unknown_dealer = validators[1].address.clone();
+        let sender = validators[2].address.clone();
+        let message_hash = [42u8; 32];
+        let signature = sign_message_hash(&message_hash, &bls_keys[2]);
+
+        let approval = MessageApproval {
+            message_hash,
+            approver: unknown_dealer.clone(), // Approving a dealer we have no message from
+            signature,
+            timestamp: 1000,
+        };
+
+        let result = coordinator.handle_approval(sender, approval).await;
+
+        assert!(result.is_err(), "Should reject approval for unknown share");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Approval for unknown share"),
+            "Error should mention unknown share"
+        );
+
+        // Verify no approval was stored
+        assert!(
+            coordinator
+                .state
+                .signature_tracker
+                .share_approvals
+                .is_empty(),
+            "Should not store approval for unknown share"
         );
     }
 }

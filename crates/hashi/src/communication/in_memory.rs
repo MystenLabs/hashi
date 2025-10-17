@@ -56,6 +56,21 @@ impl<M> InMemoryP2PChannels<M>
 where
     M: Clone + Send + Sync + 'static,
 {
+    pub fn new(validator_address: ValidatorAddress) -> Self {
+        let mut queues = HashMap::new();
+        queues.insert(
+            validator_address.clone(),
+            Arc::new(Mutex::new(VecDeque::new())),
+        );
+        let message_queues = Arc::new(RwLock::new(queues.clone()));
+        let my_queue = queues.get(&validator_address).unwrap().clone();
+        Self {
+            validator_address,
+            message_queues,
+            my_queue,
+        }
+    }
+
     pub fn new_network(
         validator_addresses: Vec<ValidatorAddress>,
     ) -> HashMap<ValidatorAddress, Self> {
@@ -215,6 +230,136 @@ where
         let queue = self.shared_queue.try_lock().ok()?;
         let pos = self.read_position.try_lock().ok()?;
         Some(queue.len().saturating_sub(*pos))
+    }
+}
+
+type HookFn<M> = Box<
+    dyn Fn(M) -> std::pin::Pin<Box<dyn Future<Output=ChannelResult<()>> + Send>> + Send + Sync,
+>;
+
+pub struct MockP2PChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    #[allow(dead_code)]
+    validator_address: ValidatorAddress,
+    broadcast_hook: Option<HookFn<M>>,
+}
+
+impl<M> MockP2PChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    pub fn new(validator_address: ValidatorAddress) -> Self {
+        Self {
+            validator_address,
+            broadcast_hook: None,
+        }
+    }
+
+    pub fn set_broadcast_hook<F, Fut>(&mut self, hook: F)
+    where
+        F: Fn(M) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output=ChannelResult<()>> + Send + 'static,
+    {
+        self.broadcast_hook = Some(Box::new(move |msg| Box::pin(hook(msg))));
+    }
+}
+
+#[async_trait]
+impl<M> P2PChannel<M> for MockP2PChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    async fn send_to(&self, _recipient: &ValidatorAddress, _message: M) -> ChannelResult<()> {
+        Ok(())
+    }
+
+    async fn broadcast(&self, message: M) -> ChannelResult<()> {
+        if let Some(ref hook) = self.broadcast_hook {
+            hook(message).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>> {
+        // Mock channel doesn't actually receive messages
+        std::future::pending().await
+    }
+
+    async fn try_receive_timeout(
+        &mut self,
+        _duration: Duration,
+    ) -> ChannelResult<Option<AuthenticatedMessage<M>>> {
+        Ok(None)
+    }
+
+    fn pending_messages(&self) -> Option<usize> {
+        Some(0)
+    }
+}
+
+pub struct MockOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    publish_hook: Option<HookFn<M>>,
+}
+
+impl<M> Default for MockOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M> MockOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    pub fn new() -> Self {
+        Self { publish_hook: None }
+    }
+
+    pub fn set_publish_hook<F, Fut>(&mut self, hook: F)
+    where
+        F: Fn(M) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output=ChannelResult<()>> + Send + 'static,
+    {
+        self.publish_hook = Some(Box::new(move |msg| Box::pin(hook(msg))));
+    }
+}
+
+#[async_trait]
+impl<M> OrderedBroadcastChannel<M> for MockOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    async fn publish(&self, message: M) -> ChannelResult<()> {
+        if let Some(ref hook) = self.publish_hook {
+            hook(message).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>> {
+        // Mock channel doesn't actually receive messages
+        std::future::pending().await
+    }
+
+    async fn try_receive_timeout(
+        &mut self,
+        _duration: Duration,
+    ) -> ChannelResult<Option<AuthenticatedMessage<M>>> {
+        Ok(None)
+    }
+
+    fn pending_messages(&self) -> Option<usize> {
+        Some(0)
     }
 }
 

@@ -1,5 +1,6 @@
 //! Core types for the DKG protocol
 
+use crate::bls::{Bls12381PublicKey, Bls12381Signature};
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::ristretto255::RistrettoPoint;
@@ -51,7 +52,8 @@ pub struct ValidatorInfo {
     /// Index in the validator set
     pub party_id: PartyId,
     pub weight: u16,
-    pub ecies_public_key: PublicKey<RistrettoPoint>,
+    pub communication_key: PublicKey<RistrettoPoint>,
+    pub signature_verification_key: Bls12381PublicKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -246,7 +248,7 @@ pub enum P2PMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OrderedBroadcastMessage {
-    CertificateV1(DkgCertificate),
+    CertificateV1(Box<DkgCertificate>),
     PresignatureV1 {
         sender: ValidatorAddress,
         session_context: SessionContext,
@@ -258,8 +260,7 @@ pub enum OrderedBroadcastMessage {
 pub struct MessageApproval {
     pub message_hash: MessageHash,
     pub approver: ValidatorAddress,
-    // TODO: Will be replaced with proper signature type when certificate management is implemented.
-    pub signature: SignatureBytes,
+    pub signature: Bls12381Signature,
     pub timestamp: u64,
 }
 
@@ -274,7 +275,10 @@ pub struct DkgCertificate {
     pub dealer: ValidatorAddress,
     pub message_hash: MessageHash,
     pub data_availability_signatures: Vec<ValidatorSignature>,
-    pub dkg_signatures: Vec<ValidatorSignature>,
+    /// Aggregated BLS signature from validators approving this share
+    pub aggregated_signature: Bls12381Signature,
+    /// Bitmap indicating which validators signed (matches validator order in DkgConfig)
+    pub signers_bitmap: Vec<u8>,
     pub session_context: SessionContext,
 }
 
@@ -350,16 +354,20 @@ mod tests {
     use super::*;
 
     fn create_test_validator(party_id: u16, weight: u16) -> ValidatorInfo {
+        use crate::bls::Bls12381PrivateKey;
         use fastcrypto::groups::ristretto255::RistrettoPoint;
         use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
 
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
+        let bls_private_key = Bls12381PrivateKey::generate(rand::rngs::OsRng);
+        let bls_public_key = bls_private_key.public_key();
         ValidatorInfo {
             address: ValidatorAddress([party_id as u8; 32]),
             party_id,
             weight,
-            ecies_public_key: public_key,
+            communication_key: public_key,
+            signature_verification_key: bls_public_key,
         }
     }
 
