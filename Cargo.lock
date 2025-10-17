@@ -1596,7 +1596,6 @@ dependencies = [
  "base64ct",
  "bcs",
  "bin-version",
- "bincode",
  "blst",
  "bytes",
  "clap",

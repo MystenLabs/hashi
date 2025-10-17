@@ -54,4 +54,3 @@ rand = "0.8"
 [dev-dependencies]
 test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
-bincode = "1.3"

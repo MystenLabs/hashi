@@ -974,8 +974,8 @@ mod test {
     #[proptest]
     fn roundtrip_public_key_serialization(private_key: Bls12381PrivateKey) {
         let public_key = private_key.public_key();
-        let bytes = bincode::serialize(&public_key).unwrap();
-        let deserialized: Bls12381PublicKey = bincode::deserialize(&bytes).unwrap();
+        let bytes = bcs::to_bytes(&public_key).unwrap();
+        let deserialized: Bls12381PublicKey = bcs::from_bytes(&bytes).unwrap();
 
         assert_eq!(public_key, deserialized);
     }
@@ -983,8 +983,8 @@ mod test {
     #[proptest]
     fn roundtrip_signature_serialization(private_key: Bls12381PrivateKey, message: Vec<u8>) {
         let signature = private_key.try_sign(&message).unwrap();
-        let bytes = bincode::serialize(&signature).unwrap();
-        let deserialized: Bls12381Signature = bincode::deserialize(&bytes).unwrap();
+        let bytes = bcs::to_bytes(&signature).unwrap();
+        let deserialized: Bls12381Signature = bcs::from_bytes(&bytes).unwrap();
 
         private_key
             .public_key()
