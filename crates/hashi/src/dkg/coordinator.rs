@@ -479,7 +479,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                         .collect();
 
                     // Create the certificate
-                    // TODO: Calculate actual message hash from the dealer's share
+                    // TODO: Retrieve actual message hash from the AVSS message we received as dealer
                     let message_hash = [0u8; 32];
 
                     // For now, use the collected signatures as DKG signatures
@@ -487,7 +487,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                     let certificate = crate::dkg::types::DkgCertificate {
                         dealer: dealer.clone(),
                         message_hash,
-                        data_availability_signatures: vec![], // TODO: Collect from data_availability_sigs
+                        data_availability_signatures: vec![], // TODO: Collect from data_availability_signatures in signature_tracker
                         dkg_signatures: signatures,
                         session_context: self.config.session_context.clone(),
                     };
@@ -536,11 +536,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     async fn handle_ordered_message(&mut self, message: OrderedBroadcastMessage) -> DkgResult<()> {
         match message {
             OrderedBroadcastMessage::CertificateV1(_cert) => {
-                // TODO: Implement certificate handling
-                // Will need to:
-                // 1. Verify the certificate signatures
-                // 2. Store the certificate as proof of share validity
-                // 3. Update protocol state accordingly
+                // TODO: Implement certificate verification and processing
                 Ok(())
             }
             OrderedBroadcastMessage::PresignatureV1 {
@@ -548,11 +544,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 session_context: _,
                 data: _,
             } => {
-                // TODO: Implement presignature handling
-                // Will need to:
-                // 1. Verify the presignature is valid
-                // 2. Store it for the signing phase
-                // 3. Check if we have enough presignatures to proceed
+                // TODO: Implement presignature handling for threshold signing phase
                 Ok(())
             }
         }
@@ -575,14 +567,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                             *dealer_state = DealerState::Processing {
                                 received_at: Instant::now(),
                             };
-
-                            // TODO: Implement the full AVSS protocol flow here:
-                            // 1. Process the AVSS message (decrypt share with ECIES private key)
-                            // 2. Verify the share against the commitment
-                            // 3. If valid, send an approval signature back to the dealer
-                            // 4. The dealer will collect 2f+1 approvals and create a certificate
-                            // 5. The certificate will be broadcast via OrderedBroadcastChannel
-
+                            // TODO: Implement the full AVSS protocol flow
                             self.check_progress().await?;
                             Ok(())
                         }
@@ -612,8 +597,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     ) -> DkgResult<()> {
         match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
-                // TODO: Get actual dealer ID from complaint structure
-                // This is a placeholder - the actual complaint structure should identify the dealer
+                // TODO: Extract dealer ID from complaint.accused_id field
                 for (_dealer_id, dealer_state) in dealer_states.iter_mut() {
                     match dealer_state {
                         DealerState::Processing { .. } => {
@@ -623,13 +607,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                                 response_count: 0,
                             };
 
-                            // TODO: Implement complaint verification and response:
-                            // 1. Verify the complaint is valid (check the proof)
-                            // 2. If we're the accused dealer, create and send a complaint response
-                            //    revealing the share for the complaining party
-                            // 3. If we're a receiver, verify the complaint and potentially
-                            //    mark the accused dealer as faulty
-                            // 4. Broadcast our own complaint response if needed
+                            // TODO: Implement complaint verification and response
 
                             break;
                         }
@@ -658,18 +636,12 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     ) -> DkgResult<()> {
         match &mut self.state.dkg_state {
             DkgState::Running { dealer_states, .. } => {
-                // TODO: Identify which dealer this response is for
+                // TODO: Extract dealer ID from the AVSS message that the complaint/response relates to
                 for dealer_state in dealer_states.values_mut() {
                     if let DealerState::ComplaintHandling { response_count, .. } = dealer_state {
                         *response_count += 1;
 
-                        // TODO: Process complaint response:
-                        // 1. Verify the response is valid (check revealed share matches commitment)
-                        // 2. If we're the original complainer, use the revealed share to recover
-                        //    our missing/invalid share
-                        // 3. All receivers can verify the response to ensure the dealer is honest
-                        // 4. If response is invalid, mark the dealer as faulty
-                        // 5. Once all complaints are resolved, transition back to processing
+                        // TODO: Process complaint response
 
                         break;
                     }
@@ -732,7 +704,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     ) -> DkgResult<()> {
         // TODO: Verify the approval signature
         // For now, just track that we received an approval
-
         if !self
             .state
             .protocol_data
@@ -799,7 +770,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             .get(&dealer)
             && sigs.len() >= required
         {
-            // TODO: Mark this dealer's share as having sufficient data availability
+            // TODO: Update DealerState to track data availability status
         }
         Ok(())
     }
@@ -828,8 +799,8 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         if let Some(sigs) = self.state.signature_tracker.dkg_signatures.get(&dealer)
             && sigs.len() >= required
         {
-            // TODO: Create a certificate for this dealer's share
-            // The certificate can then be broadcast via OrderedBroadcastChannel
+            // Note: Certificate creation happens in publish_pending_certificates()
+            // We mark the dealer as Completed here to indicate sufficient signatures
             if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state
                 && let Some(dealer_state) = dealer_states.get_mut(&dealer)
             {
@@ -851,10 +822,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         if dealer == self.config.validator_info.address {
             // Check if we have the share for this requester
             if let Some(_avss_message) = self.state.protocol_data.received_messages.get(&dealer) {
-                // TODO: Extract and send the encrypted share for the requester
-                // 1. Getting the encrypted share for the requester from the AVSS message
-                // 2. Sending it via P2P channel
-                // For now, just acknowledge the request
+                // TODO: Implement share recovery assistance
             } else {
                 return Err(DkgError::InvalidMessage {
                     sender: requester,
@@ -870,7 +838,9 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     async fn check_complaint_resolution(&mut self) -> DkgResult<()> {
-        // TODO: Implement the actual complaint verification when adding complaint handling for all protocols
+        // TODO: Properly track complaint resolution:
+        // Need to check if we have received t valid ComplaintResponses
+        // and call receiver.recover() to reconstruct the share
         if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state {
             // Check if any dealers are still in complaint handling with sufficient responses
             for dealer_state in dealer_states.values_mut() {
