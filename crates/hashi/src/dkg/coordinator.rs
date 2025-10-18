@@ -793,18 +793,13 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             .entry(dealer.clone())
             .or_default()
             .push(sig);
-
-        // Check if we have enough DKG signatures to proceed
         let required = self.config.dkg_config.required_dkg_signatures();
         if let Some(sigs) = self.state.signature_tracker.dkg_signatures.get(&dealer)
             && sigs.len() >= required
         {
-            // Note: Certificate creation happens in publish_pending_certificates()
-            // We mark the dealer as Completed here to indicate sufficient signatures
             if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state
                 && let Some(dealer_state) = dealer_states.get_mut(&dealer)
             {
-                // Mark this dealer as completed if we have enough signatures
                 *dealer_state = DealerState::Completed;
             }
             self.check_progress().await?;
