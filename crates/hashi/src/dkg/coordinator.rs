@@ -621,7 +621,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                                 self.config.validator_info.party_id,
                                 self.config.dkg_config.threshold,
                                 sid,
-                                None, // No previous round commitment for initial DKG (shares still verified against Feldman commitment in message)
+                                None, // No previous round commitment for initial DKG
                                 self.config.ecies_private_key.clone(),
                             );
                             match receiver.process_message(&message)? {
