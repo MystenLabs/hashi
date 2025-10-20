@@ -618,8 +618,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         sender: ValidatorAddress,
         approval: MessageApproval,
     ) -> DkgResult<()> {
-        // TODO: Verify the approval signature
-        // For now, just track that we received an approval
         if !self
             .state
             .protocol_data
@@ -631,26 +629,25 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 reason: "Approval for unknown share".to_string(),
             });
         }
+        // TODO: Verify the approval signature
         self.state
             .signature_tracker
             .share_approvals
             .entry(approval.approver.clone())
             .or_default()
-            .insert(sender);
-
-        // Check if we have enough approvals to create a certificate
+            .insert(sender.clone());
+        if approval.approver != self.config.validator_info.address {
+            return Ok(());
+        }
         let required_approvals = self.config.dkg_config.required_dkg_signatures();
         if let Some(approvers) = self
             .state
             .signature_tracker
             .share_approvals
-            .get(&approval.approver)
+            .get(&self.config.validator_info.address)
             && approvers.len() >= required_approvals
-            && approval.approver == self.config.validator_info.address
         {
-            // TODO: Create and publish certificate via OrderedBroadcastChannel
-            // This will be called from the run() method where we have the trait bound
-            // For now, just mark that we're ready to publish
+            // TODO: Create the certificate and broadcast it
         }
         Ok(())
     }
