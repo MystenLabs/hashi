@@ -58,7 +58,7 @@ pub enum DkgState {
         dealer_states: BTreeMap<ValidatorAddress, DealerState>,
     },
     /// Success state - DKG completed successfully
-    Completed { output: DkgOutput },
+    Completed { output: Box<DkgOutput> },
     /// Failed state - DKG failed
     Failed { reason: String },
 }
@@ -583,7 +583,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 session_context: self.config.session_context.clone(),
             };
             self.state.dkg_state = DkgState::Completed {
-                output: output.clone(),
+                output: Box::new(output.clone()),
             };
             if let Some(storage) = &self.storage {
                 storage
