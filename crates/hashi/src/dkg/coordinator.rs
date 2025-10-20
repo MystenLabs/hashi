@@ -31,7 +31,7 @@ fn validate_sender(
 }
 
 #[derive(Debug, Clone)]
-pub enum DealerState {
+pub enum DealerShareState {
     /// Waiting for share from this dealer
     WaitingForShare,
     /// Received share, now processing/verifying
@@ -52,10 +52,9 @@ pub enum DealerState {
 pub enum DkgState {
     /// Initial state, waiting to start
     Idle,
-    /// Running phase - tracking each dealer's state separately
+    /// Running phase - tracking shares received from each dealer
     Running {
-        /// State for each dealer's DKG instance
-        dealer_states: BTreeMap<ValidatorAddress, DealerState>,
+        dealer_share_states: BTreeMap<ValidatorAddress, DealerShareState>,
     },
     /// Success state - DKG completed successfully
     Completed { output: Box<DkgOutput> },
@@ -365,11 +364,15 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     async fn start(&mut self) -> DkgResult<()> {
         match &self.state.dkg_state {
             DkgState::Idle => {
-                let mut dealer_states = BTreeMap::new();
+                let mut dealer_share_states = BTreeMap::new();
                 for validator in &self.config.dkg_config.validators {
-                    dealer_states.insert(validator.address.clone(), DealerState::WaitingForShare);
+                    dealer_share_states
+                        .insert(validator.address.clone(), DealerShareState::WaitingForShare);
                 }
-                self.state.dkg_state = DkgState::Running { dealer_states };
+                self.state.dkg_state = DkgState::Running {
+                    dealer_share_states,
+                };
+                // TODO: Generate and distribute our own AVSS shares as a dealer
                 Ok(())
             }
             _ => Err(DkgError::ProtocolFailed(
@@ -460,15 +463,18 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         message: avss::Message,
     ) -> DkgResult<()> {
         match &mut self.state.dkg_state {
-            DkgState::Running { dealer_states, .. } => {
+            DkgState::Running {
+                dealer_share_states: dealer_states,
+                ..
+            } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
                     match dealer_state {
-                        DealerState::WaitingForShare => {
+                        DealerShareState::WaitingForShare => {
                             self.state
                                 .protocol_data
                                 .received_messages
                                 .insert(dealer.clone(), message);
-                            *dealer_state = DealerState::Processing;
+                            *dealer_state = DealerShareState::Processing;
                             // TODO: Implement the full AVSS protocol flow
                             self.check_progress().await?;
                             Ok(())
@@ -498,12 +504,15 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         _complaint: complaint::Complaint,
     ) -> DkgResult<()> {
         match &mut self.state.dkg_state {
-            DkgState::Running { dealer_states, .. } => {
+            DkgState::Running {
+                dealer_share_states: dealer_states,
+                ..
+            } => {
                 // TODO: Extract dealer ID from complaint.accused_id field
                 for (_dealer_id, dealer_state) in dealer_states.iter_mut() {
                     match dealer_state {
-                        DealerState::Processing => {
-                            *dealer_state = DealerState::ComplaintHandling {
+                        DealerShareState::Processing => {
+                            *dealer_state = DealerShareState::ComplaintHandling {
                                 complaint_count: 1,
                                 response_count: 0,
                             };
@@ -512,7 +521,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
 
                             break;
                         }
-                        DealerState::ComplaintHandling {
+                        DealerShareState::ComplaintHandling {
                             complaint_count, ..
                         } => {
                             *complaint_count += 1;
@@ -536,10 +545,14 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         _response: complaint::ComplaintResponse,
     ) -> DkgResult<()> {
         match &mut self.state.dkg_state {
-            DkgState::Running { dealer_states, .. } => {
+            DkgState::Running {
+                dealer_share_states: dealer_states,
+                ..
+            } => {
                 // TODO: Extract dealer ID from the AVSS message that the complaint/response relates to
                 for dealer_state in dealer_states.values_mut() {
-                    if let DealerState::ComplaintHandling { response_count, .. } = dealer_state {
+                    if let DealerShareState::ComplaintHandling { response_count, .. } = dealer_state
+                    {
                         *response_count += 1;
 
                         // TODO: Process complaint response
@@ -557,10 +570,14 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     async fn check_progress(&mut self) -> DkgResult<()> {
-        if let DkgState::Running { dealer_states, .. } = &self.state.dkg_state {
+        if let DkgState::Running {
+            dealer_share_states: dealer_states,
+            ..
+        } = &self.state.dkg_state
+        {
             let completed_count = dealer_states
                 .values()
-                .filter(|state| matches!(state, DealerState::Completed))
+                .filter(|state| matches!(state, DealerShareState::Completed))
                 .count();
             if completed_count >= self.required_shares() {
                 self.check_completion().await?;
@@ -696,10 +713,13 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         if let Some(sigs) = self.state.signature_tracker.dkg_signatures.get(&dealer)
             && sigs.len() >= required
         {
-            if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state
+            if let DkgState::Running {
+                dealer_share_states: dealer_states,
+                ..
+            } = &mut self.state.dkg_state
                 && let Some(dealer_state) = dealer_states.get_mut(&dealer)
             {
-                *dealer_state = DealerState::Completed;
+                *dealer_state = DealerShareState::Completed;
             }
             self.check_progress().await?;
         }
@@ -735,14 +755,18 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         // TODO: Properly track complaint resolution:
         // Need to check if we have received t valid ComplaintResponses
         // and call receiver.recover() to reconstruct the share
-        if let DkgState::Running { dealer_states, .. } = &mut self.state.dkg_state {
+        if let DkgState::Running {
+            dealer_share_states: dealer_states,
+            ..
+        } = &mut self.state.dkg_state
+        {
             // Check if any dealers are still in complaint handling with sufficient responses
             for dealer_state in dealer_states.values_mut() {
-                if let DealerState::ComplaintHandling { response_count, .. } = dealer_state
+                if let DealerShareState::ComplaintHandling { response_count, .. } = dealer_state
                     && *response_count > 0
                 {
                     // For now, assume successful resolution
-                    *dealer_state = DealerState::Completed;
+                    *dealer_state = DealerShareState::Completed;
                 }
             }
         }
@@ -990,10 +1014,14 @@ mod tests {
         assert!(coordinator.is_running());
 
         // All dealers should be in WaitingForShare state
-        if let DkgState::Running { dealer_states, .. } = coordinator.current_state() {
+        if let DkgState::Running {
+            dealer_share_states: dealer_states,
+            ..
+        } = coordinator.current_state()
+        {
             assert_eq!(dealer_states.len(), 1); // Single validator setup
             for state in dealer_states.values() {
-                assert!(matches!(state, DealerState::WaitingForShare));
+                assert!(matches!(state, DealerShareState::WaitingForShare));
             }
         }
     }
@@ -1057,10 +1085,12 @@ mod tests {
         for i in 0..num_validators {
             dealer_states.insert(
                 setup.validators[i as usize].address.clone(),
-                DealerState::Completed,
+                DealerShareState::Completed,
             );
         }
-        coordinator.state.dkg_state = DkgState::Running { dealer_states };
+        coordinator.state.dkg_state = DkgState::Running {
+            dealer_share_states: dealer_states,
+        };
 
         // Check progress should transition to Completed
         coordinator.check_progress().await.unwrap();
@@ -1132,8 +1162,12 @@ mod tests {
 
         // Now simulate having received a share from the dealer
         // We mark the dealer as Processing in the state machine
-        if let DkgState::Running { dealer_states, .. } = &mut coordinator.state.dkg_state {
-            dealer_states.insert(dealer.clone(), DealerState::Processing);
+        if let DkgState::Running {
+            dealer_share_states: dealer_states,
+            ..
+        } = &mut coordinator.state.dkg_state
+        {
+            dealer_states.insert(dealer.clone(), DealerShareState::Processing);
         }
         coordinator
             .state
@@ -1241,10 +1275,14 @@ mod tests {
             .get(&dealer)
             .unwrap();
         assert_eq!(sigs.len(), required_sigs);
-        if let DkgState::Running { dealer_states, .. } = &coordinator.state.dkg_state {
+        if let DkgState::Running {
+            dealer_share_states: dealer_states,
+            ..
+        } = &coordinator.state.dkg_state
+        {
             assert!(matches!(
                 dealer_states.get(&dealer),
-                Some(DealerState::Completed)
+                Some(DealerShareState::Completed)
             ));
         }
     }
@@ -1396,10 +1434,14 @@ mod tests {
         );
 
         // Verify dealer is marked as completed after getting enough DKG signatures
-        if let DkgState::Running { dealer_states, .. } = &coordinator.state.dkg_state {
+        if let DkgState::Running {
+            dealer_share_states: dealer_states,
+            ..
+        } = &coordinator.state.dkg_state
+        {
             assert!(matches!(
                 dealer_states.get(&dealer),
-                Some(DealerState::Completed)
+                Some(DealerShareState::Completed)
             ));
         }
     }
