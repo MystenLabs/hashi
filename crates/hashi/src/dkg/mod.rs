@@ -4,7 +4,7 @@ pub mod coordinator;
 pub mod interfaces;
 pub mod types;
 
-pub use coordinator::{CoordinatorConfig, DkgCoordinator, DkgState};
+pub use coordinator::{DkgCoordinator, DkgState};
 pub use interfaces::{DkgStorage, OrderedBroadcastChannel, P2PChannel};
 pub use types::{
     DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, MessageHash,

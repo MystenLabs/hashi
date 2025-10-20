@@ -12,8 +12,7 @@ use crate::types::ValidatorAddress;
 use fastcrypto::groups::GroupElement;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::{G, avss, complaint};
-use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, HashSet};
 use tokio::select;
 use tracing::{error, warn};
 
@@ -32,21 +31,13 @@ fn validate_sender(
 }
 
 #[derive(Debug, Clone)]
-pub struct DkgErrorRecord {
-    pub timestamp: Instant,
-    pub error: String,
-    pub context: String,
-}
-
-#[derive(Debug, Clone)]
 pub enum DealerState {
     /// Waiting for share from this dealer
-    WaitingForShare { start_time: Instant },
+    WaitingForShare,
     /// Received share, now processing/verifying
-    Processing { received_at: Instant },
+    Processing,
     /// Handling complaint about this dealer's share
     ComplaintHandling {
-        complaint_time: Instant,
         complaint_count: usize,
         response_count: usize,
     },
@@ -56,13 +47,13 @@ pub enum DealerState {
     Failed { reason: String },
 }
 
+// TODO: Consider add timeout for each DKG phase
 #[derive(Debug, Clone)]
 pub enum DkgState {
     /// Initial state, waiting to start
     Idle,
     /// Running phase - tracking each dealer's state separately
     Running {
-        start_time: Instant,
         /// State for each dealer's DKG instance
         dealer_states: BTreeMap<ValidatorAddress, DealerState>,
     },
@@ -72,36 +63,11 @@ pub enum DkgState {
     Failed { reason: String },
 }
 
-#[derive(Debug, Clone)]
-pub struct CoordinatorConfig {
-    /// Timeout for each phase
-    pub phase_timeout: Duration,
-    /// Maximum number of retries for message sending
-    pub max_send_retries: u32,
-    /// Whether to persist state to storage
-    pub enable_persistence: bool,
-    /// Maximum number of errors to keep in history
-    pub max_error_history: usize,
-}
-
-impl Default for CoordinatorConfig {
-    // TODO: Set the values in a config file.
-    fn default() -> Self {
-        Self {
-            phase_timeout: Duration::from_secs(30),
-            max_send_retries: 3,
-            enable_persistence: true,
-            max_error_history: 100,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct DkgConfiguration {
     pub validator_info: ValidatorInfo,
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
-    pub coordinator_config: CoordinatorConfig,
 }
 
 impl DkgConfiguration {
@@ -109,13 +75,11 @@ impl DkgConfiguration {
         validator_info: ValidatorInfo,
         dkg_config: DkgConfig,
         session_context: SessionContext,
-        coordinator_config: CoordinatorConfig,
     ) -> Self {
         Self {
             validator_info,
             dkg_config,
             session_context,
-            coordinator_config,
         }
     }
 }
@@ -185,7 +149,6 @@ pub struct DkgRuntimeState {
     pub dkg_state: DkgState,
     pub protocol_data: DkgProtocolData,
     pub signature_tracker: DkgSignatureTracker,
-    pub error_history: VecDeque<DkgErrorRecord>,
 }
 
 impl DkgRuntimeState {
@@ -194,19 +157,6 @@ impl DkgRuntimeState {
             dkg_state: DkgState::Idle,
             protocol_data: DkgProtocolData::new(),
             signature_tracker: DkgSignatureTracker::new(),
-            error_history: VecDeque::new(),
-        }
-    }
-
-    pub fn record_error(&mut self, error: String, context: String, max_history: usize) {
-        let error_record = DkgErrorRecord {
-            timestamp: Instant::now(),
-            error,
-            context,
-        };
-        self.error_history.push_back(error_record);
-        while self.error_history.len() > max_history {
-            self.error_history.pop_front();
         }
     }
 }
@@ -254,10 +204,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             ));
         }
         loop {
-            if self.check_timeout() {
-                self.handle_timeout();
-                break;
-            }
             if self.is_complete() || self.is_failed() {
                 break;
             }
@@ -396,14 +342,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         }
     }
 
-    pub fn check_timeout(&mut self) -> bool {
-        let timeout = self.config.coordinator_config.phase_timeout;
-        match &self.state.dkg_state {
-            DkgState::Running { start_time, .. } => start_time.elapsed() > timeout,
-            _ => false,
-        }
-    }
-
     pub fn current_state(&self) -> &DkgState {
         &self.state.dkg_state
     }
@@ -428,17 +366,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         match &self.state.dkg_state {
             DkgState::Idle => {
                 let mut dealer_states = BTreeMap::new();
-                let now = Instant::now();
                 for validator in &self.config.dkg_config.validators {
-                    dealer_states.insert(
-                        validator.address.clone(),
-                        DealerState::WaitingForShare { start_time: now },
-                    );
+                    dealer_states.insert(validator.address.clone(), DealerState::WaitingForShare);
                 }
-                self.state.dkg_state = DkgState::Running {
-                    start_time: now,
-                    dealer_states,
-                };
+                self.state.dkg_state = DkgState::Running { dealer_states };
                 Ok(())
             }
             _ => Err(DkgError::ProtocolFailed(
@@ -506,33 +437,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         Ok(())
     }
 
-    fn handle_timeout(&mut self) {
-        if self.check_timeout()
-            && let DkgState::Running { dealer_states, .. } = &self.state.dkg_state
-        {
-            let mut timed_out_dealers = Vec::new();
-            for (dealer_id, dealer_state) in dealer_states.iter() {
-                if let DealerState::WaitingForShare { start_time } = dealer_state
-                    && start_time.elapsed() > self.config.coordinator_config.phase_timeout
-                {
-                    timed_out_dealers.push(dealer_id.clone());
-                }
-            }
-            if !timed_out_dealers.is_empty() {
-                self.state.dkg_state = DkgState::Failed {
-                    reason: format!(
-                        "Timeout waiting for shares from dealers: {:?}",
-                        timed_out_dealers
-                    ),
-                };
-            } else {
-                self.state.dkg_state = DkgState::Failed {
-                    reason: "Timeout in DKG protocol".to_string(),
-                };
-            }
-        }
-    }
-
     async fn handle_ordered_message(&mut self, message: OrderedBroadcastMessage) -> DkgResult<()> {
         match message {
             OrderedBroadcastMessage::CertificateV1(_cert) => {
@@ -559,14 +463,12 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             DkgState::Running { dealer_states, .. } => {
                 if let Some(dealer_state) = dealer_states.get_mut(&dealer) {
                     match dealer_state {
-                        DealerState::WaitingForShare { .. } => {
+                        DealerState::WaitingForShare => {
                             self.state
                                 .protocol_data
                                 .received_messages
                                 .insert(dealer.clone(), message);
-                            *dealer_state = DealerState::Processing {
-                                received_at: Instant::now(),
-                            };
+                            *dealer_state = DealerState::Processing;
                             // TODO: Implement the full AVSS protocol flow
                             self.check_progress().await?;
                             Ok(())
@@ -600,9 +502,8 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 // TODO: Extract dealer ID from complaint.accused_id field
                 for (_dealer_id, dealer_state) in dealer_states.iter_mut() {
                     match dealer_state {
-                        DealerState::Processing { .. } => {
+                        DealerState::Processing => {
                             *dealer_state = DealerState::ComplaintHandling {
-                                complaint_time: Instant::now(),
                                 complaint_count: 1,
                                 response_count: 0,
                             };
@@ -684,9 +585,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             self.state.dkg_state = DkgState::Completed {
                 output: output.clone(),
             };
-            if let Some(storage) = &self.storage
-                && self.config.coordinator_config.enable_persistence
-            {
+            if let Some(storage) = &self.storage {
                 storage
                     .save_output(&self.config.session_context, &output)
                     .await?;
@@ -895,7 +794,6 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
     }
 
     async fn handle_dkg_error(&mut self, error: DkgError, context: String) -> DkgResult<()> {
-        let error_str = error.to_string();
         match &error {
             DkgError::InvalidMessage { sender, reason } => {
                 warn!(
@@ -914,17 +812,12 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
             }
             _ => {
                 warn!(
-                    error = %error_str,
+                    error = ?error,
                     context = %context,
                     "Processing error"
                 );
             }
         }
-        self.state.record_error(
-            error_str,
-            context,
-            self.config.coordinator_config.max_error_history,
-        );
         // Always log and continue - resilient to Byzantine behavior
         Ok(())
     }
@@ -934,17 +827,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         error: ChannelError,
         channel_name: &str,
     ) -> DkgResult<()> {
-        let context = format!("{} error", channel_name);
-        let error_str = format!("{:?}", error);
         warn!(
             channel = %channel_name,
-            error = %error_str,
+            error = ?error,
             "Channel error occurred"
-        );
-        self.state.record_error(
-            error_str,
-            context,
-            self.config.coordinator_config.max_error_history,
         );
         // Continue processing - channel errors are typically transient
         Ok(())
@@ -966,7 +852,6 @@ mod tests {
     use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     fn create_test_validator(party_id: u16) -> ValidatorInfo {
         use fastcrypto::groups::ristretto255::RistrettoPoint;
@@ -1024,13 +909,6 @@ mod tests {
         fn create_coordinator(
             &self,
         ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage> {
-            self.create_coordinator_with_config(CoordinatorConfig::default())
-        }
-
-        fn create_coordinator_with_config(
-            &self,
-            coordinator_config: CoordinatorConfig,
-        ) -> DkgCoordinator<InMemoryP2PChannels<P2PMessage>, (), MockStorage> {
             let validator_addresses: Vec<ValidatorAddress> =
                 self.validators.iter().map(|v| v.address.clone()).collect();
             let channels = InMemoryP2PChannels::new_network(validator_addresses);
@@ -1039,7 +917,6 @@ mod tests {
                 self.validators[0].clone(),
                 self.config.clone(),
                 self.session.clone(),
-                coordinator_config,
             );
             let state = DkgRuntimeState::new();
             let communication_channels = DkgCommunicationChannels::new(p2p_channel, None);
@@ -1116,32 +993,9 @@ mod tests {
         if let DkgState::Running { dealer_states, .. } = coordinator.current_state() {
             assert_eq!(dealer_states.len(), 1); // Single validator setup
             for state in dealer_states.values() {
-                assert!(matches!(state, DealerState::WaitingForShare { .. }));
+                assert!(matches!(state, DealerState::WaitingForShare));
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_timeout_detection() {
-        let setup = TestSetup::single_validator();
-
-        // Set a short timeout
-        let coordinator_config = CoordinatorConfig {
-            phase_timeout: Duration::from_millis(50),
-            enable_persistence: false,
-            max_send_retries: 3,
-            max_error_history: 100,
-        };
-
-        let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
-        coordinator.start().await.unwrap();
-
-        // Wait for timeout
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Check and handle timeout
-        coordinator.handle_timeout();
-        assert!(coordinator.is_failed());
     }
 
     #[tokio::test]
@@ -1177,7 +1031,6 @@ mod tests {
     #[tokio::test]
     async fn test_transition_to_completed() {
         use fastcrypto_tbls::threshold_schnorr::avss;
-        use std::time::Instant;
 
         let num_validators = 4;
         let threshold = 2;
@@ -1207,10 +1060,7 @@ mod tests {
                 DealerState::Completed,
             );
         }
-        coordinator.state.dkg_state = DkgState::Running {
-            start_time: Instant::now(),
-            dealer_states,
-        };
+        coordinator.state.dkg_state = DkgState::Running { dealer_states };
 
         // Check progress should transition to Completed
         coordinator.check_progress().await.unwrap();
@@ -1231,19 +1081,11 @@ mod tests {
 
         let setup = TestSetup::single_validator();
         let save_count_clone = setup.storage.save_count.clone();
-        let coordinator_config = CoordinatorConfig {
-            phase_timeout: Duration::from_secs(30),
-            enable_persistence: true,
-            max_send_retries: 3,
-            max_error_history: 100,
-        };
-        let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
+        let mut coordinator = setup.create_coordinator();
 
         coordinator.start().await.unwrap();
 
-        if let Some(storage) = &coordinator.storage
-            && coordinator.config.coordinator_config.enable_persistence
-        {
+        if let Some(storage) = &coordinator.storage {
             storage
                 .save_output(
                     &setup.session,
@@ -1291,12 +1133,7 @@ mod tests {
         // Now simulate having received a share from the dealer
         // We mark the dealer as Processing in the state machine
         if let DkgState::Running { dealer_states, .. } = &mut coordinator.state.dkg_state {
-            dealer_states.insert(
-                dealer.clone(),
-                DealerState::Processing {
-                    received_at: std::time::Instant::now(),
-                },
-            );
+            dealer_states.insert(dealer.clone(), DealerState::Processing);
         }
         coordinator
             .state
@@ -1567,23 +1404,11 @@ mod tests {
         }
     }
 
-    fn create_test_coordinator_config(max_error_history: usize) -> CoordinatorConfig {
-        CoordinatorConfig {
-            phase_timeout: Duration::from_secs(30),
-            enable_persistence: false,
-            max_send_retries: 3,
-            max_error_history,
-        }
-    }
-
     #[tokio::test]
-    async fn test_error_handling_and_tracking() {
-        const TEST_ERROR_COUNT_SMALL: usize = 5;
-
+    async fn test_error_handling() {
         let setup = TestSetup::with_validators(2, 1, 0);
 
-        let coordinator_config = create_test_coordinator_config(10);
-        let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
+        let mut coordinator = setup.create_coordinator();
         coordinator.start().await.unwrap();
 
         // Test that invalid messages are handled gracefully
@@ -1606,49 +1431,17 @@ mod tests {
         // But coordinator should still be running
         assert!(coordinator.is_running());
 
-        // Generate some errors to test tracking
-        for i in 0..TEST_ERROR_COUNT_SMALL {
+        // Test that errors are handled gracefully without crashing
+        for i in 0..5 {
             let error = DkgError::InvalidMessage {
                 sender: ValidatorAddress([i as u8; 32]),
                 reason: format!("test error {}", i),
             };
-            let _ = coordinator
+            // Should handle errors without panicking
+            let result = coordinator
                 .handle_dkg_error(error, format!("test context {}", i))
                 .await;
+            assert!(result.is_ok());
         }
-
-        // Verify errors are being tracked
-        assert_eq!(
-            coordinator.state.error_history.len(),
-            TEST_ERROR_COUNT_SMALL
-        );
-    }
-
-    #[tokio::test]
-    async fn test_error_history_limit() {
-        const TEST_ERROR_LIMIT: usize = 5;
-
-        let setup = TestSetup::single_validator();
-        let coordinator_config = create_test_coordinator_config(TEST_ERROR_LIMIT);
-        let mut coordinator = setup.create_coordinator_with_config(coordinator_config);
-        coordinator.start().await.unwrap();
-
-        // Generate more errors than the limit
-        for i in 0..10 {
-            let error = DkgError::InvalidMessage {
-                sender: ValidatorAddress([i as u8; 32]),
-                reason: format!("error {}", i),
-            };
-            let _ = coordinator
-                .handle_dkg_error(error, format!("context {}", i))
-                .await;
-        }
-
-        // Should only keep the last TEST_ERROR_LIMIT errors
-        assert_eq!(coordinator.state.error_history.len(), TEST_ERROR_LIMIT);
-
-        // Most recent error should be the last one added
-        let last_error = coordinator.state.error_history.back().unwrap();
-        assert!(last_error.error.contains("error 9"));
     }
 }
