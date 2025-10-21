@@ -211,7 +211,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                 p2p_result = self.channels.p2p.receive() => {
                     match p2p_result {
                         Ok(AuthenticatedMessage { sender, message }) => {
-                            if let Err(e) = self.handle_message(sender.clone(), message).await {
+                            if let Err(e) = self.handle_p2p_message(sender.clone(), message).await {
                                 self.handle_dkg_error(
                                     e,
                                     format!("P2P message from {:?}", sender),
@@ -266,7 +266,7 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
         }
     }
 
-    pub async fn handle_message(
+    pub async fn handle_p2p_message(
         &mut self,
         sender: ValidatorAddress,
         message: P2PMessage,
@@ -411,13 +411,8 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                             signature: vec![], // TODO: Store actual signatures from approvals
                         })
                         .collect();
-
-                    // Create the certificate
                     // TODO: Retrieve actual message hash from the AVSS message we received as dealer
                     let message_hash = [0u8; 32];
-
-                    // For now, use the collected signatures as DKG signatures
-                    // In practice, we'd separate DA and DKG signatures
                     let certificate = crate::dkg::types::DkgCertificate {
                         dealer: dealer.clone(),
                         message_hash,
@@ -425,14 +420,10 @@ impl<P, O, S: DkgStorage> DkgCoordinator<P, O, S> {
                         dkg_signatures: signatures,
                         session_context: self.config.session_context.clone(),
                     };
-
-                    // Publish to ordered broadcast channel
                     let message = OrderedBroadcastMessage::CertificateV1(certificate);
                     channel.publish(message).await.map_err(|e| {
                         DkgError::ProtocolFailed(format!("Failed to publish certificate: {}", e))
                     })?;
-
-                    // Remove from pending after publishing
                     self.state.signature_tracker.share_approvals.remove(&dealer);
                 }
             }
@@ -1333,7 +1324,9 @@ mod tests {
             message_hash: [0u8; 32],
             signature: vec![1, 2, 3],
         };
-        let result = coordinator.handle_message(wrong_sender.clone(), msg).await;
+        let result = coordinator
+            .handle_p2p_message(wrong_sender.clone(), msg)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Signer mismatch"));
 
@@ -1347,7 +1340,9 @@ mod tests {
             message_hash: [0u8; 32],
             signature: vec![1, 2, 3],
         };
-        let result = coordinator.handle_message(wrong_sender.clone(), msg).await;
+        let result = coordinator
+            .handle_p2p_message(wrong_sender.clone(), msg)
+            .await;
         assert!(result.is_err());
         assert!(
             result
@@ -1363,7 +1358,7 @@ mod tests {
             dealer,
             message_hash: [0u8; 32],
         };
-        let result = coordinator.handle_message(wrong_sender, msg).await;
+        let result = coordinator.handle_p2p_message(wrong_sender, msg).await;
         assert!(result.is_err());
         assert!(
             result
@@ -1453,7 +1448,7 @@ mod tests {
         // Test that invalid messages are handled gracefully
         let invalid_sender = ValidatorAddress([99; 32]);
         let result = coordinator
-            .handle_message(
+            .handle_p2p_message(
                 invalid_sender.clone(),
                 P2PMessage::ApprovalV1(MessageApproval {
                     message_hash: [0u8; 32],
