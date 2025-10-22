@@ -232,7 +232,7 @@ mod tests {
             encryption_key,
             bls_signing_key,
         )
-            .unwrap()
+        .unwrap()
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
         )
-            .unwrap();
+        .unwrap();
 
         let dealer_manager = DkgManager::new(dealer_static);
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
@@ -320,7 +320,7 @@ mod tests {
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
         )
-            .unwrap();
+        .unwrap();
 
         let mut receiver_manager = DkgManager::new(receiver_static);
 
@@ -432,14 +432,14 @@ mod tests {
             &dealer_address,
             &manager.static_data.session_context,
         )
-            .unwrap();
+        .unwrap();
 
         let hash2 = compute_message_hash(
             &message,
             &dealer_address,
             &manager.static_data.session_context,
         )
-            .unwrap();
+        .unwrap();
 
         assert_eq!(hash1, hash2);
     }
@@ -459,14 +459,14 @@ mod tests {
             &ValidatorAddress([1; 32]),
             &manager.static_data.session_context,
         )
-            .unwrap();
+        .unwrap();
 
         let hash2 = compute_message_hash(
             &message,
             &ValidatorAddress([2; 32]),
             &manager.static_data.session_context,
         )
-            .unwrap();
+        .unwrap();
 
         assert_ne!(hash1, hash2);
     }
