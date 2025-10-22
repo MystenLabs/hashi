@@ -153,7 +153,9 @@ impl DkgManager {
 
     /// TODO: Verify certificates, aggregate outputs, and create final DKG output
     pub fn process_certificates(&self, _certificates: &[DkgCertificate]) -> DkgResult<DkgOutput> {
-        unimplemented!("process_certificates should use fastcrypto's ReceiverOutput aggregation")
+        unimplemented!(
+            "process_certificates should use fastcrypto's ReceiverOutput aggregation that does not seem to exist yet"
+        )
     }
 }
 
