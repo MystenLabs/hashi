@@ -195,6 +195,10 @@ impl Bls12381Signature {
             .map_err(BlstError)
             .map_err(SignatureError::from_source)
     }
+
+    pub fn to_bytes(&self) -> [u8; Self::LENGTH] {
+        self.0.to_bytes()
+    }
 }
 
 impl Verifier<Bls12381Signature> for Bls12381PublicKey {

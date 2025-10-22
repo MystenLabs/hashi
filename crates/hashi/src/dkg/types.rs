@@ -112,6 +112,7 @@ pub struct SessionContext {
     pub epoch: u64,
     pub protocol_type: ProtocolType,
     pub chain_id: String,
+    pub session_id: SessionId,
 }
 
 /// Inputs for session ID generation
@@ -124,51 +125,53 @@ struct SessionIdInputs {
     derivation_indexes: Option<Vec<u32>>,
 }
 
+fn compute_session_id(epoch: u64, protocol_type: &ProtocolType, chain_id: &str) -> SessionId {
+    let oracle = base_oracle(protocol_type).extend(chain_id);
+    let input = match protocol_type {
+        ProtocolType::DkgKeyGeneration | ProtocolType::DkgShareRotation => SessionIdInputs {
+            epoch,
+            nonce_id: None,
+            message_hash: None,
+            sighash_type: None,
+            derivation_indexes: None,
+        },
+        ProtocolType::NonceGeneration(nonce_id) => SessionIdInputs {
+            epoch,
+            nonce_id: Some(*nonce_id),
+            message_hash: None,
+            sighash_type: None,
+            derivation_indexes: None,
+        },
+        ProtocolType::Signing {
+            message_hash,
+            sighash_type,
+            derivation_indexes,
+        } => SessionIdInputs {
+            epoch,
+            nonce_id: None,
+            message_hash: Some(*message_hash),
+            sighash_type: Some(*sighash_type as u8),
+            derivation_indexes: derivation_indexes.clone(),
+        },
+    };
+    evaluate_oracle(&oracle, &input)
+}
+
 impl SessionContext {
     pub fn new(epoch: u64, protocol_type: ProtocolType, chain_id: String) -> Self {
+        let session_id = compute_session_id(epoch, &protocol_type, &chain_id);
         Self {
             epoch,
             protocol_type,
             chain_id,
+            session_id,
         }
-    }
-
-    pub fn session_id(&self) -> SessionId {
-        let oracle = base_oracle(&self.protocol_type).extend(&self.chain_id);
-        let input = match &self.protocol_type {
-            ProtocolType::DkgKeyGeneration | ProtocolType::DkgShareRotation => SessionIdInputs {
-                epoch: self.epoch,
-                nonce_id: None,
-                message_hash: None,
-                sighash_type: None,
-                derivation_indexes: None,
-            },
-            ProtocolType::NonceGeneration(nonce_id) => SessionIdInputs {
-                epoch: self.epoch,
-                nonce_id: Some(*nonce_id),
-                message_hash: None,
-                sighash_type: None,
-                derivation_indexes: None,
-            },
-            ProtocolType::Signing {
-                message_hash,
-                sighash_type,
-                derivation_indexes,
-            } => SessionIdInputs {
-                epoch: self.epoch,
-                nonce_id: None,
-                message_hash: Some(*message_hash),
-                sighash_type: Some(*sighash_type as u8),
-                derivation_indexes: derivation_indexes.clone(),
-            },
-        };
-        evaluate_oracle(&oracle, &input)
     }
 
     /// Sub-session ID for a specific dealer, derived from the session ID
     pub fn dealer_session_id(&self, dealer: &ValidatorAddress) -> SessionId {
         let oracle = RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DEALER);
-        evaluate_oracle(&oracle, &(self.session_id(), dealer.0))
+        evaluate_oracle(&oracle, &(&self.session_id, dealer.0))
     }
 }
 
@@ -356,6 +359,7 @@ mod tests {
 
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
+
         ValidatorInfo {
             address: ValidatorAddress([party_id as u8; 32]),
             party_id,
@@ -479,18 +483,11 @@ mod tests {
         let epoch = 100;
         let protocol_type = ProtocolType::DkgKeyGeneration;
         let chain_id = "testnet".to_string();
-        let ctx1 = SessionContext {
-            epoch,
-            protocol_type: protocol_type.clone(),
-            chain_id: chain_id.clone(),
-        };
-        let ctx2 = SessionContext {
-            epoch,
-            protocol_type,
-            chain_id,
-        };
 
-        assert_eq!(ctx1.session_id(), ctx2.session_id());
+        let ctx1 = SessionContext::new(epoch, protocol_type.clone(), chain_id.clone());
+        let ctx2 = SessionContext::new(epoch, protocol_type, chain_id);
+
+        assert_eq!(ctx1.session_id, ctx2.session_id);
     }
 
     #[test]
@@ -504,9 +501,9 @@ mod tests {
         let nonce_ctx =
             SessionContext::new(epoch, ProtocolType::NonceGeneration(1), chain_id.clone());
 
-        assert_ne!(dkg_ctx.session_id(), rotation_ctx.session_id());
-        assert_ne!(dkg_ctx.session_id(), nonce_ctx.session_id());
-        assert_ne!(rotation_ctx.session_id(), nonce_ctx.session_id());
+        assert_ne!(dkg_ctx.session_id, rotation_ctx.session_id);
+        assert_ne!(dkg_ctx.session_id, nonce_ctx.session_id);
+        assert_ne!(rotation_ctx.session_id, nonce_ctx.session_id);
     }
 
     #[test]
@@ -516,7 +513,7 @@ mod tests {
         let mainnet_ctx = SessionContext::new(epoch, protocol_type.clone(), "mainnet".to_string());
         let testnet_ctx = SessionContext::new(epoch, protocol_type, "testnet".to_string());
 
-        assert_ne!(mainnet_ctx.session_id(), testnet_ctx.session_id());
+        assert_ne!(mainnet_ctx.session_id, testnet_ctx.session_id);
     }
 
     #[test]
