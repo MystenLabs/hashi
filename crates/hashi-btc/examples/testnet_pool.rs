@@ -1,30 +1,19 @@
-//! Example binary that demonstrates running a Bitcoin P2P pool on testnet4.
+//! Example binary that demonstrates running a Bitcoin monitor on testnet4.
 //! It uses hardcoded known-working testnet4 seed nodes for peer discovery.
 //!
 //! # Usage Examples
 //!
-//! Monitor a single testnet4 address:
+//! Monitor testnet4:
 //! ```bash
-//! cargo run --example testnet_pool -- --addresses tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx
+//! cargo run --example testnet_pool
 //! ```
-//!
-//! Monitor multiple addresses with verbose logging:
-//! ```bash
-//! cargo run --example testnet_pool -- \
-//!     --addresses tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx \
-//!     --addresses tb1qkqkt3ra8d44lt90t9thgy3lgucsjrtywwgq8yp \
-//!     --verbose
-//! ```
-
 use std::net::SocketAddr;
 
-use bitcoin::Address;
 use bitcoin::Network;
 use clap::Parser;
-use hashi_btc::config::PoolConfig;
-use hashi_btc::pool::Pool;
+use hashi_btc::config::MontiorConfig;
+use hashi_btc::monitor::Monitor;
 use kyoto::TrustedPeer;
-use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
@@ -34,10 +23,6 @@ use tracing_subscriber::prelude::*;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Bitcoin addresses to monitor (can specify multiple)
-    #[arg(short, long, value_name = "ADDRESS", required = true)]
-    addresses: Vec<String>,
-
     /// Number of confirmations required for a transaction to be considered canonical
     #[arg(short = 'c', long, default_value = "6")]
     confirmations: u32,
@@ -67,51 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(filter)
         .init();
 
-    info!("Starting BTC testnet4 pool");
-    info!("Monitoring addresses: {:?}", args.addresses);
-
-    // Parse Bitcoin addresses into script pubkeys
-    let mut monitored_scripts = Vec::new();
-    for addr_str in &args.addresses {
-        match Address::from_str(addr_str) {
-            Ok(addr) => {
-                // Properly check that the address is valid for testnet4
-                // Note: Testnet4 uses the same address prefixes as Testnet3
-                match addr.clone().require_network(Network::Testnet4) {
-                    Ok(checked_addr) => {
-                        monitored_scripts.push(checked_addr.script_pubkey());
-                        info!("Added address: {}", addr_str);
-                    }
-                    Err(_) => {
-                        // Try Testnet (Testnet3) network as fallback since addresses are compatible
-                        match addr.require_network(Network::Testnet) {
-                            Ok(checked_addr) => {
-                                monitored_scripts.push(checked_addr.script_pubkey());
-                                info!("Added address (testnet3 format): {}", addr_str);
-                            }
-                            Err(_) => {
-                                error!("Address '{}' is not valid for testnet4", addr_str);
-                                return Err(format!(
-                                    "Address '{}' is not valid for testnet4",
-                                    addr_str
-                                )
-                                .into());
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Invalid Bitcoin address '{}': {}", addr_str, e);
-                return Err(format!("Invalid Bitcoin address '{}': {}", addr_str, e).into());
-            }
-        }
-    }
-
-    if monitored_scripts.is_empty() {
-        error!("No valid addresses to monitor");
-        return Err("No valid addresses to monitor".into());
-    }
+    info!("Starting BTC testnet4 monitor");
 
     // Known working testnet4 peers (using socket addresses)
     let testnet_peers = vec![
@@ -125,12 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TrustedPeer::from("91.83.65.73:48333".parse::<SocketAddr>()?),
     ];
 
-    let config = PoolConfig {
+    let config = MontiorConfig {
         network: Network::Testnet4,
         confirmation_threshold: args.confirmations,
         trusted_peers: testnet_peers,
         start_height: args.start_height,
-        monitored_scripts,
     };
 
     info!("Pool configuration:");
@@ -140,7 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.confirmation_threshold
     );
     info!("  Starting height: {}", config.start_height);
-    info!("  Monitored scripts: {}", config.monitored_scripts.len());
     info!("  Initial peers: {}", config.trusted_peers.len());
     info!("  Peer addresses:");
     for peer in &config.trusted_peers {
@@ -148,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create and start the pool
-    let pool = Pool::new(config)?;
+    let pool = Monitor::new(config)?;
 
     info!("Starting pool...");
     let _pool_client = pool.run()?;
@@ -167,6 +106,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// Helper function for parsing addresses
-use std::str::FromStr;

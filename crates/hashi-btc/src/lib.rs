@@ -1,7 +1,7 @@
-//! Bitcoin UTXO pool management library for the Hashi system.
+//! Bitcoin monitoring library for the Hashi system.
 //!
-//! This crate provides functionality for managing a pool of Bitcoin UTXOs
-//! across multiple addresses.
+//! This crate provides functionality for monitoring the Bitcoin network
+//! and verifying specific transactions.
 
 pub mod config;
-pub mod pool;
+pub mod monitor;
