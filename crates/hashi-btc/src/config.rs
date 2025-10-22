@@ -35,7 +35,7 @@ impl MontiorConfig {
     }
 }
 
-/// Builder for constructing pool configuration.
+/// Builder for constructing monitor configuration.
 #[derive(Debug, Default)]
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
@@ -69,7 +69,6 @@ impl MonitorConfigBuilder {
         self
     }
 
-    /// Build the pool configuration.
     pub fn build(self) -> MontiorConfig {
         let default = MontiorConfig::default();
 

@@ -5,7 +5,7 @@
 //!
 //! Monitor testnet4:
 //! ```bash
-//! cargo run --example testnet_pool
+//! cargo run --example testnet_monitor
 //! ```
 use std::net::SocketAddr;
 
@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-/// Run a Bitcoin P2P pool monitoring specific addresses on testnet4
+/// Run a Bitcoin P2P monitor on testnet4
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_height: args.start_height,
     };
 
-    info!("Pool configuration:");
+    info!("Monitor configuration:");
     info!("  Network: {:?}", config.network);
     info!(
         "  Confirmations required: {}",
@@ -86,22 +86,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("    - {:?}:{:?}", peer.address(), peer.port());
     }
 
-    // Create and start the pool
-    let pool = Monitor::new(config)?;
+    // Create and start the monitor
+    let monitor = Monitor::new(config)?;
 
-    info!("Starting pool...");
-    let _pool_client = pool.run()?;
+    info!("Starting monitor...");
+    let _monitor_client = monitor.run()?;
 
-    // The pool is now running in background tasks
-    // In a real application, you would use pool_client to interact with the pool
+    // The monitor is now running in background tasks
+    // In a real application, you would use monitor_client to interact with it
 
-    info!("Pool is running. Press Ctrl-C to stop.");
+    info!("Monitor is running. Press Ctrl-C to stop.");
 
     // Wait for ctrl-c
     tokio::signal::ctrl_c().await?;
     info!("Received shutdown signal");
 
-    // In a real application, you would properly shutdown the pool here
+    // In a real application, you would properly shutdown the monitor here
     // For now, the tasks will be cancelled when the program exits
 
     Ok(())

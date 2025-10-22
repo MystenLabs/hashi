@@ -2,7 +2,7 @@
 name = "hashi-btc"
 version = "0.0.0"
 edition = "2024"
-description = "Bitcoin UTXO pool management library for the Hashi system"
+description = "Bitcoin management library for the Hashi system"
 
 [dependencies]
 # Bitcoin libraries
@@ -21,5 +21,5 @@ clap = { version = "4.5", features = ["derive"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 [[example]]
-name = "testnet_pool"
-path = "examples/testnet_pool.rs"
+name = "testnet_monitor"
+path = "examples/testnet_monitor.rs"

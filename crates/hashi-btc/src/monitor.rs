@@ -15,7 +15,7 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    /// Create a new UTXO pool with the given configuration.
+    /// Create a new BTC monitor with the given configuration.
     pub fn new(config: MontiorConfig) -> Result<Self> {
         let genesis_hash = match config.network {
             bitcoin::Network::Bitcoin => {
@@ -168,8 +168,8 @@ pub struct MonitorClient {
 }
 
 impl MonitorClient {
-    // TODO: this wraps the pool messages to provide a functional query interface to
-    // the pool event loop
+    // TODO: this wraps the messages to provide a functional query interface to
+    // the event loop
 }
 
 enum MonitorMessage {
@@ -193,14 +193,14 @@ mod tests {
     use bitcoin::block::Version;
     use bitcoin::hashes::Hash;
 
-    fn create_test_pool() -> Monitor {
+    fn create_test_monitor() -> Monitor {
         let config = MontiorConfig {
             network: bitcoin::Network::Regtest,
             confirmation_threshold: 6,
             trusted_peers: vec![],
             start_height: 0,
         };
-        Monitor::new(config).expect("Failed to create test pool")
+        Monitor::new(config).expect("Failed to create test monitor")
     }
 
     fn create_test_block(height: u32, transactions: Vec<Transaction>) -> kyoto::IndexedBlock {
@@ -223,13 +223,13 @@ mod tests {
 
     #[test]
     fn test_process_block_empty() {
-        let mut pool = create_test_pool();
+        let mut monitor = create_test_monitor();
 
         let block = create_test_block(100, vec![]);
-        pool.process_block(block);
+        monitor.process_block(block);
 
         // Verify the chain was updated.
-        let chain_tip = pool.local_chain.tip();
+        let chain_tip = monitor.local_chain.tip();
         assert_eq!(chain_tip.height(), 100);
     }
 
@@ -237,7 +237,7 @@ mod tests {
     fn test_process_synced_update_chain_tip() {
         use std::collections::BTreeMap;
 
-        let mut pool = create_test_pool();
+        let mut monitor = create_test_monitor();
 
         let sync_update = kyoto::messages::SyncUpdate {
             tip: kyoto::chain::checkpoints::HeaderCheckpoint {
@@ -247,29 +247,29 @@ mod tests {
             recent_history: BTreeMap::new(),
         };
 
-        pool.process_synced(sync_update);
+        monitor.process_synced(sync_update);
 
         // Verify chain tip was updated.
-        let chain_tip = pool.local_chain.tip();
+        let chain_tip = monitor.local_chain.tip();
         assert_eq!(chain_tip.height(), 500);
     }
 
     #[test]
     fn test_process_blocks_disconnected() {
-        let mut pool = create_test_pool();
+        let mut monitor = create_test_monitor();
 
         // First, process some blocks that will later be disconnected.
         let block1 = create_test_block(100, vec![]);
-        pool.process_block(block1);
+        monitor.process_block(block1);
 
         let block2 = create_test_block(101, vec![]);
-        pool.process_block(block2);
+        monitor.process_block(block2);
 
         let block3 = create_test_block(102, vec![]);
-        pool.process_block(block3);
+        monitor.process_block(block3);
 
         // Verify these blocks are in the chain.
-        assert_eq!(pool.local_chain.tip().height(), 102);
+        assert_eq!(monitor.local_chain.tip().height(), 102);
 
         // Now create headers for disconnection that match our processed blocks.
         let disconnected = vec![
@@ -335,10 +335,10 @@ mod tests {
         ];
 
         // Process the reorg.
-        pool.process_blocks_disconnected(accepted.clone(), disconnected);
+        monitor.process_blocks_disconnected(accepted.clone(), disconnected);
 
         // Verify the chain tip is from the replacement blocks.
-        let chain_tip = pool.local_chain.tip();
+        let chain_tip = monitor.local_chain.tip();
         assert_eq!(chain_tip.height(), 101);
         assert_eq!(chain_tip.hash(), accepted[1].block_hash());
     }
