@@ -253,7 +253,7 @@ impl DkgManager {
                             message,
                             session_id: msg_session_id,
                         } if msg_session_id == session_id => {
-                            self.handle_incoming_share(
+                            self.process_dealer_message(
                                 p2p_channel,
                                 sender,
                                 &p2p_msg.sender,
@@ -272,7 +272,7 @@ impl DkgManager {
                             && dealer == my_address
                             && message_hash == my_message_hash =>
                         {
-                            self.handle_signature_for_my_message(
+                            self.collect_signature(
                                 ordered_broadcast_channel,
                                 &dealer_message,
                                 signer,
@@ -305,7 +305,7 @@ impl DkgManager {
     }
 
     /// TODO: Send error response if validation fails
-    async fn handle_incoming_share(
+    async fn process_dealer_message(
         &mut self,
         p2p_channel: &mut impl crate::communication::P2PChannel<P2PMessage>,
         sender: ValidatorAddress,
@@ -342,7 +342,7 @@ impl DkgManager {
         Ok(())
     }
 
-    async fn handle_signature_for_my_message(
+    async fn collect_signature(
         &self,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<
             OrderedBroadcastMessage,
@@ -1053,7 +1053,7 @@ mod tests {
 
         // Test: handle_incoming_share should send a signature back
         receiver_manager
-            .handle_incoming_share(
+            .process_dealer_message(
                 &mut receiver_channel,
                 validators[0].address.clone(),
                 &validators[0].address,
@@ -1113,7 +1113,7 @@ mod tests {
         // Add 2 signatures (below threshold of 3)
         for i in 0..2 {
             manager
-                .handle_signature_for_my_message(
+                .collect_signature(
                     &mut tob_channel,
                     &dealer_message,
                     config.validators[i].address.clone(),
@@ -1160,7 +1160,7 @@ mod tests {
         // Add exactly 3 signatures (reaches threshold)
         for i in 0..3 {
             manager
-                .handle_signature_for_my_message(
+                .collect_signature(
                     &mut tob_channel,
                     &dealer_message,
                     config.validators[i].address.clone(),
@@ -1217,7 +1217,7 @@ mod tests {
         // Add 4 signatures (exceeds threshold)
         for i in 0..4 {
             manager
-                .handle_signature_for_my_message(
+                .collect_signature(
                     &mut tob_channel,
                     &dealer_message,
                     config.validators[i].address.clone(),
