@@ -4,13 +4,11 @@ pub mod interfaces;
 pub mod types;
 
 use crate::types::ValidatorAddress;
-use fastcrypto::groups::Scalar;
 use fastcrypto::groups::ristretto255::RistrettoPoint;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Node;
 use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use std::collections::BTreeMap;
 use sui_crypto::Signer;
@@ -29,11 +27,14 @@ pub struct DkgStaticData {
     pub encryption_key: PrivateKey<RistrettoPoint>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub receiver: avss::Receiver,
+    pub validator_weights: BTreeMap<ValidatorAddress, u16>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DkgRuntimeState {
     pub dealer_outputs: BTreeMap<ValidatorAddress, avss::ReceiverOutput>,
+    /// TODO: Add signature recovery
+    pub dealer_messages: BTreeMap<ValidatorAddress, avss::Message>,
 }
 
 impl DkgStaticData {
@@ -54,6 +55,11 @@ impl DkgStaticData {
             None, // commitment: None for initial DKG
             encryption_key.clone(),
         );
+        let validator_weights: BTreeMap<_, _> = dkg_config
+            .validators
+            .iter()
+            .map(|v| (v.address.clone(), v.weight))
+            .collect();
         Ok(Self {
             validator_info,
             nodes,
@@ -62,6 +68,7 @@ impl DkgStaticData {
             encryption_key,
             bls_signing_key,
             receiver,
+            validator_weights,
         })
     }
 }
@@ -77,6 +84,7 @@ impl DkgManager {
             static_data,
             runtime_state: DkgRuntimeState {
                 dealer_outputs: BTreeMap::new(),
+                dealer_messages: BTreeMap::new(),
             },
         }
     }
@@ -85,9 +93,8 @@ impl DkgManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<avss::Message> {
-        let secret = S::rand(rng);
         let dealer = avss::Dealer::new(
-            Some(secret),
+            None,
             self.static_data.nodes.clone(),
             self.static_data.dkg_config.threshold,
             self.static_data.dkg_config.max_faulty,
@@ -113,6 +120,9 @@ impl DkgManager {
         self.runtime_state
             .dealer_outputs
             .insert(dealer_address.clone(), receiver_output);
+        self.runtime_state
+            .dealer_messages
+            .insert(dealer_address.clone(), message.clone());
         let message_hash =
             compute_message_hash(message, &dealer_address, &self.static_data.session_context)?;
         let signature = self.static_data.bls_signing_key.sign(&message_hash);
@@ -127,14 +137,14 @@ impl DkgManager {
         message: &avss::Message,
         signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<DkgCertificate> {
-        let required_num_of_signatures = (self.static_data.dkg_config.threshold
-            + self.static_data.dkg_config.max_faulty)
-            as usize;
-        if signatures.len() < required_num_of_signatures {
+        let total_weight =
+            compute_total_signature_weight(&signatures, &self.static_data.validator_weights)?;
+        let weight_lower_bound =
+            self.static_data.dkg_config.threshold + self.static_data.dkg_config.max_faulty;
+        if total_weight < weight_lower_bound {
             return Err(DkgError::ProtocolFailed(format!(
-                "Insufficient signatures: got {}, need {}",
-                signatures.len(),
-                required_num_of_signatures
+                "Insufficient weighted signatures: got {}, need {}",
+                total_weight, weight_lower_bound
             )));
         }
         let message_hash = compute_message_hash(
@@ -169,6 +179,23 @@ fn create_nodes(validators: &[ValidatorInfo]) -> Nodes<RistrettoPoint> {
         })
         .collect();
     Nodes::new(nodes).expect("Failed to create nodes")
+}
+
+fn compute_total_signature_weight(
+    signatures: &[ValidatorSignature],
+    validator_weights: &BTreeMap<ValidatorAddress, u16>,
+) -> DkgResult<u16> {
+    let mut total_weight: u16 = 0;
+    for sig in signatures {
+        let weight = validator_weights.get(&sig.validator).ok_or_else(|| {
+            DkgError::ProtocolFailed(format!(
+                "Signature from unknown validator: {:?}",
+                sig.validator
+            ))
+        })?;
+        total_weight += weight;
+    }
+    Ok(total_weight)
 }
 
 fn compute_message_hash(
@@ -345,26 +372,34 @@ mod tests {
                 .dealer_outputs
                 .contains_key(&dealer_address)
         );
+
+        // Verify dealer message was stored for signature recovery
+        assert!(
+            receiver_manager
+                .runtime_state
+                .dealer_messages
+                .contains_key(&dealer_address)
+        );
     }
 
     #[test]
     fn test_create_certificate_insufficient_signatures() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config);
+        let static_data = create_test_static_data(0, config.clone());
         let manager = DkgManager::new(static_data);
 
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
 
-        // Only 2 signatures, need threshold + max_faulty = 3
+        // Only 2 signatures with weight=1 each, need threshold + max_faulty = 3
         let signatures = vec![
             ValidatorSignature {
-                validator: ValidatorAddress([1; 32]),
+                validator: config.validators[0].address.clone(),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
-                validator: ValidatorAddress([2; 32]),
+                validator: config.validators[1].address.clone(),
                 signature: vec![0; 96],
             },
         ];
@@ -375,26 +410,26 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Insufficient signatures")
+                .contains("Insufficient weighted signatures")
         );
     }
 
     #[test]
     fn test_create_certificate_success() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config);
+        let static_data = create_test_static_data(0, config.clone());
         let manager = DkgManager::new(static_data);
 
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
 
-        // Create enough signatures (threshold + max_faulty)
+        // Create enough signatures (threshold + max_faulty = 3 weight needed)
         let required_sigs = (manager.static_data.dkg_config.threshold
             + manager.static_data.dkg_config.max_faulty) as usize;
         let signatures: Vec<_> = (0..required_sigs)
             .map(|i| ValidatorSignature {
-                validator: ValidatorAddress([i as u8; 32]),
+                validator: config.validators[i].address.clone(),
                 signature: vec![0; 96],
             })
             .collect();
@@ -415,6 +450,109 @@ mod tests {
         assert_eq!(
             certificate.session_context.session_id,
             manager.static_data.session_context.session_id
+        );
+    }
+
+    #[test]
+    fn test_create_certificate_weighted_signatures() {
+        // Create validators with different weights
+        let validators: Vec<_> = vec![
+            ValidatorInfo {
+                address: ValidatorAddress([0; 32]),
+                party_id: 0,
+                weight: 3, // Heavy weight
+                ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
+                    &PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng()),
+                ),
+            },
+            ValidatorInfo {
+                address: ValidatorAddress([1; 32]),
+                party_id: 1,
+                weight: 1,
+                ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
+                    &PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng()),
+                ),
+            },
+            ValidatorInfo {
+                address: ValidatorAddress([2; 32]),
+                party_id: 2,
+                weight: 1,
+                ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
+                    &PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng()),
+                ),
+            },
+        ];
+
+        // threshold=3, max_faulty=1, total_weight=5
+        let config = DkgConfig::new(100, validators, 3, 1).unwrap();
+        let static_data = create_test_static_data(0, config.clone());
+        let manager = DkgManager::new(static_data);
+
+        let message = manager
+            .create_dealer_message(&mut rand::thread_rng())
+            .unwrap();
+
+        // Only validator 0 (weight=3), which is less than required (threshold + max_faulty = 4)
+        let insufficient_sigs = vec![ValidatorSignature {
+            validator: config.validators[0].address.clone(),
+            signature: vec![0; 96],
+        }];
+
+        let result = manager.create_certificate(&message, insufficient_sigs);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Insufficient weighted signatures")
+        );
+
+        // Validator 0 (weight=3) + validator 1 (weight=1) = 4, which meets the requirement
+        let sufficient_sigs = vec![
+            ValidatorSignature {
+                validator: config.validators[0].address.clone(),
+                signature: vec![0; 96],
+            },
+            ValidatorSignature {
+                validator: config.validators[1].address.clone(),
+                signature: vec![0; 96],
+            },
+        ];
+
+        let result = manager.create_certificate(&message, sufficient_sigs);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_certificate_unknown_validator() {
+        let config = create_test_dkg_config(5);
+        let static_data = create_test_static_data(0, config.clone());
+        let manager = DkgManager::new(static_data);
+
+        let message = manager
+            .create_dealer_message(&mut rand::thread_rng())
+            .unwrap();
+
+        // Create signatures including one from an unknown validator
+        let unknown_validator = ValidatorAddress([99; 32]);
+        let signatures = vec![
+            ValidatorSignature {
+                validator: config.validators[0].address.clone(),
+                signature: vec![0; 96],
+            },
+            ValidatorSignature {
+                validator: unknown_validator.clone(),
+                signature: vec![0; 96],
+            },
+        ];
+
+        let result = manager.create_certificate(&message, signatures);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Signature from unknown validator")
         );
     }
 
