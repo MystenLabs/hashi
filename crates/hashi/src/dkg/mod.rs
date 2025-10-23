@@ -76,6 +76,11 @@ pub struct DkgManager {
     pub runtime_state: DkgRuntimeState,
 }
 
+struct SignatureCollectionState {
+    signatures: Vec<ValidatorSignature>,
+    is_cert_published: bool,
+}
+
 impl DkgManager {
     pub fn new(static_data: DkgStaticData) -> Self {
         Self {
@@ -193,6 +198,184 @@ impl DkgManager {
             session_context: self.static_data.session_context.clone(),
         })
     }
+
+    pub async fn run_dkg(
+        &mut self,
+        p2p_channel: &mut impl crate::communication::P2PChannel<P2PMessage>,
+        ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<
+            OrderedBroadcastMessage,
+        >,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<DkgOutput> {
+        let threshold = self.static_data.dkg_config.threshold;
+        let max_faulty = self.static_data.dkg_config.max_faulty;
+        let required_sigs = threshold + max_faulty;
+        let my_address = self.static_data.validator_info.address.clone();
+        let session_id = self.static_data.session_context.session_id;
+
+        let dealer_message = self.create_dealer_message(rng)?;
+        let my_message_hash = compute_message_hash(
+            &dealer_message,
+            &my_address,
+            &self.static_data.session_context,
+        )?;
+        p2p_channel
+            .broadcast(P2PMessage::ShareV1 {
+                session_id,
+                sender: my_address.clone(),
+                message: Box::new(dealer_message.clone()),
+            })
+            .await
+            .map_err(|e| DkgError::ProtocolFailed(format!("Failed to broadcast share: {}", e)))?;
+        self.receive_dealer_message(&dealer_message, my_address.clone())?;
+
+        let mut sig_state = SignatureCollectionState {
+            signatures: Vec::new(),
+            is_cert_published: false,
+        };
+        let mut certificates = Vec::new();
+        loop {
+            let have_all_dealer_messages = certificates.iter().all(|cert: &DkgCertificate| {
+                self.runtime_state.dealer_outputs.contains_key(&cert.dealer)
+            });
+            if certificates.len() >= threshold as usize && have_all_dealer_messages {
+                break;
+            }
+            // TODO: Validate message sender is as claimed
+            tokio::select! {
+                p2p_result = p2p_channel.receive() => {
+                    let p2p_msg = p2p_result.map_err(|e| {
+                        DkgError::ProtocolFailed(format!("P2P channel error: {}", e))
+                    })?;
+                    match p2p_msg.message {
+                        P2PMessage::ShareV1 {
+                            sender,
+                            message,
+                            session_id: msg_session_id,
+                        } if msg_session_id == session_id => {
+                            self.handle_incoming_share(
+                                p2p_channel,
+                                sender,
+                                &p2p_msg.sender,
+                                &message,
+                                session_id,
+                            )
+                            .await?;
+                        }
+                        P2PMessage::DkgSignatureV1 {
+                            dealer,
+                            message_hash,
+                            signature,
+                            signer,
+                            session_id: msg_session_id,
+                        } if msg_session_id == session_id
+                            && dealer == my_address
+                            && message_hash == my_message_hash =>
+                        {
+                            self.handle_signature_for_my_message(
+                                ordered_broadcast_channel,
+                                &dealer_message,
+                                signer,
+                                signature,
+                                required_sigs,
+                                &mut sig_state,
+                            )
+                            .await?;
+                        }
+                        // TODO: Handle error responses to our dealer message for n-(t+f+1) error counting
+                        _ => {
+                        }
+                    }
+                }
+                tob_result = ordered_broadcast_channel.receive() => {
+                    let tob_msg = tob_result.map_err(|e| {
+                        DkgError::ProtocolFailed(format!("TOB channel error: {}", e))
+                    })?;
+                    if let OrderedBroadcastMessage::CertificateV1(cert) = tob_msg.message {
+                        // TODO: Validate certificate signatures
+                        // TODO: Check session_id matches
+                        certificates.push(cert);
+                    }
+                }
+            }
+            // TODO: Handle case where we receive n-(t+f+1) error responses (too slow, abort)
+        }
+        let output = self.process_certificates(&certificates)?;
+        Ok(output)
+    }
+
+    /// TODO: Send error response if validation fails
+    async fn handle_incoming_share(
+        &mut self,
+        p2p_channel: &mut impl crate::communication::P2PChannel<P2PMessage>,
+        sender: ValidatorAddress,
+        authenticated_sender: &ValidatorAddress,
+        message: &avss::Message,
+        session_id: SessionId,
+    ) -> DkgResult<()> {
+        match self.receive_dealer_message(message, sender.clone()) {
+            Ok(sig) => {
+                p2p_channel
+                    .send_to(
+                        &sender,
+                        P2PMessage::DkgSignatureV1 {
+                            session_id,
+                            signer: self.static_data.validator_info.address.clone(),
+                            dealer: sender.clone(),
+                            message_hash: compute_message_hash(
+                                message,
+                                authenticated_sender,
+                                &self.static_data.session_context,
+                            )?,
+                            signature: sig.signature,
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        DkgError::ProtocolFailed(format!("Failed to send signature: {}", e))
+                    })?;
+            }
+            Err(_) => {
+                // TODO: Send error response to dealer
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_signature_for_my_message(
+        &self,
+        ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<
+            OrderedBroadcastMessage,
+        >,
+        dealer_message: &avss::Message,
+        signer: ValidatorAddress,
+        signature: SignatureBytes,
+        required_sigs: u16,
+        signature_collection_state: &mut SignatureCollectionState,
+    ) -> DkgResult<()> {
+        signature_collection_state
+            .signatures
+            .push(ValidatorSignature {
+                validator: signer,
+                signature,
+            });
+        if !signature_collection_state.is_cert_published
+            && signature_collection_state.signatures.len() >= required_sigs as usize
+        {
+            let cert = self.create_certificate(
+                dealer_message,
+                signature_collection_state.signatures.clone(),
+            )?;
+            ordered_broadcast_channel
+                .publish(OrderedBroadcastMessage::CertificateV1(cert))
+                .await
+                .map_err(|e| {
+                    DkgError::ProtocolFailed(format!("Failed to publish certificate: {}", e))
+                })?;
+            signature_collection_state.is_cert_published = true;
+        }
+        Ok(())
+    }
 }
 
 fn create_nodes(validators: &[ValidatorInfo]) -> Nodes<EncryptionGroupElement> {
@@ -243,6 +426,7 @@ fn compute_message_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::communication::{OrderedBroadcastChannel, P2PChannel};
     use crate::dkg::types::ProtocolType;
 
     fn create_test_validator(party_id: u16) -> ValidatorInfo {
@@ -811,5 +995,334 @@ mod tests {
                 .to_string()
                 .contains("No dealer output found for dealer")
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_incoming_share_valid() {
+        // Setup: Create two validators - dealer and receiver
+        let mut rng = rand::thread_rng();
+        let encryption_keys: Vec<_> = (0..5)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let validators: Vec<_> = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                ValidatorInfo {
+                    address: ValidatorAddress([i as u8; 32]),
+                    party_id: i as u16,
+                    weight: 1,
+                    ecies_public_key: public_key,
+                }
+            })
+            .collect();
+
+        let config = DkgConfig::new(100, validators.clone(), 2, 1).unwrap();
+
+        // Dealer (validator 0) creates a share message
+        let dealer_static_data = DkgStaticData::new(
+            validators[0].clone(),
+            config.clone(),
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string()),
+            encryption_keys[0].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+        )
+            .unwrap();
+        let dealer_manager = DkgManager::new(dealer_static_data);
+        let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
+
+        // Receiver (validator 1) receives the share
+        let receiver_static_data = DkgStaticData::new(
+            validators[1].clone(),
+            config.clone(),
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string()),
+            encryption_keys[1].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+        )
+            .unwrap();
+        let mut receiver_manager = DkgManager::new(receiver_static_data);
+
+        // Setup P2P channels
+        let mut channels = crate::communication::InMemoryP2PChannels::new_network(
+            validators.iter().map(|v| v.address.clone()).collect(),
+        );
+        let mut receiver_channel = channels.remove(&validators[1].address).unwrap();
+
+        // Test: handle_incoming_share should send a signature back
+        receiver_manager
+            .handle_incoming_share(
+                &mut receiver_channel,
+                validators[0].address.clone(),
+                &validators[0].address,
+                &dealer_message,
+                receiver_manager.static_data.session_context.session_id,
+            )
+            .await
+            .unwrap();
+
+        // Verify: Check that a signature was sent back to the dealer
+        let mut dealer_channel = channels.remove(&validators[0].address).unwrap();
+        let received = dealer_channel.receive().await.unwrap();
+        match received.message {
+            P2PMessage::DkgSignatureV1 {
+                signer,
+                dealer,
+                session_id,
+                ..
+            } => {
+                assert_eq!(signer, validators[1].address);
+                assert_eq!(dealer, validators[0].address);
+                assert_eq!(
+                    session_id,
+                    receiver_manager.static_data.session_context.session_id
+                );
+            }
+            _ => panic!("Expected DkgSignatureV1 message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_signature_for_my_message_below_threshold() {
+        let config = create_test_dkg_config(5);
+        let static_data = create_test_static_data(0, config.clone());
+        let manager = DkgManager::new(static_data);
+        let dealer_message = manager
+            .create_dealer_message(&mut rand::thread_rng())
+            .unwrap();
+
+        // Setup ordered broadcast channel
+        let mut tob_channels = crate::communication::InMemoryOrderedBroadcastChannel::new_network(
+            config
+                .validators
+                .iter()
+                .map(|v| v.address.clone())
+                .collect(),
+        );
+        let mut tob_channel = tob_channels.remove(&config.validators[0].address).unwrap();
+
+        // Create state
+        let mut state = SignatureCollectionState {
+            signatures: Vec::new(),
+            is_cert_published: false,
+        };
+        let required_sigs = 3; // threshold + max_faulty
+
+        // Add 2 signatures (below threshold of 3)
+        for i in 0..2 {
+            manager
+                .handle_signature_for_my_message(
+                    &mut tob_channel,
+                    &dealer_message,
+                    config.validators[i].address.clone(),
+                    vec![0; 96],
+                    required_sigs,
+                    &mut state,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Verify: No certificate published yet
+        assert_eq!(state.signatures.len(), 2);
+        assert!(!state.is_cert_published);
+        assert_eq!(tob_channel.pending_messages().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_signature_for_my_message_reaches_threshold() {
+        let config = create_test_dkg_config(5);
+        let static_data = create_test_static_data(0, config.clone());
+        let manager = DkgManager::new(static_data);
+        let dealer_message = manager
+            .create_dealer_message(&mut rand::thread_rng())
+            .unwrap();
+
+        // Setup ordered broadcast channel
+        let mut tob_channels = crate::communication::InMemoryOrderedBroadcastChannel::new_network(
+            config
+                .validators
+                .iter()
+                .map(|v| v.address.clone())
+                .collect(),
+        );
+        let mut tob_channel = tob_channels.remove(&config.validators[0].address).unwrap();
+
+        // Create state
+        let mut state = SignatureCollectionState {
+            signatures: Vec::new(),
+            is_cert_published: false,
+        };
+        let required_sigs = 3;
+
+        // Add exactly 3 signatures (reaches threshold)
+        for i in 0..3 {
+            manager
+                .handle_signature_for_my_message(
+                    &mut tob_channel,
+                    &dealer_message,
+                    config.validators[i].address.clone(),
+                    vec![0; 96],
+                    required_sigs,
+                    &mut state,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Verify: Certificate was published
+        assert_eq!(state.signatures.len(), 3);
+        assert!(state.is_cert_published);
+        assert_eq!(tob_channel.pending_messages().unwrap(), 1);
+
+        // Verify the published message is a certificate
+        let published = tob_channel.receive().await.unwrap();
+        match published.message {
+            OrderedBroadcastMessage::CertificateV1(cert) => {
+                assert_eq!(cert.dealer, manager.static_data.validator_info.address);
+                assert_eq!(cert.dkg_signatures.len(), 3);
+            }
+            _ => panic!("Expected CertificateV1 message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_signature_for_my_message_no_duplicate_cert() {
+        let config = create_test_dkg_config(5);
+        let static_data = create_test_static_data(0, config.clone());
+        let manager = DkgManager::new(static_data);
+        let dealer_message = manager
+            .create_dealer_message(&mut rand::thread_rng())
+            .unwrap();
+
+        // Setup ordered broadcast channel
+        let mut tob_channels = crate::communication::InMemoryOrderedBroadcastChannel::new_network(
+            config
+                .validators
+                .iter()
+                .map(|v| v.address.clone())
+                .collect(),
+        );
+        let mut tob_channel = tob_channels.remove(&config.validators[0].address).unwrap();
+
+        // Create state
+        let mut state = SignatureCollectionState {
+            signatures: Vec::new(),
+            is_cert_published: false,
+        };
+        let required_sigs = 3;
+
+        // Add 4 signatures (exceeds threshold)
+        for i in 0..4 {
+            manager
+                .handle_signature_for_my_message(
+                    &mut tob_channel,
+                    &dealer_message,
+                    config.validators[i].address.clone(),
+                    vec![0; 96],
+                    required_sigs,
+                    &mut state,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Verify: Only one certificate was published (no duplicate)
+        assert_eq!(state.signatures.len(), 4);
+        assert!(state.is_cert_published);
+        assert_eq!(tob_channel.pending_messages().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_dkg_weighted_validators() {
+        // Test DKG with weighted validators: [3, 2, 4, 1, 2]
+        let mut rng = rand::thread_rng();
+        let weights = [3, 2, 4, 1, 2];
+        let num_validators = weights.len();
+
+        // Create encryption keys and validators
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let validators: Vec<_> = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                ValidatorInfo {
+                    address: ValidatorAddress([i as u8; 32]),
+                    party_id: i as u16,
+                    weight: weights[i],
+                    ecies_public_key: public_key,
+                }
+            })
+            .collect();
+
+        // Total weight = 12, threshold = 3, max_faulty = 1
+        let config = DkgConfig::new(100, validators.clone(), 3, 1).unwrap();
+
+        // Create DKG managers for each validator
+        let managers: Vec<_> = validators
+            .iter()
+            .enumerate()
+            .map(|(i, validator)| {
+                let static_data = DkgStaticData::new(
+                    validator.clone(),
+                    config.clone(),
+                    SessionContext::new(
+                        100,
+                        ProtocolType::DkgKeyGeneration,
+                        "testchain".to_string(),
+                    ),
+                    encryption_keys[i].clone(),
+                    crate::bls::Bls12381PrivateKey::generate(&mut rng),
+                )
+                    .unwrap();
+                DkgManager::new(static_data)
+            })
+            .collect();
+
+        // Setup channels
+        let mut p2p_channels = crate::communication::InMemoryP2PChannels::new_network(
+            validators.iter().map(|v| v.address.clone()).collect(),
+        );
+        let mut tob_channels = crate::communication::InMemoryOrderedBroadcastChannel::new_network(
+            validators.iter().map(|v| v.address.clone()).collect(),
+        );
+
+        // Run DKG for all validators concurrently
+        let mut tasks = Vec::new();
+        for (i, mut manager) in managers.into_iter().enumerate() {
+            let mut p2p = p2p_channels.remove(&validators[i].address).unwrap();
+            let mut tob = tob_channels.remove(&validators[i].address).unwrap();
+
+            let task = tokio::spawn(async move {
+                use rand::SeedableRng;
+                let mut rng = rand::rngs::StdRng::from_entropy();
+                manager.run_dkg(&mut p2p, &mut tob, &mut rng).await
+            });
+            tasks.push(task);
+        }
+
+        // Wait for all validators to complete DKG
+        let mut outputs = Vec::new();
+        for task in tasks {
+            outputs.push(task.await.unwrap().unwrap());
+        }
+
+        // Verify all validators produced valid outputs
+        assert_eq!(outputs.len(), num_validators);
+
+        // All validators should have the same public key
+        let first_pk = &outputs[0].public_key;
+        for (i, output) in outputs.iter().enumerate() {
+            assert_eq!(&output.public_key, first_pk);
+            // Each validator should receive shares proportional to their weight
+            assert_eq!(output.key_shares.shares.len(), weights[i] as usize);
+        }
     }
 }
