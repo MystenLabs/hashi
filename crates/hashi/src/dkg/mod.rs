@@ -646,7 +646,7 @@ mod tests {
             .collect();
 
         // Use different weights: [3, 2, 4, 1, 2] (total = 12)
-        let weights = vec![3, 2, 4, 1, 2];
+        let weights = [3, 2, 4, 1, 2];
         let validators: Vec<_> = encryption_keys
             .iter()
             .enumerate()
@@ -673,7 +673,7 @@ mod tests {
 
         // Create threshold (3) dealers - complete_dkg requires exactly t dealer outputs
         // Using validators 0, 1, 4 as dealers (weights 3, 2, 2 respectively)
-        let dealer_indices = vec![0, 1, 4];
+        let dealer_indices = [0, 1, 4];
         let dealer_managers: Vec<_> = dealer_indices
             .iter()
             .map(|&i| {
@@ -684,7 +684,7 @@ mod tests {
                     encryption_keys[i].clone(),
                     crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
                 )
-                    .unwrap();
+                .unwrap();
                 DkgManager::new(static_data)
             })
             .collect();
@@ -697,7 +697,7 @@ mod tests {
             encryption_keys[2].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
         )
-            .unwrap();
+        .unwrap();
         let mut receiver_manager = DkgManager::new(receiver_static);
 
         // Each dealer creates a message
