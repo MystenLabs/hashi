@@ -1030,7 +1030,7 @@ mod tests {
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
         )
-            .unwrap();
+        .unwrap();
         let dealer_manager = DkgManager::new(dealer_static_data);
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
 
@@ -1042,7 +1042,7 @@ mod tests {
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
         )
-            .unwrap();
+        .unwrap();
         let mut receiver_manager = DkgManager::new(receiver_static_data);
 
         // Setup P2P channels
@@ -1281,7 +1281,7 @@ mod tests {
                     encryption_keys[i].clone(),
                     crate::bls::Bls12381PrivateKey::generate(&mut rng),
                 )
-                    .unwrap();
+                .unwrap();
                 DkgManager::new(static_data)
             })
             .collect();
