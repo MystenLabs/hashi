@@ -4,7 +4,6 @@ pub mod interfaces;
 pub mod types;
 
 use crate::types::ValidatorAddress;
-use fastcrypto::groups::ristretto255::RistrettoPoint;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Node;
@@ -14,17 +13,17 @@ use std::collections::BTreeMap;
 use sui_crypto::Signer;
 
 pub use types::{
-    DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, MessageApproval, MessageHash,
-    MessageType, OrderedBroadcastMessage, P2PMessage, SessionContext, SessionId, SighashType,
-    SignatureBytes, ValidatorInfo, ValidatorSignature,
+    DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult, EncryptionGroupElement,
+    MessageApproval, MessageHash, MessageType, OrderedBroadcastMessage, P2PMessage, SessionContext,
+    SessionId, SighashType, SignatureBytes, ValidatorInfo, ValidatorSignature,
 };
 
 pub struct DkgStaticData {
     pub validator_info: ValidatorInfo,
-    pub nodes: Nodes<RistrettoPoint>,
+    pub nodes: Nodes<EncryptionGroupElement>,
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
-    pub encryption_key: PrivateKey<RistrettoPoint>,
+    pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub receiver: avss::Receiver,
     pub validator_weights: BTreeMap<ValidatorAddress, u16>,
@@ -42,7 +41,7 @@ impl DkgStaticData {
         validator_info: ValidatorInfo,
         dkg_config: DkgConfig,
         session_context: SessionContext,
-        encryption_key: PrivateKey<RistrettoPoint>,
+        encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
     ) -> DkgResult<Self> {
         let nodes = create_nodes(&dkg_config.validators);
@@ -169,7 +168,7 @@ impl DkgManager {
     }
 }
 
-fn create_nodes(validators: &[ValidatorInfo]) -> Nodes<RistrettoPoint> {
+fn create_nodes(validators: &[ValidatorInfo]) -> Nodes<EncryptionGroupElement> {
     let nodes: Vec<_> = validators
         .iter()
         .map(|v| Node {
@@ -221,7 +220,7 @@ mod tests {
     use crate::dkg::types::ProtocolType;
 
     fn create_test_validator(party_id: u16) -> ValidatorInfo {
-        let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let private_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let public_key = fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&private_key);
 
         ValidatorInfo {
@@ -252,7 +251,7 @@ mod tests {
             ProtocolType::DkgKeyGeneration,
             "testchain".to_string(),
         );
-        let encryption_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
+        let encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(rand::thread_rng());
         DkgStaticData::new(
             validator_info,
@@ -301,7 +300,7 @@ mod tests {
         // Create encryption keys for each validator
         let mut rng = rand::thread_rng();
         let encryption_keys: Vec<_> = (0..5)
-            .map(|_| PrivateKey::<RistrettoPoint>::new(&mut rng))
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
 
         // Create validators using the encryption public keys
@@ -462,7 +461,7 @@ mod tests {
                 party_id: 0,
                 weight: 3, // Heavy weight
                 ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
-                    &PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng()),
+                    &PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng()),
                 ),
             },
             ValidatorInfo {
@@ -470,7 +469,7 @@ mod tests {
                 party_id: 1,
                 weight: 1,
                 ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
-                    &PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng()),
+                    &PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng()),
                 ),
             },
             ValidatorInfo {
@@ -478,7 +477,7 @@ mod tests {
                 party_id: 2,
                 weight: 1,
                 ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
-                    &PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng()),
+                    &PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng()),
                 ),
             },
         ];

@@ -13,7 +13,7 @@ use fastcrypto_tbls::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-type EG = fastcrypto::groups::ristretto255::RistrettoPoint;
+pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 
 pub type MessageHash = [u8; 32];
 pub type SignatureBytes = Vec<u8>;
@@ -52,7 +52,7 @@ pub struct ValidatorInfo {
     /// Index in the validator set
     pub party_id: PartyId,
     pub weight: u16,
-    pub ecies_public_key: PublicKey<EG>,
+    pub ecies_public_key: PublicKey<EncryptionGroupElement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
