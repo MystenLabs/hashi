@@ -32,7 +32,6 @@ pub struct DkgStaticData {
 #[derive(Clone, Debug)]
 pub struct DkgRuntimeState {
     pub dealer_outputs: BTreeMap<ValidatorAddress, avss::ReceiverOutput>,
-    /// TODO: Add signature recovery
     pub dealer_messages: BTreeMap<ValidatorAddress, avss::Message>,
 }
 
@@ -110,6 +109,7 @@ impl DkgManager {
     ) -> DkgResult<ValidatorSignature> {
         let receiver_output = match self.static_data.receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
+            // TODO: Add compliant handling
             avss::ProcessedMessage::Complaint(_) => {
                 return Err(DkgError::ProtocolFailed(
                     "Invalid message from dealer".into(),
@@ -160,11 +160,38 @@ impl DkgManager {
         })
     }
 
-    /// TODO: Verify certificates, aggregate outputs, and create final DKG output
-    pub fn process_certificates(&self, _certificates: &[DkgCertificate]) -> DkgResult<DkgOutput> {
-        unimplemented!(
-            "process_certificates should use fastcrypto's ReceiverOutput aggregation that does not seem to exist yet"
-        )
+    pub fn process_certificates(&self, certificates: &[DkgCertificate]) -> DkgResult<DkgOutput> {
+        let threshold = self.static_data.dkg_config.threshold;
+        if certificates.len() != threshold as usize {
+            return Err(DkgError::ProtocolFailed(format!(
+                "Expected {} certificates, got {}",
+                threshold,
+                certificates.len()
+            )));
+        }
+        // TODO: Handle missing messages and invalid shares
+        let mut outputs = Vec::new();
+        for cert in certificates {
+            let output = self
+                .runtime_state
+                .dealer_outputs
+                .get(&cert.dealer)
+                .ok_or_else(|| {
+                    DkgError::ProtocolFailed(format!(
+                        "No dealer output found for dealer: {:?}.",
+                        cert.dealer
+                    ))
+                })?;
+            outputs.push(output.clone());
+        }
+        let combined = avss::ReceiverOutput::complete_dkg(threshold, outputs)
+            .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
+        Ok(DkgOutput {
+            public_key: combined.vk,
+            key_shares: combined.my_shares,
+            commitments: combined.commitments,
+            session_context: self.static_data.session_context.clone(),
+        })
     }
 }
 
@@ -608,5 +635,182 @@ mod tests {
         .unwrap();
 
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_process_certificates_success() {
+        // Create 5 validators with different weights
+        let mut rng = rand::thread_rng();
+        let encryption_keys: Vec<_> = (0..5)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        // Use different weights: [3, 2, 4, 1, 2] (total = 12)
+        let weights = vec![3, 2, 4, 1, 2];
+        let validators: Vec<_> = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                ValidatorInfo {
+                    address: ValidatorAddress([i as u8; 32]),
+                    party_id: i as u16,
+                    weight: weights[i],
+                    ecies_public_key: public_key,
+                }
+            })
+            .collect();
+
+        // threshold = 3, max_faulty = 1, total_weight = 12
+        // Constraint: t + 2f = 3 + 2 = 5 <= 12 ✓
+        let config = DkgConfig::new(100, validators, 3, 1).unwrap();
+        let session_context = SessionContext::new(
+            config.epoch,
+            ProtocolType::DkgKeyGeneration,
+            "testchain".to_string(),
+        );
+
+        // Create threshold (3) dealers - complete_dkg requires exactly t dealer outputs
+        // Using validators 0, 1, 4 as dealers (weights 3, 2, 2 respectively)
+        let dealer_indices = vec![0, 1, 4];
+        let dealer_managers: Vec<_> = dealer_indices
+            .iter()
+            .map(|&i| {
+                let static_data = DkgStaticData::new(
+                    config.validators[i].clone(),
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
+                )
+                    .unwrap();
+                DkgManager::new(static_data)
+            })
+            .collect();
+
+        // Create receiver (party 2 with weight=4 - will receive 4 shares!)
+        let receiver_static = DkgStaticData::new(
+            config.validators[2].clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[2].clone(),
+            crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
+        )
+            .unwrap();
+        let mut receiver_manager = DkgManager::new(receiver_static);
+
+        // Each dealer creates a message
+        let dealer_messages: Vec<_> = dealer_managers
+            .iter()
+            .map(|dm| dm.create_dealer_message(&mut rng).unwrap())
+            .collect();
+
+        // Receiver processes all dealer messages and creates certificates
+        let mut certificates = Vec::new();
+        for (i, message) in dealer_messages.iter().enumerate() {
+            let dealer_address = dealer_managers[i]
+                .static_data
+                .validator_info
+                .address
+                .clone();
+
+            // Receiver processes the message
+            let _sig = receiver_manager
+                .receive_dealer_message(message, dealer_address.clone())
+                .unwrap();
+
+            // Create a certificate (in practice, would collect signatures from other validators)
+            // Need threshold + max_faulty = 3 + 1 = 4 weighted signatures
+            // Using validators with weights: 0(3) + 1(2) = 5 weight, which is > 4 ✓
+            let mock_signatures = vec![
+                ValidatorSignature {
+                    validator: config.validators[0].address.clone(), // weight=3
+                    signature: vec![0; 96],
+                },
+                ValidatorSignature {
+                    validator: config.validators[1].address.clone(), // weight=2
+                    signature: vec![0; 96],
+                },
+            ];
+
+            // Dealer creates their own certificate
+            let cert = dealer_managers[i]
+                .create_certificate(message, mock_signatures)
+                .unwrap();
+            certificates.push(cert);
+        }
+
+        // Process certificates to complete DKG
+        let dkg_output = receiver_manager
+            .process_certificates(&certificates)
+            .unwrap();
+
+        // Verify output structure
+        // Receiver has weight=4, so should receive 4 shares
+        assert_eq!(dkg_output.key_shares.shares.len(), 4);
+        assert!(!dkg_output.commitments.is_empty());
+        assert_eq!(
+            dkg_output.session_context.session_id,
+            session_context.session_id
+        );
+    }
+
+    #[test]
+    fn test_process_certificates_insufficient_count() {
+        let config = create_test_dkg_config(5);
+        let static_data = create_test_static_data(0, config);
+        let manager = DkgManager::new(static_data);
+
+        // Only 1 certificate, but threshold is 2
+        let certificates = vec![];
+
+        let result = manager.process_certificates(&certificates);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Expected 2 certificates, got 0")
+        );
+    }
+
+    #[test]
+    fn test_process_certificates_missing_dealer_output() {
+        let config = create_test_dkg_config(5);
+        let static_data = create_test_static_data(0, config.clone());
+        let manager = DkgManager::new(static_data);
+
+        // Create certificates for dealers we haven't received messages from
+        let mock_signatures = vec![ValidatorSignature {
+            validator: config.validators[0].address.clone(),
+            signature: vec![0; 96],
+        }];
+
+        let certificates = vec![
+            DkgCertificate {
+                dealer: config.validators[0].address.clone(),
+                message_hash: [0; 32],
+                data_availability_signatures: mock_signatures.clone(),
+                dkg_signatures: mock_signatures.clone(),
+                session_context: manager.static_data.session_context.clone(),
+            },
+            DkgCertificate {
+                dealer: config.validators[1].address.clone(),
+                message_hash: [0; 32],
+                data_availability_signatures: mock_signatures.clone(),
+                dkg_signatures: mock_signatures,
+                session_context: manager.static_data.session_context.clone(),
+            },
+        ];
+
+        let result = manager.process_certificates(&certificates);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No dealer output found for dealer")
+        );
     }
 }

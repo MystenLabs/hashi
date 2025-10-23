@@ -43,8 +43,8 @@ rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }
 
 # DKG dependencies
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ea5a0b07573fc9bdf65edf190a3059ef7549a26c" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ea5a0b07573fc9bdf65edf190a3059ef7549a26c", features = ["experimental"] }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f16fbdff0d8f483c4c01f49e771e642dc6ca1688" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f16fbdff0d8f483c4c01f49e771e642dc6ca1688", features = ["experimental"] }
 async-trait = "0.1"
 thiserror = "1.0"
 hex = "0.4"
