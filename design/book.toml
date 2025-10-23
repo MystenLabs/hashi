@@ -3,3 +3,9 @@ authors = ["Brandon Williams"]
 language = "en"
 src = "src"
 title = "hashi"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

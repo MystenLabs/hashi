@@ -1,5 +1,3 @@
-<!-- Lucid diagrams can be found here: https://lucid.app/lucidchart/d1fecc0c-0fd8-4de1-9633-499daa7909e8/edit?viewport_loc=-713%2C117%2C3668%2C1831%2C0_0&invitationId=inv_aae7f517-7b2c-45ba-ae56-c0d4f2e7228d -->
-
 # User Flows
 
 There are two main user flows for interacting with `hashi`, deposits and
@@ -8,55 +6,104 @@ withdrawals.
 
 ## Deposit Flow
 
-In order for a user to leverage their BTC on Sui (e.g. as collateral for a
-loan), they'll need to deposit the BTC they want to leverage to a hashi mpc
+In order for a user to leverage their `BTC` on Sui (e.g. as collateral for a
+loan), they'll need to deposit the `BTC` they want to leverage to a hashi mpc
 controlled bitcoin address.
 
-![deposit-flow](./images/deposit-flow.svg)
+<div style="zoom: 1.5;">
 
-### Register
+```mermaid
+---
+title: Deposit Flow
+config:
+  sequence:
+    diagramMarginX: 0
+---
+sequenceDiagram
+    autonumber
 
-This step only needs to be performed once per Sui Address.
+    participant User
+    participant Hashi as Sui / Hashi
+    participant Bitcoin
 
-Before a user can deposit funds, they'll need to register their Sui Address
-with `hashi` in order to generate a unique Bitcoin deposit address. The
-generated bitcoin deposit address is a hashi MPC controlled address and any and
-all deposits sent to this deposit address will only be claimable by the linked
-Sui Address.
+    User    ->>     Bitcoin:    Deposit native BTC
+    User    ->>     Hashi:      Notify hashi of deposit
+    Hashi   ->>     Bitcoin:    Query for deposit
+    Hashi   ->>     Hashi:      Quorum agreement on deposit
+    Hashi   ->>     User:       #35;BTC sent to User
+```
 
-1. User sends a transaction to Sui in order to generate a Bitcoin deposit
-   address and link it with their Sui Address.
-2. Hashi listens for new registrations to be able to monitor the newly
-   generated Bitcoin address for deposits.
+</div>
+
+### BTC Deposit Address
+
+Every Sui Address has its own unique Hashi Bitcoin deposit address. 
+
+This unique deposit address can be derived by the following:
+
+<!-- TODO provide a more mathematical definition of this -->
+```
+G: Guardian Public Key
+H: Base Hashi MPC Public Key
+S: User's Sui Address
+D: User's unique Bitcoin deposit address
+
+D = 2-of-2 Multisig of G and (Pubkey H using derevation path S)
+```
+
+Any `BTC` sent to `D` can only ever be claimed by `S`.
 
 ### Deposit
 
-Once a deposit address has been established, a user can initiate a deposit to
+Once a user's deposit address has been determined, they can initiate a deposit to
 hashi.
 
-1. Broadcast a Bitcoin transaction depositing BTC into previously setup deposit
-   address.
-2. Hashi listens for the deposit.
-3. Once a quorum has confirmed the deposit (after X block confirmations) the
-   committee registers the new deposit on Sui, minting the equivalent amount of
-   sBTC.
-4. The user, using their linked Sui address, sends a transaction to claim the
-   sBTC. This claim transaction could also be bundled with an interaction with
-   a defi protocol to, for example, immediately leverage the sBTC as collateral
-   for a loan in USDC.
+1. Broadcast a Bitcoin transaction depositing `BTC` into the user's unique
+   deposit address.
+1. Notify hashi of the deposit by submitting a transaction to Sui including the
+   deposit transaction id.
+1. Hashi nodes will query Bitcoin and watch for confirmation of the deposit
+   transaction.
+1. Hashi nodes communicate, waiting till a quorum has confirmed the deposit
+   (after X block confirmations).
+1. Hashi confirms the deposit on chain, minting the equivalent amount of `#BTC`
+   and transferring it to the user's Sui address. The user can then immediately
+   use the `#BTC` to interact with a defi protocol to, for example, leverage the
+   `#BTC` as collateral for a loan in `USDC`. 
 
-## Withdrawal Flow
+## Withdraw Flow
 
-Once a user has decided they want their BTC back on bitcoin (e.g. they've paid
+Once a user has decided they want their `BTC` back on Bitcoin (e.g. they've paid
 off their loan) they can initiate a withdrawal.
 
-![withdrawal-flow](./images/withdrawal-flow.svg)
+<div style="zoom: 1.5;">
+
+```mermaid
+---
+title: Withdraw Flow
+config:
+  sequence:
+    diagramMarginX: 0
+---
+sequenceDiagram
+    autonumber
+
+    participant User
+    participant Hashi as Sui / Hashi
+    participant Bitcoin
+
+    User    ->>     Hashi:   Request withdrawal
+    Hashi   ->>     Hashi:   Craft and sign Bitcoin transaction using MPC
+    Hashi   ->>     Bitcoin: Broadcast transaction
+```
+
+</div>
 
 ### Withdraw
 
-1. User sends a transaction to Sui with the amount of sBTC they would like to
+1. User sends a transaction to Sui with the amount of `#BTC` they would like to
    withdraw and the Bitcoin address they want to withdraw to.
-2. Hashi will pick up the withdrawal request and will craft a bitcoin
-   transaction that sends the requested BTC (minus fees) to the provided
+1. Hashi will pick up the withdrawal request and will craft a bitcoin
+   transaction that sends the requested `BTC` (minus fees) to the provided
    Bitcoin address and uses MPC to sign the transaction.
-3. The transaction is broadcast to the Bitcoin network.
+1. The transaction is broadcast to the Bitcoin network.

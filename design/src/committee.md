@@ -1,9 +1,9 @@
 # Committee
 
-Hashi is intended to be a "native" bridge, meaning the expectation is that the
-members of the bridge committee are a subset of the Sui validators. Being a
-member of the hashi committee is restricted to members of Sui's validator set
-but is essentially optional as it requires a separate on-chain registration and
+Hashi is intended to be "native", meaning the expectation is that the members
+of the hashi committee are a subset of the Sui validators. Being a member of
+the hashi committee is restricted to members of Sui's validator set but is
+essentially optional as it requires a separate on-chain registration and
 running extra services. In practice we expect the % to of Sui validators who
 are members of the hashi committee to be >90%.
 
@@ -47,7 +47,7 @@ The voting weight each validator possesses will be mirrored from the
 
 ## Why is the committee not exactly the set of Sui Validators?
 
-Above its mentioned that the bridge committee is a subset of the Sui Validators
+Above its mentioned that the hashi committee is a subset of the Sui Validators
 instead of being strictly the same set. There are a few challenges with forcing
 these sets to be identical:
 
@@ -57,7 +57,7 @@ these sets to be identical:
   are required to submit only includes information necessary for running the
   `sui-node` validator service. Without changes, there is no way of preventing
   a new validator from becoming a validator without also registering to join
-  the bridge committee.
+  the hashi committee.
 - If we enforce tight coupling we'd likely need to change sui's epoch
   change/reconfiguration process in a few ways:
   - Given the mpc hand-off protocol takes non-trivial amount of time to
