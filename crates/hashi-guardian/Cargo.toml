@@ -1,0 +1,10 @@
+[workspace]
+members = [
+  "src/client",
+  "src/server",
+  "enclave_utils/aws",
+  "enclave_utils/system",
+  "enclave_utils/init"
+]
+
+resolver = "2"
