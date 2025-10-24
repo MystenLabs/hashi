@@ -232,13 +232,12 @@ fn compute_message_hash(
     let message_bytes = bcs::to_bytes(message)
         .map_err(|e| DkgError::CryptoError(format!("Failed to serialize message: {}", e)))?;
     let mut hasher = Blake2b256::default();
+    // No length prefix is needed for message_bytes because it's the only variable-length
+    // input.
     hasher.update(&message_bytes);
     hasher.update(dealer_address.0);
     hasher.update(session.session_id.as_ref());
-    let hash = hasher.finalize();
-    let mut result = [0u8; 32];
-    result.copy_from_slice(hash.as_ref());
-    Ok(result)
+    Ok(hasher.finalize().into())
 }
 
 #[cfg(test)]
