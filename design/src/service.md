@@ -35,11 +35,13 @@ block-beta
 
   block
     gov["Governance Request Queue"]
-    deposits["Deposit Request Queue"]
 
     block
       columns 1
-      withdrawals["Withdraw Request Queue"]
+      block
+        deposits["Deposit Request Queue"]
+        withdrawals["Withdraw Request Queue"]
+      end
       Limiter
     end
 

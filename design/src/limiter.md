@@ -1,15 +1,13 @@
 # Rate Limiting
 
 In order to protect against vulnerabilities or other exceptional scenarios,
-hashi will implement a Rate Limiter on out flows.
+hashi will implement a Rate Limiter on in and out flows.
 
-The limit will be a configurable value denominated in `BTC` and capacity will
-be replenished on 24h intervals. The Guardian will implement its own rate
-limiter and is expected to have its limit be larger than on chain limit in
-order to have a slight buffer in case the intervals are not synced properly.
-
-<!-- TODO do we want to see how hard it would be to do this based on a rolling -->
-<!-- window? -->
+Each limit will be a configurable value denominated in `BTC` and capacity will
+be replenished continuously over a fixed duration. The Guardian will implement
+its own rate limiter and is expected to have its limit be larger than on chain
+limit in order to have a slight buffer in case the intervals are not synced
+properly.
 
 ## Deposits
 
@@ -17,9 +15,13 @@ Hashi requires that users notify hashi of a deposit by sending a transaction to
 Sui. All deposit notifications are assigned a unique sequence number and placed
 in a queue, this inherently ascribes a total order to the deposits.
 
-Deposits are not subject to any limits and will generally be processed in FIFO
-order, but this isn't a strict requirement and there are some scenarios where
-they may be processed out of order.
+When a deposit comes in and it would exceed the rate limit, it will remain in
+the queue. Deposits will gradually be processed and released once enough
+capacity is replenished.
+
+Deposits will generally be processed in FIFO order, but this isn't a strict
+requirement and there are some scenarios where they may be processed out of
+order.
 
 Since a deposit requires that a Bitcoin transaction has already been signed and
 broadcast, it isn't possible to cancel a deposit.
