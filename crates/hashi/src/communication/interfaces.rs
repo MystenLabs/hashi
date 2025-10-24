@@ -1,5 +1,6 @@
 //! Generic communication channel interfaces
 
+use crate::dkg::{SendShareRequest, SendShareResponse};
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -39,28 +40,12 @@ pub struct AuthenticatedMessage<M> {
 /// This is a generic interface that can work with any message type.
 /// Messages are not guaranteed to be delivered in any particular order.
 #[async_trait]
-pub trait P2PChannel<M>: Send + Sync
-where
-    M: Clone + Send + Sync + 'static,
-{
-    /// Send a message to a specific validator
-    async fn send_to(&self, recipient: &ValidatorAddress, message: M) -> ChannelResult<()>;
-
-    /// Send the same message to all validators (each receives it as a separate P2P message)
-    /// This is NOT consensus-ordered broadcast
-    async fn broadcast(&self, message: M) -> ChannelResult<()>;
-
-    /// Receive the next available message with authenticated sender
-    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>>;
-
-    async fn try_receive_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> ChannelResult<Option<AuthenticatedMessage<M>>>;
-
-    fn pending_messages(&self) -> Option<usize> {
-        None
-    }
+pub trait P2PChannel: Send + Sync {
+    async fn send_share(
+        &self,
+        recipient: &ValidatorAddress,
+        request: SendShareRequest,
+    ) -> ChannelResult<SendShareResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages

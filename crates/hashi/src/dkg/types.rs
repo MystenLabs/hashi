@@ -249,6 +249,26 @@ pub enum P2PMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendShareRequest {
+    pub session_id: SessionId,
+    pub dealer: ValidatorAddress,
+    pub message: Box<avss::Message>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendShareResponse {
+    pub signer: ValidatorAddress,
+    pub message_hash: MessageHash,
+    pub signature: SignatureBytes,
+}
+
+#[derive(Clone, Debug)]
+pub struct Authenticated<T> {
+    pub sender: ValidatorAddress,
+    pub message: T,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OrderedBroadcastMessage {
     CertificateV1(DkgCertificate),
     PresignatureV1 {
