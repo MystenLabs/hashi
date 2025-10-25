@@ -1,6 +1,0 @@
-/out/
-.env
-
-# Nested Cargo build artifacts
-src/*/target/
-src/*/Cargo.lock

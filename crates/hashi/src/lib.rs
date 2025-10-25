@@ -77,6 +77,9 @@ mod test {
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]
     async fn tls() {
+        // Initialize the default crypto provider for rustls 0.23+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        
         let server_version = ServerVersion::new("unknown", "unknown");
         let config = Config::new_for_testing();
         let tls_public_key = config.tls_public_key().unwrap();
