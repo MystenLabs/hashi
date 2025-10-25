@@ -39,3 +39,11 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dummy_test() {
+        assert_eq!(2 + 2, 4);
+    }
+}

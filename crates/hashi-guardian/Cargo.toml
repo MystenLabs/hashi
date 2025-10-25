@@ -1,10 +1,14 @@
-[workspace]
-members = [
-  "src/client",
-  "src/server",
-  "enclave_utils/aws",
-  "enclave_utils/system",
-  "enclave_utils/init"
-]
+[package]
+name = "guardian-client"
+version = "0.0.0"
+edition = "2024"
 
-resolver = "2"
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+env_logger = "0.11"
+dotenvy = "0.15"
+shared = { path = "src/shared" }

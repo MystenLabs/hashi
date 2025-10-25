@@ -1,3 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = [
+  "crates/*",
+]
+exclude = [
+  "crates/hashi-guardian/src/server",
+]

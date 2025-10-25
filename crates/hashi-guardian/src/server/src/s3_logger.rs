@@ -1,6 +1,6 @@
 use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
-use log::{debug, info};
+use log::{error, info};
 use shared::S3Config;
 
 use aws_config::meta::region::RegionProviderChain;
@@ -13,16 +13,17 @@ pub async fn configure_s3(
     State(state): State<AppState>,
     Json(config): Json<S3Config>,
 ) -> (StatusCode, String) {
-    info!("Received S3 configuration");
-    info!("bucket name: {}", config.bucket_name);
-
-    // Try to set the configuration (only works if not already set)
-    if state.s3_config.set(config.clone()).is_err() {
+    // If the configuration has already been set, return an error
+    if state.s3_config.get().is_some() {
+        error!("S3 configuration previously set");
         return (
             StatusCode::FORBIDDEN,
-            "S3 configuration already set".to_string(),
+            "S3 configuration previously set".to_string(),
         );
     }
+
+    info!("Received S3 configuration");
+    info!("bucket name: {}", config.bucket_name);
 
     std::env::set_var("AWS_ACCESS_KEY_ID", &config.access_key);
     std::env::set_var("AWS_SECRET_ACCESS_KEY", &config.secret_key);
@@ -30,17 +31,27 @@ pub async fn configure_s3(
     // Test S3 connectivity with the new credentials
     match test_s3_connectivity(&config).await {
         Ok(_) => {
-            info!("✅ S3 configuration accepted and tested successfully");
+            info!("✅ S3 configuration tested successfully");
+
+            // Remember the configuration
+            if state.s3_config.set(config.clone()).is_err() {
+                error!("Failed to set S3 configuration");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to set S3 configuration".to_string(),
+                );
+            }
+
             (
                 StatusCode::OK,
                 "S3 configuration received and tested successfully".to_string(),
             )
         }
         Err(e) => {
-            debug!("❌ S3 connectivity test failed: {}", e);
+            error!("❌ S3 connectivity test failed: {}", e);
             (
-                StatusCode::OK,
-                format!("S3 configuration received but test failed: {}", e),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("S3 connectivity test failed: {}", e),
             )
         }
     }
@@ -67,7 +78,7 @@ async fn test_s3_connectivity(config: &S3Config) -> Result<()> {
 
     info!("✅ S3 connectivity test passed!");
 
-    // Print object list for testing
+    // Print object list just for sanity check
     let contents = response.contents();
     if contents.is_empty() {
         info!("No objects found in bucket");
