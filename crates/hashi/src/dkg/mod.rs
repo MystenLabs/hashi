@@ -204,8 +204,8 @@ impl DkgManager {
         request: SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
         // TODO: Validate session_id matches
-        let dealer = request.dealer.clone();
-        let validator_signature = self.receive_dealer_message(&request.message, dealer.clone())?;
+        let validator_signature =
+            self.receive_dealer_message(&request.message, request.dealer.clone())?;
         Ok(SendShareResponse {
             signer: validator_signature.validator,
             signature: validator_signature.signature,
