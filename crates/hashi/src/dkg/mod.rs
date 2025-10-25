@@ -271,10 +271,7 @@ impl DkgManager {
         let threshold = self.static_data.dkg_config.threshold;
         let mut certificates = Vec::new();
         loop {
-            let have_all_dealer_messages = certificates.iter().all(|cert: &DkgCertificate| {
-                self.runtime_state.dealer_outputs.contains_key(&cert.dealer)
-            });
-            if certificates.len() >= threshold as usize && have_all_dealer_messages {
+            if certificates.len() >= threshold as usize {
                 break;
             }
             let tob_msg = ordered_broadcast_channel.receive().await.map_err(|e| {
