@@ -203,15 +203,11 @@ impl DkgManager {
         &mut self,
         request: SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
+        // TODO: Validate session_id matches
         let dealer = request.dealer.clone();
         let validator_signature = self.receive_dealer_message(&request.message, dealer.clone())?;
         Ok(SendShareResponse {
             signer: validator_signature.validator,
-            message_hash: compute_message_hash(
-                &request.message,
-                &dealer,
-                &self.static_data.session_context,
-            )?,
             signature: validator_signature.signature,
         })
     }
@@ -553,7 +549,6 @@ mod tests {
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             Ok(SendShareResponse {
                 signer: self.sender_address.clone(),
-                message_hash: [0u8; 32],
                 signature: Vec::new(),
             })
         }
@@ -1617,9 +1612,5 @@ mod tests {
             receiver_manager.static_data.validator_info.address
         );
         assert_eq!(response.signature.len(), 96); // BLS signature size
-        // message_hash should match what we computed
-        let expected_hash =
-            compute_message_hash(&dealer_message, &sender, &session_context).unwrap();
-        assert_eq!(response.message_hash, expected_hash);
     }
 }

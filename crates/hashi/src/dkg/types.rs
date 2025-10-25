@@ -258,7 +258,6 @@ pub struct SendShareRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendShareResponse {
     pub signer: ValidatorAddress,
-    pub message_hash: MessageHash,
     pub signature: SignatureBytes,
 }
 
