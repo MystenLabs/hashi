@@ -23,6 +23,21 @@ const ERR_SEND_SHARE_FAILED: &str = "Failed to send share";
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const ERR_TOB_RECEIVE_FAILED: &str = "TOB channel error";
 
+#[derive(Debug, Clone, Copy)]
+enum SignatureSetType {
+    DataAvailability,
+    Dkg,
+}
+
+impl std::fmt::Display for SignatureSetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DataAvailability => write!(f, "data availability"),
+            Self::Dkg => write!(f, "DKG"),
+        }
+    }
+}
+
 pub struct DkgStaticData {
     pub validator_info: ValidatorInfo,
     pub nodes: Nodes<EncryptionGroupElement>,
@@ -274,20 +289,125 @@ impl DkgManager {
         let threshold = self.static_data.dkg_config.threshold;
         let mut validator_to_certificate = std::collections::HashMap::new();
         loop {
-            if validator_to_certificate.len() >= threshold as usize {
+            if validator_to_certificate.len() == threshold as usize {
                 break;
             }
             let tob_msg = ordered_broadcast_channel.receive().await.map_err(|e| {
                 DkgError::ProtocolFailed(format!("{}: {}", ERR_TOB_RECEIVE_FAILED, e))
             })?;
             if let OrderedBroadcastMessage::CertificateV1(cert) = tob_msg.message {
-                // TODO: Validate certificate signatures and check session_id matches
-                validator_to_certificate.insert(cert.dealer.clone(), cert);
+                match validate_certificate(
+                    &cert,
+                    &self.static_data,
+                    &self.runtime_state.dealer_messages,
+                ) {
+                    Ok(()) => {
+                        validator_to_certificate.insert(cert.dealer.clone(), cert);
+                    }
+                    Err(e) => {
+                        tracing::info!("Invalid certificate from {:?}: {}", cert.dealer, e);
+                        continue;
+                    }
+                }
             }
         }
         let output = self.process_certificates(&validator_to_certificate)?;
         Ok(output)
     }
+}
+
+fn validate_certificate(
+    cert: &DkgCertificate,
+    static_data: &DkgStaticData,
+    dealer_messages: &BTreeMap<ValidatorAddress, avss::Message>,
+) -> DkgResult<()> {
+    if cert.session_context.session_id != static_data.session_context.session_id {
+        return Err(DkgError::InvalidCertificate(format!(
+            "Session ID mismatch: expected {:?}, got {:?}",
+            static_data.session_context.session_id, cert.session_context.session_id
+        )));
+    }
+    if !static_data
+        .dkg_config
+        .validator_registry
+        .contains_key(&cert.dealer)
+    {
+        return Err(DkgError::InvalidCertificate(format!(
+            "Unknown dealer: {:?}",
+            cert.dealer
+        )));
+    }
+    validate_signature_set(
+        &cert.data_availability_signatures,
+        SignatureSetType::DataAvailability,
+        static_data
+            .dkg_config
+            .required_data_availability_signatures() as u16,
+        &static_data.validator_weights,
+    )?;
+    validate_signature_set(
+        &cert.dkg_signatures,
+        SignatureSetType::Dkg,
+        static_data.dkg_config.required_dkg_signatures() as u16,
+        &static_data.validator_weights,
+    )?;
+    validate_message_hash(cert, dealer_messages, &static_data.session_context)?;
+    Ok(())
+}
+
+fn validate_message_hash(
+    cert: &DkgCertificate,
+    dealer_messages: &BTreeMap<ValidatorAddress, avss::Message>,
+    session_context: &SessionContext,
+) -> DkgResult<()> {
+    let message = dealer_messages.get(&cert.dealer).ok_or_else(|| {
+        DkgError::InvalidCertificate(format!(
+            "Dealer message not yet received from {:?}",
+            cert.dealer
+        ))
+    })?;
+    let expected_hash = compute_message_hash(message, &cert.dealer, session_context)?;
+    if cert.message_hash != expected_hash {
+        return Err(DkgError::InvalidCertificate(format!(
+            "Message hash mismatch for dealer {:?}",
+            cert.dealer
+        )));
+    }
+    Ok(())
+}
+
+fn validate_signature_set(
+    signatures: &[ValidatorSignature],
+    signature_type: SignatureSetType,
+    required_weight: u16,
+    validator_weights: &BTreeMap<ValidatorAddress, u16>,
+) -> DkgResult<()> {
+    let mut seen_signers = std::collections::HashSet::new();
+    let mut total_weight = 0u16;
+    for sig in signatures {
+        if !seen_signers.insert(&sig.validator) {
+            return Err(DkgError::InvalidCertificate(format!(
+                "Duplicate signer in {}: {:?}",
+                signature_type, sig.validator
+            )));
+        }
+        let weight = validator_weights.get(&sig.validator).ok_or_else(|| {
+            DkgError::InvalidCertificate(format!(
+                "Unknown signer in {}: {:?}",
+                signature_type, sig.validator
+            ))
+        })?;
+        total_weight = total_weight
+            .checked_add(*weight)
+            .ok_or_else(|| DkgError::InvalidCertificate("Signature weight overflow".to_string()))?;
+    }
+    if total_weight < required_weight {
+        return Err(DkgError::InvalidCertificate(format!(
+            "Insufficient {} signature weight: got {}, need {}",
+            signature_type, total_weight, required_weight
+        )));
+    }
+    Ok(())
 }
 
 fn create_nodes(validators: &ValidatorRegistry) -> Nodes<EncryptionGroupElement> {
@@ -1310,15 +1430,18 @@ mod tests {
             .collect();
         let mock_p2p = MockP2PChannel::new(other_managers);
 
-        // Pre-populate validator 0's manager with dealer outputs from validators 1-4
-        for (j, message) in dealer_messages.iter().enumerate().skip(1) {
+        // Pre-populate validator 0's manager with dealer outputs from all validators (including itself)
+        for (j, message) in dealer_messages.iter().enumerate() {
             test_manager
                 .receive_dealer_message(message, ValidatorAddress([j as u8; 32]))
                 .unwrap();
         }
 
-        // Create mock ordered broadcast channel with all certificates
-        let mut mock_tob = MockOrderedBroadcastChannel::new(certificates.clone());
+        // Create mock ordered broadcast channel with certificates from dealers 1-4
+        // (exclude dealer 0 since run_as_dealer() will create its own certificate)
+        let other_certificates: Vec<_> = certificates.iter().skip(1).cloned().collect();
+        let other_certificates_len = other_certificates.len();
+        let mut mock_tob = MockOrderedBroadcastChannel::new(other_certificates);
 
         // Call run_as_dealer() and run_as_party() for validator 0
         test_manager
@@ -1352,7 +1475,7 @@ mod tests {
         use crate::communication::OrderedBroadcastChannel;
         assert_eq!(
             mock_tob.pending_messages(),
-            Some(certificates.len() - config.threshold as usize),
+            Some(other_certificates_len - config.threshold as usize),
             "TOB should have consumed exactly threshold certificates"
         );
 
@@ -1567,6 +1690,139 @@ mod tests {
         // Verify TOB consumed exactly threshold certificates
         use crate::communication::OrderedBroadcastChannel;
         assert_eq!(mock_tob.pending_messages(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_run_as_party_skips_invalid_certificates() {
+        // Test that run_as_party() skips invalid certificates and continues collecting valid ones
+        let mut rng = rand::thread_rng();
+        let num_validators = 5;
+        let threshold = 3;
+
+        // Create encryption keys for all validators
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let address = ValidatorAddress([i as u8; 32]);
+                let info = ValidatorInfo {
+                    address: address.clone(),
+                    party_id: i as u16,
+                    weight: 1,
+                    ecies_public_key: public_key,
+                };
+                (address, info)
+            })
+            .collect();
+
+        let config = DkgConfig::new(100, validators, threshold, 1).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+        let wrong_session_context =
+            SessionContext::new(200, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        // Create all managers
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| {
+                let address = ValidatorAddress([i as u8; 32]);
+                let validator_info = config.validator_registry.get(&address).unwrap();
+                let static_data = DkgStaticData::new(
+                    validator_info.clone(),
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    bls_keys[i].clone(),
+                )
+                .unwrap();
+                DkgManager::new(static_data)
+            })
+            .collect();
+
+        // Create threshold valid certificates + some invalid ones
+        let dealer_messages: Vec<_> = managers
+            .iter()
+            .take(threshold as usize)
+            .map(|mgr| mgr.create_dealer_message(&mut rng).unwrap())
+            .collect();
+
+        let mut valid_certificates = Vec::new();
+        for (dealer_idx, message) in dealer_messages.iter().enumerate() {
+            let dealer_addr = ValidatorAddress([dealer_idx as u8; 32]);
+
+            // All validators process dealer messages
+            let mut signatures = Vec::new();
+            for manager in managers.iter_mut() {
+                let sig = manager
+                    .receive_dealer_message(message, dealer_addr.clone())
+                    .unwrap();
+                signatures.push(sig);
+            }
+
+            // Create certificate
+            let cert = managers[dealer_idx]
+                .create_certificate(message, signatures)
+                .unwrap();
+            valid_certificates.push(cert);
+        }
+
+        // Create invalid certificates with wrong session ID
+        let invalid_dealer_msg = managers[3].create_dealer_message(&mut rng).unwrap();
+        let dealer_addr_3 = ValidatorAddress([3; 32]);
+
+        let mut invalid_signatures = Vec::new();
+        for manager in managers.iter_mut() {
+            let sig = manager
+                .receive_dealer_message(&invalid_dealer_msg, dealer_addr_3.clone())
+                .unwrap();
+            invalid_signatures.push(sig);
+        }
+
+        let mut invalid_cert = managers[3]
+            .create_certificate(&invalid_dealer_msg, invalid_signatures)
+            .unwrap();
+        // Make it invalid by changing session context
+        invalid_cert.session_context = wrong_session_context.clone();
+
+        // Mix valid and invalid certificates in TOB
+        // Order: valid[0], invalid, valid[1], valid[2]
+        let all_certificates = vec![
+            valid_certificates[0].clone(),
+            invalid_cert,
+            valid_certificates[1].clone(),
+            valid_certificates[2].clone(),
+        ];
+
+        let mut mock_tob = MockOrderedBroadcastChannel::new(all_certificates);
+
+        // Call run_as_party() for validator 0
+        let mut test_manager = managers.remove(0);
+        let output = test_manager.run_as_party(&mut mock_tob).await.unwrap();
+
+        // Verify it succeeded by collecting the 3 valid certificates
+        assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
+        assert_eq!(output.commitments.len(), num_validators); // total weight = 5
+        assert_eq!(
+            output.session_context.session_id,
+            session_context.session_id
+        );
+
+        // Verify TOB consumed all certificates (3 valid + 1 invalid)
+        use crate::communication::OrderedBroadcastChannel;
+        assert_eq!(
+            mock_tob.pending_messages(),
+            Some(0),
+            "TOB should have consumed all certificates"
+        );
     }
 
     #[tokio::test]
@@ -1823,5 +2079,387 @@ mod tests {
             receiver_manager.static_data.validator_info.address
         );
         assert_eq!(response.signature.len(), 96); // BLS signature size
+    }
+
+    mod validation_test_utils {
+        use super::*;
+
+        pub fn create_test_validators_with_weights(weights: &[u16]) -> ValidatorRegistry {
+            weights
+                .iter()
+                .enumerate()
+                .map(|(i, &weight)| {
+                    let private_key =
+                        PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
+                    let public_key =
+                        fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&private_key);
+                    let address = ValidatorAddress([i as u8; 32]);
+                    let info = ValidatorInfo {
+                        address: address.clone(),
+                        party_id: i as u16,
+                        weight,
+                        ecies_public_key: public_key,
+                    };
+                    (address, info)
+                })
+                .collect()
+        }
+
+        pub fn create_test_config_with_weights(
+            weights: &[u16],
+            threshold: u16,
+            max_faulty: u16,
+        ) -> DkgConfig {
+            let validators = create_test_validators_with_weights(weights);
+            DkgConfig::new(100, validators, threshold, max_faulty).unwrap()
+        }
+
+        pub fn create_validator_weights(config: &DkgConfig) -> BTreeMap<ValidatorAddress, u16> {
+            config
+                .validator_registry
+                .iter()
+                .map(|(addr, info)| (addr.clone(), info.weight))
+                .collect()
+        }
+
+        pub fn create_test_signatures(
+            validator_indices: &[usize],
+            _config: &DkgConfig,
+        ) -> Vec<ValidatorSignature> {
+            validator_indices
+                .iter()
+                .map(|&i| {
+                    let address = ValidatorAddress([i as u8; 32]);
+                    ValidatorSignature {
+                        validator: address,
+                        signature: vec![0u8; 96], // Dummy BLS signature
+                    }
+                })
+                .collect()
+        }
+    }
+
+    mod test_validate_signature_set {
+        use super::validation_test_utils::*;
+        use super::*;
+
+        #[test]
+        fn test_valid_signatures_sufficient_weight() {
+            let weights = vec![3, 2, 4, 1, 2]; // total = 12
+            let config = create_test_config_with_weights(&weights, 3, 1);
+            let validator_weights = create_validator_weights(&config);
+
+            // Signatures from validators 0, 2 (weights 3 + 4 = 7)
+            let signatures = create_test_signatures(&[0, 2], &config);
+
+            let result = validate_signature_set(
+                &signatures,
+                SignatureSetType::DataAvailability,
+                7, // require exactly 7
+                &validator_weights,
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_duplicate_signer() {
+            let weights = vec![3, 2, 4];
+            let config = create_test_config_with_weights(&weights, 2, 1);
+            let validator_weights = create_validator_weights(&config);
+
+            // Duplicate validator 0
+            let signatures = vec![
+                ValidatorSignature {
+                    validator: ValidatorAddress([0; 32]),
+                    signature: vec![0u8; 96],
+                },
+                ValidatorSignature {
+                    validator: ValidatorAddress([0; 32]),
+                    signature: vec![0u8; 96],
+                },
+            ];
+
+            let result =
+                validate_signature_set(&signatures, SignatureSetType::Dkg, 5, &validator_weights);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Duplicate signer"));
+        }
+
+        #[test]
+        fn test_unknown_signer() {
+            let weights = vec![3, 2, 4];
+            let config = create_test_config_with_weights(&weights, 2, 1);
+            let validator_weights = create_validator_weights(&config);
+
+            // Validator 99 doesn't exist
+            let signatures = vec![ValidatorSignature {
+                validator: ValidatorAddress([99; 32]),
+                signature: vec![0u8; 96],
+            }];
+
+            let result = validate_signature_set(
+                &signatures,
+                SignatureSetType::DataAvailability,
+                1,
+                &validator_weights,
+            );
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Unknown signer"));
+        }
+
+        #[test]
+        fn test_insufficient_weight() {
+            let weights = vec![3, 2, 4];
+            let config = create_test_config_with_weights(&weights, 2, 1);
+            let validator_weights = create_validator_weights(&config);
+
+            // Signatures from validators 0, 1 (weights 3 + 2 = 5)
+            let signatures = create_test_signatures(&[0, 1], &config);
+
+            let result = validate_signature_set(
+                &signatures,
+                SignatureSetType::Dkg,
+                6, // require 6, but only have 5
+                &validator_weights,
+            );
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(err_msg.contains("Insufficient"));
+            assert!(err_msg.contains("got 5, need 6"));
+        }
+    }
+
+    mod test_validate_message_hash {
+        use super::validation_test_utils::*;
+        use super::*;
+
+        #[test]
+        fn test_valid_message_hash() {
+            let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
+            let session_context =
+                SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
+
+            // Create a dealer message
+            let mut rng = rand::thread_rng();
+            let static_data = create_test_static_data(0, config);
+            let manager = DkgManager::new(static_data);
+            let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
+            let dealer_addr = ValidatorAddress([0; 32]);
+
+            // Compute correct hash
+            let message_hash =
+                compute_message_hash(&dealer_message, &dealer_addr, &session_context).unwrap();
+
+            let cert = DkgCertificate {
+                dealer: dealer_addr.clone(),
+                message_hash,
+                data_availability_signatures: vec![],
+                dkg_signatures: vec![],
+                session_context: session_context.clone(),
+            };
+
+            let mut dealer_messages = BTreeMap::new();
+            dealer_messages.insert(dealer_addr, dealer_message);
+
+            let result = validate_message_hash(&cert, &dealer_messages, &session_context);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_dealer_message_not_received() {
+            let _config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
+            let session_context =
+                SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
+            let dealer_addr = ValidatorAddress([0; 32]);
+
+            let cert = DkgCertificate {
+                dealer: dealer_addr.clone(),
+                message_hash: [0; 32],
+                data_availability_signatures: vec![],
+                dkg_signatures: vec![],
+                session_context: session_context.clone(),
+            };
+
+            let dealer_messages = BTreeMap::new(); // Empty - message not received
+
+            let result = validate_message_hash(&cert, &dealer_messages, &session_context);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Dealer message not yet received")
+            );
+        }
+
+        #[test]
+        fn test_message_hash_mismatch() {
+            let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
+            let session_context =
+                SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
+
+            let mut rng = rand::thread_rng();
+            let static_data = create_test_static_data(0, config);
+            let manager = DkgManager::new(static_data);
+            let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
+            let dealer_addr = ValidatorAddress([0; 32]);
+
+            // Create cert with wrong hash
+            let cert = DkgCertificate {
+                dealer: dealer_addr.clone(),
+                message_hash: [99; 32], // Wrong hash
+                data_availability_signatures: vec![],
+                dkg_signatures: vec![],
+                session_context: session_context.clone(),
+            };
+
+            let mut dealer_messages = BTreeMap::new();
+            dealer_messages.insert(dealer_addr, dealer_message);
+
+            let result = validate_message_hash(&cert, &dealer_messages, &session_context);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Message hash mismatch")
+            );
+        }
+    }
+
+    mod test_validate_certificate {
+        use super::validation_test_utils::*;
+        use super::*;
+
+        fn create_valid_cert_and_data() -> (
+            DkgCertificate,
+            DkgStaticData,
+            BTreeMap<ValidatorAddress, avss::Message>,
+        ) {
+            let weights = vec![2, 2, 2, 2, 2]; // 5 validators
+            let config = create_test_config_with_weights(&weights, 3, 1);
+
+            let mut rng = rand::thread_rng();
+            let temp_static_data = create_test_static_data(0, config.clone());
+            let temp_manager = DkgManager::new(temp_static_data);
+            let dealer_message = temp_manager.create_dealer_message(&mut rng).unwrap();
+            let dealer_addr = ValidatorAddress([0; 32]);
+
+            // Create the final static_data that we'll return
+            let static_data = create_test_static_data(0, config.clone());
+            let session_context = &static_data.session_context;
+
+            let message_hash =
+                compute_message_hash(&dealer_message, &dealer_addr, session_context).unwrap();
+
+            // Create sufficient signatures (4 validators with weight 2 each = 8)
+            // DA requires 2f+1 = 3, DKG requires t+f = 4
+            let da_sigs = create_test_signatures(&[0, 1, 2], &config); // weight = 6 >= 3
+            let dkg_sigs = create_test_signatures(&[0, 1, 2, 3], &config); // weight = 8 >= 4
+
+            let cert = DkgCertificate {
+                dealer: dealer_addr.clone(),
+                message_hash,
+                data_availability_signatures: da_sigs,
+                dkg_signatures: dkg_sigs,
+                session_context: session_context.clone(),
+            };
+
+            let mut dealer_messages = BTreeMap::new();
+            dealer_messages.insert(dealer_addr, dealer_message);
+
+            (cert, static_data, dealer_messages)
+        }
+
+        #[test]
+        fn test_valid_certificate() {
+            let (cert, static_data, dealer_messages) = create_valid_cert_and_data();
+            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_session_id_mismatch() {
+            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+
+            // Change session ID
+            cert.session_context = SessionContext::new(
+                200, // Different epoch
+                ProtocolType::DkgKeyGeneration,
+                "test".to_string(),
+            );
+
+            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Session ID mismatch")
+            );
+        }
+
+        #[test]
+        fn test_unknown_dealer() {
+            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+
+            // Set dealer to unknown address
+            cert.dealer = ValidatorAddress([99; 32]);
+
+            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Unknown dealer"));
+        }
+
+        #[test]
+        fn test_invalid_da_signatures() {
+            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+
+            // Empty DA signatures - insufficient weight
+            cert.data_availability_signatures = vec![];
+
+            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Insufficient data availability signature weight")
+            );
+        }
+
+        #[test]
+        fn test_invalid_dkg_signatures() {
+            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+
+            // Empty DKG signatures - insufficient weight
+            cert.dkg_signatures = vec![];
+
+            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Insufficient DKG signature weight")
+            );
+        }
+
+        #[test]
+        fn test_invalid_message_hash() {
+            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+
+            // Wrong message hash
+            cert.message_hash = [99; 32];
+
+            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Message hash mismatch")
+            );
+        }
     }
 }
