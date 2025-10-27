@@ -11,13 +11,15 @@ use fastcrypto_tbls::{
     threshold_schnorr::{G, avss, complaint},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 
 pub type MessageHash = [u8; 32];
 pub type SignatureBytes = Vec<u8>;
 pub type SessionId = Digest<64>;
+pub type ValidatorRegistry = HashMap<ValidatorAddress, ValidatorInfo>;
+pub type ValidatorEntry = (ValidatorAddress, ValidatorInfo);
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str = "hashi";
@@ -58,7 +60,7 @@ pub struct ValidatorInfo {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgConfig {
     pub epoch: u64,
-    pub validators: Vec<ValidatorInfo>,
+    pub validator_registry: ValidatorRegistry,
     /// Threshold for signing (t)
     pub threshold: u16,
     /// Maximum number of faulty validators (f)
@@ -68,7 +70,7 @@ pub struct DkgConfig {
 impl DkgConfig {
     pub fn new(
         epoch: u64,
-        validators: Vec<ValidatorInfo>,
+        validator_registry: ValidatorRegistry,
         threshold: u16,
         max_faulty: u16,
     ) -> Result<Self, DkgError> {
@@ -77,7 +79,7 @@ impl DkgConfig {
                 "threshold must be greater than max_faulty".into(),
             ));
         }
-        let total_weight: u16 = validators.iter().map(|v| v.weight).sum();
+        let total_weight: u16 = validator_registry.values().map(|v| v.weight).sum();
         if threshold + 2 * max_faulty > total_weight {
             return Err(DkgError::InvalidThreshold(format!(
                 "t + 2f ({}) must be <= total weight ({})",
@@ -87,14 +89,14 @@ impl DkgConfig {
         }
         Ok(Self {
             epoch,
-            validators,
+            validator_registry,
             threshold,
             max_faulty,
         })
     }
 
     pub fn total_weight(&self) -> u16 {
-        self.validators.iter().map(|v| v.weight).sum()
+        self.validator_registry.values().map(|v| v.weight).sum()
     }
 
     pub fn required_data_availability_signatures(&self) -> usize {
@@ -372,19 +374,21 @@ impl From<crate::communication::ChannelError> for DkgError {
 mod tests {
     use super::*;
 
-    fn create_test_validator(party_id: u16, weight: u16) -> ValidatorInfo {
+    fn create_test_validator(party_id: u16, weight: u16) -> ValidatorEntry {
         use fastcrypto::groups::ristretto255::RistrettoPoint;
         use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
 
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
 
-        ValidatorInfo {
-            address: ValidatorAddress([party_id as u8; 32]),
+        let address = ValidatorAddress([party_id as u8; 32]);
+        let info = ValidatorInfo {
+            address: address.clone(),
             party_id,
             weight,
             ecies_public_key: public_key,
-        }
+        };
+        (address, info)
     }
 
     #[test]
@@ -407,7 +411,9 @@ mod tests {
             create_test_validator(2, 2),
             create_test_validator(3, 1),
             create_test_validator(4, 1),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let config = DkgConfig::new(42, validators, 5, 2);
         assert!(config.is_ok());
         let config = config.unwrap();
@@ -462,14 +468,16 @@ mod tests {
 
     #[test]
     fn test_dkg_config_single_validator() {
-        let validators = vec![create_test_validator(0, 1)];
+        let validators = vec![create_test_validator(0, 1)].into_iter().collect();
         let config = DkgConfig::new(100, validators, 1, 0);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_dkg_config_zero_weight_sum() {
-        let validators = vec![create_test_validator(0, 0), create_test_validator(1, 0)];
+        let validators = vec![create_test_validator(0, 0), create_test_validator(1, 0)]
+            .into_iter()
+            .collect();
         let config = DkgConfig::new(100, validators, 1, 0);
         assert!(config.is_err());
     }
@@ -483,16 +491,16 @@ mod tests {
 
     #[test]
     fn test_required_data_availability_signatures() {
-        let validators: Vec<ValidatorInfo> = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators.clone(), 3, 2).unwrap();
+        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config = DkgConfig::new(100, validators, 3, 2).unwrap();
 
         assert_eq!(config.required_data_availability_signatures(), 5);
     }
 
     #[test]
     fn test_required_dkg_signatures() {
-        let validators: Vec<ValidatorInfo> = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config1 = DkgConfig::new(100, validators.clone(), 3, 2).unwrap();
+        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
+        let config1 = DkgConfig::new(100, validators, 3, 2).unwrap();
 
         assert_eq!(config1.required_dkg_signatures(), 5);
     }
