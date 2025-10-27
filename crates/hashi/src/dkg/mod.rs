@@ -855,8 +855,8 @@ mod tests {
                 },
             ),
         ]
-            .into_iter()
-            .collect();
+        .into_iter()
+        .collect();
 
         // threshold=3, max_faulty=1, total_weight=5
         let config = DkgConfig::new(100, validators, 3, 1).unwrap();
@@ -1618,7 +1618,7 @@ mod tests {
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
                 )
-                    .unwrap();
+                .unwrap();
                 DkgManager::new(static_data)
             })
             .collect();
