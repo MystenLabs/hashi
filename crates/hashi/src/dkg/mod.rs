@@ -399,7 +399,7 @@ fn validate_signature_set(
         })?;
         total_weight = total_weight
             .checked_add(*weight)
-            .ok_or_else(|| DkgError::InvalidCertificate("Signature weight overflow".to_string()))?;
+            .ok_or_else(|| DkgError::ProtocolFailed("Signature weight overflow".to_string()))?;
     }
     if total_weight < required_weight {
         return Err(DkgError::InvalidCertificate(format!(
@@ -2226,6 +2226,41 @@ mod tests {
             let err_msg = result.unwrap_err().to_string();
             assert!(err_msg.contains("Insufficient"));
             assert!(err_msg.contains("got 5, need 6"));
+        }
+
+        #[test]
+        fn test_signature_weight_overflow() {
+            let mut validator_weights = BTreeMap::new();
+            let addr0 = ValidatorAddress([0; 32]);
+            let addr1 = ValidatorAddress([1; 32]);
+            validator_weights.insert(addr0.clone(), u16::MAX);
+            validator_weights.insert(addr1.clone(), 1);
+
+            // Create signatures from both validators (will cause overflow: u16::MAX + 1)
+            let signatures = vec![
+                ValidatorSignature {
+                    validator: addr0,
+                    signature: vec![0u8; 96],
+                },
+                ValidatorSignature {
+                    validator: addr1,
+                    signature: vec![0u8; 96],
+                },
+            ];
+
+            let result = validate_signature_set(
+                &signatures,
+                SignatureSetType::DataAvailability,
+                1,
+                &validator_weights,
+            );
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Signature weight overflow")
+            );
         }
     }
 
