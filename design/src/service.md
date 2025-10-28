@@ -20,26 +20,33 @@ stored on Sui as a part of the live object set and knowledge of any historical
 transactions or events previously emitted must not be needed for correct
 operations of the service.
 
-## Workflows
+The set of data structures and state that are kept on chain are as follows:
 
-For example, when processing a BTC withdrawal we could have the state of that
-withdrawal on chain as it moves through various stages:
+```mermaid
+block-beta
+  columns 1
 
-- Request withdrawal -> transaction formation -> MPC committee sig generation
-  -> waiting for confirmations -> Finalized
+  block
+    committee
+    config
+  end
 
-In the system state on sui (or maybe another shared object?) we can have a
-buffer of these sort of heterogeneous ongoing or pending actions. This way a
-node can trivially list out or fetch these actions from Sui on startup or after
-a crash.
+  pool["UTXO pool"]
 
-TODO add workflows
+  block
+    gov["Governance Request Queue"]
 
+    block
+      columns 1
+      block
+        deposits["Deposit Request Queue"]
+        withdrawals["Withdraw Request Queue"]
+      end
+      Limiter
+    end
+
+  end
+
+  processor["Processing Queue"]
+  broadcast["Ordered broadcast channel"]
 ```
-struct Workflow {
-    id: UID,
-    name: String, // type of workflow
-    // Dynamic fields with workflow specific information
-}
-```
-

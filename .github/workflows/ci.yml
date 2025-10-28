@@ -159,6 +159,9 @@ jobs:
         run: make doc
 
       - uses: taiki-e/install-action@mdbook
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook-mermaid
       - name: build mdbook
         run: cd design && mdbook build
 
