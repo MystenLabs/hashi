@@ -220,7 +220,15 @@ impl DkgManager {
         &mut self,
         request: SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
-        // TODO: Validate session_id matches
+        if request.session_id != self.static_data.session_context.session_id {
+            return Err(DkgError::InvalidMessage {
+                sender: request.dealer.clone(),
+                reason: format!(
+                    "Session ID mismatch: expected {:?}, got {:?}",
+                    self.static_data.session_context.session_id, request.session_id
+                ),
+            });
+        }
         let validator_signature =
             self.receive_dealer_message(&request.message, request.dealer.clone())?;
         Ok(SendShareResponse {
@@ -450,12 +458,13 @@ fn compute_total_signature_weight(
 ) -> DkgResult<u16> {
     let mut total_weight: u16 = 0;
     for sig in signatures {
-        let weight = validator_weights.get(&sig.validator).ok_or_else(|| {
-            DkgError::ProtocolFailed(format!(
-                "Signature from unknown validator: {:?}",
-                sig.validator
-            ))
-        })?;
+        let weight =
+            validator_weights
+                .get(&sig.validator)
+                .ok_or_else(|| DkgError::InvalidMessage {
+                    sender: sig.validator.clone(),
+                    reason: "Signature from unknown validator".to_string(),
+                })?;
         total_weight += weight;
     }
     Ok(total_weight)
@@ -2251,6 +2260,94 @@ mod tests {
             receiver_manager.static_data.validator_info.address
         );
         assert_eq!(response.signature.len(), 96); // BLS signature size
+    }
+
+    #[tokio::test]
+    async fn test_handle_send_share_request_session_id_mismatch() {
+        let mut rng = rand::thread_rng();
+
+        // Create shared encryption keys
+        let encryption_keys: Vec<_> = (0..5)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        // Create validators using shared encryption public keys
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let address = ValidatorAddress([i as u8; 32]);
+                let info = ValidatorInfo {
+                    address: address.clone(),
+                    party_id: i as u16,
+                    weight: 1,
+                    ecies_public_key: public_key,
+                };
+                (address, info)
+            })
+            .collect();
+
+        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let session_context = SessionContext::new(
+            config.epoch,
+            ProtocolType::DkgKeyGeneration,
+            "testchain".to_string(),
+        );
+
+        // Create dealer (party 1) with its encryption key
+        let dealer_address = ValidatorAddress([1; 32]);
+        let dealer_data = DkgStaticData::new(
+            config
+                .validator_registry
+                .get(&dealer_address)
+                .unwrap()
+                .clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[1].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+        )
+        .unwrap();
+        let dealer_manager = DkgManager::new(dealer_data);
+
+        // Create receiver (party 0) with its encryption key
+        let receiver_address = ValidatorAddress([0; 32]);
+        let receiver_data = DkgStaticData::new(
+            config
+                .validator_registry
+                .get(&receiver_address)
+                .unwrap()
+                .clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+        )
+        .unwrap();
+        let mut receiver_manager = DkgManager::new(receiver_data);
+
+        // Dealer creates a message
+        let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
+
+        // Create a request with WRONG session_id (different epoch)
+        let wrong_session_context = SessionContext::new(
+            999, // Wrong epoch
+            ProtocolType::DkgKeyGeneration,
+            "testchain".to_string(),
+        );
+        let request = SendShareRequest {
+            session_id: wrong_session_context.session_id,
+            dealer: dealer_address.clone(),
+            message: Box::new(dealer_message.clone()),
+        };
+
+        // Receiver handles the request - should fail
+        let result = receiver_manager.handle_send_share_request(request);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Session ID mismatch"));
     }
 
     mod validation_test_utils {
