@@ -282,16 +282,7 @@ impl DkgManager {
                     );
                     continue;
                 }
-                if !self
-                    .static_data
-                    .dkg_config
-                    .validator_registry
-                    .contains_key(&response.signer)
-                {
-                    tracing::info!("Response from unknown validator: {:?}", response.signer);
-                    continue;
-                }
-                // TODO: Add cryptographic verification of response signature
+                // TODO: Add cryptographic verification of response.signature
                 signatures.push(ValidatorSignature {
                     validator: response.signer,
                     signature: response.signature,
@@ -2084,24 +2075,6 @@ mod tests {
 
         let result = test_manager
             .run_as_dealer(&wrong_signer_p2p, &mut mock_tob, &mut rng)
-            .await;
-
-        assert!(result.is_ok());
-        assert_eq!(mock_tob.published_count(), 0);
-        assert!(logs_contain("Response signer mismatch"));
-    }
-
-    #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_run_as_dealer_unknown_validator_rejected() {
-        let mut rng = rand::thread_rng();
-        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
-        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
-
-        let unknown_validator_p2p = UnknownValidatorP2PChannel {};
-
-        let result = test_manager
-            .run_as_dealer(&unknown_validator_p2p, &mut mock_tob, &mut rng)
             .await;
 
         assert!(result.is_ok());
