@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "enclave_utils/init",
+    "enclave_utils/aws",
+    "enclave_utils/system",
+]
+
+exclude = [
+    "src/server",
+    "src/shared",
+]
