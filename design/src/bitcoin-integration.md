@@ -12,4 +12,6 @@ Hashi will have a UTXO pool object to maintain the set of UTXOs that the
 committee is managing. This will act as both an accounting mechanism as well as
 a nonce/replay protection mechanism. As UTXOs are deposited, entries will be
 added, and as UTXOs are withdrawn (spent), entries will be removed, all after
-the requisite number of confirmations.
+the requisite number of confirmations. Note that this pool will also
+immediately include change UTXOs (UTXOs from withdraw requests) that may not be
+fully confirmed but are known to be fully spendable by hashi.

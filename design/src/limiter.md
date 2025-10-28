@@ -11,6 +11,8 @@ properly.
 
 ## Deposits
 
+<!-- TODO have another discussion on if we want to have any limiter on deposits --> 
+
 Hashi requires that users notify hashi of a deposit by sending a transaction to
 Sui. All deposit notifications are assigned a unique sequence number and placed
 in a queue, this inherently ascribes a total order to the deposits.

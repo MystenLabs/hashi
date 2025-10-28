@@ -24,3 +24,5 @@ flowchart TD
     Paused -- Yes --> B
     Paused -- No --> F
 ```
+
+<!-- TODO(andrew) Add more details for how we communicate with a bitcoin node. -->

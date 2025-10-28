@@ -4,8 +4,8 @@ Hashi is intended to be "native", meaning the expectation is that the members
 of the hashi committee are a subset of the Sui validators. Being a member of
 the hashi committee is restricted to members of Sui's validator set but is
 essentially optional as it requires a separate on-chain registration and
-running extra services. In practice we expect the % to of Sui validators who
-are members of the hashi committee to be >90%.
+running extra services. In practice we expect the % of Sui validators who are
+members of the hashi committee to be >90%.
 
 ## Registration Info
 
@@ -47,7 +47,7 @@ The voting weight each validator possesses will be mirrored from the
 
 ## Why is the committee not exactly the set of Sui Validators?
 
-Above its mentioned that the hashi committee is a subset of the Sui Validators
+Above it's mentioned that the hashi committee is a subset of the Sui Validators
 instead of being strictly the same set. There are a few challenges with forcing
 these sets to be identical:
 
