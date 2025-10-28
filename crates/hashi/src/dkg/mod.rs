@@ -19,7 +19,6 @@ pub use types::{
     SignatureBytes, ValidatorEntry, ValidatorInfo, ValidatorRegistry, ValidatorSignature,
 };
 
-const ERR_SEND_SHARE_FAILED: &str = "Failed to send share";
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const ERR_TOB_RECEIVE_FAILED: &str = "TOB channel error";
 
@@ -247,9 +246,10 @@ impl DkgManager {
         self.receive_dealer_message(&dealer_message, my_address.clone())?;
         let mut signatures = Vec::new();
         // TODO: Consider sending RPC's in parallel
+        // TODO: Add timeout handling when adding RPC layer
         for validator_address in self.static_data.dkg_config.validator_registry.keys() {
             if validator_address != &my_address {
-                let response = p2p_channel
+                let response = match p2p_channel
                     .send_share(
                         validator_address,
                         SendShareRequest {
@@ -259,9 +259,31 @@ impl DkgManager {
                         },
                     )
                     .await
-                    .map_err(|e| {
-                        DkgError::ProtocolFailed(format!("{}: {}", ERR_SEND_SHARE_FAILED, e))
-                    })?;
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        tracing::info!("Failed to send share to {:?}: {}", validator_address, e);
+                        continue;
+                    }
+                };
+                if &response.signer != validator_address {
+                    tracing::info!(
+                        "Response signer mismatch: expected {:?}, got {:?}",
+                        validator_address,
+                        response.signer
+                    );
+                    continue;
+                }
+                if !self
+                    .static_data
+                    .dkg_config
+                    .validator_registry
+                    .contains_key(&response.signer)
+                {
+                    tracing::info!("Response from unknown validator: {:?}", response.signer);
+                    continue;
+                }
+                // TODO: Add cryptographic verification of response signature
                 signatures.push(ValidatorSignature {
                     validator: response.signer,
                     signature: response.signature,
@@ -276,8 +298,14 @@ impl DkgManager {
                 .map_err(|e| {
                     DkgError::ProtocolFailed(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
+            Ok(())
+        } else {
+            Err(DkgError::ProtocolFailed(format!(
+                "Insufficient signatures: got {}, need {}",
+                signatures.len(),
+                required_sigs
+            )))
         }
-        Ok(())
     }
 
     pub async fn run_as_party(
@@ -665,21 +693,81 @@ mod tests {
         }
     }
 
-    struct SucceedingP2PChannel {
-        sender_address: ValidatorAddress,
-    }
+    struct SucceedingP2PChannel {}
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for SucceedingP2PChannel {
+        async fn send_share(
+            &self,
+            recipient: &ValidatorAddress,
+            _request: SendShareRequest,
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            Ok(SendShareResponse {
+                signer: recipient.clone(),
+                signature: Vec::new(),
+            })
+        }
+    }
+
+    struct WrongSignerP2PChannel {
+        wrong_signer: ValidatorAddress,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::communication::P2PChannel for WrongSignerP2PChannel {
         async fn send_share(
             &self,
             _recipient: &ValidatorAddress,
             _request: SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             Ok(SendShareResponse {
-                signer: self.sender_address.clone(),
+                signer: self.wrong_signer.clone(),
                 signature: Vec::new(),
             })
+        }
+    }
+
+    struct UnknownValidatorP2PChannel {}
+
+    #[async_trait::async_trait]
+    impl crate::communication::P2PChannel for UnknownValidatorP2PChannel {
+        async fn send_share(
+            &self,
+            _recipient: &ValidatorAddress,
+            _request: SendShareRequest,
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            // Return an address that's not in the validator registry
+            Ok(SendShareResponse {
+                signer: ValidatorAddress([99; 32]),
+                signature: Vec::new(),
+            })
+        }
+    }
+
+    struct PartiallyFailingP2PChannel {
+        fail_count: std::sync::Arc<std::sync::Mutex<usize>>,
+        max_failures: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
+        async fn send_share(
+            &self,
+            recipient: &ValidatorAddress,
+            _request: SendShareRequest,
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            let mut count = self.fail_count.lock().unwrap();
+            if *count < self.max_failures {
+                *count += 1;
+                Err(crate::communication::ChannelError::SendFailed(
+                    "network error".to_string(),
+                ))
+            } else {
+                Ok(SendShareResponse {
+                    signer: recipient.clone(),
+                    signature: Vec::new(),
+                })
+            }
         }
     }
 
@@ -1945,8 +2033,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains(ERR_SEND_SHARE_FAILED));
-        assert!(err.to_string().contains("network error"));
+        assert!(err.to_string().contains("Insufficient signatures"));
     }
 
     #[tokio::test]
@@ -1954,9 +2041,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
 
-        let succeeding_p2p = SucceedingP2PChannel {
-            sender_address: test_manager.static_data.validator_info.address.clone(),
-        };
+        let succeeding_p2p = SucceedingP2PChannel {};
 
         let mut failing_tob = FailingOrderedBroadcastChannel {
             error_message: "consensus error".to_string(),
@@ -1972,6 +2057,85 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains(ERR_PUBLISH_CERT_FAILED));
         assert!(err.to_string().contains("consensus error"));
+    }
+
+    #[tokio::test]
+    async fn test_run_as_dealer_signer_mismatch_rejected() {
+        let mut rng = rand::thread_rng();
+        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+        // Use wrong signer - always returns dealer's address instead of recipient's
+        let wrong_signer = test_manager.static_data.validator_info.address.clone();
+        let wrong_signer_p2p = WrongSignerP2PChannel { wrong_signer };
+
+        let result = test_manager
+            .run_as_dealer(&wrong_signer_p2p, &mut mock_tob, &mut rng)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Insufficient signatures"));
+    }
+
+    #[tokio::test]
+    async fn test_run_as_dealer_unknown_validator_rejected() {
+        let mut rng = rand::thread_rng();
+        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+        let unknown_validator_p2p = UnknownValidatorP2PChannel {};
+
+        let result = test_manager
+            .run_as_dealer(&unknown_validator_p2p, &mut mock_tob, &mut rng)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Insufficient signatures"));
+    }
+
+    #[tokio::test]
+    async fn test_run_as_dealer_partial_failures_still_collects_enough() {
+        let mut rng = rand::thread_rng();
+        // Use 7 validators so we have more room for failures
+        // threshold=4, max_faulty=1, required_sigs=5
+        // Dealer sends to 6 others, fail 1, succeed 5
+        let (mut test_manager, _) = create_manager_with_valid_keys(0, 7);
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+        let partially_failing_p2p = PartiallyFailingP2PChannel {
+            fail_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            max_failures: 1, // Fail 1 out of 6, get 5 signatures
+        };
+
+        let result = test_manager
+            .run_as_dealer(&partially_failing_p2p, &mut mock_tob, &mut rng)
+            .await;
+
+        // Should succeed because we get 5 signatures and need 5
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
+        let mut rng = rand::thread_rng();
+        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+        // Fail too many validators
+        let partially_failing_p2p = PartiallyFailingP2PChannel {
+            fail_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            max_failures: 3, // Fail 3 out of 4, only 1 succeeds
+        };
+
+        let result = test_manager
+            .run_as_dealer(&partially_failing_p2p, &mut mock_tob, &mut rng)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Insufficient signatures"));
     }
 
     #[tokio::test]
