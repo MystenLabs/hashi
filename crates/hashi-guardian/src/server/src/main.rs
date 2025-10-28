@@ -1,11 +1,11 @@
 use anyhow::Result;
-use axum::{
-    routing::{get, post},
-    Router,
-};
-use tracing::info;
+use axum::routing::get;
+use axum::routing::post;
+use axum::Router;
 use shared::S3Config;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use tracing::info;
 
 mod s3_logger;
 use s3_logger::configure_s3;
