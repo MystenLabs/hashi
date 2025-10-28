@@ -58,8 +58,9 @@ COPY src/server/ /src/server/
 COPY src/shared/ /src/shared/
 COPY enclave/enclave_utils/ /enclave_utils/
 COPY enclave/Cargo.toml /Cargo.toml
+COPY enclave/Cargo.lock /Cargo.lock
 
-RUN cargo build --no-default-features --release --target x86_64-unknown-linux-musl
+RUN cargo build --locked --no-default-features --release --target x86_64-unknown-linux-musl
 
 WORKDIR /src/server
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
