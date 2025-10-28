@@ -1,6 +1,6 @@
 use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
-use log::{error, info};
+use tracing::{error, info};
 use shared::S3Config;
 
 use aws_config::meta::region::RegionProviderChain;

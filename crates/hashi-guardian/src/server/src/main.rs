@@ -3,7 +3,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use log::info;
+use tracing::info;
 use shared::S3Config;
 use std::sync::{Arc, OnceLock};
 
@@ -21,7 +21,7 @@ async fn hello() -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_tracing_subscriber();
 
     let state = AppState {
         s3_config: Arc::new(OnceLock::new()),
@@ -38,6 +38,20 @@ async fn main() -> Result<()> {
     axum::serve(listener, app.into_make_service())
         .await
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+}
+
+fn init_tracing_subscriber() {
+    let subscriber = ::tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .with_file(true)
+        .with_line_number(true)
+        .finish();
+    ::tracing::subscriber::set_global_default(subscriber)
+        .expect("unable to initialize tracing subscriber");
 }
 
 #[cfg(test)]
