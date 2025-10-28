@@ -298,14 +298,8 @@ impl DkgManager {
                 .map_err(|e| {
                     DkgError::ProtocolFailed(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
-            Ok(())
-        } else {
-            Err(DkgError::ProtocolFailed(format!(
-                "Insufficient signatures: got {}, need {}",
-                signatures.len(),
-                required_sigs
-            )))
         }
+        Ok(())
     }
 
     pub async fn run_as_party(
@@ -574,13 +568,19 @@ mod tests {
 
     struct MockOrderedBroadcastChannel {
         certificates: std::sync::Mutex<std::collections::VecDeque<DkgCertificate>>,
+        published: std::sync::Mutex<Vec<OrderedBroadcastMessage>>,
     }
 
     impl MockOrderedBroadcastChannel {
         fn new(certificates: Vec<DkgCertificate>) -> Self {
             Self {
                 certificates: std::sync::Mutex::new(certificates.into()),
+                published: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn published_count(&self) -> usize {
+            self.published.lock().unwrap().len()
         }
     }
 
@@ -590,8 +590,9 @@ mod tests {
     {
         async fn publish(
             &self,
-            _message: OrderedBroadcastMessage,
+            message: OrderedBroadcastMessage,
         ) -> crate::communication::ChannelResult<()> {
+            self.published.lock().unwrap().push(message);
             Ok(())
         }
 
@@ -2018,6 +2019,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_run_as_dealer_p2p_send_error() {
         let mut rng = rand::thread_rng();
         let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
@@ -2031,9 +2033,10 @@ mod tests {
             .run_as_dealer(&failing_p2p, &mut mock_tob, &mut rng)
             .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Insufficient signatures"));
+        assert!(result.is_ok());
+        assert_eq!(mock_tob.published_count(), 0);
+        assert!(logs_contain("Failed to send share"));
+        assert!(logs_contain("network error"));
     }
 
     #[tokio::test]
@@ -2060,6 +2063,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_run_as_dealer_signer_mismatch_rejected() {
         let mut rng = rand::thread_rng();
         let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
@@ -2073,12 +2077,13 @@ mod tests {
             .run_as_dealer(&wrong_signer_p2p, &mut mock_tob, &mut rng)
             .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Insufficient signatures"));
+        assert!(result.is_ok());
+        assert_eq!(mock_tob.published_count(), 0);
+        assert!(logs_contain("Response signer mismatch"));
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_run_as_dealer_unknown_validator_rejected() {
         let mut rng = rand::thread_rng();
         let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
@@ -2090,9 +2095,9 @@ mod tests {
             .run_as_dealer(&unknown_validator_p2p, &mut mock_tob, &mut rng)
             .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Insufficient signatures"));
+        assert!(result.is_ok());
+        assert_eq!(mock_tob.published_count(), 0);
+        assert!(logs_contain("Response signer mismatch"));
     }
 
     #[tokio::test]
@@ -2113,11 +2118,13 @@ mod tests {
             .run_as_dealer(&partially_failing_p2p, &mut mock_tob, &mut rng)
             .await;
 
-        // Should succeed because we get 5 signatures and need 5
         assert!(result.is_ok());
+        // Verify that a certificate was published
+        assert_eq!(mock_tob.published_count(), 1);
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
         let mut rng = rand::thread_rng();
         let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
@@ -2133,9 +2140,10 @@ mod tests {
             .run_as_dealer(&partially_failing_p2p, &mut mock_tob, &mut rng)
             .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Insufficient signatures"));
+        assert!(result.is_ok());
+        assert_eq!(mock_tob.published_count(), 0);
+        // Verify logging occurred for the 3 failures
+        assert!(logs_contain("Failed to send share"));
     }
 
     #[tokio::test]
