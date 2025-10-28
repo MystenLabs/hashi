@@ -282,7 +282,7 @@ impl DkgManager {
                     );
                     continue;
                 }
-                // TODO: Add cryptographic verification of response.signature
+                // TODO: Add cryptographic verification of response signature
                 signatures.push(ValidatorSignature {
                     validator: response.signer,
                     signature: response.signature,
