@@ -45,7 +45,7 @@ pub trait P2PChannel: Send + Sync {
         &self,
         recipient: &ValidatorAddress,
         request: SendShareRequest,
-    ) -> ChannelResult<SendShareResponse>;
+    ) -> ChannelResult<AuthenticatedMessage<SendShareResponse>>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages
