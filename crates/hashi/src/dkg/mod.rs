@@ -728,23 +728,6 @@ mod tests {
         }
     }
 
-    struct UnknownValidatorP2PChannel {}
-
-    #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for UnknownValidatorP2PChannel {
-        async fn send_share(
-            &self,
-            _recipient: &ValidatorAddress,
-            _request: SendShareRequest,
-        ) -> crate::communication::ChannelResult<SendShareResponse> {
-            // Return an address that's not in the validator registry
-            Ok(SendShareResponse {
-                signer: ValidatorAddress([99; 32]),
-                signature: Vec::new(),
-            })
-        }
-    }
-
     struct PartiallyFailingP2PChannel {
         fail_count: std::sync::Arc<std::sync::Mutex<usize>>,
         max_failures: usize,
