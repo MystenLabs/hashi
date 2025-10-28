@@ -221,32 +221,9 @@ impl DkgManager {
         &mut self,
         authenticated_request: AuthenticatedMessage<SendShareRequest>,
     ) -> DkgResult<SendShareResponse> {
-        let authenticated_sender = authenticated_request.sender;
+        let dealer = authenticated_request.sender;
         let request = authenticated_request.message;
-        if authenticated_sender != request.dealer {
-            return Err(DkgError::InvalidMessage {
-                sender: authenticated_sender.clone(),
-                reason: format!(
-                    "Sender impersonation: authenticated as {:?}, claims to be dealer {:?}",
-                    authenticated_sender, request.dealer
-                ),
-            });
-        }
-        let expected_dealer_session_id = self
-            .static_data
-            .session_context
-            .dealer_session_id(&request.dealer);
-        if request.session_id != expected_dealer_session_id {
-            return Err(DkgError::InvalidMessage {
-                sender: request.dealer.clone(),
-                reason: format!(
-                    "Session ID mismatch for dealer {:?}: expected {:?}, got {:?}",
-                    request.dealer, expected_dealer_session_id, request.session_id
-                ),
-            });
-        }
-        let validator_signature =
-            self.receive_dealer_message(&request.message, request.dealer.clone())?;
+        let validator_signature = self.receive_dealer_message(&request.message, dealer)?;
         Ok(SendShareResponse {
             signer: validator_signature.validator,
             signature: validator_signature.signature,
@@ -265,10 +242,6 @@ impl DkgManager {
         let max_faulty = self.static_data.dkg_config.max_faulty;
         let required_sigs = threshold + max_faulty;
         let my_address = self.static_data.validator_info.address.clone();
-        let dealer_session_id = self
-            .static_data
-            .session_context
-            .dealer_session_id(&my_address);
         let dealer_message = self.create_dealer_message(rng)?;
         self.receive_dealer_message(&dealer_message, my_address.clone())?;
         let mut signatures = Vec::new();
@@ -280,8 +253,6 @@ impl DkgManager {
                     .send_share(
                         validator_address,
                         SendShareRequest {
-                            session_id: dealer_session_id,
-                            dealer: my_address.clone(),
                             message: Box::new(dealer_message.clone()),
                         },
                     )
@@ -556,12 +527,17 @@ mod tests {
         managers: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<ValidatorAddress, DkgManager>>,
         >,
+        current_sender: ValidatorAddress,
     }
 
     impl MockP2PChannel {
-        fn new(managers: std::collections::HashMap<ValidatorAddress, DkgManager>) -> Self {
+        fn new(
+            managers: std::collections::HashMap<ValidatorAddress, DkgManager>,
+            current_sender: ValidatorAddress,
+        ) -> Self {
             Self {
                 managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
+                current_sender,
             }
         }
     }
@@ -581,7 +557,7 @@ mod tests {
                 ))
             })?;
             let authenticated_request = AuthenticatedMessage {
-                sender: request.dealer.clone(), // For testing, use the dealer from the request
+                sender: self.current_sender.clone(), // Use the sender that owns this channel
                 message: request,
             };
             manager
@@ -1524,7 +1500,7 @@ mod tests {
             .enumerate()
             .map(|(idx, mgr)| (ValidatorAddress([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers);
+        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([0; 32]));
 
         // Pre-populate validator 0's manager with dealer outputs from all validators (including itself)
         for (j, message) in dealer_messages.iter().enumerate() {
@@ -1653,7 +1629,7 @@ mod tests {
             })
             .collect();
 
-        let mock_p2p = MockP2PChannel::new(other_managers);
+        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([0; 32]));
         let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         // Call run_as_dealer()
@@ -2224,11 +2200,7 @@ mod tests {
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
 
         // Create a request as if dealer sent it to receiver
-        let sender = dealer_address.clone();
-        let dealer_session_id = session_context.dealer_session_id(&sender);
         let request = SendShareRequest {
-            session_id: dealer_session_id,
-            dealer: sender.clone(),
             message: Box::new(dealer_message.clone()),
         };
 
@@ -2247,190 +2219,6 @@ mod tests {
             receiver_manager.static_data.validator_info.address
         );
         assert_eq!(response.signature.len(), 96); // BLS signature size
-    }
-
-    #[tokio::test]
-    async fn test_handle_send_share_request_session_id_mismatch() {
-        let mut rng = rand::thread_rng();
-
-        // Create shared encryption keys
-        let encryption_keys: Vec<_> = (0..5)
-            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
-            .collect();
-
-        // Create validators using shared encryption public keys
-        let validators = encryption_keys
-            .iter()
-            .enumerate()
-            .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
-                };
-                (address, info)
-            })
-            .collect();
-
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
-        let session_context = SessionContext::new(
-            config.epoch,
-            ProtocolType::DkgKeyGeneration,
-            "testchain".to_string(),
-        );
-
-        // Create dealer (party 1) with its encryption key
-        let dealer_address = ValidatorAddress([1; 32]);
-        let dealer_data = DkgStaticData::new(
-            config
-                .validator_registry
-                .get(&dealer_address)
-                .unwrap()
-                .clone(),
-            config.clone(),
-            session_context.clone(),
-            encryption_keys[1].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let dealer_manager = DkgManager::new(dealer_data);
-
-        // Create receiver (party 0) with its encryption key
-        let receiver_address = ValidatorAddress([0; 32]);
-        let receiver_data = DkgStaticData::new(
-            config
-                .validator_registry
-                .get(&receiver_address)
-                .unwrap()
-                .clone(),
-            config.clone(),
-            session_context.clone(),
-            encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let mut receiver_manager = DkgManager::new(receiver_data);
-
-        // Dealer creates a message
-        let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
-
-        // Create a request with WRONG session_id (different epoch)
-        let wrong_session_context = SessionContext::new(
-            999, // Wrong epoch
-            ProtocolType::DkgKeyGeneration,
-            "testchain".to_string(),
-        );
-        let wrong_dealer_session_id = wrong_session_context.dealer_session_id(&dealer_address);
-        let request = SendShareRequest {
-            session_id: wrong_dealer_session_id,
-            dealer: dealer_address.clone(),
-            message: Box::new(dealer_message.clone()),
-        };
-
-        // Receiver handles the request - should fail
-        let authenticated_request = AuthenticatedMessage {
-            sender: dealer_address.clone(),
-            message: request,
-        };
-        let result = receiver_manager.handle_send_share_request(authenticated_request);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Session ID mismatch"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_send_share_request_sender_impersonation() {
-        let mut rng = rand::thread_rng();
-
-        // Create shared encryption keys
-        let encryption_keys: Vec<_> = (0..5)
-            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
-            .collect();
-
-        // Create validators using shared encryption public keys
-        let validators = encryption_keys
-            .iter()
-            .enumerate()
-            .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
-                };
-                (address, info)
-            })
-            .collect();
-
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
-        let session_context = SessionContext::new(
-            config.epoch,
-            ProtocolType::DkgKeyGeneration,
-            "testchain".to_string(),
-        );
-
-        // Create dealer (party 1) with its encryption key
-        let dealer_address = ValidatorAddress([1; 32]);
-        let dealer_data = DkgStaticData::new(
-            config
-                .validator_registry
-                .get(&dealer_address)
-                .unwrap()
-                .clone(),
-            config.clone(),
-            session_context.clone(),
-            encryption_keys[1].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let dealer_manager = DkgManager::new(dealer_data);
-
-        // Create receiver (party 0) with its encryption key
-        let receiver_address = ValidatorAddress([0; 32]);
-        let receiver_data = DkgStaticData::new(
-            config
-                .validator_registry
-                .get(&receiver_address)
-                .unwrap()
-                .clone(),
-            config.clone(),
-            session_context.clone(),
-            encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let mut receiver_manager = DkgManager::new(receiver_data);
-
-        // Dealer creates a message
-        let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
-
-        // Create a request claiming to be from dealer_address
-        let dealer_session_id = session_context.dealer_session_id(&dealer_address);
-        let request = SendShareRequest {
-            session_id: dealer_session_id,
-            dealer: dealer_address.clone(),
-            message: Box::new(dealer_message.clone()),
-        };
-
-        // But authenticated as a different validator (validator 2)
-        let impersonator_address = ValidatorAddress([2; 32]);
-        let authenticated_request = AuthenticatedMessage {
-            sender: impersonator_address.clone(), // Different from claimed dealer!
-            message: request,
-        };
-
-        // Receiver handles the request - should fail
-        let result = receiver_manager.handle_send_share_request(authenticated_request);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Sender impersonation"));
     }
 
     mod validation_test_utils {

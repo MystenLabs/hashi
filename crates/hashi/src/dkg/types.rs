@@ -252,8 +252,6 @@ pub enum P2PMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendShareRequest {
-    pub session_id: SessionId,
-    pub dealer: ValidatorAddress,
     pub message: Box<avss::Message>,
 }
 
