@@ -2,8 +2,7 @@
 /// Module: hashi
 module hashi::hashi;
 
-use hashi::config::Config;
-use hashi::treasury::Treasury;
+use hashi::{config::Config, treasury::Treasury};
 
 public struct Hashi has key {
     id: UID,
