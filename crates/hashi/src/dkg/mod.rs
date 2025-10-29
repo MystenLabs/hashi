@@ -35,6 +35,7 @@ impl std::fmt::Display for SignatureSetType {
     }
 }
 
+/// Data that remains constant for a given session
 pub struct DkgStaticData {
     pub validator_info: ValidatorInfo,
     pub nodes: Nodes<EncryptionGroupElement>,
