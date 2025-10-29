@@ -77,7 +77,7 @@ impl Monitor {
             info!("Bitcoin monitor stopped");
         });
 
-        Ok(MonitorClient { _tx: client_tx })
+        Ok(MonitorClient { tx: client_tx })
     }
 
     fn process_kyoto_event(&mut self, event: kyoto::Event) {
@@ -168,11 +168,40 @@ impl Monitor {
 }
 
 pub struct MonitorClient {
-    _tx: tokio::sync::mpsc::Sender<MonitorMessage>,
+    tx: tokio::sync::mpsc::Sender<MonitorMessage>,
 }
 
 impl MonitorClient {
-    // TODO: Wrap messages below with client functions.
+    pub async fn confirm_deposit(
+        &self,
+        transaction: bitcoin::Txid,
+        address: bitcoin::ScriptBuf,
+    ) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::ConfirmDeposit(transaction, address, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
+
+    pub async fn get_recent_fee_rate(&self, percentile: u32) -> Result<FeeRate> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::GetRecentFeeRate(percentile, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
+
+    pub async fn broadcast_transaction(&self, transaction: bitcoin::Transaction) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::BroadcastTransaction(transaction, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
 }
 
 enum MonitorMessage {
