@@ -45,7 +45,6 @@ pub struct DkgStaticData {
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
-    pub receiver: avss::Receiver,
     pub validator_weights: BTreeMap<ValidatorAddress, u16>,
 }
 
@@ -64,15 +63,6 @@ impl DkgStaticData {
         bls_signing_key: crate::bls::Bls12381PrivateKey,
     ) -> DkgResult<Self> {
         let nodes = create_nodes(&dkg_config.validator_registry);
-        let session_id = session_context.session_id.to_vec();
-        let receiver = avss::Receiver::new(
-            nodes.clone(),
-            validator_info.party_id,
-            dkg_config.threshold,
-            session_id,
-            None, // commitment: None for initial DKG
-            encryption_key.clone(),
-        );
         let validator_weights: BTreeMap<_, _> = dkg_config
             .validator_registry
             .iter()
@@ -85,7 +75,6 @@ impl DkgStaticData {
             session_context,
             encryption_key,
             bls_signing_key,
-            receiver,
             validator_weights,
         })
     }
@@ -127,7 +116,15 @@ impl DkgManager {
         message: &avss::Message,
         dealer_address: ValidatorAddress,
     ) -> DkgResult<ValidatorSignature> {
-        let receiver_output = match self.static_data.receiver.process_message(message)? {
+        let receiver = avss::Receiver::new(
+            self.static_data.nodes.clone(),
+            self.static_data.validator_info.party_id,
+            self.static_data.dkg_config.threshold,
+            self.static_data.session_context.session_id.to_vec(),
+            None, // commitment: None for initial DKG
+            self.static_data.encryption_key.clone(),
+        );
+        let receiver_output = match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
             // TODO: Add compliant handling
             avss::ProcessedMessage::Complaint(_) => {
