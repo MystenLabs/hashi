@@ -151,6 +151,7 @@ impl DkgManager {
         })
     }
 
+    // TODO: Use aggregated BLS signature in certificate
     pub fn create_certificate(
         &self,
         message: &avss::Message,
@@ -328,12 +329,6 @@ fn validate_certificate(
     static_data: &DkgStaticData,
     dealer_messages: &BTreeMap<ValidatorAddress, avss::Message>,
 ) -> DkgResult<()> {
-    if cert.session_context.session_id != static_data.session_context.session_id {
-        return Err(DkgError::InvalidCertificate(format!(
-            "Session ID mismatch: expected {:?}, got {:?}",
-            static_data.session_context.session_id, cert.session_context.session_id
-        )));
-    }
     if !static_data
         .dkg_config
         .validator_registry
@@ -344,6 +339,7 @@ fn validate_certificate(
             cert.dealer
         )));
     }
+    validate_message_hash(cert, dealer_messages, &static_data.session_context)?;
     validate_signature_set(
         &cert.data_availability_signatures,
         SignatureSetType::DataAvailability,
@@ -358,7 +354,6 @@ fn validate_certificate(
         static_data.dkg_config.required_dkg_signatures() as u16,
         &static_data.validator_weights,
     )?;
-    validate_message_hash(cert, dealer_messages, &static_data.session_context)?;
     Ok(())
 }
 
@@ -472,8 +467,8 @@ fn compute_message_hash(
     // No length prefix is needed for message_bytes because it's the only variable-length
     // input.
     hasher.update(&message_bytes);
-    hasher.update(dealer_address.0);
-    hasher.update(session.session_id.as_ref());
+    let dealer_session_id = session.dealer_session_id(dealer_address);
+    hasher.update(dealer_session_id.as_ref());
     Ok(hasher.finalize().into())
 }
 
@@ -1859,9 +1854,6 @@ mod tests {
         let config = DkgConfig::new(100, validators, threshold, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
-        let wrong_session_context =
-            SessionContext::new(200, ProtocolType::DkgKeyGeneration, "testchain".to_string());
-
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
@@ -1906,7 +1898,7 @@ mod tests {
             valid_certificates.push(cert);
         }
 
-        // Create invalid certificates with wrong session ID
+        // Create invalid certificate with wrong message hash
         let invalid_dealer_msg = managers[3].create_dealer_message(&mut rng).unwrap();
         let dealer_addr_3 = ValidatorAddress([3; 32]);
 
@@ -1921,8 +1913,8 @@ mod tests {
         let mut invalid_cert = managers[3]
             .create_certificate(&invalid_dealer_msg, invalid_signatures)
             .unwrap();
-        // Make it invalid by changing session context
-        invalid_cert.session_context = wrong_session_context.clone();
+        // Make it invalid by corrupting the message hash
+        invalid_cert.message_hash = [99; 32]; // Wrong hash
 
         // Mix valid and invalid certificates in TOB
         // Order: valid[0], invalid, valid[1], valid[2]
@@ -2618,22 +2610,56 @@ mod tests {
 
         #[test]
         fn test_session_id_mismatch() {
-            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+            // This test verifies that a certificate created with a different session context
+            // (and thus different message hash) is properly rejected
+            let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1);
+            let dealer_addr = ValidatorAddress([0; 32]);
 
-            // Change session ID
-            cert.session_context = SessionContext::new(
-                200, // Different epoch
-                ProtocolType::DkgKeyGeneration,
-                "test".to_string(),
-            );
+            // Create a minimal dealer message using actual dealer (to get valid message structure)
+            let static_data = create_test_static_data(0, config.clone());
+            let mut rng = rand::thread_rng();
+            let dealer = avss::Dealer::new(
+                None,
+                static_data.nodes.clone(),
+                static_data.dkg_config.threshold,
+                static_data.dkg_config.max_faulty,
+                vec![1, 2, 3], // Dummy session ID
+            )
+            .unwrap();
+            let dealer_message = dealer.create_message(&mut rng).unwrap();
 
-            let result = validate_certificate(&cert, &static_data, &dealer_messages);
-            assert!(result.is_err());
+            // Create certificate with hash computed using WRONG session context
+            let wrong_session_context =
+                SessionContext::new(200, ProtocolType::DkgKeyGeneration, "test".to_string());
+            let wrong_hash =
+                compute_message_hash(&dealer_message, &dealer_addr, &wrong_session_context)
+                    .unwrap();
+
+            let cert = DkgCertificate {
+                dealer: dealer_addr.clone(),
+                message_hash: wrong_hash, // Hash computed with wrong session
+                data_availability_signatures: vec![], // Empty is fine since hash check happens first
+                dkg_signatures: vec![],
+                session_context: wrong_session_context, // Doesn't matter what we put here
+            };
+
+            // Create static data with CORRECT session for validation
+            let correct_static_data = create_test_static_data(0, config);
+
+            let mut dealer_messages = BTreeMap::new();
+            dealer_messages.insert(dealer_addr, dealer_message);
+
+            // Validation should fail because the hash was computed with a different session
+            let result = validate_certificate(&cert, &correct_static_data, &dealer_messages);
             assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Session ID mismatch")
+                result.is_err(),
+                "Expected validation to fail but it succeeded"
+            );
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("Message hash mismatch"),
+                "Expected 'Message hash mismatch' but got: {}",
+                error_msg
             );
         }
 
