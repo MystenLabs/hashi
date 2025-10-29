@@ -40,5 +40,5 @@ update:
 
 .PHONY: clean
 clean:
-	rm -rf src/ out/
+	rm -rf out/
 
