@@ -156,16 +156,6 @@ impl DkgManager {
         message: &avss::Message,
         signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<DkgCertificate> {
-        let total_weight =
-            compute_total_signature_weight(&signatures, &self.static_data.validator_weights)?;
-        let weight_lower_bound =
-            self.static_data.dkg_config.threshold + self.static_data.dkg_config.max_faulty;
-        if total_weight < weight_lower_bound {
-            return Err(DkgError::ProtocolFailed(format!(
-                "Insufficient weighted signatures: got {}, need {}",
-                total_weight, weight_lower_bound
-            )));
-        }
         let message_hash = compute_message_hash(
             message,
             &self.static_data.validator_info.address,
@@ -237,13 +227,11 @@ impl DkgManager {
         >,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
-        let threshold = self.static_data.dkg_config.threshold;
-        let max_faulty = self.static_data.dkg_config.max_faulty;
-        let required_sigs = threshold + max_faulty;
+        // TODO: Return early if DKG is already completed (we're a slow dealer)
         let my_address = self.static_data.validator_info.address.clone();
         let dealer_message = self.create_dealer_message(rng)?;
         self.receive_dealer_message(&dealer_message, my_address.clone())?;
-        let mut signatures = Vec::new();
+        let mut approvals = Vec::new();
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
         for validator_address in self.static_data.dkg_config.validator_registry.keys() {
@@ -274,14 +262,20 @@ impl DkgManager {
                     continue;
                 }
                 // TODO: Add cryptographic verification of response.signature
-                signatures.push(ValidatorSignature {
+                approvals.push(ValidatorSignature {
                     validator: signer,
                     signature: response.signature,
                 });
             }
         }
-        if signatures.len() >= required_sigs as usize {
-            let cert = self.create_certificate(&dealer_message, signatures)?;
+        let required_weight =
+            self.static_data.dkg_config.threshold + self.static_data.dkg_config.max_faulty;
+        if has_sufficient_weighted_signatures(
+            &approvals,
+            &self.static_data.validator_weights,
+            required_weight,
+        ) {
+            let cert = self.create_certificate(&dealer_message, approvals)?;
             // TODO: Add timeout and retries handling when adding RPC layer
             ordered_broadcast_channel
                 .publish(OrderedBroadcastMessage::CertificateV1(cert))
@@ -451,6 +445,20 @@ fn compute_total_signature_weight(
         total_weight += weight;
     }
     Ok(total_weight)
+}
+
+fn has_sufficient_weighted_signatures(
+    signatures: &[ValidatorSignature],
+    validator_weights: &BTreeMap<ValidatorAddress, u16>,
+    required_weight: u16,
+) -> bool {
+    match compute_total_signature_weight(signatures, validator_weights) {
+        Ok(total_weight) => total_weight >= required_weight,
+        Err(e) => {
+            tracing::info!("Error checking signature weights: {}", e);
+            false
+        }
+    }
 }
 
 fn compute_message_hash(
@@ -948,33 +956,69 @@ mod tests {
     }
 
     #[test]
-    fn test_create_certificate_insufficient_signatures() {
-        let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config.clone());
-        let manager = DkgManager::new(static_data);
+    fn test_has_sufficient_weighted_signatures_insufficient() {
+        // Create validators with different weights: [5, 3, 2, 1, 1]
+        let validators =
+            validation_test_utils::create_test_validators_with_weights(&[5, 3, 2, 1, 1]);
+        // threshold=7, max_faulty=2, so required_weight = 9
+        let config = DkgConfig::new(100, validators, 7, 2).unwrap();
 
-        let message = manager
-            .create_dealer_message(&mut rand::thread_rng())
-            .unwrap();
-
-        // Only 2 signatures with weight=1 each, need threshold + max_faulty = 3
-        let signatures: Vec<_> = config
-            .validator_registry
-            .values()
-            .take(2)
-            .map(|v| ValidatorSignature {
-                validator: v.address.clone(),
-                signature: vec![0; 96],
-            })
-            .collect();
-
-        let result = manager.create_certificate(&message, signatures);
-        assert!(result.is_err());
+        // Test case 1: Only validator 0 (weight=5), need 9
+        let signatures = vec![ValidatorSignature {
+            validator: ValidatorAddress([0; 32]),
+            signature: vec![0; 96],
+        }];
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Insufficient weighted signatures")
+            !validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
+        );
+
+        // Test case 2: Validators 0 and 2 (weight=5+2=7), need 9
+        let signatures = vec![
+            ValidatorSignature {
+                validator: ValidatorAddress([0; 32]),
+                signature: vec![0; 96],
+            },
+            ValidatorSignature {
+                validator: ValidatorAddress([2; 32]),
+                signature: vec![0; 96],
+            },
+        ];
+        assert!(
+            !validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
+        );
+
+        // Test case 3: Validators 0 and 1 (weight=5+3=8), still need 9
+        let signatures = vec![
+            ValidatorSignature {
+                validator: ValidatorAddress([0; 32]),
+                signature: vec![0; 96],
+            },
+            ValidatorSignature {
+                validator: ValidatorAddress([1; 32]),
+                signature: vec![0; 96],
+            },
+        ];
+        assert!(
+            !validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
+        );
+
+        // Test case 4: Validators 0, 1, and 3 (weight=5+3+1=9), exactly sufficient
+        let signatures = vec![
+            ValidatorSignature {
+                validator: ValidatorAddress([0; 32]),
+                signature: vec![0; 96],
+            },
+            ValidatorSignature {
+                validator: ValidatorAddress([1; 32]),
+                signature: vec![0; 96],
+            },
+            ValidatorSignature {
+                validator: ValidatorAddress([3; 32]),
+                signature: vec![0; 96],
+            },
+        ];
+        assert!(
+            validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
         );
     }
 
@@ -1082,13 +1126,12 @@ mod tests {
             signature: vec![0; 96],
         }];
 
-        let result = manager.create_certificate(&message, insufficient_sigs);
-        assert!(result.is_err());
+        // Should not have sufficient weight
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Insufficient weighted signatures")
+            !validation_test_utils::test_has_sufficient_weighted_signatures(
+                &insufficient_sigs,
+                &config
+            )
         );
 
         // Validator 0 (weight=3) + validator 1 (weight=1) = 4, which meets the requirement
@@ -1114,19 +1157,23 @@ mod tests {
             },
         ];
 
+        // Should have sufficient weight
+        assert!(
+            validation_test_utils::test_has_sufficient_weighted_signatures(
+                &sufficient_sigs,
+                &config
+            )
+        );
+
+        // create_certificate should succeed now (no weight validation there)
         let result = manager.create_certificate(&message, sufficient_sigs);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_create_certificate_unknown_validator() {
+    #[tracing_test::traced_test]
+    fn test_has_sufficient_weighted_signatures_unknown_validator() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config.clone());
-        let manager = DkgManager::new(static_data);
-
-        let message = manager
-            .create_dealer_message(&mut rand::thread_rng())
-            .unwrap();
 
         // Create signatures including one from an unknown validator
         let unknown_validator = ValidatorAddress([99; 32]);
@@ -1142,14 +1189,15 @@ mod tests {
             },
         ];
 
-        let result = manager.create_certificate(&message, signatures);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Signature from unknown validator")
-        );
+        let validator_weights = validation_test_utils::create_validator_weights(&config);
+        let required_weight = config.threshold + config.max_faulty;
+
+        let result =
+            has_sufficient_weighted_signatures(&signatures, &validator_weights, required_weight);
+
+        assert!(!result);
+        assert!(logs_contain("Error checking signature weights"));
+        assert!(logs_contain("Signature from unknown validator"));
     }
 
     #[test]
@@ -2266,6 +2314,15 @@ mod tests {
                 .iter()
                 .map(|(addr, info)| (addr.clone(), info.weight))
                 .collect()
+        }
+
+        pub fn test_has_sufficient_weighted_signatures(
+            signatures: &[ValidatorSignature],
+            config: &DkgConfig,
+        ) -> bool {
+            let validator_weights = create_validator_weights(config);
+            let required_weight = config.threshold + config.max_faulty;
+            has_sufficient_weighted_signatures(signatures, &validator_weights, required_weight)
         }
 
         pub fn create_test_signatures(
