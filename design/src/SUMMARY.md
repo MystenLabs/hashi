@@ -15,4 +15,10 @@
 - [Guardian](./guardian.md)
 - [Bitcoin Integration](./bitcoin-integration.md)
 - [Limiter](./limiter.md)
-- [Open Questions](./open-questions.md)
+- [Upgrades](./upgrades.md)
+- [Fees](./fees.md)
+
+# Flows
+
+- [Deposit](./deposit.md)
+- [Withdraw](./withdraw.md)

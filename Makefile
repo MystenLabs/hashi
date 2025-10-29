@@ -21,6 +21,14 @@ test: ## Run all tests
 	cargo nextest run --all-features
 	cargo test --all-features --doc
 
+.PHONY: test-move
+test-move: ## Run all move tests
+	ls -d packages/*/ | xargs -I {} bash -c "sui move test --path '{}'"
+
+.PHONY: fmt-move
+fmt-move: ## Format code
+	prettier-move -w packages/*/sources/**/*.move
+
 .PHONY: proto
 proto: ## Build proto files
 	$(MAKE) -C crates/hashi proto

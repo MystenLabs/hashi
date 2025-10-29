@@ -3,7 +3,7 @@
 use bitcoin::Network;
 
 #[derive(Debug, Clone)]
-pub struct MontiorConfig {
+pub struct MonitorConfig {
     /// Bitcoin network to connect to
     pub network: Network,
 
@@ -17,7 +17,7 @@ pub struct MontiorConfig {
     pub start_height: u32,
 }
 
-impl Default for MontiorConfig {
+impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
             network: Network::Bitcoin,
@@ -28,7 +28,7 @@ impl Default for MontiorConfig {
     }
 }
 
-impl MontiorConfig {
+impl MonitorConfig {
     /// Create a new configuration builder.
     pub fn builder() -> MonitorConfigBuilder {
         MonitorConfigBuilder::default()
@@ -69,10 +69,10 @@ impl MonitorConfigBuilder {
         self
     }
 
-    pub fn build(self) -> MontiorConfig {
-        let default = MontiorConfig::default();
+    pub fn build(self) -> MonitorConfig {
+        let default = MonitorConfig::default();
 
-        MontiorConfig {
+        MonitorConfig {
             network: self.network.unwrap_or(default.network),
             confirmation_threshold: self
                 .confirmation_threshold

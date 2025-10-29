@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 
 use bitcoin::Network;
 use clap::Parser;
-use hashi_btc::config::MontiorConfig;
+use hashi_btc::config::MonitorConfig;
 use hashi_btc::monitor::Monitor;
 use kyoto::TrustedPeer;
 use tracing::info;
@@ -28,7 +28,7 @@ struct Args {
     confirmations: u32,
 
     /// Starting block height for synchronization (defaults to recent testnet4 height)
-    #[arg(short = 's', long, default_value = "50000")]
+    #[arg(short = 's', long, default_value = "70000")]
     start_height: u32,
 
     /// Enable verbose logging
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TrustedPeer::from("91.83.65.73:48333".parse::<SocketAddr>()?),
     ];
 
-    let config = MontiorConfig {
+    let config = MonitorConfig {
         network: Network::Testnet4,
         confirmation_threshold: args.confirmations,
         trusted_peers: testnet_peers,
@@ -87,10 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create and start the monitor
-    let monitor = Monitor::new(config)?;
-
     info!("Starting monitor...");
-    let _monitor_client = monitor.run()?;
+    let _monitor_client = Monitor::run(config)?;
 
     // The monitor is now running in background tasks
     // In a real application, you would use monitor_client to interact with it

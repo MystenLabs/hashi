@@ -1,59 +1,46 @@
 use anyhow::Result;
-use bdk_chain::local_chain::LocalChain;
-use bdk_core::BlockId;
-use tracing::debug;
+use kyoto::FeeRate;
+use kyoto::HeaderCheckpoint;
+use tokio::sync::oneshot;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
-use crate::config::MontiorConfig;
+use crate::config::MonitorConfig;
 
-// TODO: doc comment
+/// Monitor loop that tracks the state of the Bitcoin chain.
+///
+/// Client provides functions for querying for specific transactions,
+/// fee information, and transaction submission.
 pub struct Monitor {
-    config: MontiorConfig,
-
-    local_chain: LocalChain,
+    config: MonitorConfig,
+    requester: kyoto::Requester,
+    tip: Option<HeaderCheckpoint>,
 }
 
 impl Monitor {
-    /// Create a new BTC monitor with the given configuration.
-    pub fn new(config: MontiorConfig) -> Result<Self> {
-        let genesis_hash = match config.network {
-            bitcoin::Network::Bitcoin => {
-                bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin).block_hash()
-            }
-            bitcoin::Network::Testnet => {
-                bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Testnet).block_hash()
-            }
-            bitcoin::Network::Testnet4 => {
-                bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Testnet4)
-                    .block_hash()
-            }
-            bitcoin::Network::Signet => {
-                bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Signet).block_hash()
-            }
-            bitcoin::Network::Regtest => {
-                bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).block_hash()
-            }
-        };
-        let (local_chain, _) = LocalChain::from_genesis_hash(genesis_hash);
-
-        Ok(Self {
-            config,
-            local_chain,
-        })
-    }
-
-    pub fn run(mut self) -> Result<MonitorClient> {
-        let (kyoto_node, mut kyoto_client) = kyoto::NodeBuilder::new(self.config.network)
-            .add_peers(self.config.trusted_peers.iter().cloned())
+    /// Run a BTC monitor with the given configuration.
+    pub fn run(config: MonitorConfig) -> Result<MonitorClient> {
+        let (kyoto_node, mut kyoto_client) = kyoto::NodeBuilder::new(config.network)
+            .add_peers(config.trusted_peers.iter().cloned())
             // TODO: should we set this higher than default?
             // .required_peers(num_peers)
+            // Need a dummy script to prevent default match on every single block.
+            // TODO: Remove once commit
+            // https://github.com/rust-bitcoin/rust-bitcoin/commit/e7d992a5ff75807ec454655d112a671294a101dd
+            // is available in a released version of the bitcoin crate.
+            .add_scripts(vec![bitcoin::ScriptBuf::new()])
             .after_checkpoint(kyoto::HeaderCheckpoint::closest_checkpoint_below_height(
-                self.config.start_height,
-                self.config.network,
+                config.start_height,
+                config.network,
             ))
             .build()?;
 
+        let mut monitor = Self {
+            config,
+            requester: kyoto_client.requester.clone(),
+            tip: None,
+        };
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(100);
 
         // Spawn tasks.
@@ -66,15 +53,21 @@ impl Monitor {
         tokio::spawn(async move {
             info!(
                 "Starting Bitcoin monitor for network: {:?}",
-                self.config.network
+                monitor.config.network
             );
             loop {
                 tokio::select! {
                     Some(event) = kyoto_client.event_rx.recv() => {
-                        self.process_kyoto_event(event);
+                        monitor.process_kyoto_event(event);
                     }
                     Some(msg) = client_rx.recv() => {
-                        self.process_client_message(msg);
+                        monitor.process_client_message(msg);
+                    }
+                    Some(msg) = kyoto_client.info_rx.recv() => {
+                        info!("Kyoto: {msg}");
+                    }
+                    Some(msg) = kyoto_client.warn_rx.recv() => {
+                        warn!("Kyoto: {msg}");
                     }
                     else => {
                         break;
@@ -84,7 +77,7 @@ impl Monitor {
             info!("Bitcoin monitor stopped");
         });
 
-        Ok(MonitorClient { _tx: client_tx })
+        Ok(MonitorClient { tx: client_tx })
     }
 
     fn process_kyoto_event(&mut self, event: kyoto::Event) {
@@ -98,37 +91,24 @@ impl Monitor {
         }
     }
 
-    // TODO: make sure this can't race with newly added addresses from Sui.
     fn process_block(&mut self, block: kyoto::IndexedBlock) {
-        let block_id = BlockId {
-            height: block.height,
-            hash: block.block.block_hash(),
-        };
-        debug!(
-            "Processing block {block_id:?} with {} transactions",
+        info!(
+            "Got block {} at height {} with {} transactions",
+            block.block.block_hash(),
+            block.height,
             block.block.txdata.len()
         );
-
-        // Update local data structures with any relevant tx (from our watched addresses).
-        // TODO: persist changesets for crash recovery
-        let _chain_changeset = self
-            .local_chain
-            .insert_block(block_id)
-            .expect("insert_block must not fail");
     }
 
     fn process_synced(&mut self, sync_update: kyoto::messages::SyncUpdate) {
-        let tip = sync_update.tip();
-        debug!("Synchronized to height {} ({})", tip.height, tip.hash);
-
-        self.local_chain
-            .insert_block(BlockId {
-                height: tip.height,
-                hash: tip.hash,
-            })
-            .expect("insert_block must not fail");
-
-        // TODO: check whether any requested txid are now considered confirmed?
+        let tip = sync_update.tip;
+        info!(
+            "Synchronized to height {} ({}) with {} recent headers",
+            tip.height,
+            tip.hash,
+            sync_update.recent_history.len()
+        );
+        self.tip = Some(tip);
     }
 
     fn process_blocks_disconnected(
@@ -136,210 +116,109 @@ impl Monitor {
         accepted: Vec<kyoto::chain::IndexedHeader>,
         disconnected: Vec<kyoto::chain::IndexedHeader>,
     ) {
-        debug!(
+        info!(
             "Processing reorg with {} accepted blocks and {} disconnected blocks",
             accepted.len(),
             disconnected.len()
         );
-
-        let mut changeset = bdk_chain::local_chain::ChangeSet::default();
-        for block in disconnected {
-            changeset.blocks.insert(block.height, None);
-        }
-        for block in accepted {
-            changeset
-                .blocks
-                .insert(block.height, Some(block.block_hash()));
-        }
-        self.local_chain
-            .apply_changeset(&changeset)
-            .expect("apply_changeset must not fail");
     }
 
     fn process_client_message(&mut self, msg: MonitorMessage) {
         match msg {
-            // No variants yet
+            MonitorMessage::ConfirmDeposit(txid, script, result_tx) => {
+                self.confirm_deposit(txid, script, result_tx);
+            }
+            MonitorMessage::GetRecentFeeRate(percentile, result_tx) => {
+                self.get_recent_fee_rate(percentile, result_tx);
+            }
+            MonitorMessage::BroadcastTransaction(tx, result_tx) => {
+                self.broadcast_transaction(tx, result_tx);
+            }
         }
+    }
+
+    fn confirm_deposit(
+        &mut self,
+        _txid: bitcoin::Txid,
+        _script: bitcoin::ScriptBuf,
+        _result_tx: oneshot::Sender<Result<()>>,
+    ) {
+        todo!()
+    }
+
+    fn get_recent_fee_rate(
+        &mut self,
+        _percentile: u32,
+        _result_tx: oneshot::Sender<Result<FeeRate>>,
+    ) {
+        todo!()
+    }
+
+    fn broadcast_transaction(
+        &mut self,
+        tx: bitcoin::Transaction,
+        _result_tx: oneshot::Sender<Result<()>>,
+    ) {
+        let _ = self.requester.broadcast_tx(kyoto::TxBroadcast {
+            tx,
+            broadcast_policy: kyoto::TxBroadcastPolicy::AllPeers,
+        });
+        todo!()
     }
 }
 
 pub struct MonitorClient {
-    _tx: tokio::sync::mpsc::Sender<MonitorMessage>,
+    tx: tokio::sync::mpsc::Sender<MonitorMessage>,
 }
 
 impl MonitorClient {
-    // TODO: this wraps the messages to provide a functional query interface to
-    // the event loop
+    pub async fn confirm_deposit(
+        &self,
+        transaction: bitcoin::Txid,
+        address: bitcoin::ScriptBuf,
+    ) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::ConfirmDeposit(transaction, address, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
+
+    pub async fn get_recent_fee_rate(&self, percentile: u32) -> Result<FeeRate> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::GetRecentFeeRate(percentile, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
+
+    pub async fn broadcast_transaction(&self, transaction: bitcoin::Transaction) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::BroadcastTransaction(transaction, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
 }
 
 enum MonitorMessage {
-    // add a subscriber which reports deposits, withdrawals
-    //   with some kind of starting timestamp or seq number? or just start from current and then
-    // request info e.g. current utxo set
-    // request a withdrawal - are eligible utxos provided? or do we somehow also keep seq numbers in here?
-    // request governance actions e.g. key rotation
+    // Locates the given transaction in a block, waits for it to have enough
+    // confirmations, and returns deposit information. Will wait indefinitely
+    // unless the proivded channel is closed.
+    ConfirmDeposit(
+        bitcoin::Txid,
+        bitcoin::ScriptBuf,
+        oneshot::Sender<Result<()>>,
+    ),
 
-    // how do we do persistence?
-}
+    // Returns the Nth-percentile fee rate of confirmed transactions on the
+    // network, over the last several blocks.
+    // TODO: should lookback window be configurable?
+    GetRecentFeeRate(u32, oneshot::Sender<Result<FeeRate>>),
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bitcoin::Block;
-    use bitcoin::BlockHash;
-    use bitcoin::CompactTarget;
-    use bitcoin::Transaction;
-    use bitcoin::block::Header;
-    use bitcoin::block::Version;
-    use bitcoin::hashes::Hash;
-
-    fn create_test_monitor() -> Monitor {
-        let config = MontiorConfig {
-            network: bitcoin::Network::Regtest,
-            confirmation_threshold: 6,
-            trusted_peers: vec![],
-            start_height: 0,
-        };
-        Monitor::new(config).expect("Failed to create test monitor")
-    }
-
-    fn create_test_block(height: u32, transactions: Vec<Transaction>) -> kyoto::IndexedBlock {
-        let header = Header {
-            version: Version::from_consensus(1),
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: bitcoin::hash_types::TxMerkleNode::all_zeros(),
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
-        };
-
-        let block = Block {
-            header,
-            txdata: transactions,
-        };
-
-        kyoto::IndexedBlock { height, block }
-    }
-
-    #[test]
-    fn test_process_block_empty() {
-        let mut monitor = create_test_monitor();
-
-        let block = create_test_block(100, vec![]);
-        monitor.process_block(block);
-
-        // Verify the chain was updated.
-        let chain_tip = monitor.local_chain.tip();
-        assert_eq!(chain_tip.height(), 100);
-    }
-
-    #[test]
-    fn test_process_synced_update_chain_tip() {
-        use std::collections::BTreeMap;
-
-        let mut monitor = create_test_monitor();
-
-        let sync_update = kyoto::messages::SyncUpdate {
-            tip: kyoto::chain::checkpoints::HeaderCheckpoint {
-                hash: BlockHash::all_zeros(),
-                height: 500,
-            },
-            recent_history: BTreeMap::new(),
-        };
-
-        monitor.process_synced(sync_update);
-
-        // Verify chain tip was updated.
-        let chain_tip = monitor.local_chain.tip();
-        assert_eq!(chain_tip.height(), 500);
-    }
-
-    #[test]
-    fn test_process_blocks_disconnected() {
-        let mut monitor = create_test_monitor();
-
-        // First, process some blocks that will later be disconnected.
-        let block1 = create_test_block(100, vec![]);
-        monitor.process_block(block1);
-
-        let block2 = create_test_block(101, vec![]);
-        monitor.process_block(block2);
-
-        let block3 = create_test_block(102, vec![]);
-        monitor.process_block(block3);
-
-        // Verify these blocks are in the chain.
-        assert_eq!(monitor.local_chain.tip().height(), 102);
-
-        // Now create headers for disconnection that match our processed blocks.
-        let disconnected = vec![
-            kyoto::chain::IndexedHeader {
-                height: 100,
-                header: Header {
-                    version: Version::from_consensus(1),
-                    prev_blockhash: BlockHash::all_zeros(),
-                    merkle_root: bitcoin::hash_types::TxMerkleNode::all_zeros(),
-                    time: 0,
-                    bits: CompactTarget::from_consensus(0),
-                    nonce: 0,
-                },
-            },
-            kyoto::chain::IndexedHeader {
-                height: 101,
-                header: Header {
-                    version: Version::from_consensus(1),
-                    prev_blockhash: BlockHash::all_zeros(),
-                    merkle_root: bitcoin::hash_types::TxMerkleNode::all_zeros(),
-                    time: 0,
-                    bits: CompactTarget::from_consensus(0),
-                    nonce: 0,
-                },
-            },
-            kyoto::chain::IndexedHeader {
-                height: 102,
-                header: Header {
-                    version: Version::from_consensus(1),
-                    prev_blockhash: BlockHash::all_zeros(),
-                    merkle_root: bitcoin::hash_types::TxMerkleNode::all_zeros(),
-                    time: 0,
-                    bits: CompactTarget::from_consensus(0),
-                    nonce: 0,
-                },
-            },
-        ];
-
-        // Create new accepted blocks with different hashes (different nonces).
-        let accepted = vec![
-            kyoto::chain::IndexedHeader {
-                height: 100,
-                header: Header {
-                    version: Version::from_consensus(1),
-                    prev_blockhash: BlockHash::all_zeros(),
-                    merkle_root: bitcoin::hash_types::TxMerkleNode::all_zeros(),
-                    time: 0,
-                    bits: CompactTarget::from_consensus(0),
-                    nonce: 999,
-                },
-            },
-            kyoto::chain::IndexedHeader {
-                height: 101,
-                header: Header {
-                    version: Version::from_consensus(1),
-                    prev_blockhash: BlockHash::all_zeros(),
-                    merkle_root: bitcoin::hash_types::TxMerkleNode::all_zeros(),
-                    time: 0,
-                    bits: CompactTarget::from_consensus(0),
-                    nonce: 1000,
-                },
-            },
-        ];
-
-        // Process the reorg.
-        monitor.process_blocks_disconnected(accepted.clone(), disconnected);
-
-        // Verify the chain tip is from the replacement blocks.
-        let chain_tip = monitor.local_chain.tip();
-        assert_eq!(chain_tip.height(), 101);
-        assert_eq!(chain_tip.hash(), accepted[1].block_hash());
-    }
+    // Broadcast a transaction to the network.
+    BroadcastTransaction(bitcoin::Transaction, oneshot::Sender<Result<()>>),
 }
