@@ -2,7 +2,7 @@ use crate::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use shared::S3Config;
+use hashi_guardian_shared::S3Config;
 use tracing::error;
 use tracing::info;
 

@@ -2308,9 +2308,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "dotenvy",
+ "hashi-guardian-shared",
  "reqwest",
  "serde",
- "shared",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2324,7 +2324,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "axum 0.7.9",
- "shared",
+ "hashi-guardian-shared",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2457,6 +2457,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hashi-guardian-shared"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4543,13 +4550,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
-]
-
-[[package]]
-name = "shared"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]

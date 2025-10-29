@@ -58,7 +58,7 @@ COPY crates /crates
 COPY Cargo.toml /Cargo.toml
 COPY Cargo.lock /Cargo.lock
 
-WORKDIR /crates/hashi-guardian/enclave/
+WORKDIR /crates/hashi-guardian-enclave/
 RUN cargo build --locked --no-default-features --release --target x86_64-unknown-linux-musl
 
 WORKDIR /
@@ -77,10 +77,10 @@ COPY --from=core-busybox /bin/sh initramfs/sh
 COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
 
-RUN cp /crates/hashi-guardian/enclave/target/${TARGET}/release/init initramfs
+RUN cp /crates/hashi-guardian-enclave/target/${TARGET}/release/init initramfs
 RUN cp /target/${TARGET}/release/guardian-server initramfs/server
-RUN cp /crates/hashi-guardian/enclave/enclave_utils/traffic_forwarder.py initramfs/
-RUN cp /crates/hashi-guardian/enclave/enclave_utils/run.sh initramfs/
+RUN cp /crates/hashi-guardian-enclave/src/traffic_forwarder.py initramfs/
+RUN cp /crates/hashi-guardian-enclave/src/run.sh initramfs/
 
 RUN <<-EOF
     set -eux

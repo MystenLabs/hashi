@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/*",
-  "crates/hashi-guardian/src/server",
-  "crates/hashi-guardian/src/shared",
+]
+exclude = [
+  "crates/hashi-guardian-enclave",
 ]

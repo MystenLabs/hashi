@@ -1,5 +1,5 @@
 use anyhow::Result;
-use shared::S3Config;
+use hashi_guardian_shared::S3Config;
 use std::env;
 use tracing::info;
 
