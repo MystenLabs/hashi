@@ -97,12 +97,16 @@ impl DkgManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<avss::Message> {
+        let dealer_session_id = self
+            .static_data
+            .session_context
+            .dealer_session_id(&self.static_data.validator_info.address);
         let dealer = avss::Dealer::new(
             None,
             self.static_data.nodes.clone(),
             self.static_data.dkg_config.threshold,
             self.static_data.dkg_config.max_faulty,
-            self.static_data.session_context.session_id.to_vec(),
+            dealer_session_id.to_vec(),
         )?;
         let message = dealer.create_message(rng)?;
         Ok(message)
@@ -113,11 +117,15 @@ impl DkgManager {
         message: &avss::Message,
         dealer_address: ValidatorAddress,
     ) -> DkgResult<ValidatorSignature> {
+        let dealer_session_id = self
+            .static_data
+            .session_context
+            .dealer_session_id(&dealer_address);
         let receiver = avss::Receiver::new(
             self.static_data.nodes.clone(),
             self.static_data.validator_info.party_id,
             self.static_data.dkg_config.threshold,
-            self.static_data.session_context.session_id.to_vec(),
+            dealer_session_id.to_vec(),
             None, // commitment: None for initial DKG
             self.static_data.encryption_key.clone(),
         );
