@@ -5,7 +5,7 @@ module hashi::config;
 
 use hashi::config_value::{Self, Value};
 use std::string::String;
-use sui::vec_map::VecMap;
+use sui::vec_map::{Self, VecMap};
 
 const PACKAGE_VERSION: u64 = 1;
 
@@ -61,4 +61,14 @@ public(package) fun paused(self: &Config): bool {
 
 public(package) fun set_paused(self: &mut Config, paused: bool) {
     self.upsert(PAUSED_KEY, config_value::new_bool(paused))
+}
+
+//
+// Constructor
+//
+
+public(package) fun create(): Config {
+    Config {
+        config: vec_map::empty(),
+    }
 }
