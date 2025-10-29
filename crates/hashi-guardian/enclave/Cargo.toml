@@ -5,8 +5,3 @@ members = [
     "enclave_utils/aws",
     "enclave_utils/system",
 ]
-
-exclude = [
-    "src/server",
-    "src/shared",
-]

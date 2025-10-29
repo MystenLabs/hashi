@@ -54,17 +54,16 @@ COPY --from=user-linux-nitro /nsm.ko .
 COPY --from=user-linux-nitro /linux.config .
 
 FROM base as build
-COPY src/server/ /src/server/
-COPY src/shared/ /src/shared/
-COPY enclave/enclave_utils/ /enclave_utils/
-COPY enclave/Cargo.toml /Cargo.toml
-COPY enclave/Cargo.lock /Cargo.lock
+COPY crates /crates
+COPY Cargo.toml /Cargo.toml
+COPY Cargo.lock /Cargo.lock
 
+WORKDIR /crates/hashi-guardian/enclave/
 RUN cargo build --locked --no-default-features --release --target x86_64-unknown-linux-musl
 
-WORKDIR /src/server
+WORKDIR /
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
-RUN cargo build --no-default-features --release --target x86_64-unknown-linux-musl
+RUN cargo build --locked --no-default-features --release --target x86_64-unknown-linux-musl -p guardian-server
 
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
@@ -77,10 +76,11 @@ COPY --from=core-ca-certificates /etc/ssl/certs initramfs
 COPY --from=core-busybox /bin/sh initramfs/sh
 COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
-RUN cp /target/${TARGET}/release/init initramfs
-RUN cp /src/server/target/${TARGET}/release/guardian-server initramfs/server
-RUN cp /enclave_utils/traffic_forwarder.py initramfs/
-RUN cp /enclave_utils/run.sh initramfs/
+
+RUN cp /crates/hashi-guardian/enclave/target/${TARGET}/release/init initramfs
+RUN cp /target/${TARGET}/release/guardian-server initramfs/server
+RUN cp /crates/hashi-guardian/enclave/enclave_utils/traffic_forwarder.py initramfs/
+RUN cp /crates/hashi-guardian/enclave/enclave_utils/run.sh initramfs/
 
 RUN <<-EOF
     set -eux

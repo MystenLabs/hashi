@@ -14,7 +14,7 @@ out/enclaveos.tar: out
 		--platform linux/amd64 \
 		--output type=local,rewrite-timestamp=true,dest=out\
 		-f Containerfile \
-		.
+		../..
 
 .PHONY: run
 run: out/nitro.eif
