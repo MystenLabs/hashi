@@ -10,7 +10,7 @@ use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Node;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use sui_crypto::Signer;
 
 pub use types::{
@@ -45,13 +45,13 @@ pub struct DkgStaticData {
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
-    pub validator_weights: BTreeMap<ValidatorAddress, u16>,
+    pub validator_weights: HashMap<ValidatorAddress, u16>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DkgRuntimeState {
-    pub dealer_outputs: BTreeMap<ValidatorAddress, avss::ReceiverOutput>,
-    pub dealer_messages: BTreeMap<ValidatorAddress, avss::Message>,
+    pub dealer_outputs: HashMap<ValidatorAddress, avss::ReceiverOutput>,
+    pub dealer_messages: HashMap<ValidatorAddress, avss::Message>,
 }
 
 impl DkgStaticData {
@@ -63,7 +63,7 @@ impl DkgStaticData {
         bls_signing_key: crate::bls::Bls12381PrivateKey,
     ) -> DkgResult<Self> {
         let nodes = create_nodes(&dkg_config.validator_registry);
-        let validator_weights: BTreeMap<_, _> = dkg_config
+        let validator_weights: HashMap<_, _> = dkg_config
             .validator_registry
             .iter()
             .map(|(addr, v)| (addr.clone(), v.weight))
@@ -90,8 +90,8 @@ impl DkgManager {
         Self {
             static_data,
             runtime_state: DkgRuntimeState {
-                dealer_outputs: BTreeMap::new(),
-                dealer_messages: BTreeMap::new(),
+                dealer_outputs: HashMap::new(),
+                dealer_messages: HashMap::new(),
             },
         }
     }
@@ -324,7 +324,7 @@ impl DkgManager {
 fn validate_certificate(
     cert: &DkgCertificate,
     static_data: &DkgStaticData,
-    dealer_messages: &BTreeMap<ValidatorAddress, avss::Message>,
+    dealer_messages: &HashMap<ValidatorAddress, avss::Message>,
 ) -> DkgResult<()> {
     if !static_data
         .dkg_config
@@ -356,7 +356,7 @@ fn validate_certificate(
 
 fn validate_message_hash(
     cert: &DkgCertificate,
-    dealer_messages: &BTreeMap<ValidatorAddress, avss::Message>,
+    dealer_messages: &HashMap<ValidatorAddress, avss::Message>,
     session_context: &SessionContext,
 ) -> DkgResult<()> {
     let message = dealer_messages.get(&cert.dealer).ok_or_else(|| {
@@ -379,7 +379,7 @@ fn validate_signature_set(
     signatures: &[ValidatorSignature],
     signature_type: SignatureSetType,
     required_weight: u16,
-    validator_weights: &BTreeMap<ValidatorAddress, u16>,
+    validator_weights: &HashMap<ValidatorAddress, u16>,
 ) -> DkgResult<()> {
     let mut seen_signers = std::collections::HashSet::new();
     let mut total_weight = 0u16;
@@ -423,7 +423,7 @@ fn create_nodes(validators: &ValidatorRegistry) -> Nodes<EncryptionGroupElement>
 
 fn compute_total_signature_weight(
     signatures: &[ValidatorSignature],
-    validator_weights: &BTreeMap<ValidatorAddress, u16>,
+    validator_weights: &HashMap<ValidatorAddress, u16>,
 ) -> DkgResult<u16> {
     let mut total_weight: u16 = 0;
     for sig in signatures {
@@ -441,7 +441,7 @@ fn compute_total_signature_weight(
 
 fn has_sufficient_weighted_signatures(
     signatures: &[ValidatorSignature],
-    validator_weights: &BTreeMap<ValidatorAddress, u16>,
+    validator_weights: &HashMap<ValidatorAddress, u16>,
     required_weight: u16,
 ) -> bool {
     match compute_total_signature_weight(signatures, validator_weights) {
@@ -2297,7 +2297,7 @@ mod tests {
             DkgConfig::new(100, validators, threshold, max_faulty).unwrap()
         }
 
-        pub fn create_validator_weights(config: &DkgConfig) -> BTreeMap<ValidatorAddress, u16> {
+        pub fn create_validator_weights(config: &DkgConfig) -> HashMap<ValidatorAddress, u16> {
             config
                 .validator_registry
                 .iter()
@@ -2422,7 +2422,7 @@ mod tests {
 
         #[test]
         fn test_signature_weight_overflow() {
-            let mut validator_weights = BTreeMap::new();
+            let mut validator_weights = HashMap::new();
             let addr0 = ValidatorAddress([0; 32]);
             let addr1 = ValidatorAddress([1; 32]);
             validator_weights.insert(addr0.clone(), u16::MAX);
@@ -2485,7 +2485,7 @@ mod tests {
                 session_context: session_context.clone(),
             };
 
-            let mut dealer_messages = BTreeMap::new();
+            let mut dealer_messages = HashMap::new();
             dealer_messages.insert(dealer_addr, dealer_message);
 
             let result = validate_message_hash(&cert, &dealer_messages, &session_context);
@@ -2507,7 +2507,7 @@ mod tests {
                 session_context: session_context.clone(),
             };
 
-            let dealer_messages = BTreeMap::new(); // Empty - message not received
+            let dealer_messages = HashMap::new(); // Empty - message not received
 
             let result = validate_message_hash(&cert, &dealer_messages, &session_context);
             assert!(result.is_err());
@@ -2540,7 +2540,7 @@ mod tests {
                 session_context: session_context.clone(),
             };
 
-            let mut dealer_messages = BTreeMap::new();
+            let mut dealer_messages = HashMap::new();
             dealer_messages.insert(dealer_addr, dealer_message);
 
             let result = validate_message_hash(&cert, &dealer_messages, &session_context);
@@ -2561,7 +2561,7 @@ mod tests {
         fn create_valid_cert_and_data() -> (
             DkgCertificate,
             DkgStaticData,
-            BTreeMap<ValidatorAddress, avss::Message>,
+            HashMap<ValidatorAddress, avss::Message>,
         ) {
             let weights = vec![2, 2, 2, 2, 2]; // 5 validators
             let config = create_test_config_with_weights(&weights, 3, 1);
@@ -2592,7 +2592,7 @@ mod tests {
                 session_context: session_context.clone(),
             };
 
-            let mut dealer_messages = BTreeMap::new();
+            let mut dealer_messages = HashMap::new();
             dealer_messages.insert(dealer_addr, dealer_message);
 
             (cert, static_data, dealer_messages)
@@ -2643,7 +2643,7 @@ mod tests {
             // Create static data with CORRECT session for validation
             let correct_static_data = create_test_static_data(0, config);
 
-            let mut dealer_messages = BTreeMap::new();
+            let mut dealer_messages = HashMap::new();
             dealer_messages.insert(dealer_addr, dealer_message);
 
             // Validation should fail because the hash was computed with a different session
