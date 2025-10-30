@@ -13,9 +13,8 @@ const EProposalThresholdNotSet: vector<u8> = b"Proposal threshold not set";
 
 // TODO: do we want to store all seq_num for each proposal type separately?
 // or use a global seq_num for all proposal types?
+// TODO: enable future config options to be added via dynamic fields
 public struct Config has store {
-    proposal_sequential_execution: VecMap<TypeName, bool>,
-    latest_proposal_executed: VecMap<TypeName, u64>,
     proposal_threshold_bps: VecMap<TypeName, u64>,
     upgrade_cap: UpgradeCap,
     seq_num: u64,
@@ -35,13 +34,6 @@ public(package) fun authorize_upgrade(
 
 public(package) fun seq_num(self: &Config): u64 {
     self.seq_num
-}
-
-public(package) fun increment_seq_num<T>(self: &mut Config) {
-    self.seq_num = self.seq_num + 1;
-    self
-        .latest_proposal_executed
-        .insert(type_name::with_defining_ids<T>(), self.seq_num);
 }
 
 public(package) fun set_proposal_threshold<T>(self: &mut Config, bps: u64) {
