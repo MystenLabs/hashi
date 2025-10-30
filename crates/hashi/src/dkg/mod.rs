@@ -19,6 +19,10 @@ pub use types::{
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 
+// DKG protocol
+// 1) A dealer sends out a message to all parties.
+// 2) Once sufficient valid signatures are received from the parties, the dealer sends a certificate to Sui (TOB).
+// 3) Once sufficient valid certificates are received, a party completes the protocol locally.
 pub struct DkgManager {
     // Immutable during a given session
     pub validator_info: ValidatorInfo,
