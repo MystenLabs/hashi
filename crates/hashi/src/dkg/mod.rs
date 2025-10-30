@@ -1,4 +1,4 @@
-//! Distributed Key Generation (DKG) module for Hashi bridge
+//! Distributed Key Generation (DKG) module
 
 pub mod types;
 
@@ -6,8 +6,7 @@ use crate::communication::AuthenticatedMessage;
 use crate::types::ValidatorAddress;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
-use fastcrypto_tbls::nodes::Node;
-use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_crypto::Signer;
 
@@ -176,33 +175,43 @@ impl DkgManager {
 
     pub fn process_certificates(
         &self,
-        validator_to_certificate: &std::collections::BTreeMap<ValidatorAddress, DkgCertificate>,
+        validator_to_certificate: &std::collections::HashMap<ValidatorAddress, DkgCertificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.static_data.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
-        // Take exactly threshold ReceiverOutput's in deterministic order (BTreeMap guarantees order)
-        let outputs: Vec<_> = validator_to_certificate
-            .values()
-            .take(threshold as usize)
-            .map(|cert| {
-                self.runtime_state
-                    .dealer_outputs
-                    .get(&cert.dealer)
-                    .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
-                            "No dealer output found for dealer: {:?}.",
-                            cert.dealer
-                        ))
-                    })
-                    .cloned()
-            })
-            .collect::<Result<_, _>>()?;
-        let combined = avss::ReceiverOutput::complete_dkg(threshold, outputs)
-            .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
+        let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> =
+            validator_to_certificate
+                .values()
+                .map(|cert| {
+                    let dealer_info = self
+                        .static_data
+                        .dkg_config
+                        .validator_registry
+                        .get(&cert.dealer)
+                        .ok_or_else(|| {
+                            DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
+                        })?;
+                    let output = self
+                        .runtime_state
+                        .dealer_outputs
+                        .get(&cert.dealer)
+                        .ok_or_else(|| {
+                            DkgError::ProtocolFailed(format!(
+                                "No dealer output found for dealer: {:?}.",
+                                cert.dealer
+                            ))
+                        })?
+                        .clone();
+                    Ok((dealer_info.party_id, output))
+                })
+                .collect::<Result<_, DkgError>>()?;
+        let combined_output =
+            avss::ReceiverOutput::complete_dkg(threshold, &self.static_data.nodes, outputs)
+                .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
         Ok(DkgOutput {
-            public_key: combined.vk,
-            key_shares: combined.my_shares,
-            commitments: combined.commitments,
+            public_key: combined_output.vk,
+            key_shares: combined_output.my_shares,
+            commitments: combined_output.commitments,
             session_context: self.static_data.session_context.clone(),
         })
     }
@@ -294,7 +303,7 @@ impl DkgManager {
         >,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.static_data.dkg_config.threshold;
-        let mut validator_to_certificate = std::collections::BTreeMap::new();
+        let mut validator_to_certificate = std::collections::HashMap::new();
         let mut dealer_weight_sum = 0u16;
         loop {
             if dealer_weight_sum >= threshold {
@@ -1342,7 +1351,7 @@ mod tests {
             .collect();
 
         // Receiver processes all dealer messages and creates certificates
-        let mut certificates = std::collections::BTreeMap::new();
+        let mut certificates = std::collections::HashMap::new();
         for (i, message) in dealer_messages.iter().enumerate() {
             let dealer_address = dealer_managers[i]
                 .static_data
@@ -1448,7 +1457,7 @@ mod tests {
             session_context: manager.static_data.session_context.clone(),
         };
 
-        let mut certificates = std::collections::BTreeMap::new();
+        let mut certificates = std::collections::HashMap::new();
         certificates.insert(cert0.dealer.clone(), cert0);
         certificates.insert(cert1.dealer.clone(), cert1);
 
@@ -1461,15 +1470,6 @@ mod tests {
                 .contains("No dealer output found for dealer")
         );
     }
-
-    // Note: Weight-based collection logic in run_as_party is tested in test_run_dkg
-    // with weights [1, 1, 1, 2, 2] which demonstrates that collection continues
-    // until dealer_weight_sum >= threshold.
-    //
-    // The edge case where high-weight dealers meet the weight threshold with fewer
-    // certificates than required for AVSS (causing DKG to fail) is an accepted limitation
-    // of the design: DKG will fail if we don't have enough distinct dealers even if
-    // their combined weight is sufficient.
 
     #[tokio::test]
     async fn test_run_dkg() {
@@ -2394,21 +2394,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_as_party_high_weight_dealer_first() {
-        // Test that a single high-weight dealer can satisfy threshold
+        // Test that dealers with sufficient combined weight can complete DKG
         // Use weights [4, 1, 1, 1, 1] (total = 8)
-        // Validator 0 alone has weight 4 >= threshold 3
         // Create only 2 dealers (validator 0 with weight 4, validator 1 with weight 1)
+        // Combined weight: 4 + 1 = 5 >= threshold 3
         let test_setup = setup_weight_based_test(vec![4, 1, 1, 1, 1], 3, Some(2));
         let (result, _mock_tob) = setup_party_and_run(&test_setup, 2).await;
 
-        // Should fail because we need exactly threshold (3) dealers for AVSS,
-        // but we only have 2 dealers even though weight is sufficient
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        // Should succeed: complete_dkg() validates that dealer weights sum >= threshold
+        // which is satisfied (5 >= 3)
         assert!(
-            err.contains("complete DKG") || err.contains("Failed to complete DKG"),
-            "Expected DKG completion error, got: {}",
-            err
+            result.is_ok(),
+            "Expected success with sufficient dealer weight, got: {:?}",
+            result.unwrap_err()
         );
     }
 
