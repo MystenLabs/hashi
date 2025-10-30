@@ -2393,7 +2393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_as_party_high_weight_dealer_first() {
+    async fn test_run_as_party_sufficient_combined_weight() {
         // Test that dealers with sufficient combined weight can complete DKG
         // Use weights [4, 1, 1, 1, 1] (total = 8)
         // Create only 2 dealers (validator 0 with weight 4, validator 1 with weight 1)
