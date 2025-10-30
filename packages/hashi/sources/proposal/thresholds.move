@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 module hashi::proposal_thresholds;
+use hashi::claim::Claim;
 use hashi::deny::Deny;
-use hashi::deposit::Deposit;
 use hashi::hashi::Hashi;
 use hashi::register_coin::RegisterCoin;
 use hashi::upgrade::Upgrade;
 
-const DEFAULT_PROPOSAL_THRESHOLD_BPS: u64 = 10000;
+const CONFIG_THRESHOLD_BPS: u64 = 10000;
+const DENY_THRESHOLD_BPS: u64 = 10000;
+const CLAIM_THRESHOLD_BPS: u64 = 10000;
+const REGISTER_COIN_THRESHOLD_BPS: u64 = 10000;
 
 /// Initialize default proposal thresholds in a single place.
 ///
@@ -20,18 +23,18 @@ public fun initialize_default_thresholds(hashi: &mut Hashi) {
 
     hashi::config::set_proposal_threshold<Upgrade>(
         cfg,
-        DEFAULT_PROPOSAL_THRESHOLD_BPS,
+        CONFIG_THRESHOLD_BPS,
     );
     hashi::config::set_proposal_threshold<Deny>(
         cfg,
-        DEFAULT_PROPOSAL_THRESHOLD_BPS,
+        DENY_THRESHOLD_BPS,
     );
-    hashi::config::set_proposal_threshold<Deposit>(
+    hashi::config::set_proposal_threshold<Claim>(
         cfg,
-        DEFAULT_PROPOSAL_THRESHOLD_BPS,
+        CLAIM_THRESHOLD_BPS,
     );
     hashi::config::set_proposal_threshold<RegisterCoin>(
         cfg,
-        DEFAULT_PROPOSAL_THRESHOLD_BPS,
+        REGISTER_COIN_THRESHOLD_BPS,
     );
 }

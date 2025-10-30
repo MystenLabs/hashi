@@ -339,7 +339,7 @@ fun verify_certificate_and_weight(
     (aggregate_weight as u16)
 }
 
-public struct CertifiedMessage has drop {
+public struct CertifiedMessage has drop, store {
     intent_type: u8,
     intent_version: u8,
     cert_epoch: u64,

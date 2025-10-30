@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 module hashi::proposal;
+use hashi::bls::CertifiedMessage;
 use hashi::governance_events;
 use hashi::hashi::Hashi;
 use std::string::String;
@@ -15,6 +16,7 @@ public struct Proposal<T> has key, store {
     hashi: ID,
     creator: address,
     votes: vector<address>,
+    certificate: Option<CertifiedMessage>,
     metadata: VecMap<String, String>,
     seq_num: u64,
     data: T,
@@ -43,6 +45,7 @@ public fun new<T: store>(
     hashi: &mut Hashi,
     data: T,
     metadata: VecMap<String, String>,
+    certificate: Option<CertifiedMessage>,
     ctx: &mut TxContext,
 ) {
     // only voters can create proposal
@@ -52,6 +55,9 @@ public fun new<T: store>(
     );
     let votes = vector[ctx.sender()];
     let seq_num = hashi.seq_num();
+
+    // TODO: check certificate validity
+    if (certificate.is_some()) {};
 
     let proposal = Proposal {
         id: derived_object::claim(
@@ -63,6 +69,7 @@ public fun new<T: store>(
         creator: ctx.sender(),
         hashi: object::id(hashi),
         votes,
+        certificate,
         seq_num,
         metadata,
         data,
@@ -122,6 +129,8 @@ public fun remove_vote<T>(
 }
 
 public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
+    if (proposal.certificate.is_some()) return true;
+
     let valid_voting_power = proposal
         .votes
         .fold!(
