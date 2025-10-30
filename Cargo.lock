@@ -1640,6 +1640,7 @@ dependencies = [
  "bdk_chain",
  "bdk_core",
  "bitcoin",
+ "bitcoincore-rpc",
  "clap",
  "kyoto-cbf",
  "tokio",
