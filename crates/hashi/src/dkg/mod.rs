@@ -216,6 +216,7 @@ impl DkgManager {
         })
     }
 
+    // TODO: Cache response if already answered to protect against DoS attacks
     pub fn handle_send_share_request(
         &mut self,
         authenticated_request: AuthenticatedMessage<SendShareRequest>,
