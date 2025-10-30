@@ -453,7 +453,9 @@ fn compute_total_signature_weight(
                     sender: sig.validator.clone(),
                     reason: "Signature from unknown validator".to_string(),
                 })?;
-        total_weight += weight;
+        total_weight = total_weight
+            .checked_add(*weight)
+            .ok_or_else(|| DkgError::ProtocolFailed("Weight overflow".parse().unwrap()))?;
     }
     Ok(total_weight)
 }
