@@ -36,8 +36,6 @@ pub struct AuthenticatedMessage<M> {
 }
 
 /// Point-to-point channel for direct validator-to-validator messaging
-///
-/// Messages are not guaranteed to be delivered in any particular order.
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
     async fn send_share(
