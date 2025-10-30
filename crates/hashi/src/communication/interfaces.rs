@@ -1,4 +1,4 @@
-//! Generic communication channel interfaces
+//! Communication channel interfaces
 
 use crate::dkg::{SendShareRequest, SendShareResponse};
 use crate::types::ValidatorAddress;
