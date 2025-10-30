@@ -295,8 +295,7 @@ pub struct ValidatorSignature {
 pub struct DkgCertificate {
     pub dealer: ValidatorAddress,
     pub message_hash: MessageHash,
-    pub data_availability_signatures: Vec<ValidatorSignature>,
-    pub dkg_signatures: Vec<ValidatorSignature>,
+    pub signatures: Vec<ValidatorSignature>,
     pub session_context: SessionContext,
 }
 

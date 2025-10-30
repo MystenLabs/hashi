@@ -19,21 +19,6 @@ pub use types::{
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 
-#[derive(Debug, Clone, Copy)]
-enum SignatureSetType {
-    DataAvailability,
-    Dkg,
-}
-
-impl std::fmt::Display for SignatureSetType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DataAvailability => write!(f, "data availability"),
-            Self::Dkg => write!(f, "DKG"),
-        }
-    }
-}
-
 /// Data that remains constant for a given session
 pub struct DkgStaticData {
     pub validator_info: ValidatorInfo,
@@ -167,8 +152,7 @@ impl DkgManager {
         Ok(DkgCertificate {
             dealer: self.static_data.validator_info.address.clone(),
             message_hash,
-            data_availability_signatures: signatures.clone(),
-            dkg_signatures: signatures,
+            signatures,
             session_context: self.static_data.session_context.clone(),
         })
     }
@@ -367,16 +351,7 @@ fn validate_certificate(
     }
     validate_message_hash(cert, dealer_messages, &static_data.session_context)?;
     validate_signature_set(
-        &cert.data_availability_signatures,
-        SignatureSetType::DataAvailability,
-        static_data
-            .dkg_config
-            .required_data_availability_signatures() as u16,
-        &static_data.validator_weights,
-    )?;
-    validate_signature_set(
-        &cert.dkg_signatures,
-        SignatureSetType::Dkg,
+        &cert.signatures,
         static_data.dkg_config.required_dkg_signatures() as u16,
         &static_data.validator_weights,
     )?;
@@ -406,7 +381,6 @@ fn validate_message_hash(
 
 fn validate_signature_set(
     signatures: &[ValidatorSignature],
-    signature_type: SignatureSetType,
     required_weight: u16,
     validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
 ) -> DkgResult<()> {
@@ -415,15 +389,12 @@ fn validate_signature_set(
     for sig in signatures {
         if !seen_signers.insert(&sig.validator) {
             return Err(DkgError::InvalidCertificate(format!(
-                "Duplicate signer in {}: {:?}",
-                signature_type, sig.validator
+                "Duplicate signer: {:?}",
+                sig.validator
             )));
         }
         let weight = validator_weights.get(&sig.validator).ok_or_else(|| {
-            DkgError::InvalidCertificate(format!(
-                "Unknown signer in {}: {:?}",
-                signature_type, sig.validator
-            ))
+            DkgError::InvalidCertificate(format!("Unknown signer: {:?}", sig.validator))
         })?;
         total_weight = total_weight
             .checked_add(*weight)
@@ -431,8 +402,8 @@ fn validate_signature_set(
     }
     if total_weight < required_weight {
         return Err(DkgError::InvalidCertificate(format!(
-            "Insufficient {} signature weight: got {}, need {}",
-            signature_type, total_weight, required_weight
+            "Insufficient signature weight: got {}, need {}",
+            total_weight, required_weight
         )));
     }
     Ok(())
@@ -1076,11 +1047,7 @@ mod tests {
             certificate.dealer,
             manager.static_data.validator_info.address
         );
-        assert_eq!(certificate.dkg_signatures.len(), required_sigs);
-        assert_eq!(
-            certificate.data_availability_signatures.len(),
-            required_sigs
-        );
+        assert_eq!(certificate.signatures.len(), required_sigs);
         assert_eq!(
             certificate.session_context.session_id,
             manager.static_data.session_context.session_id
@@ -1441,8 +1408,7 @@ mod tests {
                 .address
                 .clone(),
             message_hash: [0; 32],
-            data_availability_signatures: mock_signatures.clone(),
-            dkg_signatures: mock_signatures.clone(),
+            signatures: mock_signatures.clone(),
             session_context: manager.static_data.session_context.clone(),
         };
         let cert1 = DkgCertificate {
@@ -1453,8 +1419,7 @@ mod tests {
                 .address
                 .clone(),
             message_hash: [0; 32],
-            data_availability_signatures: mock_signatures.clone(),
-            dkg_signatures: mock_signatures,
+            signatures: mock_signatures,
             session_context: manager.static_data.session_context.clone(),
         };
 
@@ -2291,11 +2256,7 @@ mod tests {
         let message_hash = compute_message_hash(message, dealer_addr, session_context).unwrap();
 
         // Create minimal valid signatures to pass validation
-        let da_required = config.required_data_availability_signatures() as u16;
         let dkg_required = config.required_dkg_signatures() as u16;
-        let max_required = da_required.max(dkg_required);
-
-        let mut da_sigs = vec![];
         let mut dkg_sigs = vec![];
         let mut weight_sum = 0u16;
 
@@ -2306,11 +2267,10 @@ mod tests {
                 validator: signer_addr,
                 signature: vec![0u8; 64], // Dummy signature
             };
-            da_sigs.push(sig.clone());
             dkg_sigs.push(sig);
             weight_sum += w;
 
-            if weight_sum >= max_required {
+            if weight_sum >= dkg_required {
                 break;
             }
         }
@@ -2318,8 +2278,7 @@ mod tests {
         DkgCertificate {
             dealer: dealer_addr.clone(),
             message_hash,
-            data_availability_signatures: da_sigs,
-            dkg_signatures: dkg_sigs,
+            signatures: dkg_sigs,
             session_context: session_context.clone(),
         }
     }
@@ -2781,7 +2740,6 @@ mod tests {
 
             let result = validate_signature_set(
                 &signatures,
-                SignatureSetType::DataAvailability,
                 7, // require exactly 7
                 &validator_weights,
             );
@@ -2806,8 +2764,7 @@ mod tests {
                 },
             ];
 
-            let result =
-                validate_signature_set(&signatures, SignatureSetType::Dkg, 5, &validator_weights);
+            let result = validate_signature_set(&signatures, 5, &validator_weights);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Duplicate signer"));
         }
@@ -2824,12 +2781,7 @@ mod tests {
                 signature: vec![0u8; 96],
             }];
 
-            let result = validate_signature_set(
-                &signatures,
-                SignatureSetType::DataAvailability,
-                1,
-                &validator_weights,
-            );
+            let result = validate_signature_set(&signatures, 1, &validator_weights);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Unknown signer"));
         }
@@ -2845,7 +2797,6 @@ mod tests {
 
             let result = validate_signature_set(
                 &signatures,
-                SignatureSetType::Dkg,
                 6, // require 6, but only have 5
                 &validator_weights,
             );
@@ -2875,12 +2826,7 @@ mod tests {
                 },
             ];
 
-            let result = validate_signature_set(
-                &signatures,
-                SignatureSetType::DataAvailability,
-                1,
-                &validator_weights,
-            );
+            let result = validate_signature_set(&signatures, 1, &validator_weights);
             assert!(result.is_err());
             assert!(
                 result
@@ -2915,8 +2861,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash,
-                data_availability_signatures: vec![],
-                dkg_signatures: vec![],
+                signatures: vec![],
                 session_context: session_context.clone(),
             };
 
@@ -2937,8 +2882,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash: [0; 32],
-                data_availability_signatures: vec![],
-                dkg_signatures: vec![],
+                signatures: vec![],
                 session_context: session_context.clone(),
             };
 
@@ -2970,8 +2914,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash: [99; 32], // Wrong hash
-                data_availability_signatures: vec![],
-                dkg_signatures: vec![],
+                signatures: vec![],
                 session_context: session_context.clone(),
             };
 
@@ -3015,15 +2958,13 @@ mod tests {
                 compute_message_hash(&dealer_message, &dealer_addr, session_context).unwrap();
 
             // Create sufficient signatures (4 validators with weight 2 each = 8)
-            // DA requires 2f+1 = 3, DKG requires t+f = 4
-            let da_sigs = create_test_signatures(&[0, 1, 2], &config); // weight = 6 >= 3
+            // DKG requires t+f = 4
             let dkg_sigs = create_test_signatures(&[0, 1, 2, 3], &config); // weight = 8 >= 4
 
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash,
-                data_availability_signatures: da_sigs,
-                dkg_signatures: dkg_sigs,
+                signatures: dkg_sigs,
                 session_context: session_context.clone(),
             };
 
@@ -3070,8 +3011,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash: wrong_hash, // Hash computed with wrong session
-                data_availability_signatures: vec![], // Empty is fine since hash check happens first
-                dkg_signatures: vec![],
+                signatures: vec![],
                 session_context: wrong_session_context, // Doesn't matter what we put here
             };
 
@@ -3108,28 +3048,11 @@ mod tests {
         }
 
         #[test]
-        fn test_invalid_da_signatures() {
-            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
-
-            // Empty DA signatures - insufficient weight
-            cert.data_availability_signatures = vec![];
-
-            let result = validate_certificate(&cert, &static_data, &dealer_messages);
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Insufficient data availability signature weight")
-            );
-        }
-
-        #[test]
         fn test_invalid_dkg_signatures() {
             let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
 
             // Empty DKG signatures - insufficient weight
-            cert.dkg_signatures = vec![];
+            cert.signatures = vec![];
 
             let result = validate_certificate(&cert, &static_data, &dealer_messages);
             assert!(result.is_err());
@@ -3137,7 +3060,7 @@ mod tests {
                 result
                     .unwrap_err()
                     .to_string()
-                    .contains("Insufficient DKG signature weight")
+                    .contains("Insufficient signature weight")
             );
         }
 
