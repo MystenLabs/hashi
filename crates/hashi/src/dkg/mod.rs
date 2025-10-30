@@ -19,8 +19,8 @@ pub use types::{
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 
-/// Data that remains constant for a given session
-pub struct DkgStaticData {
+pub struct DkgManager {
+    // Immutable during a given session
     pub validator_info: ValidatorInfo,
     pub nodes: Nodes<EncryptionGroupElement>,
     pub dkg_config: DkgConfig,
@@ -28,29 +28,26 @@ pub struct DkgStaticData {
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DkgRuntimeState {
+    // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
 }
 
-impl DkgStaticData {
+impl DkgManager {
     pub fn new(
         validator_info: ValidatorInfo,
         dkg_config: DkgConfig,
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
-    ) -> DkgResult<Self> {
+    ) -> Self {
         let nodes = create_nodes(&dkg_config.validator_registry);
         let validator_weights: std::collections::HashMap<_, _> = dkg_config
             .validator_registry
             .iter()
             .map(|(addr, v)| (addr.clone(), v.weight))
             .collect();
-        Ok(Self {
+        Self {
             validator_info,
             nodes,
             dkg_config,
@@ -58,23 +55,8 @@ impl DkgStaticData {
             encryption_key,
             bls_signing_key,
             validator_weights,
-        })
-    }
-}
-
-pub struct DkgManager {
-    pub static_data: DkgStaticData,
-    pub runtime_state: DkgRuntimeState,
-}
-
-impl DkgManager {
-    pub fn new(static_data: DkgStaticData) -> Self {
-        Self {
-            static_data,
-            runtime_state: DkgRuntimeState {
-                dealer_outputs: std::collections::HashMap::new(),
-                dealer_messages: std::collections::HashMap::new(),
-            },
+            dealer_outputs: std::collections::HashMap::new(),
+            dealer_messages: std::collections::HashMap::new(),
         }
     }
 
@@ -83,14 +65,13 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<avss::Message> {
         let dealer_session_id = self
-            .static_data
             .session_context
-            .dealer_session_id(&self.static_data.validator_info.address);
+            .dealer_session_id(&self.validator_info.address);
         let dealer = avss::Dealer::new(
             None,
-            self.static_data.nodes.clone(),
-            self.static_data.dkg_config.threshold,
-            self.static_data.dkg_config.max_faulty,
+            self.nodes.clone(),
+            self.dkg_config.threshold,
+            self.dkg_config.max_faulty,
             dealer_session_id.to_vec(),
         )?;
         let message = dealer.create_message(rng)?;
@@ -102,17 +83,14 @@ impl DkgManager {
         message: &avss::Message,
         dealer_address: ValidatorAddress,
     ) -> DkgResult<ValidatorSignature> {
-        let dealer_session_id = self
-            .static_data
-            .session_context
-            .dealer_session_id(&dealer_address);
+        let dealer_session_id = self.session_context.dealer_session_id(&dealer_address);
         let receiver = avss::Receiver::new(
-            self.static_data.nodes.clone(),
-            self.static_data.validator_info.party_id,
-            self.static_data.dkg_config.threshold,
+            self.nodes.clone(),
+            self.validator_info.party_id,
+            self.dkg_config.threshold,
             dealer_session_id.to_vec(),
             None, // commitment: None for initial DKG
-            self.static_data.encryption_key.clone(),
+            self.encryption_key.clone(),
         );
         let receiver_output = match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
@@ -123,17 +101,14 @@ impl DkgManager {
                 ));
             }
         };
-        self.runtime_state
-            .dealer_outputs
+        self.dealer_outputs
             .insert(dealer_address.clone(), receiver_output);
-        self.runtime_state
-            .dealer_messages
+        self.dealer_messages
             .insert(dealer_address.clone(), message.clone());
-        let message_hash =
-            compute_message_hash(message, &dealer_address, &self.static_data.session_context)?;
-        let signature = self.static_data.bls_signing_key.sign(&message_hash);
+        let message_hash = compute_message_hash(message, &dealer_address, &self.session_context)?;
+        let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
-            validator: self.static_data.validator_info.address.clone(),
+            validator: self.validator_info.address.clone(),
             signature: signature.to_bytes().to_vec(),
         })
     }
@@ -143,16 +118,13 @@ impl DkgManager {
         message: &avss::Message,
         signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<DkgCertificate> {
-        let message_hash = compute_message_hash(
-            message,
-            &self.static_data.validator_info.address,
-            &self.static_data.session_context,
-        )?;
+        let message_hash =
+            compute_message_hash(message, &self.validator_info.address, &self.session_context)?;
         Ok(DkgCertificate {
-            dealer: self.static_data.validator_info.address.clone(),
+            dealer: self.validator_info.address.clone(),
             message_hash,
             signatures,
-            session_context: self.static_data.session_context.clone(),
+            session_context: self.session_context.clone(),
         })
     }
 
@@ -160,14 +132,13 @@ impl DkgManager {
         &self,
         validator_to_certificate: &std::collections::HashMap<ValidatorAddress, DkgCertificate>,
     ) -> DkgResult<DkgOutput> {
-        let threshold = self.static_data.dkg_config.threshold;
+        let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
         let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> =
             validator_to_certificate
                 .values()
                 .map(|cert| {
                     let dealer_info = self
-                        .static_data
                         .dkg_config
                         .validator_registry
                         .get(&cert.dealer)
@@ -175,7 +146,6 @@ impl DkgManager {
                             DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
                         })?;
                     let output = self
-                        .runtime_state
                         .dealer_outputs
                         .get(&cert.dealer)
                         .ok_or_else(|| {
@@ -189,13 +159,13 @@ impl DkgManager {
                 })
                 .collect::<Result<_, DkgError>>()?;
         let combined_output =
-            avss::ReceiverOutput::complete_dkg(threshold, &self.static_data.nodes, outputs)
+            avss::ReceiverOutput::complete_dkg(threshold, &self.nodes, outputs)
                 .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output.commitments,
-            session_context: self.static_data.session_context.clone(),
+            session_context: self.session_context.clone(),
         })
     }
 
@@ -221,13 +191,13 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
         // TODO: Return early if DKG is already completed (we're a slow dealer)
-        let my_address = self.static_data.validator_info.address.clone();
+        let my_address = self.validator_info.address.clone();
         let dealer_message = self.create_dealer_message(rng)?;
         self.receive_dealer_message(&dealer_message, my_address.clone())?;
         let mut approvals = Vec::new();
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
-        for validator_address in self.static_data.dkg_config.validator_registry.keys() {
+        for validator_address in self.dkg_config.validator_registry.keys() {
             if validator_address != &my_address {
                 let authenticated_response = match p2p_channel
                     .send_share(
@@ -261,13 +231,9 @@ impl DkgManager {
                 });
             }
         }
-        let required_weight =
-            self.static_data.dkg_config.threshold + self.static_data.dkg_config.max_faulty;
-        if has_sufficient_weighted_signatures(
-            &approvals,
-            &self.static_data.validator_weights,
-            required_weight,
-        ) {
+        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        if has_sufficient_weighted_signatures(&approvals, &self.validator_weights, required_weight)
+        {
             let cert = self.create_certificate(&dealer_message, approvals)?;
             // TODO: Add timeout and retries handling when adding RPC layer
             ordered_broadcast_channel
@@ -286,7 +252,7 @@ impl DkgManager {
             OrderedBroadcastMessage,
         >,
     ) -> DkgResult<DkgOutput> {
-        let threshold = self.static_data.dkg_config.threshold;
+        let threshold = self.dkg_config.threshold;
         let mut validator_to_certificate = std::collections::HashMap::new();
         let mut dealer_weight_sum = 0u16;
         loop {
@@ -303,15 +269,14 @@ impl DkgManager {
                 }
                 match validate_certificate(
                     &cert,
-                    &self.static_data,
-                    &self.runtime_state.dealer_messages,
+                    &self.dkg_config,
+                    &self.session_context,
+                    &self.validator_weights,
+                    &self.dealer_messages,
                 ) {
                     Ok(()) => {
-                        let dealer_weight = self
-                            .static_data
-                            .validator_weights
-                            .get(&cert.dealer)
-                            .ok_or_else(|| {
+                        let dealer_weight =
+                            self.validator_weights.get(&cert.dealer).ok_or_else(|| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
                         dealer_weight_sum = dealer_weight_sum
@@ -335,24 +300,22 @@ impl DkgManager {
 
 fn validate_certificate(
     cert: &DkgCertificate,
-    static_data: &DkgStaticData,
+    dkg_config: &DkgConfig,
+    session_context: &SessionContext,
+    validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
     dealer_messages: &std::collections::HashMap<ValidatorAddress, avss::Message>,
 ) -> DkgResult<()> {
-    if !static_data
-        .dkg_config
-        .validator_registry
-        .contains_key(&cert.dealer)
-    {
+    if !dkg_config.validator_registry.contains_key(&cert.dealer) {
         return Err(DkgError::InvalidCertificate(format!(
             "Unknown dealer: {:?}",
             cert.dealer
         )));
     }
-    validate_message_hash(cert, dealer_messages, &static_data.session_context)?;
+    validate_message_hash(cert, dealer_messages, session_context)?;
     validate_signatures(
         &cert.signatures,
-        static_data.dkg_config.required_dkg_signatures() as u16,
-        &static_data.validator_weights,
+        dkg_config.required_dkg_signatures() as u16,
+        validator_weights,
     )?;
     Ok(())
 }
@@ -501,7 +464,7 @@ mod tests {
         DkgConfig::new(100, validators, THRESHOLD, MAX_FAULTY).unwrap()
     }
 
-    fn create_test_static_data(validator_index: u16, dkg_config: DkgConfig) -> DkgStaticData {
+    fn create_test_manager(validator_index: u16, dkg_config: DkgConfig) -> DkgManager {
         let validator_address = ValidatorAddress([validator_index as u8; 32]);
         let validator_info = dkg_config
             .validator_registry
@@ -515,14 +478,13 @@ mod tests {
         );
         let encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(rand::thread_rng());
-        DkgStaticData::new(
+        DkgManager::new(
             validator_info,
             dkg_config,
             session_context,
             encryption_key,
             bls_signing_key,
         )
-        .unwrap()
     }
 
     struct MockP2PChannel {
@@ -672,16 +634,15 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         let validator_address = ValidatorAddress([validator_index as u8; 32]);
-        let static_data = DkgStaticData::new(
+        let manager = DkgManager::new(
             validators.get(&validator_address).unwrap().clone(),
             config,
             session_context,
             encryption_keys[validator_index].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
+        );
 
-        (DkgManager::new(static_data), encryption_keys)
+        (manager, encryption_keys)
     }
 
     struct FailingP2PChannel {
@@ -821,28 +782,26 @@ mod tests {
     #[test]
     fn test_dkg_static_data_creation() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config.clone());
+        let manager = create_test_manager(0, config.clone());
 
-        assert_eq!(static_data.validator_info.party_id, 0);
-        assert_eq!(static_data.dkg_config.threshold, 2);
-        assert_eq!(static_data.dkg_config.max_faulty, 1);
-        assert_eq!(static_data.dkg_config.validator_registry.len(), 5);
+        assert_eq!(manager.validator_info.party_id, 0);
+        assert_eq!(manager.dkg_config.threshold, 2);
+        assert_eq!(manager.dkg_config.max_faulty, 1);
+        assert_eq!(manager.dkg_config.validator_registry.len(), 5);
     }
 
     #[test]
     fn test_dkg_manager_creation() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config);
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config);
 
-        assert!(manager.runtime_state.dealer_outputs.is_empty());
+        assert!(manager.dealer_outputs.is_empty());
     }
 
     #[test]
     fn test_create_dealer_message() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config);
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config);
 
         // Should successfully create a dealer message
         let _message = manager
@@ -885,7 +844,7 @@ mod tests {
 
         // Create dealer (party 0) with its encryption key
         let dealer_address = ValidatorAddress([0; 32]);
-        let dealer_static = DkgStaticData::new(
+        let dealer_manager = DkgManager::new(
             config
                 .validator_registry
                 .get(&dealer_address)
@@ -895,16 +854,13 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
-        )
-        .unwrap();
-
-        let dealer_manager = DkgManager::new(dealer_static);
+        );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
-        let dealer_address = dealer_manager.static_data.validator_info.address.clone();
+        let dealer_address = dealer_manager.validator_info.address.clone();
 
         // Create receiver (party 1) with its encryption key
         let receiver_address = ValidatorAddress([1; 32]);
-        let receiver_static = DkgStaticData::new(
+        let mut receiver_manager = DkgManager::new(
             config
                 .validator_registry
                 .get(&receiver_address)
@@ -914,10 +870,7 @@ mod tests {
             session_context.clone(),
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
-        )
-        .unwrap();
-
-        let mut receiver_manager = DkgManager::new(receiver_static);
+        );
 
         // Receiver processes the dealer's message
         let signature = receiver_manager
@@ -925,16 +878,12 @@ mod tests {
             .unwrap();
 
         // Verify signature format
-        assert_eq!(
-            signature.validator,
-            receiver_manager.static_data.validator_info.address
-        );
+        assert_eq!(signature.validator, receiver_manager.validator_info.address);
         assert_eq!(signature.signature.len(), 96); // BLS signature length
 
         // Verify receiver output was stored
         assert!(
             receiver_manager
-                .runtime_state
                 .dealer_outputs
                 .contains_key(&dealer_address)
         );
@@ -942,7 +891,6 @@ mod tests {
         // Verify dealer message was stored for signature recovery
         assert!(
             receiver_manager
-                .runtime_state
                 .dealer_messages
                 .contains_key(&dealer_address)
         );
@@ -1018,16 +966,14 @@ mod tests {
     #[test]
     fn test_create_certificate_success() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config.clone());
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config.clone());
 
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
 
         // Create enough signatures (threshold + max_faulty = 3 weight needed)
-        let required_sigs = (manager.static_data.dkg_config.threshold
-            + manager.static_data.dkg_config.max_faulty) as usize;
+        let required_sigs = (manager.dkg_config.threshold + manager.dkg_config.max_faulty) as usize;
         let signatures: Vec<_> = config
             .validator_registry
             .values()
@@ -1042,14 +988,11 @@ mod tests {
             .create_certificate(&message, signatures.clone())
             .unwrap();
 
-        assert_eq!(
-            certificate.dealer,
-            manager.static_data.validator_info.address
-        );
+        assert_eq!(certificate.dealer, manager.validator_info.address);
         assert_eq!(certificate.signatures.len(), required_sigs);
         assert_eq!(
             certificate.session_context.session_id,
-            manager.static_data.session_context.session_id
+            manager.session_context.session_id
         );
     }
 
@@ -1096,8 +1039,7 @@ mod tests {
 
         // threshold=3, max_faulty=1, total_weight=5
         let config = DkgConfig::new(100, validators, 3, 1).unwrap();
-        let static_data = create_test_static_data(0, config.clone());
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config.clone());
 
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
@@ -1192,27 +1134,18 @@ mod tests {
     #[test]
     fn test_compute_message_hash_deterministic() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config);
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config);
 
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
         let dealer_address = ValidatorAddress([42; 32]);
 
-        let hash1 = compute_message_hash(
-            &message,
-            &dealer_address,
-            &manager.static_data.session_context,
-        )
-        .unwrap();
+        let hash1 =
+            compute_message_hash(&message, &dealer_address, &manager.session_context).unwrap();
 
-        let hash2 = compute_message_hash(
-            &message,
-            &dealer_address,
-            &manager.static_data.session_context,
-        )
-        .unwrap();
+        let hash2 =
+            compute_message_hash(&message, &dealer_address, &manager.session_context).unwrap();
 
         assert_eq!(hash1, hash2);
     }
@@ -1220,8 +1153,7 @@ mod tests {
     #[test]
     fn test_compute_message_hash_different_for_different_dealers() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config);
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config);
 
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
@@ -1230,14 +1162,14 @@ mod tests {
         let hash1 = compute_message_hash(
             &message,
             &ValidatorAddress([1; 32]),
-            &manager.static_data.session_context,
+            &manager.session_context,
         )
         .unwrap();
 
         let hash2 = compute_message_hash(
             &message,
             &ValidatorAddress([2; 32]),
-            &manager.static_data.session_context,
+            &manager.session_context,
         )
         .unwrap();
 
@@ -1287,29 +1219,25 @@ mod tests {
             .iter()
             .map(|&i| {
                 let addr = ValidatorAddress([i as u8; 32]);
-                let static_data = DkgStaticData::new(
+                DkgManager::new(
                     config.validator_registry.get(&addr).unwrap().clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
                 )
-                .unwrap();
-                DkgManager::new(static_data)
             })
             .collect();
 
         // Create receiver (party 2 with weight=4 - will receive 4 shares!)
         let addr2 = ValidatorAddress([2; 32]);
-        let receiver_static = DkgStaticData::new(
+        let mut receiver_manager = DkgManager::new(
             config.validator_registry.get(&addr2).unwrap().clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[2].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
-        )
-        .unwrap();
-        let mut receiver_manager = DkgManager::new(receiver_static);
+        );
 
         // Each dealer creates a message
         let dealer_messages: Vec<_> = dealer_managers
@@ -1320,16 +1248,10 @@ mod tests {
         // Receiver processes all dealer messages and creates certificates
         let mut certificates = std::collections::HashMap::new();
         for (i, message) in dealer_messages.iter().enumerate() {
-            let dealer_address = dealer_managers[i]
-                .static_data
-                .validator_info
-                .address
-                .clone();
+            let dealer_address = dealer_managers[i].validator_info.address.clone();
 
             // Receiver processes the message
-            let _sig = receiver_manager
-                .receive_dealer_message(message, dealer_address.clone())
-                .unwrap();
+            let _sig = receiver_manager.receive_dealer_message(message, dealer_address.clone());
 
             // Create a certificate (in practice, would collect signatures from other validators)
             // Need threshold + max_faulty = 3 + 1 = 4 weighted signatures
@@ -1382,8 +1304,7 @@ mod tests {
     #[test]
     fn test_process_certificates_missing_dealer_output() {
         let config = create_test_dkg_config(5);
-        let static_data = create_test_static_data(0, config.clone());
-        let manager = DkgManager::new(static_data);
+        let manager = create_test_manager(0, config.clone());
 
         // Create certificates for dealers we haven't received messages from
         let addr0 = &ValidatorAddress([0; 32]);
@@ -1408,7 +1329,7 @@ mod tests {
                 .clone(),
             message_hash: [0; 32],
             signatures: mock_signatures.clone(),
-            session_context: manager.static_data.session_context.clone(),
+            session_context: manager.session_context.clone(),
         };
         let cert1 = DkgCertificate {
             dealer: config
@@ -1419,7 +1340,7 @@ mod tests {
                 .clone(),
             message_hash: [0; 32],
             signatures: mock_signatures,
-            session_context: manager.static_data.session_context.clone(),
+            session_context: manager.session_context.clone(),
         };
 
         let mut certificates = std::collections::HashMap::new();
@@ -1478,15 +1399,13 @@ mod tests {
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
                 let validator = config.validator_registry.get(&address).unwrap();
-                let static_data = DkgStaticData::new(
+                DkgManager::new(
                     validator.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
                 )
-                .unwrap();
-                DkgManager::new(static_data)
             })
             .collect();
 
@@ -1585,7 +1504,7 @@ mod tests {
             let addr_j = ValidatorAddress([j as u8; 32]);
             let other_mgr = other_managers.get(&addr_j).unwrap();
             assert!(
-                other_mgr.runtime_state.dealer_outputs.contains_key(&addr0),
+                other_mgr.dealer_outputs.contains_key(&addr0),
                 "Validator {} should have dealer output from validator 0",
                 j
             );
@@ -1629,30 +1548,27 @@ mod tests {
 
         // Create manager for validator 0
         let addr0 = &ValidatorAddress([0; 32]);
-        let static_data = DkgStaticData::new(
+        let mut test_manager = DkgManager::new(
             config.validator_registry.get(addr0).unwrap().clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
             bls_keys[0].clone(),
-        )
-        .unwrap();
-        let mut test_manager = DkgManager::new(static_data);
+        );
 
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = ValidatorAddress([i as u8; 32]);
                 let validator_info = config.validator_registry.get(&addr).unwrap();
-                let static_data = DkgStaticData::new(
+                let manager = DkgManager::new(
                     validator_info.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                )
-                .unwrap();
-                (addr, DkgManager::new(static_data))
+                );
+                (addr, manager)
             })
             .collect();
 
@@ -1669,12 +1585,7 @@ mod tests {
 
         // Verify own dealer output is stored
         let addr0 = ValidatorAddress([0; 32]);
-        assert!(
-            test_manager
-                .runtime_state
-                .dealer_outputs
-                .contains_key(&addr0)
-        );
+        assert!(test_manager.dealer_outputs.contains_key(&addr0));
 
         // Verify other validators received dealer message via P2P
         let other_managers = mock_p2p.managers.lock().unwrap();
@@ -1682,7 +1593,7 @@ mod tests {
             let addr = ValidatorAddress([i as u8; 32]);
             let other_mgr = other_managers.get(&addr).unwrap();
             assert!(
-                other_mgr.runtime_state.dealer_outputs.contains_key(&addr0),
+                other_mgr.dealer_outputs.contains_key(&addr0),
                 "Validator {} should have dealer output from validator 0",
                 i
             );
@@ -1732,15 +1643,13 @@ mod tests {
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
                 let validator_info = config.validator_registry.get(&address).unwrap();
-                let static_data = DkgStaticData::new(
+                DkgManager::new(
                     validator_info.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
                 )
-                .unwrap();
-                DkgManager::new(static_data)
             })
             .collect();
 
@@ -1832,15 +1741,13 @@ mod tests {
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
                 let validator_info = config.validator_registry.get(&address).unwrap();
-                let static_data = DkgStaticData::new(
+                DkgManager::new(
                     validator_info.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
                 )
-                .unwrap();
-                DkgManager::new(static_data)
             })
             .collect();
 
@@ -1963,15 +1870,13 @@ mod tests {
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
                 let validator_info = config.validator_registry.get(&address).unwrap();
-                let static_data = DkgStaticData::new(
+                DkgManager::new(
                     validator_info.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
                 )
-                .unwrap();
-                DkgManager::new(static_data)
             })
             .collect();
 
@@ -2077,7 +1982,7 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         // Use wrong signer - always returns dealer's address instead of recipient's
-        let wrong_signer = test_manager.static_data.validator_info.address.clone();
+        let wrong_signer = test_manager.validator_info.address.clone();
         let wrong_signer_p2p = WrongSignerP2PChannel { wrong_signer };
 
         let result = test_manager
@@ -2205,15 +2110,13 @@ mod tests {
         let dealer_managers: Vec<_> = (0..dealer_count)
             .map(|i| {
                 let addr = ValidatorAddress([i as u8; 32]);
-                let static_data = DkgStaticData::new(
+                DkgManager::new(
                     config.validator_registry.get(&addr).unwrap().clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     crate::bls::Bls12381PrivateKey::generate(&mut rng),
                 )
-                .unwrap();
-                DkgManager::new(static_data)
             })
             .collect();
 
@@ -2222,7 +2125,7 @@ mod tests {
             .iter()
             .map(|manager| {
                 let message = manager.create_dealer_message(&mut rng).unwrap();
-                (manager.static_data.validator_info.address.clone(), message)
+                (manager.validator_info.address.clone(), message)
             })
             .collect();
 
@@ -2290,7 +2193,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let party_addr = ValidatorAddress([party_index as u8; 32]);
 
-        let party_static_data = DkgStaticData::new(
+        let mut party_manager = DkgManager::new(
             test_setup
                 .config
                 .validator_registry
@@ -2301,15 +2204,11 @@ mod tests {
             test_setup.session_context.clone(),
             test_setup.encryption_keys[party_index].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let mut party_manager = DkgManager::new(party_static_data);
+        );
 
         // Pre-process the dealer messages so validation passes
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            party_manager
-                .receive_dealer_message(message, dealer_addr.clone())
-                .unwrap();
+            let _ = party_manager.receive_dealer_message(message, dealer_addr.clone());
         }
 
         // Create mock TOB with certificates
@@ -2414,7 +2313,7 @@ mod tests {
         // Create party manager
         let mut rng = rand::thread_rng();
         let party_addr = ValidatorAddress([0; 32]);
-        let party_static_data = DkgStaticData::new(
+        let mut party_manager = DkgManager::new(
             test_setup
                 .config
                 .validator_registry
@@ -2425,15 +2324,11 @@ mod tests {
             test_setup.session_context.clone(),
             test_setup.encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let mut party_manager = DkgManager::new(party_static_data);
+        );
 
         // Pre-process the dealer messages
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            party_manager
-                .receive_dealer_message(message, dealer_addr.clone())
-                .unwrap();
+            let _ = party_manager.receive_dealer_message(message, dealer_addr.clone());
         }
 
         // Create mock TOB with the modified certificates (including duplicates)
@@ -2523,32 +2418,24 @@ mod tests {
         .unwrap();
 
         // Create static data with modified config
-        let party_static_data = DkgStaticData::new(
+        let mut party_manager = DkgManager::new(
             validator_info,
             modified_config,
             test_setup.session_context.clone(),
             test_setup.encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-
-        let mut party_manager = DkgManager::new(party_static_data);
+        );
 
         // Remove the fake dealer from validator_weights to trigger the error
-        party_manager
-            .static_data
-            .validator_weights
-            .remove(&fake_dealer_addr);
+        party_manager.validator_weights.remove(&fake_dealer_addr);
 
         // Pre-process real dealer messages
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            party_manager
-                .receive_dealer_message(message, dealer_addr.clone())
-                .unwrap();
+            let _ = party_manager.receive_dealer_message(message, dealer_addr.clone());
         }
 
         // Add the fake message for the fake dealer so validation can pass
-        party_manager.runtime_state.dealer_messages.insert(
+        party_manager.dealer_messages.insert(
             fake_dealer_addr.clone(),
             fake_message, // Use the same message we used for the certificate
         );
@@ -2605,7 +2492,7 @@ mod tests {
 
         // Create dealer (party 1) with its encryption key
         let dealer_address = ValidatorAddress([1; 32]);
-        let dealer_data = DkgStaticData::new(
+        let dealer_manager = DkgManager::new(
             config
                 .validator_registry
                 .get(&dealer_address)
@@ -2615,13 +2502,11 @@ mod tests {
             session_context.clone(),
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let dealer_manager = DkgManager::new(dealer_data);
+        );
 
         // Create receiver (party 0) with its encryption key
         let receiver_address = ValidatorAddress([0; 32]);
-        let receiver_data = DkgStaticData::new(
+        let mut receiver_manager = DkgManager::new(
             config
                 .validator_registry
                 .get(&receiver_address)
@@ -2631,9 +2516,7 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        )
-        .unwrap();
-        let mut receiver_manager = DkgManager::new(receiver_data);
+        );
 
         // Dealer creates a message
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
@@ -2848,8 +2731,7 @@ mod tests {
 
             // Create a dealer message
             let mut rng = rand::thread_rng();
-            let static_data = create_test_static_data(0, config);
-            let manager = DkgManager::new(static_data);
+            let manager = create_test_manager(0, config);
             let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
             let dealer_addr = ValidatorAddress([0; 32]);
 
@@ -2904,8 +2786,7 @@ mod tests {
                 SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
 
             let mut rng = rand::thread_rng();
-            let static_data = create_test_static_data(0, config);
-            let manager = DkgManager::new(static_data);
+            let manager = create_test_manager(0, config);
             let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
             let dealer_addr = ValidatorAddress([0; 32]);
 
@@ -2937,21 +2818,20 @@ mod tests {
 
         fn create_valid_cert_and_data() -> (
             DkgCertificate,
-            DkgStaticData,
+            DkgManager,
             std::collections::HashMap<ValidatorAddress, avss::Message>,
         ) {
             let weights = vec![2, 2, 2, 2, 2]; // 5 validators
             let config = create_test_config_with_weights(&weights, 3, 1);
 
             let mut rng = rand::thread_rng();
-            let temp_static_data = create_test_static_data(0, config.clone());
-            let temp_manager = DkgManager::new(temp_static_data);
+            let temp_manager = create_test_manager(0, config.clone());
             let dealer_message = temp_manager.create_dealer_message(&mut rng).unwrap();
             let dealer_addr = ValidatorAddress([0; 32]);
 
-            // Create the final static_data that we'll return
-            let static_data = create_test_static_data(0, config.clone());
-            let session_context = &static_data.session_context;
+            // Create the final manager that we'll return
+            let manager = create_test_manager(0, config.clone());
+            let session_context = &manager.session_context;
 
             let message_hash =
                 compute_message_hash(&dealer_message, &dealer_addr, session_context).unwrap();
@@ -2970,13 +2850,19 @@ mod tests {
             let mut dealer_messages = std::collections::HashMap::new();
             dealer_messages.insert(dealer_addr, dealer_message);
 
-            (cert, static_data, dealer_messages)
+            (cert, manager, dealer_messages)
         }
 
         #[test]
         fn test_valid_certificate() {
-            let (cert, static_data, dealer_messages) = create_valid_cert_and_data();
-            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            let (cert, manager, dealer_messages) = create_valid_cert_and_data();
+            let result = validate_certificate(
+                &cert,
+                &manager.dkg_config,
+                &manager.session_context,
+                &manager.validator_weights,
+                &dealer_messages,
+            );
             assert!(result.is_ok());
         }
 
@@ -2988,13 +2874,13 @@ mod tests {
             let dealer_addr = ValidatorAddress([0; 32]);
 
             // Create a minimal dealer message using actual dealer (to get valid message structure)
-            let static_data = create_test_static_data(0, config.clone());
+            let manager = create_test_manager(0, config.clone());
             let mut rng = rand::thread_rng();
             let dealer = avss::Dealer::new(
                 None,
-                static_data.nodes.clone(),
-                static_data.dkg_config.threshold,
-                static_data.dkg_config.max_faulty,
+                manager.nodes.clone(),
+                manager.dkg_config.threshold,
+                manager.dkg_config.max_faulty,
                 vec![1, 2, 3], // Dummy session ID
             )
             .unwrap();
@@ -3014,14 +2900,20 @@ mod tests {
                 session_context: wrong_session_context, // Doesn't matter what we put here
             };
 
-            // Create static data with CORRECT session for validation
-            let correct_static_data = create_test_static_data(0, config);
+            // Create manager with CORRECT session for validation
+            let correct_manager = create_test_manager(0, config);
 
             let mut dealer_messages = std::collections::HashMap::new();
             dealer_messages.insert(dealer_addr, dealer_message);
 
             // Validation should fail because the hash was computed with a different session
-            let result = validate_certificate(&cert, &correct_static_data, &dealer_messages);
+            let result = validate_certificate(
+                &cert,
+                &correct_manager.dkg_config,
+                &correct_manager.session_context,
+                &correct_manager.validator_weights,
+                &dealer_messages,
+            );
             assert!(
                 result.is_err(),
                 "Expected validation to fail but it succeeded"
@@ -3036,24 +2928,36 @@ mod tests {
 
         #[test]
         fn test_unknown_dealer() {
-            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+            let (mut cert, manager, dealer_messages) = create_valid_cert_and_data();
 
             // Set dealer to unknown address
             cert.dealer = ValidatorAddress([99; 32]);
 
-            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            let result = validate_certificate(
+                &cert,
+                &manager.dkg_config,
+                &manager.session_context,
+                &manager.validator_weights,
+                &dealer_messages,
+            );
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Unknown dealer"));
         }
 
         #[test]
         fn test_invalid_dkg_signatures() {
-            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+            let (mut cert, manager, dealer_messages) = create_valid_cert_and_data();
 
             // Empty DKG signatures - insufficient weight
             cert.signatures = vec![];
 
-            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            let result = validate_certificate(
+                &cert,
+                &manager.dkg_config,
+                &manager.session_context,
+                &manager.validator_weights,
+                &dealer_messages,
+            );
             assert!(result.is_err());
             assert!(
                 result
@@ -3065,12 +2969,18 @@ mod tests {
 
         #[test]
         fn test_invalid_message_hash() {
-            let (mut cert, static_data, dealer_messages) = create_valid_cert_and_data();
+            let (mut cert, manager, dealer_messages) = create_valid_cert_and_data();
 
             // Wrong message hash
             cert.message_hash = [99; 32];
 
-            let result = validate_certificate(&cert, &static_data, &dealer_messages);
+            let result = validate_certificate(
+                &cert,
+                &manager.dkg_config,
+                &manager.session_context,
+                &manager.validator_weights,
+                &dealer_messages,
+            );
             assert!(result.is_err());
             assert!(
                 result
