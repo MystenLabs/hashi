@@ -138,7 +138,6 @@ impl DkgManager {
         })
     }
 
-    // TODO: Use aggregated BLS signature in certificate
     pub fn create_certificate(
         &self,
         message: &avss::Message,
@@ -350,7 +349,7 @@ fn validate_certificate(
         )));
     }
     validate_message_hash(cert, dealer_messages, &static_data.session_context)?;
-    validate_signature_set(
+    validate_signatures(
         &cert.signatures,
         static_data.dkg_config.required_dkg_signatures() as u16,
         &static_data.validator_weights,
@@ -379,7 +378,7 @@ fn validate_message_hash(
     Ok(())
 }
 
-fn validate_signature_set(
+fn validate_signatures(
     signatures: &[ValidatorSignature],
     required_weight: u16,
     validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
@@ -2738,7 +2737,7 @@ mod tests {
             // Signatures from validators 0, 2 (weights 3 + 4 = 7)
             let signatures = create_test_signatures(&[0, 2], &config);
 
-            let result = validate_signature_set(
+            let result = validate_signatures(
                 &signatures,
                 7, // require exactly 7
                 &validator_weights,
@@ -2764,7 +2763,7 @@ mod tests {
                 },
             ];
 
-            let result = validate_signature_set(&signatures, 5, &validator_weights);
+            let result = validate_signatures(&signatures, 5, &validator_weights);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Duplicate signer"));
         }
@@ -2781,7 +2780,7 @@ mod tests {
                 signature: vec![0u8; 96],
             }];
 
-            let result = validate_signature_set(&signatures, 1, &validator_weights);
+            let result = validate_signatures(&signatures, 1, &validator_weights);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Unknown signer"));
         }
@@ -2795,7 +2794,7 @@ mod tests {
             // Signatures from validators 0, 1 (weights 3 + 2 = 5)
             let signatures = create_test_signatures(&[0, 1], &config);
 
-            let result = validate_signature_set(
+            let result = validate_signatures(
                 &signatures,
                 6, // require 6, but only have 5
                 &validator_weights,
@@ -2826,7 +2825,7 @@ mod tests {
                 },
             ];
 
-            let result = validate_signature_set(&signatures, 1, &validator_weights);
+            let result = validate_signatures(&signatures, 1, &validator_weights);
             assert!(result.is_err());
             assert!(
                 result

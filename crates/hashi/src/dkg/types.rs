@@ -295,6 +295,7 @@ pub struct ValidatorSignature {
 pub struct DkgCertificate {
     pub dealer: ValidatorAddress,
     pub message_hash: MessageHash,
+    // TODO: Use aggregated BLS signature to reduce footprints
     pub signatures: Vec<ValidatorSignature>,
     pub session_context: SessionContext,
 }
