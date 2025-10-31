@@ -373,6 +373,7 @@ fn create_nodes(validators: &ValidatorRegistry) -> Nodes<EncryptionGroupElement>
             weight: v.weight,
         })
         .collect();
+    // TODO: Use `Nodes::new_reduced()` that reduces weights with GCD
     Nodes::new(nodes).expect("Failed to create nodes")
 }
 
