@@ -25,24 +25,15 @@ pub enum ChannelError {
     Other(String),
 }
 
-/// An authenticated message with cryptographically verified sender
-///
-/// The `sender` field is verified by the channel layer. The protocol layer should verify
-/// that the authenticated sender matches any sender claims in the message payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AuthenticatedMessage<M> {
-    pub sender: ValidatorAddress,
-    pub message: M,
-}
-
 /// Point-to-point channel for direct validator-to-validator messaging
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
+    // TODO: Implement authentication for receiver to verify caller
     async fn send_share(
         &self,
         recipient: &ValidatorAddress,
         request: SendShareRequest,
-    ) -> ChannelResult<AuthenticatedMessage<SendShareResponse>>;
+    ) -> ChannelResult<SendShareResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages
@@ -57,13 +48,10 @@ where
     /// Broadcast a message with guaranteed ordering across all validators
     async fn publish(&self, message: M) -> ChannelResult<()>;
 
-    /// Receive the next message in the total order with authenticated sender
-    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>>;
+    /// Receive the next message in the total order
+    async fn receive(&mut self) -> ChannelResult<M>;
 
-    async fn try_receive_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> ChannelResult<Option<AuthenticatedMessage<M>>>;
+    async fn try_receive_timeout(&mut self, timeout: Duration) -> ChannelResult<Option<M>>;
 
     fn pending_messages(&self) -> Option<usize> {
         None

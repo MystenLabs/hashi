@@ -8,6 +8,4 @@ pub mod in_memory;
 pub mod interfaces;
 
 pub use in_memory::InMemoryOrderedBroadcastChannel;
-pub use interfaces::{
-    AuthenticatedMessage, ChannelError, ChannelResult, OrderedBroadcastChannel, P2PChannel,
-};
+pub use interfaces::{ChannelError, ChannelResult, OrderedBroadcastChannel, P2PChannel};

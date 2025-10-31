@@ -2,7 +2,6 @@
 
 pub mod types;
 
-use crate::communication::AuthenticatedMessage;
 use crate::types::ValidatorAddress;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
@@ -176,10 +175,10 @@ impl DkgManager {
     // TODO: Cache response if already answered to protect against DoS attacks
     pub fn handle_send_share_request(
         &mut self,
-        authenticated_request: AuthenticatedMessage<SendShareRequest>,
+        sender: ValidatorAddress,
+        request: SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
-        let dealer = authenticated_request.sender;
-        let request = authenticated_request.message;
+        let dealer = sender;
         let validator_signature = self.receive_dealer_message(&request.message, dealer)?;
         Ok(SendShareResponse {
             signature: validator_signature.signature,
@@ -203,7 +202,7 @@ impl DkgManager {
         // TODO: Add timeout and retries handling when adding RPC layer
         for validator_address in self.dkg_config.validator_registry.keys() {
             if validator_address != &my_address {
-                let authenticated_response = match p2p_channel
+                let response = match p2p_channel
                     .send_share(
                         validator_address,
                         SendShareRequest {
@@ -218,19 +217,9 @@ impl DkgManager {
                         continue;
                     }
                 };
-                let signer = authenticated_response.sender;
-                let response = authenticated_response.message;
-                if &signer != validator_address {
-                    tracing::info!(
-                        "Response signer mismatch: expected {:?}, got {:?}",
-                        validator_address,
-                        signer
-                    );
-                    continue;
-                }
                 // TODO: Add cryptographic verification of response.signature
                 approvals.push(ValidatorSignature {
-                    validator: signer,
+                    validator: validator_address.clone(),
                     signature: response.signature,
                 });
             }
@@ -267,7 +256,7 @@ impl DkgManager {
                 .receive()
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
-            if let OrderedBroadcastMessage::CertificateV1(cert) = tob_msg.message {
+            if let OrderedBroadcastMessage::CertificateV1(cert) = tob_msg {
                 if validator_to_certificate.contains_key(&cert.dealer) {
                     continue;
                 }
@@ -516,7 +505,7 @@ mod tests {
             &self,
             recipient: &ValidatorAddress,
             request: SendShareRequest,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<SendShareResponse>> {
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::SendFailed(format!(
@@ -524,19 +513,12 @@ mod tests {
                     recipient
                 ))
             })?;
-            let authenticated_request = AuthenticatedMessage {
-                sender: self.current_sender.clone(), // Use the sender that owns this channel
-                message: request,
-            };
             let response = manager
-                .handle_send_share_request(authenticated_request)
+                .handle_send_share_request(self.current_sender.clone(), request)
                 .map_err(|e| {
                     crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
                 })?;
-            Ok(AuthenticatedMessage {
-                sender: recipient.clone(),
-                message: response,
-            })
+            Ok(response)
         }
     }
 
@@ -572,8 +554,7 @@ mod tests {
 
         async fn receive(
             &mut self,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<OrderedBroadcastMessage>>
-        {
+        ) -> crate::communication::ChannelResult<OrderedBroadcastMessage> {
             let cert = self
                 .certificates
                 .lock()
@@ -584,18 +565,13 @@ mod tests {
                         "No more certificates".to_string(),
                     )
                 })?;
-            Ok(AuthenticatedMessage {
-                sender: cert.dealer.clone(),
-                message: OrderedBroadcastMessage::CertificateV1(cert),
-            })
+            Ok(OrderedBroadcastMessage::CertificateV1(cert))
         }
 
         async fn try_receive_timeout(
             &mut self,
             _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<
-            Option<AuthenticatedMessage<OrderedBroadcastMessage>>,
-        > {
+        ) -> crate::communication::ChannelResult<Option<OrderedBroadcastMessage>> {
             unimplemented!()
         }
 
@@ -659,7 +635,7 @@ mod tests {
             &self,
             _recipient: &ValidatorAddress,
             _request: SendShareRequest,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<SendShareResponse>> {
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
             Err(crate::communication::ChannelError::SendFailed(
                 self.error_message.clone(),
             ))
@@ -672,34 +648,11 @@ mod tests {
     impl crate::communication::P2PChannel for SucceedingP2PChannel {
         async fn send_share(
             &self,
-            recipient: &ValidatorAddress,
-            _request: SendShareRequest,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<SendShareResponse>> {
-            Ok(AuthenticatedMessage {
-                sender: recipient.clone(),
-                message: SendShareResponse {
-                    signature: Vec::new(),
-                },
-            })
-        }
-    }
-
-    struct WrongSignerP2PChannel {
-        wrong_signer: ValidatorAddress,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for WrongSignerP2PChannel {
-        async fn send_share(
-            &self,
             _recipient: &ValidatorAddress,
             _request: SendShareRequest,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<SendShareResponse>> {
-            Ok(AuthenticatedMessage {
-                sender: self.wrong_signer.clone(),
-                message: SendShareResponse {
-                    signature: Vec::new(),
-                },
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            Ok(SendShareResponse {
+                signature: Vec::new(),
             })
         }
     }
@@ -713,9 +666,9 @@ mod tests {
     impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
         async fn send_share(
             &self,
-            recipient: &ValidatorAddress,
+            _recipient: &ValidatorAddress,
             _request: SendShareRequest,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<SendShareResponse>> {
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut count = self.fail_count.lock().unwrap();
             if *count < self.max_failures {
                 *count += 1;
@@ -723,11 +676,8 @@ mod tests {
                     "network error".to_string(),
                 ))
             } else {
-                Ok(AuthenticatedMessage {
-                    sender: recipient.clone(),
-                    message: SendShareResponse {
-                        signature: Vec::new(),
-                    },
+                Ok(SendShareResponse {
+                    signature: Vec::new(),
                 })
             }
         }
@@ -758,8 +708,7 @@ mod tests {
 
         async fn receive(
             &mut self,
-        ) -> crate::communication::ChannelResult<AuthenticatedMessage<OrderedBroadcastMessage>>
-        {
+        ) -> crate::communication::ChannelResult<OrderedBroadcastMessage> {
             if self.fail_on_receive {
                 Err(crate::communication::ChannelError::SendFailed(
                     self.error_message.clone(),
@@ -772,9 +721,7 @@ mod tests {
         async fn try_receive_timeout(
             &mut self,
             _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<
-            Option<AuthenticatedMessage<OrderedBroadcastMessage>>,
-        > {
+        ) -> crate::communication::ChannelResult<Option<OrderedBroadcastMessage>> {
             unreachable!()
         }
 
@@ -1979,26 +1926,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_run_as_dealer_signer_mismatch_rejected() {
-        let mut rng = rand::thread_rng();
-        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
-        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
-
-        // Use wrong signer - always returns dealer's address instead of recipient's
-        let wrong_signer = test_manager.validator_info.address.clone();
-        let wrong_signer_p2p = WrongSignerP2PChannel { wrong_signer };
-
-        let result = test_manager
-            .run_as_dealer(&wrong_signer_p2p, &mut mock_tob, &mut rng)
-            .await;
-
-        assert!(result.is_ok());
-        assert_eq!(mock_tob.published_count(), 0);
-        assert!(logs_contain("Response signer mismatch"));
-    }
-
-    #[tokio::test]
     async fn test_run_as_dealer_partial_failures_still_collects_enough() {
         let mut rng = rand::thread_rng();
         // Use 7 validators so we have more room for failures
@@ -2531,12 +2458,8 @@ mod tests {
         };
 
         // Receiver handles the request
-        let authenticated_request = AuthenticatedMessage {
-            sender: dealer_address.clone(),
-            message: request,
-        };
         let response = receiver_manager
-            .handle_send_share_request(authenticated_request)
+            .handle_send_share_request(dealer_address.clone(), request)
             .unwrap();
 
         assert_eq!(response.signature.len(), 96); // BLS signature size

@@ -1,8 +1,6 @@
 //! In-memory channel implementations for testing
 
-use crate::communication::interfaces::{
-    AuthenticatedMessage, ChannelResult, OrderedBroadcastChannel,
-};
+use crate::communication::interfaces::{ChannelResult, OrderedBroadcastChannel};
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -16,7 +14,7 @@ const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
 const INITIAL_READ_POSITION: usize = 0;
 
 // TODO: Replacing in-memory implementation with RPC-based loopback testing
-type MessageQueue<M> = Arc<Mutex<VecDeque<AuthenticatedMessage<M>>>>;
+type MessageQueue<M> = Arc<Mutex<VecDeque<M>>>;
 
 async fn try_receive_with_timeout<T, F, Fut>(
     duration: Duration,
@@ -42,7 +40,6 @@ pub struct InMemoryOrderedBroadcastChannel<M>
 where
     M: Clone + Send + Sync + 'static,
 {
-    validator_address: ValidatorAddress,
     shared_queue: MessageQueue<M>,
     read_position: Arc<Mutex<usize>>,
 }
@@ -60,7 +57,6 @@ where
             channels.insert(
                 addr.clone(),
                 Self {
-                    validator_address: addr.clone(),
                     shared_queue: shared_queue.clone(),
                     read_position: Arc::new(Mutex::new(INITIAL_READ_POSITION)),
                 },
@@ -77,23 +73,20 @@ where
 {
     async fn publish(&self, message: M) -> ChannelResult<()> {
         // In a real implementation, this would go through consensus to establish ordering
-        // For testing, we simulate ordering by adding to a single shared queue with authenticated sender
+        // For testing, we simulate ordering by adding to a single shared queue
         let mut queue = self.shared_queue.lock().await;
-        queue.push_back(AuthenticatedMessage {
-            sender: self.validator_address.clone(),
-            message,
-        });
+        queue.push_back(message);
         Ok(())
     }
 
-    async fn receive(&mut self) -> ChannelResult<AuthenticatedMessage<M>> {
+    async fn receive(&mut self) -> ChannelResult<M> {
         loop {
             let queue = self.shared_queue.lock().await;
             let mut pos = self.read_position.lock().await;
             if *pos < queue.len() {
-                let authenticated_msg = queue[*pos].clone();
+                let msg = queue[*pos].clone();
                 *pos += 1;
-                return Ok(authenticated_msg);
+                return Ok(msg);
             }
             drop(queue);
             drop(pos);
@@ -102,10 +95,7 @@ where
         }
     }
 
-    async fn try_receive_timeout(
-        &mut self,
-        duration: Duration,
-    ) -> ChannelResult<Option<AuthenticatedMessage<M>>> {
+    async fn try_receive_timeout(&mut self, duration: Duration) -> ChannelResult<Option<M>> {
         try_receive_with_timeout(duration, || self.receive()).await
     }
 
@@ -149,31 +139,26 @@ mod tests {
 
         // All validators should receive messages in the same order
         let mut first_order = vec![];
-        let mut first_senders = vec![];
-        for i in 0..NUM_VALIDATORS {
-            let authenticated = channels
+        for _i in 0..NUM_VALIDATORS {
+            let msg = channels
                 .get_mut(&validators[0])
                 .unwrap()
                 .receive()
                 .await
                 .unwrap();
-            // Verify the sender is authenticated correctly
-            assert_eq!(authenticated.sender, validators[i]);
-            first_order.push(authenticated.message.id);
-            first_senders.push(authenticated.sender.clone());
+            first_order.push(msg.id);
         }
 
-        // Check all other validators see the same order and same senders
+        // Check all other validators see the same order
         for validator in &validators[1..] {
-            for (i, expected_id) in first_order.iter().enumerate() {
-                let authenticated = channels
+            for expected_id in &first_order {
+                let msg = channels
                     .get_mut(validator)
                     .unwrap()
                     .receive()
                     .await
                     .unwrap();
-                assert_eq!(authenticated.sender, first_senders[i]);
-                assert_eq!(authenticated.message.id, *expected_id);
+                assert_eq!(msg.id, *expected_id);
             }
         }
     }
