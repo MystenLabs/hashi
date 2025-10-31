@@ -2,9 +2,15 @@
 /// Module: hashi
 module hashi::hashi;
 
-use hashi::{btc::BTC, committee_set::CommitteeSet, config::Config, treasury::Treasury};
+use hashi::{
+    btc::BTC,
+    committee::Committee,
+    committee_set::CommitteeSet,
+    config::Config,
+    treasury::Treasury
+};
 use std::string::String;
-use sui::{balance::Balance, coin::Coin, object_bag::ObjectBag, sui::SUI};
+use sui::{bag::{Self, Bag}, balance::Balance, coin::Coin, object_bag::ObjectBag, sui::SUI};
 
 public struct Hashi has key {
     id: UID,
@@ -13,6 +19,11 @@ public struct Hashi has key {
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
+    proposals: Bag,
+}
+
+public struct ProposalKey<phantom T> has copy, drop, store {
+    seq_num: u64,
 }
 
 public fun deposit(
@@ -71,6 +82,7 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
+        proposals: bag::new(ctx),
     };
 
     sui::transfer::share_object(hashi);
@@ -155,4 +167,36 @@ entry fun bootstrap(
     assert!(!self.committees.has_committee(ctx.epoch()));
 
     self.committees.bootstrap(sui_system, ctx);
+}
+
+public(package) fun id_mut(self: &mut Hashi): &mut UID {
+    &mut self.id
+}
+
+public(package) fun config(self: &Hashi): &Config {
+    &self.config
+}
+
+public(package) fun config_mut(self: &mut Hashi): &mut Config {
+    &mut self.config
+}
+
+public(package) fun treasury(self: &Hashi): &Treasury {
+    &self.treasury
+}
+
+public(package) fun committees(self: &Hashi): &CommitteeSet {
+    &self.committees
+}
+
+public(package) fun current_committee(self: &Hashi): &Committee {
+    self.committees.current_committee()
+}
+
+public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
+    &mut self.treasury
+}
+
+public(package) fun add_proposal<T: store>(self: &mut Hashi, proposal: T, seq_num: u64) {
+    self.proposals.add(ProposalKey<T> { seq_num }, proposal);
 }
