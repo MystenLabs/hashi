@@ -108,7 +108,7 @@ impl DkgManager {
             .insert(dealer_address.clone(), receiver_output);
         self.dealer_messages
             .insert(dealer_address.clone(), message.clone());
-        let message_hash = compute_message_hash(message, &dealer_address, &self.session_context)?;
+        let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
             validator: self.validator_info.address.clone(),
@@ -122,7 +122,7 @@ impl DkgManager {
         signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<DkgCertificate> {
         let message_hash =
-            compute_message_hash(message, &self.validator_info.address, &self.session_context)?;
+            compute_message_hash(&self.session_context, &self.validator_info.address, message)?;
         Ok(DkgCertificate {
             dealer: self.validator_info.address.clone(),
             message_hash,
@@ -133,34 +133,33 @@ impl DkgManager {
 
     pub fn process_certificates(
         &self,
-        validator_to_certificate: &std::collections::HashMap<ValidatorAddress, DkgCertificate>,
+        certified_dealers: &std::collections::HashMap<ValidatorAddress, DkgCertificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
-        let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> =
-            validator_to_certificate
-                .values()
-                .map(|cert| {
-                    let dealer_info = self
-                        .dkg_config
-                        .validator_registry
-                        .get(&cert.dealer)
-                        .ok_or_else(|| {
-                            DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
-                        })?;
-                    let output = self
-                        .dealer_outputs
-                        .get(&cert.dealer)
-                        .ok_or_else(|| {
-                            DkgError::ProtocolFailed(format!(
-                                "No dealer output found for dealer: {:?}.",
-                                cert.dealer
-                            ))
-                        })?
-                        .clone();
-                    Ok((dealer_info.party_id, output))
-                })
-                .collect::<Result<_, DkgError>>()?;
+        let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
+            .values()
+            .map(|cert| {
+                let dealer_info = self
+                    .dkg_config
+                    .validator_registry
+                    .get(&cert.dealer)
+                    .ok_or_else(|| {
+                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
+                    })?;
+                let output = self
+                    .dealer_outputs
+                    .get(&cert.dealer)
+                    .ok_or_else(|| {
+                        DkgError::ProtocolFailed(format!(
+                            "No dealer output found for dealer: {:?}.",
+                            cert.dealer
+                        ))
+                    })?
+                    .clone();
+                Ok((dealer_info.party_id, output))
+            })
+            .collect::<Result<_, DkgError>>()?;
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.nodes, outputs)
                 .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
@@ -176,7 +175,7 @@ impl DkgManager {
     pub fn handle_send_share_request(
         &mut self,
         sender: ValidatorAddress,
-        request: SendShareRequest,
+        request: &SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
         let dealer = sender;
         let validator_signature = self.receive_dealer_message(&request.message, dealer)?;
@@ -196,8 +195,8 @@ impl DkgManager {
         // TODO: Return early if DKG is already completed (we're a slow dealer)
         let my_address = self.validator_info.address.clone();
         let dealer_message = self.create_dealer_message(rng)?;
-        self.receive_dealer_message(&dealer_message, my_address.clone())?;
-        let mut approvals = Vec::new();
+        let my_signature = self.receive_dealer_message(&dealer_message, my_address.clone())?;
+        let mut approvals = vec![my_signature];
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
         for validator_address in self.dkg_config.validator_registry.keys() {
@@ -205,8 +204,8 @@ impl DkgManager {
                 let response = match p2p_channel
                     .send_share(
                         validator_address,
-                        SendShareRequest {
-                            message: Box::new(dealer_message.clone()),
+                        &SendShareRequest {
+                            message: dealer_message.clone(),
                         },
                     )
                     .await
@@ -230,7 +229,7 @@ impl DkgManager {
             let cert = self.create_certificate(&dealer_message, approvals)?;
             // TODO: Add timeout and retries handling when adding RPC layer
             ordered_broadcast_channel
-                .publish(OrderedBroadcastMessage::CertificateV1(cert))
+                .publish(OrderedBroadcastMessage::AvssCertificateV1(cert))
                 .await
                 .map_err(|e| {
                     DkgError::ProtocolFailed(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
@@ -246,7 +245,7 @@ impl DkgManager {
         >,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
-        let mut validator_to_certificate = std::collections::HashMap::new();
+        let mut certified_dealers = std::collections::HashMap::new();
         let mut dealer_weight_sum = 0u16;
         loop {
             if dealer_weight_sum >= threshold {
@@ -256,8 +255,8 @@ impl DkgManager {
                 .receive()
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
-            if let OrderedBroadcastMessage::CertificateV1(cert) = tob_msg {
-                if validator_to_certificate.contains_key(&cert.dealer) {
+            if let OrderedBroadcastMessage::AvssCertificateV1(cert) = tob_msg {
+                if certified_dealers.contains_key(&cert.dealer) {
                     continue;
                 }
                 match validate_certificate(
@@ -277,7 +276,7 @@ impl DkgManager {
                             .ok_or_else(|| {
                                 DkgError::ProtocolFailed("Weight overflow".parse().unwrap())
                             })?;
-                        validator_to_certificate.insert(cert.dealer.clone(), cert);
+                        certified_dealers.insert(cert.dealer.clone(), cert);
                     }
                     Err(e) => {
                         tracing::info!("Invalid certificate from {:?}: {}", cert.dealer, e);
@@ -286,7 +285,7 @@ impl DkgManager {
                 }
             }
         }
-        let output = self.process_certificates(&validator_to_certificate)?;
+        let output = self.process_certificates(&certified_dealers)?;
         Ok(output)
     }
 }
@@ -324,7 +323,7 @@ fn validate_message_hash(
             cert.dealer
         ))
     })?;
-    let expected_hash = compute_message_hash(message, &cert.dealer, session_context)?;
+    let expected_hash = compute_message_hash(session_context, &cert.dealer, message)?;
     if cert.message_hash != expected_hash {
         return Err(DkgError::InvalidCertificate(format!(
             "Message hash mismatch for dealer {:?}",
@@ -334,6 +333,7 @@ fn validate_message_hash(
     Ok(())
 }
 
+// TODO: Add cryptographic verification of signatures
 fn validate_signatures(
     signatures: &[ValidatorSignature],
     required_weight: u16,
@@ -411,18 +411,18 @@ fn has_sufficient_weighted_signatures(
 }
 
 fn compute_message_hash(
-    message: &avss::Message,
-    dealer_address: &ValidatorAddress,
     session: &SessionContext,
+    dealer_address: &ValidatorAddress,
+    message: &avss::Message,
 ) -> DkgResult<MessageHash> {
     let message_bytes = bcs::to_bytes(message)
         .map_err(|e| DkgError::CryptoError(format!("Failed to serialize message: {}", e)))?;
     let mut hasher = Blake2b256::default();
+    let dealer_session_id = session.dealer_session_id(dealer_address);
+    hasher.update(dealer_session_id.as_ref());
     // No length prefix is needed for message_bytes because it's the only variable-length
     // input.
     hasher.update(&message_bytes);
-    let dealer_session_id = session.dealer_session_id(dealer_address);
-    hasher.update(dealer_session_id.as_ref());
     Ok(hasher.finalize().into())
 }
 
@@ -504,7 +504,7 @@ mod tests {
         async fn send_share(
             &self,
             recipient: &ValidatorAddress,
-            request: SendShareRequest,
+            request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
@@ -565,7 +565,7 @@ mod tests {
                         "No more certificates".to_string(),
                     )
                 })?;
-            Ok(OrderedBroadcastMessage::CertificateV1(cert))
+            Ok(OrderedBroadcastMessage::AvssCertificateV1(cert))
         }
 
         async fn try_receive_timeout(
@@ -634,7 +634,7 @@ mod tests {
         async fn send_share(
             &self,
             _recipient: &ValidatorAddress,
-            _request: SendShareRequest,
+            _request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             Err(crate::communication::ChannelError::SendFailed(
                 self.error_message.clone(),
@@ -649,7 +649,7 @@ mod tests {
         async fn send_share(
             &self,
             _recipient: &ValidatorAddress,
-            _request: SendShareRequest,
+            _request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             Ok(SendShareResponse {
                 signature: Vec::new(),
@@ -667,7 +667,7 @@ mod tests {
         async fn send_share(
             &self,
             _recipient: &ValidatorAddress,
-            _request: SendShareRequest,
+            _request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut count = self.fail_count.lock().unwrap();
             if *count < self.max_failures {
@@ -1093,10 +1093,10 @@ mod tests {
         let dealer_address = ValidatorAddress([42; 32]);
 
         let hash1 =
-            compute_message_hash(&message, &dealer_address, &manager.session_context).unwrap();
+            compute_message_hash(&manager.session_context, &dealer_address, &message).unwrap();
 
         let hash2 =
-            compute_message_hash(&message, &dealer_address, &manager.session_context).unwrap();
+            compute_message_hash(&manager.session_context, &dealer_address, &message).unwrap();
 
         assert_eq!(hash1, hash2);
     }
@@ -1111,16 +1111,16 @@ mod tests {
             .unwrap();
 
         let hash1 = compute_message_hash(
-            &message,
-            &ValidatorAddress([1; 32]),
             &manager.session_context,
+            &ValidatorAddress([1; 32]),
+            &message,
         )
         .unwrap();
 
         let hash2 = compute_message_hash(
-            &message,
-            &ValidatorAddress([2; 32]),
             &manager.session_context,
+            &ValidatorAddress([2; 32]),
+            &message,
         )
         .unwrap();
 
@@ -1972,6 +1972,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_as_dealer_includes_own_signature() {
+        let mut rng = rand::thread_rng();
+        let num_validators = 5;
+
+        // Create encryption keys for all validators
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let address = ValidatorAddress([i as u8; 32]);
+                let info = ValidatorInfo {
+                    address: address.clone(),
+                    party_id: i as u16,
+                    weight: 1,
+                    ecies_public_key: public_key,
+                };
+                (address, info)
+            })
+            .collect();
+
+        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        // Create manager for validator 0 (the dealer)
+        let dealer_addr = ValidatorAddress([0; 32]);
+        let mut test_manager = DkgManager::new(
+            config.validator_registry.get(&dealer_addr).unwrap().clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            bls_keys[0].clone(),
+        );
+
+        // Create managers for other validators
+        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+            .map(|i| {
+                let addr = ValidatorAddress([i as u8; 32]);
+                let validator_info = config.validator_registry.get(&addr).unwrap();
+                let manager = DkgManager::new(
+                    validator_info.clone(),
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    bls_keys[i].clone(),
+                );
+                (addr, manager)
+            })
+            .collect();
+
+        let mock_p2p = MockP2PChannel::new(other_managers, dealer_addr.clone());
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+        // Run as dealer
+        let result = test_manager
+            .run_as_dealer(&mock_p2p, &mut mock_tob, &mut rng)
+            .await;
+
+        assert!(result.is_ok());
+
+        // Verify a certificate was published
+        assert_eq!(mock_tob.published_count(), 1);
+
+        // Extract the certificate
+        let published = mock_tob.published.lock().unwrap();
+        let cert = match &published[0] {
+            OrderedBroadcastMessage::AvssCertificateV1(cert) => cert,
+            _ => panic!("Expected AvssCertificateV1"),
+        };
+
+        // Verify the dealer's own signature is included
+        assert!(
+            cert.signatures
+                .iter()
+                .any(|sig| sig.validator == dealer_addr),
+            "Dealer's own signature must be included in the certificate"
+        );
+
+        // Verify the dealer is the first signer
+        assert_eq!(
+            cert.signatures[0].validator, dealer_addr,
+            "Dealer should be the first signer"
+        );
+
+        // Verify all signatures are from distinct validators
+        let signers: std::collections::HashSet<_> =
+            cert.signatures.iter().map(|sig| &sig.validator).collect();
+        assert_eq!(
+            signers.len(),
+            cert.signatures.len(),
+            "All signatures should be from distinct validators"
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_as_party_tob_receive_error() {
         let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
 
@@ -2086,7 +2191,7 @@ mod tests {
         session_context: &SessionContext,
         weights: &[u16],
     ) -> DkgCertificate {
-        let message_hash = compute_message_hash(message, dealer_addr, session_context).unwrap();
+        let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
 
         // Create minimal valid signatures to pass validation
         let dkg_required = config.required_dkg_signatures() as u16;
@@ -2454,12 +2559,12 @@ mod tests {
 
         // Create a request as if dealer sent it to receiver
         let request = SendShareRequest {
-            message: Box::new(dealer_message.clone()),
+            message: dealer_message.clone(),
         };
 
         // Receiver handles the request
         let response = receiver_manager
-            .handle_send_share_request(dealer_address.clone(), request)
+            .handle_send_share_request(dealer_address.clone(), &request)
             .unwrap();
 
         assert_eq!(response.signature.len(), 96); // BLS signature size
@@ -2664,7 +2769,7 @@ mod tests {
 
             // Compute correct hash
             let message_hash =
-                compute_message_hash(&dealer_message, &dealer_addr, &session_context).unwrap();
+                compute_message_hash(&session_context, &dealer_addr, &dealer_message).unwrap();
 
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
@@ -2761,7 +2866,7 @@ mod tests {
             let session_context = &manager.session_context;
 
             let message_hash =
-                compute_message_hash(&dealer_message, &dealer_addr, session_context).unwrap();
+                compute_message_hash(session_context, &dealer_addr, &dealer_message).unwrap();
 
             // Create sufficient signatures (4 validators with weight 2 each = 8)
             // DKG requires t+f = 4
@@ -2817,7 +2922,7 @@ mod tests {
             let wrong_session_context =
                 SessionContext::new(200, ProtocolType::DkgKeyGeneration, "test".to_string());
             let wrong_hash =
-                compute_message_hash(&dealer_message, &dealer_addr, &wrong_session_context)
+                compute_message_hash(&wrong_session_context, &dealer_addr, &dealer_message)
                     .unwrap();
 
             let cert = DkgCertificate {

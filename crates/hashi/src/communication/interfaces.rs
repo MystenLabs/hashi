@@ -32,7 +32,7 @@ pub trait P2PChannel: Send + Sync {
     async fn send_share(
         &self,
         recipient: &ValidatorAddress,
-        request: SendShareRequest,
+        request: &SendShareRequest,
     ) -> ChannelResult<SendShareResponse>;
 }
 
