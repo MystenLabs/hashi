@@ -34,6 +34,7 @@ pub struct DkgManager {
     // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
+    pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
 }
 
 impl DkgManager {
@@ -60,6 +61,7 @@ impl DkgManager {
             validator_weights,
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
+            share_responses: std::collections::HashMap::new(),
         }
     }
 
@@ -171,17 +173,31 @@ impl DkgManager {
         })
     }
 
-    // TODO: Cache response if already answered to protect against DoS attacks
     pub fn handle_send_share_request(
         &mut self,
         sender: ValidatorAddress,
         request: &SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
-        let dealer = sender;
-        let validator_signature = self.receive_dealer_message(&request.message, dealer)?;
-        Ok(SendShareResponse {
+        if let Some(existing_message) = self.dealer_messages.get(&sender) {
+            let existing_hash =
+                compute_message_hash(&self.session_context, &sender, existing_message)?;
+            let incoming_hash =
+                compute_message_hash(&self.session_context, &sender, &request.message)?;
+            if existing_hash == incoming_hash {
+                return Ok(self.share_responses.get(&sender).unwrap().clone());
+            } else {
+                return Err(DkgError::InvalidMessage {
+                    sender: sender.clone(),
+                    reason: "Dealer sent different messages".to_string(),
+                });
+            }
+        }
+        let validator_signature = self.receive_dealer_message(&request.message, sender.clone())?;
+        let response = SendShareResponse {
             signature: validator_signature.signature,
-        })
+        };
+        self.share_responses.insert(sender, response.clone());
+        Ok(response)
     }
 
     pub async fn run_as_dealer(
@@ -2561,6 +2577,143 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.signature.len(), 96); // BLS signature size
+    }
+
+    fn create_test_config_and_encrption_keys(
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> (
+        DkgConfig,
+        SessionContext,
+        Vec<PrivateKey<EncryptionGroupElement>>,
+    ) {
+        let encryption_keys: Vec<_> = (0..5)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(rng))
+            .collect();
+
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key =
+                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let address = ValidatorAddress([i as u8; 32]);
+                let info = ValidatorInfo {
+                    address: address.clone(),
+                    party_id: i as u16,
+                    weight: 1,
+                    ecies_public_key: public_key,
+                };
+                (address, info)
+            })
+            .collect();
+
+        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let session_context = SessionContext::new(
+            config.epoch,
+            ProtocolType::DkgKeyGeneration,
+            "testchain".to_string(),
+        );
+
+        (config, session_context, encryption_keys)
+    }
+
+    fn create_manager_at_index(
+        index: u8,
+        config: &DkgConfig,
+        session_context: &SessionContext,
+        encryption_keys: &[PrivateKey<EncryptionGroupElement>],
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> (ValidatorAddress, DkgManager) {
+        let address = ValidatorAddress([index; 32]);
+        let manager = DkgManager::new(
+            config.validator_registry.get(&address).unwrap().clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[index as usize].clone(),
+            crate::bls::Bls12381PrivateKey::generate(rng),
+        );
+        (address, manager)
+    }
+
+    fn create_handle_send_share_test_setup(
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> (ValidatorAddress, DkgManager, ValidatorAddress, DkgManager) {
+        let (config, session_context, encryption_keys) = create_test_config_and_encrption_keys(rng);
+        let (dealer_address, dealer_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, rng);
+        let (receiver_address, receiver_manager) =
+            create_manager_at_index(0, &config, &session_context, &encryption_keys, rng);
+
+        (
+            dealer_address,
+            dealer_manager,
+            receiver_address,
+            receiver_manager,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_handle_send_share_request_idempotent() {
+        // Test that same request returns cached response (idempotent)
+        let mut rng = rand::thread_rng();
+        let (dealer_address, dealer_manager, _receiver_address, mut receiver_manager) =
+            create_handle_send_share_test_setup(&mut rng);
+
+        let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
+        let request = SendShareRequest {
+            message: dealer_message.clone(),
+        };
+
+        // First request
+        let response1 = receiver_manager
+            .handle_send_share_request(dealer_address.clone(), &request)
+            .unwrap();
+
+        // Second request with same message - should return cached response
+        let response2 = receiver_manager
+            .handle_send_share_request(dealer_address.clone(), &request)
+            .unwrap();
+
+        // Responses should be identical (same signature bytes)
+        assert_eq!(response1.signature, response2.signature);
+    }
+
+    #[tokio::test]
+    async fn test_handle_send_share_request_equivocation() {
+        // Test that different message from same dealer triggers error
+        let mut rng = rand::thread_rng();
+        let (dealer_address, dealer_manager, _receiver_address, mut receiver_manager) =
+            create_handle_send_share_test_setup(&mut rng);
+
+        // First message from dealer
+        let dealer_message1 = dealer_manager.create_dealer_message(&mut rng).unwrap();
+        let request1 = SendShareRequest {
+            message: dealer_message1.clone(),
+        };
+
+        // Process first request successfully
+        let response1 = receiver_manager
+            .handle_send_share_request(dealer_address.clone(), &request1)
+            .unwrap();
+        assert_eq!(response1.signature.len(), 96);
+
+        // Second DIFFERENT message from same dealer (equivocation)
+        let dealer_message2 = dealer_manager.create_dealer_message(&mut rng).unwrap();
+        let request2 = SendShareRequest {
+            message: dealer_message2.clone(),
+        };
+
+        // Should return error
+        let result = receiver_manager.handle_send_share_request(dealer_address.clone(), &request2);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            DkgError::InvalidMessage { sender, reason } => {
+                assert_eq!(sender, dealer_address);
+                assert!(reason.contains("different messages"));
+            }
+            _ => panic!("Expected InvalidMessage error"),
+        }
     }
 
     mod validation_test_utils {
