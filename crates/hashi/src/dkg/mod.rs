@@ -246,9 +246,9 @@ impl DkgManager {
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         let mut certified_dealers = std::collections::HashMap::new();
-        let mut dealer_weight_sum = 0u16;
+        let mut dealer_weight_sum = 0u32;
         loop {
-            if dealer_weight_sum >= threshold {
+            if dealer_weight_sum >= threshold as u32 {
                 break;
             }
             let tob_msg = ordered_broadcast_channel
@@ -271,11 +271,7 @@ impl DkgManager {
                             self.validator_weights.get(&cert.dealer).ok_or_else(|| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
-                        dealer_weight_sum = dealer_weight_sum
-                            .checked_add(*dealer_weight)
-                            .ok_or_else(|| {
-                                DkgError::ProtocolFailed("Weight overflow".parse().unwrap())
-                            })?;
+                        dealer_weight_sum += *dealer_weight as u32;
                         certified_dealers.insert(cert.dealer.clone(), cert);
                     }
                     Err(e) => {
@@ -340,7 +336,7 @@ fn validate_signatures(
     validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
 ) -> DkgResult<()> {
     let mut seen_signers = std::collections::HashSet::new();
-    let mut total_weight = 0u16;
+    let mut total_weight = 0u32;
     for sig in signatures {
         if !seen_signers.insert(&sig.validator) {
             return Err(DkgError::InvalidCertificate(format!(
@@ -351,11 +347,9 @@ fn validate_signatures(
         let weight = validator_weights.get(&sig.validator).ok_or_else(|| {
             DkgError::InvalidCertificate(format!("Unknown signer: {:?}", sig.validator))
         })?;
-        total_weight = total_weight
-            .checked_add(*weight)
-            .ok_or_else(|| DkgError::ProtocolFailed("Signature weight overflow".to_string()))?;
+        total_weight += *weight as u32;
     }
-    if total_weight < required_weight {
+    if total_weight < required_weight as u32 {
         return Err(DkgError::InvalidCertificate(format!(
             "Insufficient signature weight: got {}, need {}",
             total_weight, required_weight
@@ -380,8 +374,8 @@ fn create_nodes(validators: &ValidatorRegistry) -> Nodes<EncryptionGroupElement>
 fn compute_total_signature_weight(
     signatures: &[ValidatorSignature],
     validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
-) -> DkgResult<u16> {
-    let mut total_weight: u16 = 0;
+) -> DkgResult<u32> {
+    let mut total_weight: u32 = 0;
     for sig in signatures {
         let weight =
             validator_weights
@@ -390,9 +384,7 @@ fn compute_total_signature_weight(
                     sender: sig.validator.clone(),
                     reason: "Signature from unknown validator".to_string(),
                 })?;
-        total_weight = total_weight
-            .checked_add(*weight)
-            .ok_or_else(|| DkgError::ProtocolFailed("Weight overflow".parse().unwrap()))?;
+        total_weight += *weight as u32;
     }
     Ok(total_weight)
 }
@@ -403,7 +395,7 @@ fn has_sufficient_weighted_signatures(
     required_weight: u16,
 ) -> bool {
     match compute_total_signature_weight(signatures, validator_weights) {
-        Ok(total_weight) => total_weight >= required_weight,
+        Ok(total_weight) => total_weight >= required_weight as u32,
         Err(e) => {
             tracing::info!("Error checking signature weights: {}", e);
             false
@@ -2719,36 +2711,6 @@ mod tests {
             let err_msg = result.unwrap_err().to_string();
             assert!(err_msg.contains("Insufficient"));
             assert!(err_msg.contains("got 5, need 6"));
-        }
-
-        #[test]
-        fn test_signature_weight_overflow() {
-            let mut validator_weights = std::collections::HashMap::new();
-            let addr0 = ValidatorAddress([0; 32]);
-            let addr1 = ValidatorAddress([1; 32]);
-            validator_weights.insert(addr0.clone(), u16::MAX);
-            validator_weights.insert(addr1.clone(), 1);
-
-            // Create signatures from both validators (will cause overflow: u16::MAX + 1)
-            let signatures = vec![
-                ValidatorSignature {
-                    validator: addr0,
-                    signature: vec![0u8; 96],
-                },
-                ValidatorSignature {
-                    validator: addr1,
-                    signature: vec![0u8; 96],
-                },
-            ];
-
-            let result = validate_signatures(&signatures, 1, &validator_weights);
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Signature weight overflow")
-            );
         }
     }
 
