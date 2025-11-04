@@ -187,14 +187,14 @@ impl DkgManager {
                 compute_message_hash(&self.session_context, &sender, existing_message)?;
             let incoming_hash =
                 compute_message_hash(&self.session_context, &sender, &request.message)?;
-            if existing_hash == incoming_hash {
-                return Ok(self.share_responses.get(&sender).unwrap().clone());
+            return if existing_hash == incoming_hash {
+                Ok(self.share_responses.get(&sender).unwrap().clone())
             } else {
-                return Err(DkgError::InvalidMessage {
+                Err(DkgError::InvalidMessage {
                     sender: sender.clone(),
                     reason: "Dealer sent different messages".to_string(),
-                });
-            }
+                })
+            };
         }
         let validator_signature = self.receive_dealer_message(&request.message, sender.clone())?;
         let response = SendShareResponse {
