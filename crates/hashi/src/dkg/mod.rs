@@ -2603,14 +2603,14 @@ mod tests {
             &msg1,
             &config,
             &session_context,
-            &vec![1, 1, 1, 1, 1],
+            &[1, 1, 1, 1, 1],
         );
         let cert2 = create_test_certificate(
             &dealer2_addr,
             &msg2,
             &config,
             &session_context,
-            &vec![1, 1, 1, 1, 1],
+            &[1, 1, 1, 1, 1],
         );
 
         // Create mock P2P channel with dealers that have messages
@@ -2677,21 +2677,21 @@ mod tests {
             &msg1,
             &config,
             &session_context,
-            &vec![1, 1, 1, 1, 1],
+            &[1, 1, 1, 1, 1],
         );
         let cert2 = create_test_certificate(
             &dealer2_addr,
             &msg2,
             &config,
             &session_context,
-            &vec![1, 1, 1, 1, 1],
+            &[1, 1, 1, 1, 1],
         );
         let cert3 = create_test_certificate(
             &dealer3_addr,
             &msg3,
             &config,
             &session_context,
-            &vec![1, 1, 1, 1, 1],
+            &[1, 1, 1, 1, 1],
         );
 
         // Create mock P2P channel with only dealer1 and dealer3 (dealer2 is missing)
