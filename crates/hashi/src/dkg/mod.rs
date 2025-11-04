@@ -176,6 +176,7 @@ impl DkgManager {
         })
     }
 
+    // RPC endpoint handler for `SendShareRequest`
     pub fn handle_send_share_request(
         &mut self,
         sender: ValidatorAddress,
