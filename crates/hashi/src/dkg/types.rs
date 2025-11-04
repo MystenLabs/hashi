@@ -3,8 +3,8 @@
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
+use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::{
-    ecies_v1::PublicKey,
     nodes::PartyId,
     polynomial::Eval,
     random_oracle::RandomOracle,
@@ -14,12 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-
 pub type MessageHash = [u8; 32];
 pub type SignatureBytes = Vec<u8>;
 pub type SessionId = Digest<64>;
-pub type ValidatorRegistry = HashMap<ValidatorAddress, ValidatorInfo>;
-pub type ValidatorEntry = (ValidatorAddress, ValidatorInfo);
+pub type AddressToPartyId = HashMap<ValidatorAddress, PartyId>;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str = "hashi";
@@ -49,18 +47,10 @@ fn base_oracle(protocol_type: &ProtocolType) -> RandomOracle {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ValidatorInfo {
-    pub address: ValidatorAddress,
-    /// Index in the validator set
-    pub party_id: PartyId,
-    pub weight: u16,
-    pub ecies_public_key: PublicKey<EncryptionGroupElement>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgConfig {
     pub epoch: u64,
-    pub validator_registry: ValidatorRegistry,
+    pub nodes: Nodes<EncryptionGroupElement>,
+    pub address_to_party_id: AddressToPartyId,
     /// Threshold for signing (t)
     pub threshold: u16,
     /// Maximum number of faulty validators (f)
@@ -70,7 +60,8 @@ pub struct DkgConfig {
 impl DkgConfig {
     pub fn new(
         epoch: u64,
-        validator_registry: ValidatorRegistry,
+        nodes: Nodes<EncryptionGroupElement>,
+        address_to_party_id: AddressToPartyId,
         threshold: u16,
         max_faulty: u16,
     ) -> Result<Self, DkgError> {
@@ -79,7 +70,7 @@ impl DkgConfig {
                 "threshold must be greater than max_faulty".into(),
             ));
         }
-        let total_weight: u16 = validator_registry.values().map(|v| v.weight).sum();
+        let total_weight = nodes.total_weight();
         if threshold + 2 * max_faulty > total_weight {
             return Err(DkgError::InvalidThreshold(format!(
                 "t + 2f ({}) must be <= total weight ({})",
@@ -89,14 +80,15 @@ impl DkgConfig {
         }
         Ok(Self {
             epoch,
-            validator_registry,
+            address_to_party_id,
+            nodes,
             threshold,
             max_faulty,
         })
     }
 
     pub fn total_weight(&self) -> u16 {
-        self.validator_registry.values().map(|v| v.weight).sum()
+        self.nodes.total_weight()
     }
 
     pub fn required_data_availability_signatures(&self) -> usize {
@@ -370,28 +362,44 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fastcrypto::groups::ristretto255::RistrettoPoint;
+    use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
+    use fastcrypto_tbls::nodes::Node;
 
-    fn create_test_validator(party_id: u16, weight: u16) -> ValidatorEntry {
-        use fastcrypto::groups::ristretto255::RistrettoPoint;
-        use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
-
+    fn create_test_validator(
+        party_id: u16,
+        weight: u16,
+    ) -> (ValidatorAddress, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
-
         let address = ValidatorAddress([party_id as u8; 32]);
-        let info = ValidatorInfo {
-            address: address.clone(),
-            party_id,
+        let node = Node {
+            id: party_id,
+            pk: public_key,
             weight,
-            ecies_public_key: public_key,
         };
-        (address, info)
+        (address, node)
+    }
+
+    fn build_nodes_and_registry(
+        validators: Vec<(ValidatorAddress, Node<EncryptionGroupElement>)>,
+    ) -> (Nodes<EncryptionGroupElement>, AddressToPartyId) {
+        let mut node_vec: Vec<_> = validators.iter().map(|(_, node)| node.clone()).collect();
+        node_vec.sort_by_key(|n| n.id);
+
+        let nodes = Nodes::new(node_vec).unwrap();
+        let address_to_party_id: AddressToPartyId = validators
+            .iter()
+            .map(|(addr, node)| (addr.clone(), node.id))
+            .collect();
+        (nodes, address_to_party_id)
     }
 
     #[test]
     fn test_dkg_config_valid_equal_weight() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 3, 2);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 2);
         assert!(config.is_ok());
         let config = config.unwrap();
         assert_eq!(config.epoch, 100);
@@ -408,10 +416,9 @@ mod tests {
             create_test_validator(2, 2),
             create_test_validator(3, 1),
             create_test_validator(4, 1),
-        ]
-        .into_iter()
-        .collect();
-        let config = DkgConfig::new(42, validators, 5, 2);
+        ];
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(42, nodes, address_to_party_id, 5, 2);
         assert!(config.is_ok());
         let config = config.unwrap();
         assert_eq!(config.total_weight(), 9);
@@ -420,7 +427,8 @@ mod tests {
     #[test]
     fn test_dkg_config_threshold_too_low() {
         let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 2, 2);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 2);
         assert!(config.is_err());
         match config.unwrap_err() {
             DkgError::InvalidThreshold(msg) => {
@@ -433,7 +441,8 @@ mod tests {
     #[test]
     fn test_dkg_config_threshold_equals_faulty() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 3, 3);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 3);
         assert!(config.is_err());
         match config.unwrap_err() {
             DkgError::InvalidThreshold(msg) => {
@@ -446,7 +455,8 @@ mod tests {
     #[test]
     fn test_dkg_config_byzantine_constraint_violated() {
         let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 4, 2);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 4, 2);
         assert!(config.is_err());
         match config.unwrap_err() {
             DkgError::InvalidThreshold(msg) => {
@@ -459,37 +469,41 @@ mod tests {
     #[test]
     fn test_dkg_config_minimum_validators() {
         let validators = (0..3).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 2, 0);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 0);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_dkg_config_single_validator() {
-        let validators = vec![create_test_validator(0, 1)].into_iter().collect();
-        let config = DkgConfig::new(100, validators, 1, 0);
+        let validators = vec![create_test_validator(0, 1)];
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 1, 0);
         assert!(config.is_ok());
     }
 
     #[test]
+    #[should_panic(expected = "InvalidInput")]
     fn test_dkg_config_zero_weight_sum() {
-        let validators = vec![create_test_validator(0, 0), create_test_validator(1, 0)]
-            .into_iter()
-            .collect();
-        let config = DkgConfig::new(100, validators, 1, 0);
-        assert!(config.is_err());
+        // Nodes::new() will fail when trying to create nodes with zero weights
+        // This is the expected behavior - invalid node configuration is caught early
+        let validators = vec![create_test_validator(0, 0), create_test_validator(1, 0)];
+        let (_nodes, _address_to_party_id) = build_nodes_and_registry(validators);
     }
 
     #[test]
     fn test_optimal_byzantine_tolerance() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 3, 2);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 2);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_required_data_availability_signatures() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config = DkgConfig::new(100, validators, 3, 2).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 2).unwrap();
 
         assert_eq!(config.required_data_availability_signatures(), 5);
     }
@@ -497,7 +511,8 @@ mod tests {
     #[test]
     fn test_required_dkg_signatures() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let config1 = DkgConfig::new(100, validators, 3, 2).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config1 = DkgConfig::new(100, nodes, address_to_party_id, 3, 2).unwrap();
 
         assert_eq!(config1.required_dkg_signatures(), 5);
     }

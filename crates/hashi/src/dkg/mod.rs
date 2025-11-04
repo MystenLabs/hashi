@@ -5,15 +5,15 @@ pub mod types;
 use crate::types::ValidatorAddress;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
-use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
+use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_crypto::Signer;
 
 pub use types::{
-    Authenticated, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult,
+    AddressToPartyId, Authenticated, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult,
     EncryptionGroupElement, MessageApproval, MessageHash, MessageType, OrderedBroadcastMessage,
     P2PMessage, SendShareRequest, SendShareResponse, SessionContext, SessionId, SighashType,
-    SignatureBytes, ValidatorEntry, ValidatorInfo, ValidatorRegistry, ValidatorSignature,
+    SignatureBytes, ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -24,8 +24,8 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 // 3) Once sufficient valid certificates are received, a party completes the protocol locally.
 pub struct DkgManager {
     // Immutable during a given session
-    pub validator_info: ValidatorInfo,
-    pub nodes: Nodes<EncryptionGroupElement>,
+    pub party_id: PartyId,
+    pub address: ValidatorAddress,
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
@@ -39,21 +39,27 @@ pub struct DkgManager {
 
 impl DkgManager {
     pub fn new(
-        validator_info: ValidatorInfo,
+        address: ValidatorAddress,
         dkg_config: DkgConfig,
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
     ) -> Self {
-        let nodes = create_nodes(&dkg_config.validator_registry);
-        let validator_weights: std::collections::HashMap<_, _> = dkg_config
-            .validator_registry
+        let party_id = *dkg_config
+            .address_to_party_id
+            .get(&address)
+            .expect("address not found in validator registry");
+        let validator_weights: std::collections::HashMap<ValidatorAddress, u16> = dkg_config
+            .address_to_party_id
             .iter()
-            .map(|(addr, v)| (addr.clone(), v.weight))
+            .map(|(addr, party_id)| {
+                let weight = dkg_config.nodes.weight_of(*party_id).unwrap();
+                (addr.clone(), weight)
+            })
             .collect();
         Self {
-            validator_info,
-            nodes,
+            party_id,
+            address,
             dkg_config,
             session_context,
             encryption_key,
@@ -69,12 +75,10 @@ impl DkgManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<avss::Message> {
-        let dealer_session_id = self
-            .session_context
-            .dealer_session_id(&self.validator_info.address);
+        let dealer_session_id = self.session_context.dealer_session_id(&self.address);
         let dealer = avss::Dealer::new(
             None,
-            self.nodes.clone(),
+            self.dkg_config.nodes.clone(),
             self.dkg_config.threshold,
             self.dkg_config.max_faulty,
             dealer_session_id.to_vec(),
@@ -90,8 +94,8 @@ impl DkgManager {
     ) -> DkgResult<ValidatorSignature> {
         let dealer_session_id = self.session_context.dealer_session_id(&dealer_address);
         let receiver = avss::Receiver::new(
-            self.nodes.clone(),
-            self.validator_info.party_id,
+            self.dkg_config.nodes.clone(),
+            self.party_id,
             self.dkg_config.threshold,
             dealer_session_id.to_vec(),
             None, // commitment: None for initial DKG
@@ -113,7 +117,7 @@ impl DkgManager {
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
-            validator: self.validator_info.address.clone(),
+            validator: self.address.clone(),
             signature: signature.to_bytes().to_vec(),
         })
     }
@@ -123,10 +127,9 @@ impl DkgManager {
         message: &avss::Message,
         signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<DkgCertificate> {
-        let message_hash =
-            compute_message_hash(&self.session_context, &self.validator_info.address, message)?;
+        let message_hash = compute_message_hash(&self.session_context, &self.address, message)?;
         Ok(DkgCertificate {
-            dealer: self.validator_info.address.clone(),
+            dealer: self.address.clone(),
             message_hash,
             signatures,
             session_context: self.session_context.clone(),
@@ -142,9 +145,9 @@ impl DkgManager {
         let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
             .values()
             .map(|cert| {
-                let dealer_info = self
+                let dealer_party_id = self
                     .dkg_config
-                    .validator_registry
+                    .address_to_party_id
                     .get(&cert.dealer)
                     .ok_or_else(|| {
                         DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
@@ -159,11 +162,11 @@ impl DkgManager {
                         ))
                     })?
                     .clone();
-                Ok((dealer_info.party_id, output))
+                Ok((*dealer_party_id, output))
             })
             .collect::<Result<_, DkgError>>()?;
         let combined_output =
-            avss::ReceiverOutput::complete_dkg(threshold, &self.nodes, outputs)
+            avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
         Ok(DkgOutput {
             public_key: combined_output.vk,
@@ -209,14 +212,13 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
         // TODO: Return early if DKG is already completed (we're a slow dealer)
-        let my_address = self.validator_info.address.clone();
         let dealer_message = self.create_dealer_message(rng)?;
-        let my_signature = self.receive_dealer_message(&dealer_message, my_address.clone())?;
+        let my_signature = self.receive_dealer_message(&dealer_message, self.address.clone())?;
         let mut approvals = vec![my_signature];
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
-        for validator_address in self.dkg_config.validator_registry.keys() {
-            if validator_address != &my_address {
+        for validator_address in self.dkg_config.address_to_party_id.keys() {
+            if validator_address != &self.address {
                 let response = match p2p_channel
                     .send_share(
                         validator_address,
@@ -309,7 +311,7 @@ fn validate_certificate(
     validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
     dealer_messages: &std::collections::HashMap<ValidatorAddress, avss::Message>,
 ) -> DkgResult<()> {
-    if !dkg_config.validator_registry.contains_key(&cert.dealer) {
+    if !dkg_config.address_to_party_id.contains_key(&cert.dealer) {
         return Err(DkgError::InvalidCertificate(format!(
             "Unknown dealer: {:?}",
             cert.dealer
@@ -374,19 +376,6 @@ fn validate_signatures(
     Ok(())
 }
 
-fn create_nodes(validators: &ValidatorRegistry) -> Nodes<EncryptionGroupElement> {
-    let nodes: Vec<_> = validators
-        .values()
-        .map(|v| Node {
-            id: v.party_id,
-            pk: v.ecies_public_key.clone(),
-            weight: v.weight,
-        })
-        .collect();
-    // TODO: Use `Nodes::new_reduced()` that reduces weights with GCD
-    Nodes::new(nodes).expect("Failed to create nodes")
-}
-
 fn compute_total_signature_weight(
     signatures: &[ValidatorSignature],
     validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
@@ -439,18 +428,34 @@ fn compute_message_hash(
 mod tests {
     use super::*;
     use crate::dkg::types::ProtocolType;
+    use fastcrypto_tbls::ecies_v1::PublicKey;
+    use fastcrypto_tbls::nodes::Node;
+    use fastcrypto_tbls::nodes::Nodes;
 
-    fn create_test_validator(party_id: u16) -> ValidatorEntry {
+    fn create_test_validator(party_id: u16) -> (ValidatorAddress, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
-        let public_key = fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&private_key);
+        let public_key = PublicKey::from_private_key(&private_key);
         let address = ValidatorAddress([party_id as u8; 32]);
-        let info = ValidatorInfo {
-            address: address.clone(),
-            party_id,
-            weight: 1,
-            ecies_public_key: public_key,
+        let weight = 1;
+        let node = Node {
+            id: party_id,
+            pk: public_key,
+            weight,
         };
-        (address, info)
+        (address, node)
+    }
+
+    fn build_nodes_and_registry(
+        validators: Vec<(ValidatorAddress, Node<EncryptionGroupElement>)>,
+    ) -> (Nodes<EncryptionGroupElement>, AddressToPartyId) {
+        let mut node_vec: Vec<_> = validators.iter().map(|(_, node)| node.clone()).collect();
+        node_vec.sort_by_key(|n| n.id);
+        let nodes = Nodes::new(node_vec).unwrap();
+        let address_to_party_id: AddressToPartyId = validators
+            .iter()
+            .map(|(addr, node)| (addr.clone(), node.id))
+            .collect();
+        (nodes, address_to_party_id)
     }
 
     fn create_test_dkg_config(num_validators: u16) -> DkgConfig {
@@ -463,16 +468,12 @@ mod tests {
             THRESHOLD + 2 * MAX_FAULTY
         );
         let validators = (0..num_validators).map(create_test_validator).collect();
-        DkgConfig::new(100, validators, THRESHOLD, MAX_FAULTY).unwrap()
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        DkgConfig::new(100, nodes, address_to_party_id, THRESHOLD, MAX_FAULTY).unwrap()
     }
 
     fn create_test_manager(validator_index: u16, dkg_config: DkgConfig) -> DkgManager {
-        let validator_address = ValidatorAddress([validator_index as u8; 32]);
-        let validator_info = dkg_config
-            .validator_registry
-            .get(&validator_address)
-            .expect("validator not found")
-            .clone();
+        let address = ValidatorAddress([validator_index as u8; 32]);
         let session_context = SessionContext::new(
             dkg_config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -481,7 +482,7 @@ mod tests {
         let encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(rand::thread_rng());
         DkgManager::new(
-            validator_info,
+            address,
             dkg_config,
             session_context,
             encryption_key,
@@ -601,30 +602,31 @@ mod tests {
             .collect();
 
         // Create validators using shared encryption public keys
-        let validators: ValidatorRegistry = encryption_keys
+        let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators.clone(), 2, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
-        let validator_address = ValidatorAddress([validator_index as u8; 32]);
+        let address = ValidatorAddress([validator_index as u8; 32]);
         let manager = DkgManager::new(
-            validators.get(&validator_address).unwrap().clone(),
+            address,
             config,
             session_context,
             encryption_keys[validator_index].clone(),
@@ -744,10 +746,10 @@ mod tests {
         let config = create_test_dkg_config(5);
         let manager = create_test_manager(0, config.clone());
 
-        assert_eq!(manager.validator_info.party_id, 0);
+        assert_eq!(manager.party_id, 0);
         assert_eq!(manager.dkg_config.threshold, 2);
         assert_eq!(manager.dkg_config.max_faulty, 1);
-        assert_eq!(manager.dkg_config.validator_registry.len(), 5);
+        assert_eq!(manager.dkg_config.address_to_party_id.len(), 5);
     }
 
     #[test]
@@ -782,20 +784,21 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_context = SessionContext::new(
             config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -805,27 +808,19 @@ mod tests {
         // Create dealer (party 0) with its encryption key
         let dealer_address = ValidatorAddress([0; 32]);
         let dealer_manager = DkgManager::new(
-            config
-                .validator_registry
-                .get(&dealer_address)
-                .unwrap()
-                .clone(),
+            dealer_address.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
         );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
-        let dealer_address = dealer_manager.validator_info.address.clone();
+        let dealer_address = dealer_manager.address.clone();
 
         // Create receiver (party 1) with its encryption key
         let receiver_address = ValidatorAddress([1; 32]);
         let mut receiver_manager = DkgManager::new(
-            config
-                .validator_registry
-                .get(&receiver_address)
-                .unwrap()
-                .clone(),
+            receiver_address.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
@@ -838,7 +833,7 @@ mod tests {
             .unwrap();
 
         // Verify signature format
-        assert_eq!(signature.validator, receiver_manager.validator_info.address);
+        assert_eq!(signature.validator, receiver_manager.address);
         assert_eq!(signature.signature.len(), 96); // BLS signature length
 
         // Verify receiver output was stored
@@ -861,8 +856,9 @@ mod tests {
         // Create validators with different weights: [5, 3, 2, 1, 1]
         let validators =
             validation_test_utils::create_test_validators_with_weights(&[5, 3, 2, 1, 1]);
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         // threshold=7, max_faulty=2, so required_weight = 9
-        let config = DkgConfig::new(100, validators, 7, 2).unwrap();
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 7, 2).unwrap();
 
         // Test case 1: Only validator 0 (weight=5), need 9
         let signatures = vec![ValidatorSignature {
@@ -935,11 +931,11 @@ mod tests {
         // Create enough signatures (threshold + max_faulty = 3 weight needed)
         let required_sigs = (manager.dkg_config.threshold + manager.dkg_config.max_faulty) as usize;
         let signatures: Vec<_> = config
-            .validator_registry
-            .values()
+            .address_to_party_id
+            .keys()
             .take(required_sigs)
-            .map(|v| ValidatorSignature {
-                validator: v.address.clone(),
+            .map(|addr| ValidatorSignature {
+                validator: addr.clone(),
                 signature: vec![0; 96],
             })
             .collect();
@@ -948,7 +944,7 @@ mod tests {
             .create_certificate(&message, signatures.clone())
             .unwrap();
 
-        assert_eq!(certificate.dealer, manager.validator_info.address);
+        assert_eq!(certificate.dealer, manager.address);
         assert_eq!(certificate.signatures.len(), required_sigs);
         assert_eq!(
             certificate.session_context.session_id,
@@ -962,43 +958,39 @@ mod tests {
         let validators = vec![
             (
                 ValidatorAddress([0; 32]),
-                ValidatorInfo {
-                    address: ValidatorAddress([0; 32]),
-                    party_id: 0,
+                Node {
+                    id: 0,
+                    pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
+                        &mut rand::thread_rng(),
+                    )),
                     weight: 3, // Heavy weight
-                    ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
-                        &PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng()),
-                    ),
                 },
             ),
             (
                 ValidatorAddress([1; 32]),
-                ValidatorInfo {
-                    address: ValidatorAddress([1; 32]),
-                    party_id: 1,
+                Node {
+                    id: 1,
+                    pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
+                        &mut rand::thread_rng(),
+                    )),
                     weight: 1,
-                    ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
-                        &PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng()),
-                    ),
                 },
             ),
             (
                 ValidatorAddress([2; 32]),
-                ValidatorInfo {
-                    address: ValidatorAddress([2; 32]),
-                    party_id: 2,
+                Node {
+                    id: 2,
+                    pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
+                        &mut rand::thread_rng(),
+                    )),
                     weight: 1,
-                    ecies_public_key: fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
-                        &PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng()),
-                    ),
                 },
             ),
-        ]
-        .into_iter()
-        .collect();
+        ];
 
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         // threshold=3, max_faulty=1, total_weight=5
-        let config = DkgConfig::new(100, validators, 3, 1).unwrap();
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
         let manager = create_test_manager(0, config.clone());
 
         let message = manager
@@ -1008,12 +1000,7 @@ mod tests {
         // Only validator 0 (weight=3), which is less than required (threshold + max_faulty = 4)
         let addr0 = ValidatorAddress([0; 32]);
         let insufficient_sigs = vec![ValidatorSignature {
-            validator: config
-                .validator_registry
-                .get(&addr0)
-                .unwrap()
-                .address
-                .clone(),
+            validator: addr0.clone(),
             signature: vec![0; 96],
         }];
 
@@ -1029,21 +1016,11 @@ mod tests {
         let addr1 = ValidatorAddress([1; 32]);
         let sufficient_sigs = vec![
             ValidatorSignature {
-                validator: config
-                    .validator_registry
-                    .get(&addr0)
-                    .unwrap()
-                    .address
-                    .clone(),
+                validator: addr0.clone(),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
-                validator: config
-                    .validator_registry
-                    .get(&addr1)
-                    .unwrap()
-                    .address
-                    .clone(),
+                validator: addr1.clone(),
                 signature: vec![0; 96],
             },
         ];
@@ -1068,10 +1045,10 @@ mod tests {
 
         // Create signatures including one from an unknown validator
         let unknown_validator = ValidatorAddress([99; 32]);
-        let known_validator = config.validator_registry.values().next().unwrap();
+        let known_validator_addr = config.address_to_party_id.keys().next().unwrap();
         let signatures = vec![
             ValidatorSignature {
-                validator: known_validator.address.clone(),
+                validator: known_validator_addr.clone(),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
@@ -1150,22 +1127,23 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: weights[i],
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = weights[i];
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
         // threshold = 3, max_faulty = 1, total_weight = 12
         // Constraint: t + 2f = 3 + 2 = 5 <= 12 ✓
-        let config = DkgConfig::new(100, validators, 3, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
         let session_context = SessionContext::new(
             config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -1180,7 +1158,7 @@ mod tests {
             .map(|&i| {
                 let addr = ValidatorAddress([i as u8; 32]);
                 DkgManager::new(
-                    config.validator_registry.get(&addr).unwrap().clone(),
+                    addr.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -1192,7 +1170,7 @@ mod tests {
         // Create receiver (party 2 with weight=4 - will receive 4 shares!)
         let addr2 = ValidatorAddress([2; 32]);
         let mut receiver_manager = DkgManager::new(
-            config.validator_registry.get(&addr2).unwrap().clone(),
+            addr2.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[2].clone(),
@@ -1208,7 +1186,7 @@ mod tests {
         // Receiver processes all dealer messages and creates certificates
         let mut certificates = std::collections::HashMap::new();
         for (i, message) in dealer_messages.iter().enumerate() {
-            let dealer_address = dealer_managers[i].validator_info.address.clone();
+            let dealer_address = dealer_managers[i].address.clone();
 
             // Receiver processes the message
             let _sig = receiver_manager.receive_dealer_message(message, dealer_address.clone());
@@ -1216,25 +1194,15 @@ mod tests {
             // Create a certificate (in practice, would collect signatures from other validators)
             // Need threshold + max_faulty = 3 + 1 = 4 weighted signatures
             // Using validators with weights: 0(3) + 1(2) = 5 weight, which is > 4 ✓
-            let addr0 = &ValidatorAddress([0; 32]);
-            let addr1 = &ValidatorAddress([1; 32]);
+            let addr0 = ValidatorAddress([0; 32]);
+            let addr1 = ValidatorAddress([1; 32]);
             let mock_signatures = vec![
                 ValidatorSignature {
-                    validator: config
-                        .validator_registry
-                        .get(addr0)
-                        .unwrap()
-                        .address
-                        .clone(), // weight=3
+                    validator: addr0.clone(), // weight=3
                     signature: vec![0; 96],
                 },
                 ValidatorSignature {
-                    validator: config
-                        .validator_registry
-                        .get(addr1)
-                        .unwrap()
-                        .address
-                        .clone(), // weight=2
+                    validator: addr1.clone(), // weight=2
                     signature: vec![0; 96],
                 },
             ];
@@ -1271,33 +1239,18 @@ mod tests {
         let addr1 = &ValidatorAddress([1; 32]);
 
         let mock_signatures = vec![ValidatorSignature {
-            validator: config
-                .validator_registry
-                .get(addr0)
-                .unwrap()
-                .address
-                .clone(),
+            validator: addr0.clone(),
             signature: vec![0; 96],
         }];
 
         let cert0 = DkgCertificate {
-            dealer: config
-                .validator_registry
-                .get(addr0)
-                .unwrap()
-                .address
-                .clone(),
+            dealer: addr0.clone(),
             message_hash: [0; 32],
             signatures: mock_signatures.clone(),
             session_context: manager.session_context.clone(),
         };
         let cert1 = DkgCertificate {
-            dealer: config
-                .validator_registry
-                .get(addr1)
-                .unwrap()
-                .address
-                .clone(),
+            dealer: addr1.clone(),
             message_hash: [0; 32],
             signatures: mock_signatures,
             session_context: manager.session_context.clone(),
@@ -1332,25 +1285,26 @@ mod tests {
             .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
             .collect();
 
-        let validators: ValidatorRegistry = encryption_keys
+        let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: weights[i],
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = weights[i];
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         // Total weight = 7, threshold = 3, max_faulty = 1
-        let config = DkgConfig::new(100, validators, 3, 1).unwrap();
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
@@ -1358,9 +1312,8 @@ mod tests {
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
-                let validator = config.validator_registry.get(&address).unwrap();
                 DkgManager::new(
-                    validator.clone(),
+                    address.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -1489,27 +1442,28 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create manager for validator 0
-        let addr0 = &ValidatorAddress([0; 32]);
+        let addr0 = ValidatorAddress([0; 32]);
         let mut test_manager = DkgManager::new(
-            config.validator_registry.get(addr0).unwrap().clone(),
+            addr0.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
@@ -1520,9 +1474,8 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = ValidatorAddress([i as u8; 32]);
-                let validator_info = config.validator_registry.get(&addr).unwrap();
                 let manager = DkgManager::new(
-                    validator_info.clone(),
+                    addr.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -1581,20 +1534,21 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, threshold, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
@@ -1602,9 +1556,8 @@ mod tests {
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
-                let validator_info = config.validator_registry.get(&address).unwrap();
                 DkgManager::new(
-                    validator_info.clone(),
+                    address.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -1680,29 +1633,29 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, threshold, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
-                let validator_info = config.validator_registry.get(&address).unwrap();
                 DkgManager::new(
-                    validator_info.clone(),
+                    address.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -1808,20 +1761,21 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, threshold, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
@@ -1829,9 +1783,8 @@ mod tests {
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
                 let address = ValidatorAddress([i as u8; 32]);
-                let validator_info = config.validator_registry.get(&address).unwrap();
                 DkgManager::new(
-                    validator_info.clone(),
+                    address.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -1998,27 +1951,28 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create manager for validator 0 (the dealer)
         let dealer_addr = ValidatorAddress([0; 32]);
         let mut test_manager = DkgManager::new(
-            config.validator_registry.get(&dealer_addr).unwrap().clone(),
+            dealer_addr.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
@@ -2029,9 +1983,8 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = ValidatorAddress([i as u8; 32]);
-                let validator_info = config.validator_registry.get(&addr).unwrap();
                 let manager = DkgManager::new(
-                    validator_info.clone(),
+                    addr.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -2130,20 +2083,21 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: weights[i],
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = weights[i];
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, threshold, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_context = SessionContext::new(
             config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -2156,7 +2110,7 @@ mod tests {
             .map(|i| {
                 let addr = ValidatorAddress([i as u8; 32]);
                 DkgManager::new(
-                    config.validator_registry.get(&addr).unwrap().clone(),
+                    addr.clone(),
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
@@ -2170,7 +2124,7 @@ mod tests {
             .iter()
             .map(|manager| {
                 let message = manager.create_dealer_message(&mut rng).unwrap();
-                (manager.validator_info.address.clone(), message)
+                (manager.address.clone(), message)
             })
             .collect();
 
@@ -2239,12 +2193,7 @@ mod tests {
         let party_addr = ValidatorAddress([party_index as u8; 32]);
 
         let mut party_manager = DkgManager::new(
-            test_setup
-                .config
-                .validator_registry
-                .get(&party_addr)
-                .unwrap()
-                .clone(),
+            party_addr.clone(),
             test_setup.config.clone(),
             test_setup.session_context.clone(),
             test_setup.encryption_keys[party_index].clone(),
@@ -2359,12 +2308,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let party_addr = ValidatorAddress([0; 32]);
         let mut party_manager = DkgManager::new(
-            test_setup
-                .config
-                .validator_registry
-                .get(&party_addr)
-                .unwrap()
-                .clone(),
+            party_addr.clone(),
             test_setup.config.clone(),
             test_setup.session_context.clone(),
             test_setup.encryption_keys[0].clone(),
@@ -2401,106 +2345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_as_party_missing_dealer_weight() {
-        // Test the error case when a dealer is missing from validator_weights
-        // This shouldn't happen in normal flow but tests defensive programming
-
-        // Setup normal test
-        let test_setup = setup_weight_based_test(vec![1, 1, 1, 2, 2], 3, None);
-
-        // Create a certificate from a dealer not in validator_weights
-        // We'll create a fake dealer address that's not in the registry
-        let fake_dealer_addr = ValidatorAddress([99; 32]);
-
-        // Create a valid certificate from the fake dealer that will pass validation
-        // Use a real message from another dealer so hash can be valid
-        let fake_message = test_setup.dealer_messages[0].1.clone();
-
-        // Create valid signatures to pass validation
-        let fake_cert = create_test_certificate(
-            &fake_dealer_addr,
-            &fake_message,
-            &test_setup.config,
-            &test_setup.session_context,
-            &test_setup.weights,
-        );
-
-        // Create certificates with the fake one first
-        let mut modified_certificates = vec![fake_cert];
-        modified_certificates.extend(test_setup.certificates.clone());
-
-        // Create a custom party manager with modified validator_weights
-        let mut rng = rand::thread_rng();
-        let party_addr = ValidatorAddress([0; 32]);
-
-        // Create static data but we'll modify it to simulate the missing weight scenario
-        let validator_info = test_setup
-            .config
-            .validator_registry
-            .get(&party_addr)
-            .unwrap()
-            .clone();
-
-        // Add fake dealer to registry so it passes initial validation
-        // Use party_id 5 (next available after 0-4)
-        let mut modified_registry = test_setup.config.validator_registry.clone();
-        modified_registry.insert(
-            fake_dealer_addr.clone(),
-            ValidatorInfo {
-                address: fake_dealer_addr.clone(),
-                party_id: 5,
-                weight: 1,
-                ecies_public_key: validator_info.ecies_public_key.clone(),
-            },
-        );
-
-        let modified_config = DkgConfig::new(
-            test_setup.config.epoch,
-            modified_registry,
-            test_setup.config.threshold,
-            test_setup.config.max_faulty,
-        )
-        .unwrap();
-
-        // Create static data with modified config
-        let mut party_manager = DkgManager::new(
-            validator_info,
-            modified_config,
-            test_setup.session_context.clone(),
-            test_setup.encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
-        );
-
-        // Remove the fake dealer from validator_weights to trigger the error
-        party_manager.validator_weights.remove(&fake_dealer_addr);
-
-        // Pre-process real dealer messages
-        for (dealer_addr, message) in &test_setup.dealer_messages {
-            let _ = party_manager.receive_dealer_message(message, dealer_addr.clone());
-        }
-
-        // Add the fake message for the fake dealer so validation can pass
-        party_manager.dealer_messages.insert(
-            fake_dealer_addr.clone(),
-            fake_message, // Use the same message we used for the certificate
-        );
-
-        // Create mock TOB
-        let mut mock_tob = MockOrderedBroadcastChannel::new(modified_certificates);
-
-        // Run party collection - should fail with missing dealer weight
-        let result = party_manager.run_as_party(&mut mock_tob).await;
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, DkgError::ProtocolFailed(ref msg) if msg.contains("Missing dealer weight")),
-            "Expected missing dealer weight error, got: {:?}",
-            err
-        );
-    }
-
-    #[tokio::test]
     async fn test_handle_send_share_request() {
         // Test that handle_send_share_request works with the new request/response types
         let mut rng = rand::thread_rng();
@@ -2515,20 +2359,21 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_context = SessionContext::new(
             config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -2538,11 +2383,7 @@ mod tests {
         // Create dealer (party 1) with its encryption key
         let dealer_address = ValidatorAddress([1; 32]);
         let dealer_manager = DkgManager::new(
-            config
-                .validator_registry
-                .get(&dealer_address)
-                .unwrap()
-                .clone(),
+            dealer_address.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
@@ -2552,11 +2393,7 @@ mod tests {
         // Create receiver (party 0) with its encryption key
         let receiver_address = ValidatorAddress([0; 32]);
         let mut receiver_manager = DkgManager::new(
-            config
-                .validator_registry
-                .get(&receiver_address)
-                .unwrap()
-                .clone(),
+            receiver_address.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
@@ -2594,20 +2431,21 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key =
-                    fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
-                let info = ValidatorInfo {
-                    address: address.clone(),
-                    party_id: i as u16,
-                    weight: 1,
-                    ecies_public_key: public_key,
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
                 };
-                (address, info)
+                (address, node)
             })
             .collect();
 
-        let config = DkgConfig::new(100, validators, 2, 1).unwrap();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_context = SessionContext::new(
             config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -2626,7 +2464,7 @@ mod tests {
     ) -> (ValidatorAddress, DkgManager) {
         let address = ValidatorAddress([index; 32]);
         let manager = DkgManager::new(
-            config.validator_registry.get(&address).unwrap().clone(),
+            address.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[index as usize].clone(),
@@ -2718,24 +2556,26 @@ mod tests {
 
     mod validation_test_utils {
         use super::*;
+        use fastcrypto_tbls::nodes::Node;
 
-        pub fn create_test_validators_with_weights(weights: &[u16]) -> ValidatorRegistry {
+        pub fn create_test_validators_with_weights(
+            weights: &[u16],
+        ) -> Vec<(ValidatorAddress, Node<EncryptionGroupElement>)> {
             weights
                 .iter()
                 .enumerate()
                 .map(|(i, &weight)| {
                     let private_key =
                         PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
-                    let public_key =
-                        fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&private_key);
+                    let public_key = PublicKey::from_private_key(&private_key);
                     let address = ValidatorAddress([i as u8; 32]);
-                    let info = ValidatorInfo {
-                        address: address.clone(),
-                        party_id: i as u16,
+                    let party_id = i as u16;
+                    let node = Node {
+                        id: party_id,
+                        pk: public_key,
                         weight,
-                        ecies_public_key: public_key,
                     };
-                    (address, info)
+                    (address, node)
                 })
                 .collect()
         }
@@ -2746,16 +2586,20 @@ mod tests {
             max_faulty: u16,
         ) -> DkgConfig {
             let validators = create_test_validators_with_weights(weights);
-            DkgConfig::new(100, validators, threshold, max_faulty).unwrap()
+            let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+            DkgConfig::new(100, nodes, address_to_party_id, threshold, max_faulty).unwrap()
         }
 
         pub fn create_validator_weights(
             config: &DkgConfig,
         ) -> std::collections::HashMap<ValidatorAddress, u16> {
             config
-                .validator_registry
+                .address_to_party_id
                 .iter()
-                .map(|(addr, info)| (addr.clone(), info.weight))
+                .map(|(addr, party_id)| {
+                    let weight = config.nodes.weight_of(*party_id).unwrap();
+                    (addr.clone(), weight)
+                })
                 .collect()
         }
 
@@ -3004,11 +2848,13 @@ mod tests {
         #[test]
         fn test_valid_certificate() {
             let (cert, manager, dealer_messages) = create_valid_cert_and_data();
+            let validator_weights =
+                validation_test_utils::create_validator_weights(&manager.dkg_config);
             let result = validate_certificate(
                 &cert,
                 &manager.dkg_config,
                 &manager.session_context,
-                &manager.validator_weights,
+                &validator_weights,
                 &dealer_messages,
             );
             assert!(result.is_ok());
@@ -3026,7 +2872,7 @@ mod tests {
             let mut rng = rand::thread_rng();
             let dealer = avss::Dealer::new(
                 None,
-                manager.nodes.clone(),
+                manager.dkg_config.nodes.clone(),
                 manager.dkg_config.threshold,
                 manager.dkg_config.max_faulty,
                 vec![1, 2, 3], // Dummy session ID
@@ -3055,11 +2901,13 @@ mod tests {
             dealer_messages.insert(dealer_addr, dealer_message);
 
             // Validation should fail because the hash was computed with a different session
+            let validator_weights =
+                validation_test_utils::create_validator_weights(&correct_manager.dkg_config);
             let result = validate_certificate(
                 &cert,
                 &correct_manager.dkg_config,
                 &correct_manager.session_context,
-                &correct_manager.validator_weights,
+                &validator_weights,
                 &dealer_messages,
             );
             assert!(
@@ -3081,11 +2929,12 @@ mod tests {
             // Set dealer to unknown address
             cert.dealer = ValidatorAddress([99; 32]);
 
+            let validator_weights = create_validator_weights(&manager.dkg_config);
             let result = validate_certificate(
                 &cert,
                 &manager.dkg_config,
                 &manager.session_context,
-                &manager.validator_weights,
+                &validator_weights,
                 &dealer_messages,
             );
             assert!(result.is_err());
@@ -3099,11 +2948,12 @@ mod tests {
             // Empty DKG signatures - insufficient weight
             cert.signatures = vec![];
 
+            let validator_weights = create_validator_weights(&manager.dkg_config);
             let result = validate_certificate(
                 &cert,
                 &manager.dkg_config,
                 &manager.session_context,
-                &manager.validator_weights,
+                &validator_weights,
                 &dealer_messages,
             );
             assert!(result.is_err());
@@ -3122,11 +2972,12 @@ mod tests {
             // Wrong message hash
             cert.message_hash = [99; 32];
 
+            let validator_weights = create_validator_weights(&manager.dkg_config);
             let result = validate_certificate(
                 &cert,
                 &manager.dkg_config,
                 &manager.session_context,
-                &manager.validator_weights,
+                &validator_weights,
                 &dealer_messages,
             );
             assert!(result.is_err());
