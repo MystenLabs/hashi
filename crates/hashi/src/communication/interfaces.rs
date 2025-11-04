@@ -1,6 +1,8 @@
 //! Communication channel interfaces
 
-use crate::dkg::{SendShareRequest, SendShareResponse};
+use crate::dkg::{
+    RetrieveShareRequest, RetrieveShareResponse, SendShareRequest, SendShareResponse,
+};
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -26,14 +28,20 @@ pub enum ChannelError {
 }
 
 /// Point-to-point channel for direct validator-to-validator messaging
+// TODO: Implement authentication for receiver to verify caller
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
-    // TODO: Implement authentication for receiver to verify caller
     async fn send_share(
         &self,
         recipient: &ValidatorAddress,
         request: &SendShareRequest,
     ) -> ChannelResult<SendShareResponse>;
+
+    async fn retrieve_share(
+        &self,
+        dealer: &ValidatorAddress,
+        request: &RetrieveShareRequest,
+    ) -> ChannelResult<RetrieveShareResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages

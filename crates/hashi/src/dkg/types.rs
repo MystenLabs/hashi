@@ -251,6 +251,14 @@ pub struct SendShareResponse {
     pub signature: SignatureBytes,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrieveShareRequest {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrieveShareResponse {
+    pub message: avss::Message,
+}
+
 #[derive(Clone, Debug)]
 pub struct Authenticated<T> {
     pub sender: ValidatorAddress,
@@ -325,6 +333,9 @@ pub enum DkgError {
 
     #[error("Broadcast channel error: {0}")]
     BroadcastError(String),
+
+    #[error("Pairwise communication error: {0}")]
+    PairwiseCommunicationError(String),
 
     #[error("Storage error: {0}")]
     StorageError(String),
