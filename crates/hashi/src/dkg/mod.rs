@@ -298,7 +298,7 @@ impl DkgManager {
                     );
                     // TODO: Add timeout and retries handling when adding RPC layer
                     if let Err(e) = self
-                        .request_dealer_share(cert.dealer.clone(), p2p_channel)
+                        .retrieve_dealer_share(cert.dealer.clone(), p2p_channel)
                         .await
                     {
                         tracing::warn!(
@@ -440,7 +440,7 @@ impl DkgManager {
         })
     }
 
-    async fn request_dealer_share(
+    async fn retrieve_dealer_share(
         &mut self,
         dealer_address: ValidatorAddress,
         p2p_channel: &impl crate::communication::P2PChannel,
@@ -2924,7 +2924,7 @@ mod tests {
 
         // Party requests dealer's share
         let result = party_manager
-            .request_dealer_share(dealer_address.clone(), &mock_p2p)
+            .retrieve_dealer_share(dealer_address.clone(), &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -2949,7 +2949,7 @@ mod tests {
 
         let dealer_address = ValidatorAddress([0; 32]);
         let result = party_manager
-            .request_dealer_share(dealer_address.clone(), &failing_p2p)
+            .retrieve_dealer_share(dealer_address.clone(), &failing_p2p)
             .await;
 
         assert!(result.is_err());
@@ -2988,7 +2988,7 @@ mod tests {
 
         // Party requests dealer's share - should fail during message validation
         let result = party_manager
-            .request_dealer_share(dealer_address.clone(), &mock_p2p)
+            .retrieve_dealer_share(dealer_address.clone(), &mock_p2p)
             .await;
 
         assert!(result.is_err());
