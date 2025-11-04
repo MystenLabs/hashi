@@ -11,13 +11,12 @@ use fastcrypto_tbls::{
     threshold_schnorr::{G, avss, complaint},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 pub type MessageHash = [u8; 32];
 pub type SignatureBytes = Vec<u8>;
 pub type SessionId = Digest<64>;
-pub type AddressToPartyId = HashMap<ValidatorAddress, PartyId>;
+pub type AddressToPartyId = std::collections::HashMap<ValidatorAddress, PartyId>;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str = "hashi";
@@ -297,16 +296,6 @@ pub enum MessageType {
     DkgShare,
     Complaint,
     ComplaintResponse,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgProtocolState {
-    pub received_messages: BTreeMap<ValidatorAddress, avss::Message>,
-    pub processed_shares: BTreeMap<ValidatorAddress, avss::SharesForNode>,
-    pub processed_commitments: BTreeMap<ValidatorAddress, Vec<Eval<G>>>,
-    pub complaints: Vec<complaint::Complaint>,
-    pub complaint_responses: Vec<complaint::ComplaintResponse>,
-    pub certificates: Vec<DkgCertificate>,
 }
 
 pub type DkgResult<T> = Result<T, DkgError>;
