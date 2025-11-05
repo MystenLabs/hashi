@@ -62,6 +62,16 @@ impl HashiBLS12381PrivateKey {
     }
 }
 
+/// A 1-1 representation of a `BLS12381PublicKey` to use as the key in maps.
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+struct BLS12381PublicKeyBytes(Vec<u8>);
+
+impl From<&BLS12381PublicKey> for BLS12381PublicKeyBytes {
+    fn from(pk: &BLS12381PublicKey) -> Self {
+        Self(pk.as_bytes().to_vec())
+    }
+}
+
 /// The type of weight verification to perform.
 #[derive(Copy, Clone, Debug)]
 pub enum RequiredWeight {
@@ -77,7 +87,7 @@ pub enum RequiredWeight {
 pub struct BlsCommittee {
     members: Vec<BlsCommitteeMember>,
     epoch: u64,
-    public_key_to_index: BTreeMap<BLS12381PublicKey, usize>,
+    public_key_to_index: BTreeMap<BLS12381PublicKeyBytes, usize>,
     total_weight: u64,
 }
 
@@ -100,7 +110,7 @@ impl BlsCommittee {
 
         let mut total_weight = 0u64;
         for (idx, member) in members.iter().enumerate() {
-            public_key_to_index.insert(member.public_key.clone(), idx);
+            public_key_to_index.insert((&member.public_key).into(), idx);
             total_weight += member.weight as u64;
         }
 
@@ -122,7 +132,7 @@ impl BlsCommittee {
 
     fn member(&self, public_key: &BLS12381PublicKey) -> Result<MemberInfo<'_>, SignatureError> {
         self.public_key_to_index
-            .get(public_key)
+            .get(&public_key.into())
             .ok_or_else(|| {
                 SignatureError::from_source(format!(
                     "signature from public_key {public_key} does not belong to this committee",
