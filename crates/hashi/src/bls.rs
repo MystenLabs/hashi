@@ -1,7 +1,7 @@
-use fastcrypto::bls12381::{min_pk, BLS_PRIVATE_KEY_LENGTH};
 use fastcrypto::bls12381::min_pk::{
     BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
 };
+use fastcrypto::bls12381::{BLS_PRIVATE_KEY_LENGTH, min_pk};
 use fastcrypto::traits::{
     AggregateAuthenticator, AllowedRng, KeyPair, Signer, ToFromBytes, VerifyingKey,
 };
@@ -298,10 +298,9 @@ impl HashiSignatureAggregator {
             ));
         }
 
-        let signature = BLS12381AggregateSignature::aggregate(
-            self.signatures.values().map(|s| &s.signature),
-        )
-        .map_err(SignatureError::from_source)?;
+        let signature =
+            BLS12381AggregateSignature::aggregate(self.signatures.values().map(|s| &s.signature))
+                .map_err(SignatureError::from_source)?;
         let mut bitmap = BitMap::new(self.committee().members().len());
         self.signatures
             .iter()
