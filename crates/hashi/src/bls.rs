@@ -18,6 +18,7 @@ pub struct HashiBLS12381PrivateKey(min_pk::BLS12381PrivateKey);
 
 impl Clone for HashiBLS12381PrivateKey {
     fn clone(&self) -> Self {
+        // A bit of a hack since min_pk::BLS12381PrivateKey doesn't implement Clone
         Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
     }
 }
@@ -63,7 +64,7 @@ impl HashiBLS12381PrivateKey {
 }
 
 /// A 1-1 representation of a `BLS12381PublicKey` to use as the key in maps.
-#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
 struct BLS12381PublicKeyBytes(Vec<u8>);
 
 impl From<&BLS12381PublicKey> for BLS12381PublicKeyBytes {
