@@ -1,5 +1,5 @@
 use fastcrypto::bls12381::min_pk::{
-    BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
+    BLS12381AggregateSignature, BLS12381PublicKey, BLS12381PublicKeyAsBytes, BLS12381Signature,
 };
 use fastcrypto::bls12381::{BLS_PRIVATE_KEY_LENGTH, min_pk};
 use fastcrypto::traits::{
@@ -63,16 +63,6 @@ impl HashiBLS12381PrivateKey {
     }
 }
 
-/// A 1-1 representation of a `BLS12381PublicKey` to use as the key in maps.
-#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
-struct BLS12381PublicKeyBytes(Vec<u8>);
-
-impl From<&BLS12381PublicKey> for BLS12381PublicKeyBytes {
-    fn from(pk: &BLS12381PublicKey) -> Self {
-        Self(pk.as_bytes().to_vec())
-    }
-}
-
 /// The type of weight verification to perform.
 #[derive(Copy, Clone, Debug)]
 pub enum RequiredWeight {
@@ -88,7 +78,7 @@ pub enum RequiredWeight {
 pub struct BlsCommittee {
     members: Vec<BlsCommitteeMember>,
     epoch: u64,
-    public_key_to_index: BTreeMap<BLS12381PublicKeyBytes, usize>,
+    public_key_to_index: BTreeMap<BLS12381PublicKeyAsBytes, usize>,
     total_weight: u64,
 }
 
