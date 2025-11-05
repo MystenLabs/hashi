@@ -1,4 +1,4 @@
-use fastcrypto::bls12381::min_pk;
+use fastcrypto::bls12381::{min_pk, BLS_PRIVATE_KEY_LENGTH};
 use fastcrypto::bls12381::min_pk::{
     BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
 };
@@ -18,13 +18,13 @@ pub struct HashiBLS12381PrivateKey(min_pk::BLS12381PrivateKey);
 
 impl Clone for HashiBLS12381PrivateKey {
     fn clone(&self) -> Self {
-        Self(min_pk::BLS12381PrivateKey::from_bytes(&self.0.as_bytes()).unwrap())
+        Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
     }
 }
 
 impl HashiBLS12381PrivateKey {
-    /// The length of an bls12381 private key in bytes.
-    pub const LENGTH: usize = 32;
+    /// The length of an BLS12381 private key in bytes.
+    pub const LENGTH: usize = BLS_PRIVATE_KEY_LENGTH;
 
     pub fn from_bytes(bytes: [u8; Self::LENGTH]) -> Result<Self, SignatureError> {
         min_pk::BLS12381PrivateKey::from_bytes(&bytes)
@@ -44,8 +44,7 @@ impl HashiBLS12381PrivateKey {
     where
         R: AllowedRng,
     {
-        let secret_key = min_pk::BLS12381KeyPair::generate(rng).private();
-        Self(secret_key)
+        Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
     pub fn sign(&self, message: &[u8]) -> BLS12381Signature {
@@ -199,13 +198,14 @@ impl Verifier<(&HashiAggregatedSignature, RequiredWeight)> for BlsCommittee {
 
         let bitmap = BitMap::new_iter(self.members().len(), &signature.bitmap)?;
 
-        let mut pks = Vec::new();
         let mut signed_weight = 0u64;
+        let mut pks = Vec::new();
         for idx in bitmap {
-            let member = self.member_by_idx(idx)?;
-            pks.push(member.member.public_key.clone());
-            signed_weight += member.member.weight as u64;
+            let member = self.member_by_idx(idx)?.member;
+            signed_weight += member.weight as u64;
+            pks.push(member.public_key.clone());
         }
+
         signature
             .signature
             .verify(&pks, message)
@@ -299,13 +299,13 @@ impl HashiSignatureAggregator {
         }
 
         let signature = BLS12381AggregateSignature::aggregate(
-            self.signatures.iter().map(|(_, s)| &s.signature),
+            self.signatures.values().map(|s| &s.signature),
         )
         .map_err(SignatureError::from_source)?;
         let mut bitmap = BitMap::new(self.committee().members().len());
-        for (idx, _) in self.signatures.iter() {
-            bitmap.insert(*idx);
-        }
+        self.signatures
+            .iter()
+            .for_each(|(idx, _)| bitmap.insert(*idx));
 
         let aggregated_signature = HashiAggregatedSignature {
             epoch: self.committee().epoch,
@@ -388,7 +388,6 @@ mod test {
 
     impl proptest::arbitrary::Arbitrary for HashiBLS12381PrivateKey {
         type Parameters = ();
-        type Strategy = proptest::strategy::BoxedStrategy<Self>;
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
             use proptest::strategy::Strategy;
 
@@ -400,6 +399,7 @@ mod test {
                 })
                 .boxed()
         }
+        type Strategy = proptest::strategy::BoxedStrategy<Self>;
     }
 
     #[proptest]
