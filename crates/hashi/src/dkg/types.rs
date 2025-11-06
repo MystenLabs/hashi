@@ -252,7 +252,9 @@ pub struct SendShareResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveShareRequest {}
+pub struct RetrieveShareRequest {
+    pub dealer: ValidatorAddress,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrieveShareResponse {
