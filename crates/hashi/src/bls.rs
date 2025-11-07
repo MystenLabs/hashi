@@ -197,11 +197,9 @@ impl Verifier<(&HashiAggregatedSignature, RequiredWeight)> for BlsCommittee {
             )));
         }
 
-        let bitmap = BitMap::new_iter(self.members().len(), &signature.bitmap)?;
-
         let mut signed_weight = 0u64;
         let mut pks = Vec::new();
-        for idx in bitmap {
+        for idx in BitMap::new_iter(self.members().len(), &signature.bitmap)? {
             let member = self.member_by_idx(idx)?.member;
             signed_weight += member.weight as u64;
             pks.push(member.public_key.clone());
@@ -266,19 +264,19 @@ impl HashiSignatureAggregator {
             .map_err(SignatureError::from_source)?;
 
         if self.bitmap.insert(member.index) {
-            Err(SignatureError::from_source(
+            return Err(SignatureError::from_source(
                 "duplicate signature from same committee member",
-            ))
-        } else {
-            match self.aggregate_signature {
-                None => self.aggregate_signature = Some(signature.signature.into()),
-                Some(ref mut aggregate_signature) => aggregate_signature
-                    .add_signature(signature.signature)
-                    .map_err(SignatureError::from_source)?,
-            }
-            self.signed_weight += member.member.weight as u64;
-            Ok(())
+            ));
         }
+
+        match self.aggregate_signature {
+            None => self.aggregate_signature = Some(signature.signature.into()),
+            Some(ref mut aggregate_signature) => aggregate_signature
+                .add_signature(signature.signature)
+                .map_err(SignatureError::from_source)?,
+        }
+        self.signed_weight += member.member.weight as u64;
+        Ok(())
     }
 
     pub fn finish(
