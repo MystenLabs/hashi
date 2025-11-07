@@ -342,9 +342,9 @@ impl BitMap {
         if byte_index >= self.bitmap.len() {
             self.bitmap.resize(byte_index + 1, 0);
         }
-        let is_set = self.bitmap[byte_index] & bit_mask;
+        let previous = self.bitmap[byte_index] & bit_mask != 0;
         self.bitmap[byte_index] |= bit_mask;
-        is_set != 0
+        previous
     }
 
     fn into_inner(self) -> Vec<u8> {
@@ -355,11 +355,7 @@ impl BitMap {
         committee_size: usize,
         bitmap: &[u8],
     ) -> Result<impl Iterator<Item = usize>, SignatureError> {
-        let max_bitmap_len_bytes = if committee_size.is_multiple_of(8) {
-            committee_size / 8
-        } else {
-            (committee_size / 8) + 1
-        };
+        let max_bitmap_len_bytes = committee_size.div_ceil(8);
 
         if bitmap.len() > max_bitmap_len_bytes {
             return Err(SignatureError::from_source("invalid bitmap"));
