@@ -227,7 +227,8 @@ impl Verifier<(&HashiAggregatedSignature, RequiredWeight)> for BlsCommittee {
 #[derive(Debug)]
 pub struct HashiSignatureAggregator {
     committee: BlsCommittee,
-    signatures: BTreeMap<usize, HashiSignature>,
+    aggregate_signature: Option<BLS12381AggregateSignature>,
+    bitmap: BitMap,
     signed_weight: u64,
     message: Vec<u8>,
 }
@@ -235,8 +236,9 @@ pub struct HashiSignatureAggregator {
 impl HashiSignatureAggregator {
     pub fn new(committee: BlsCommittee, message: Vec<u8>) -> Self {
         Self {
+            bitmap: BitMap::new(committee.members().len()),
             committee,
-            signatures: Default::default(),
+            aggregate_signature: None,
             signed_weight: 0,
             message,
         }
@@ -247,8 +249,6 @@ impl HashiSignatureAggregator {
     }
 
     pub fn add_signature(&mut self, signature: HashiSignature) -> Result<(), SignatureError> {
-        use std::collections::btree_map::Entry;
-
         if signature.epoch != self.committee().epoch {
             return Err(SignatureError::from_source(format!(
                 "signature epoch {} does not match committee epoch {}",
@@ -265,20 +265,20 @@ impl HashiSignatureAggregator {
             .verify(&self.message, &signature.signature)
             .map_err(SignatureError::from_source)?;
 
-        match self.signatures.entry(member.index) {
-            Entry::Vacant(v) => {
-                v.insert(signature);
+        if self.bitmap.insert(member.index) {
+            Err(SignatureError::from_source(
+                "duplicate signature from same committee member",
+            ))
+        } else {
+            match self.aggregate_signature {
+                None => self.aggregate_signature = Some(signature.signature.into()),
+                Some(ref mut aggregate_signature) => aggregate_signature
+                    .add_signature(signature.signature)
+                    .map_err(SignatureError::from_source)?,
             }
-            Entry::Occupied(_) => {
-                return Err(SignatureError::from_source(
-                    "duplicate signature from same committee member",
-                ));
-            }
+            self.signed_weight += member.member.weight as u64;
+            Ok(())
         }
-
-        self.signed_weight += member.member.weight as u64;
-
-        Ok(())
     }
 
     pub fn finish(
@@ -293,34 +293,28 @@ impl HashiSignatureAggregator {
             )));
         }
 
-        if self.signatures.is_empty() {
-            return Err(SignatureError::from_source(
+        match &self.aggregate_signature {
+            None => Err(SignatureError::from_source(
                 "signature map must have at least one entry",
-            ));
+            )),
+            Some(signature) => {
+                let aggregated_signature = HashiAggregatedSignature {
+                    epoch: self.committee().epoch,
+                    signature: signature.clone(),
+                    bitmap: self.bitmap.clone().into_inner(),
+                };
+
+                // Double check that the aggregated sig still verifies
+                self.committee
+                    .verify(&self.message, &(&aggregated_signature, required_weight))?;
+
+                Ok(aggregated_signature)
+            }
         }
-
-        let signature =
-            BLS12381AggregateSignature::aggregate(self.signatures.values().map(|s| &s.signature))
-                .map_err(SignatureError::from_source)?;
-        let mut bitmap = BitMap::new(self.committee().members().len());
-        self.signatures
-            .iter()
-            .for_each(|(idx, _)| bitmap.insert(*idx));
-
-        let aggregated_signature = HashiAggregatedSignature {
-            epoch: self.committee().epoch,
-            signature,
-            bitmap: bitmap.into_inner(),
-        };
-
-        // Double check that the aggregated sig still verifies
-        self.committee
-            .verify(&self.message, &(&aggregated_signature, required_weight))?;
-
-        Ok(aggregated_signature)
     }
 }
 
+#[derive(Clone, Debug)]
 struct BitMap {
     committee_size: usize,
     bitmap: Vec<u8>,
@@ -334,9 +328,11 @@ impl BitMap {
         }
     }
 
-    fn insert(&mut self, b: usize) {
+    /// Set the given index in the bitmap and return the previous value.
+    /// If an index larger than the committee size is given, nothing is changed and `false` is returned.
+    fn insert(&mut self, b: usize) -> bool {
         if b >= self.committee_size {
-            return;
+            return false;
         }
 
         let byte_index = b / 8;
@@ -346,8 +342,9 @@ impl BitMap {
         if byte_index >= self.bitmap.len() {
             self.bitmap.resize(byte_index + 1, 0);
         }
-
+        let is_set = self.bitmap[byte_index] & bit_mask;
         self.bitmap[byte_index] |= bit_mask;
+        is_set != 0
     }
 
     fn into_inner(self) -> Vec<u8> {
