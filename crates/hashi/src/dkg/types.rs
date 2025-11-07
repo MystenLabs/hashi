@@ -252,12 +252,12 @@ pub struct SendShareResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveShareRequest {
+pub struct RetrieveMessageRequest {
     pub dealer: ValidatorAddress,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveShareResponse {
+pub struct RetrieveMessageResponse {
     pub message: avss::Message,
 }
 

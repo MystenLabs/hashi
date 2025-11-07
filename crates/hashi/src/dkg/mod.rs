@@ -12,8 +12,8 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 pub use types::{
     AddressToPartyId, Authenticated, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult,
     EncryptionGroupElement, MessageApproval, MessageHash, MessageType, OrderedBroadcastMessage,
-    P2PMessage, RetrieveShareRequest, RetrieveShareResponse, SendShareRequest, SendShareResponse,
-    SessionContext, SessionId, SighashType, SignatureBytes, ValidatorSignature,
+    P2PMessage, RetrieveMessageRequest, RetrieveMessageResponse, SendShareRequest,
+    SendShareResponse, SessionContext, SessionId, SighashType, SignatureBytes, ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -204,17 +204,17 @@ impl DkgManager {
         Ok(response)
     }
 
-    /// RPC endpoint handler for `RetrieveShareRequest`
-    pub fn handle_retrieve_share_request(
+    /// RPC endpoint handler for `RetrieveMessageRequest`
+    pub fn handle_retrieve_message_request(
         &self,
-        request: &RetrieveShareRequest,
-    ) -> DkgResult<RetrieveShareResponse> {
+        request: &RetrieveMessageRequest,
+    ) -> DkgResult<RetrieveMessageResponse> {
         // TODO: Add DoS protection - track retrieval request count per party and rate limit
         let message = self
             .dealer_messages
             .get(&request.dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("Message not available".to_string()))?;
-        Ok(RetrieveShareResponse {
+        Ok(RetrieveMessageResponse {
             message: message.clone(),
         })
     }
@@ -300,7 +300,7 @@ impl DkgManager {
                         cert.dealer
                     );
                     if let Err(e) = self
-                        .retrieve_dealer_share(cert.dealer.clone(), &cert, p2p_channel)
+                        .retrieve_dealer_message(cert.dealer.clone(), &cert, p2p_channel)
                         .await
                     {
                         tracing::info!(
@@ -442,13 +442,13 @@ impl DkgManager {
         })
     }
 
-    async fn retrieve_dealer_share(
+    async fn retrieve_dealer_message(
         &mut self,
         dealer_address: ValidatorAddress,
         certificate: &DkgCertificate,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
-        let request = RetrieveShareRequest {
+        let request = RetrieveMessageRequest {
             dealer: dealer_address.clone(),
         };
         // TODO: Implement gradual escalation strategy for better network efficiency:
@@ -460,7 +460,7 @@ impl DkgManager {
             if signer_address == &self.address {
                 continue;
             }
-            match p2p_channel.retrieve_share(signer_address, &request).await {
+            match p2p_channel.retrieve_message(signer_address, &request).await {
                 Ok(response) => {
                     let message_hash = compute_message_hash(
                         &self.session_context,
@@ -710,11 +710,11 @@ mod tests {
             Ok(response)
         }
 
-        async fn retrieve_share(
+        async fn retrieve_message(
             &self,
             recipient: &ValidatorAddress,
-            request: &RetrieveShareRequest,
-        ) -> crate::communication::ChannelResult<RetrieveShareResponse> {
+            request: &RetrieveMessageRequest,
+        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             let managers = self.managers.lock().unwrap();
             let manager = managers.get(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::SendFailed(format!(
@@ -723,7 +723,7 @@ mod tests {
                 ))
             })?;
             let response = manager
-                .handle_retrieve_share_request(request)
+                .handle_retrieve_message_request(request)
                 .map_err(|e| {
                     crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
                 })?;
@@ -851,11 +851,11 @@ mod tests {
             ))
         }
 
-        async fn retrieve_share(
+        async fn retrieve_message(
             &self,
             _dealer: &ValidatorAddress,
-            _request: &RetrieveShareRequest,
-        ) -> crate::communication::ChannelResult<RetrieveShareResponse> {
+            _request: &RetrieveMessageRequest,
+        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             Err(crate::communication::ChannelError::SendFailed(
                 self.error_message.clone(),
             ))
@@ -876,12 +876,12 @@ mod tests {
             })
         }
 
-        async fn retrieve_share(
+        async fn retrieve_message(
             &self,
             _dealer: &ValidatorAddress,
-            _request: &RetrieveShareRequest,
-        ) -> crate::communication::ChannelResult<RetrieveShareResponse> {
-            unimplemented!("SucceedingP2PChannel does not implement retrieve_share")
+            _request: &RetrieveMessageRequest,
+        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+            unimplemented!("SucceedingP2PChannel does not implement retrieve_message")
         }
     }
 
@@ -910,12 +910,12 @@ mod tests {
             }
         }
 
-        async fn retrieve_share(
+        async fn retrieve_message(
             &self,
             _dealer: &ValidatorAddress,
-            _request: &RetrieveShareRequest,
-        ) -> crate::communication::ChannelResult<RetrieveShareResponse> {
-            unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_share")
+            _request: &RetrieveMessageRequest,
+        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+            unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_message")
         }
     }
 
@@ -2826,7 +2826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_retrieve_share_request_success() {
+    async fn test_handle_retrieve_message_request_success() {
         let mut rng = rand::thread_rng();
 
         // Create shared encryption keys
@@ -2877,11 +2877,11 @@ mod tests {
             .unwrap();
 
         // Party requests the dealer's message
-        let request = RetrieveShareRequest {
+        let request = RetrieveMessageRequest {
             dealer: dealer_address.clone(),
         };
         let response = dealer_manager
-            .handle_retrieve_share_request(&request)
+            .handle_retrieve_message_request(&request)
             .unwrap();
 
         let expected_hash =
@@ -2892,7 +2892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_retrieve_share_request_message_not_available() {
+    async fn test_handle_retrieve_message_request_message_not_available() {
         let mut rng = rand::thread_rng();
 
         // Create shared encryption keys
@@ -2937,10 +2937,10 @@ mod tests {
         );
 
         // Party requests the dealer's message
-        let request = RetrieveShareRequest {
+        let request = RetrieveMessageRequest {
             dealer: dealer_address.clone(),
         };
-        let result = dealer_manager.handle_retrieve_share_request(&request);
+        let result = dealer_manager.handle_retrieve_message_request(&request);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2949,7 +2949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_share_success() {
+    async fn test_retrieve_dealer_message_success() {
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
@@ -2986,7 +2986,7 @@ mod tests {
 
         // Party requests dealer's share from certificate signers
         let result = party_manager
-            .retrieve_dealer_share(dealer_address.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_address.clone(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -2995,7 +2995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_share_propagates_processing_error() {
+    async fn test_retrieve_dealer_message_propagates_processing_error() {
         // Tests that errors from receive_dealer_message() are properly propagated
         let mut rng = rand::thread_rng();
 
@@ -3042,7 +3042,7 @@ mod tests {
 
         // Party requests dealer's share - should fail during message processing (incompatible keys)
         let result = party_manager
-            .retrieve_dealer_share(dealer_address.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_address.clone(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -3051,8 +3051,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_share_retries_multiple_signers() {
-        // Tests that retrieve_dealer_share retries with next signer if first fails
+    async fn test_retrieve_dealer_message_retries_multiple_signers() {
+        // Tests that retrieve_dealer_message retries with next signer if first fails
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
@@ -3081,7 +3081,7 @@ mod tests {
 
         // Should succeed by trying second signer after first fails
         let result = party_mgr
-            .retrieve_dealer_share(dealer_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -3089,8 +3089,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_share_skips_self() {
-        // Tests that retrieve_dealer_share skips requesting party in signer list
+    async fn test_retrieve_dealer_message_skips_self() {
+        // Tests that retrieve_dealer_message skips requesting party in signer list
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
@@ -3118,7 +3118,7 @@ mod tests {
 
         // Should skip self and request from dealer
         let result = party_mgr
-            .retrieve_dealer_share(dealer_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -3126,8 +3126,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_share_all_signers_fail() {
-        // Tests that retrieve_dealer_share returns error when all signers fail
+    async fn test_retrieve_dealer_message_all_signers_fail() {
+        // Tests that retrieve_dealer_message returns error when all signers fail
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
@@ -3154,7 +3154,7 @@ mod tests {
 
         // Should fail because all signers are offline
         let result = party_mgr
-            .retrieve_dealer_share(dealer_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -3164,8 +3164,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_share_rejects_wrong_hash() {
-        // Tests that retrieve_dealer_share validates hash and rejects messages with wrong hash
+    async fn test_retrieve_dealer_message_rejects_wrong_hash() {
+        // Tests that retrieve_dealer_message validates hash and rejects messages with wrong hash
         // Simulates Byzantine signer returning wrong message
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
@@ -3222,7 +3222,7 @@ mod tests {
         // 2. Computes hash(message B) != hash(message A) -> rejects, continues
         // 3. Tries real dealer A -> returns message A -> hash matches -> success
         let result = party_mgr
-            .retrieve_dealer_share(dealer_a_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_a_addr.clone(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());

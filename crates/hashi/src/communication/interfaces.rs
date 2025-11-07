@@ -1,7 +1,7 @@
 //! Communication channel interfaces
 
 use crate::dkg::{
-    RetrieveShareRequest, RetrieveShareResponse, SendShareRequest, SendShareResponse,
+    RetrieveMessageRequest, RetrieveMessageResponse, SendShareRequest, SendShareResponse,
 };
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
@@ -37,11 +37,11 @@ pub trait P2PChannel: Send + Sync {
         request: &SendShareRequest,
     ) -> ChannelResult<SendShareResponse>;
 
-    async fn retrieve_share(
+    async fn retrieve_message(
         &self,
         dealer: &ValidatorAddress,
-        request: &RetrieveShareRequest,
-    ) -> ChannelResult<RetrieveShareResponse>;
+        request: &RetrieveMessageRequest,
+    ) -> ChannelResult<RetrieveMessageResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages
