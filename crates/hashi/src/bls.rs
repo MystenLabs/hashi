@@ -14,16 +14,16 @@ use sui_sdk_types::SignatureScheme;
 
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct BLS12381PrivateKey(min_pk::BLS12381PrivateKey);
+pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
 
-impl Clone for BLS12381PrivateKey {
+impl Clone for Bls12381PrivateKey {
     fn clone(&self) -> Self {
         // A bit of a hack since min_pk::BLS12381PrivateKey doesn't implement Clone
         Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
     }
 }
 
-impl BLS12381PrivateKey {
+impl Bls12381PrivateKey {
     /// The length of an BLS12381 private key in bytes.
     pub const LENGTH: usize = BLS_PRIVATE_KEY_LENGTH;
 
@@ -380,7 +380,7 @@ mod test {
     use fastcrypto::serde_helpers::ToFromByteArray;
     use test_strategy::proptest;
 
-    impl proptest::arbitrary::Arbitrary for BLS12381PrivateKey {
+    impl proptest::arbitrary::Arbitrary for Bls12381PrivateKey {
         type Parameters = ();
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
             use proptest::strategy::Strategy;
@@ -398,13 +398,13 @@ mod test {
     }
 
     #[proptest]
-    fn basic_signing(signer: BLS12381PrivateKey, message: Vec<u8>) {
+    fn basic_signing(signer: Bls12381PrivateKey, message: Vec<u8>) {
         let signature = signer.sign(&message);
         signer.public_key().verify(&message, &signature).unwrap();
     }
 
     #[proptest]
-    fn basic_aggregation(private_keys: [BLS12381PrivateKey; 4], message: Vec<u8>) {
+    fn basic_aggregation(private_keys: [Bls12381PrivateKey; 4], message: Vec<u8>) {
         // Skip cases where we have the same keys
         {
             let mut pks: Vec<BLS12381PublicKey> =
