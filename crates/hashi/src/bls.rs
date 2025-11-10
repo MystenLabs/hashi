@@ -41,10 +41,7 @@ impl Bls12381PrivateKey {
         min_pk::BLS12381PublicKey::from(&self.0)
     }
 
-    pub fn generate<R>(rng: &mut R) -> Self
-    where
-        R: AllowedRng,
-    {
+    pub fn generate(rng: &mut impl AllowedRng) -> Self {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
