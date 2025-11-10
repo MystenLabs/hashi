@@ -29,7 +29,7 @@ pub struct DkgManager {
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub bls_signing_key: crate::bls::HashiBLS12381PrivateKey,
+    pub bls_signing_key: crate::bls::BLS12381PrivateKey,
     pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
     // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
@@ -43,7 +43,7 @@ impl DkgManager {
         dkg_config: DkgConfig,
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
-        bls_signing_key: crate::bls::HashiBLS12381PrivateKey,
+        bls_signing_key: crate::bls::BLS12381PrivateKey,
     ) -> Self {
         let party_id = *dkg_config
             .address_to_party_id
@@ -481,8 +481,7 @@ mod tests {
             "testchain".to_string(),
         );
         let encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
-        let bls_signing_key =
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rand::thread_rng());
+        let bls_signing_key = crate::bls::BLS12381PrivateKey::generate(&mut rand::thread_rng());
         DkgManager::new(
             address,
             dkg_config,
@@ -632,7 +631,7 @@ mod tests {
             config,
             session_context,
             encryption_keys[validator_index].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rng),
+            crate::bls::BLS12381PrivateKey::generate(&mut rng),
         );
 
         (manager, encryption_keys)
@@ -814,7 +813,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rand::thread_rng()),
+            crate::bls::BLS12381PrivateKey::generate(&mut rand::thread_rng()),
         );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
         let dealer_address = dealer_manager.address.clone();
@@ -826,7 +825,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rand::thread_rng()),
+            crate::bls::BLS12381PrivateKey::generate(&mut rand::thread_rng()),
         );
 
         // Receiver processes the dealer's message
@@ -1164,7 +1163,7 @@ mod tests {
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
-                    crate::bls::HashiBLS12381PrivateKey::generate(&mut rand::thread_rng()),
+                    crate::bls::BLS12381PrivateKey::generate(&mut rand::thread_rng()),
                 )
             })
             .collect();
@@ -1176,7 +1175,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[2].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rand::thread_rng()),
+            crate::bls::BLS12381PrivateKey::generate(&mut rand::thread_rng()),
         );
 
         // Each dealer creates a message
@@ -1284,7 +1283,7 @@ mod tests {
             .collect();
 
         let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::HashiBLS12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::bls::BLS12381PrivateKey::generate(&mut rng))
             .collect();
 
         let validators = encryption_keys
@@ -1437,7 +1436,7 @@ mod tests {
             .collect();
 
         let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::HashiBLS12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::bls::BLS12381PrivateKey::generate(&mut rng))
             .collect();
 
         let validators = encryption_keys
@@ -1529,7 +1528,7 @@ mod tests {
             .collect();
 
         let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::HashiBLS12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::bls::BLS12381PrivateKey::generate(&mut rng))
             .collect();
 
         let validators = encryption_keys
@@ -1628,7 +1627,7 @@ mod tests {
             .collect();
 
         let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::HashiBLS12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::bls::BLS12381PrivateKey::generate(&mut rng))
             .collect();
 
         let validators = encryption_keys
@@ -1756,7 +1755,7 @@ mod tests {
             .collect();
 
         let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::HashiBLS12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::bls::BLS12381PrivateKey::generate(&mut rng))
             .collect();
 
         let validators = encryption_keys
@@ -1946,7 +1945,7 @@ mod tests {
             .collect();
 
         let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::HashiBLS12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::bls::BLS12381PrivateKey::generate(&mut rng))
             .collect();
 
         let validators = encryption_keys
@@ -2116,7 +2115,7 @@ mod tests {
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
-                    crate::bls::HashiBLS12381PrivateKey::generate(&mut rng),
+                    crate::bls::BLS12381PrivateKey::generate(&mut rng),
                 )
             })
             .collect();
@@ -2199,7 +2198,7 @@ mod tests {
             test_setup.config.clone(),
             test_setup.session_context.clone(),
             test_setup.encryption_keys[party_index].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rng),
+            crate::bls::BLS12381PrivateKey::generate(&mut rng),
         );
 
         // Pre-process the dealer messages so validation passes
@@ -2314,7 +2313,7 @@ mod tests {
             test_setup.config.clone(),
             test_setup.session_context.clone(),
             test_setup.encryption_keys[0].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rng),
+            crate::bls::BLS12381PrivateKey::generate(&mut rng),
         );
 
         // Pre-process the dealer messages
@@ -2389,7 +2388,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rng),
+            crate::bls::BLS12381PrivateKey::generate(&mut rng),
         );
 
         // Create receiver (party 0) with its encryption key
@@ -2399,7 +2398,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(&mut rng),
+            crate::bls::BLS12381PrivateKey::generate(&mut rng),
         );
 
         // Dealer creates a message
@@ -2470,7 +2469,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[index as usize].clone(),
-            crate::bls::HashiBLS12381PrivateKey::generate(rng),
+            crate::bls::BLS12381PrivateKey::generate(rng),
         );
         (address, manager)
     }

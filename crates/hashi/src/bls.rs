@@ -1,4 +1,4 @@
-use fastcrypto::bls12381::min_pk::{
+pub use fastcrypto::bls12381::min_pk::{
     BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
 };
 use fastcrypto::bls12381::{BLS_PRIVATE_KEY_LENGTH, min_pk};
@@ -14,16 +14,16 @@ use sui_sdk_types::SignatureScheme;
 
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct HashiBLS12381PrivateKey(min_pk::BLS12381PrivateKey);
+pub struct BLS12381PrivateKey(min_pk::BLS12381PrivateKey);
 
-impl Clone for HashiBLS12381PrivateKey {
+impl Clone for BLS12381PrivateKey {
     fn clone(&self) -> Self {
         // A bit of a hack since min_pk::BLS12381PrivateKey doesn't implement Clone
         Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
     }
 }
 
-impl HashiBLS12381PrivateKey {
+impl BLS12381PrivateKey {
     /// The length of an BLS12381 private key in bytes.
     pub const LENGTH: usize = BLS_PRIVATE_KEY_LENGTH;
 
@@ -97,8 +97,9 @@ struct MemberInfo<'a> {
 
 impl BlsCommittee {
     pub fn new(members: Vec<BlsCommitteeMember>, epoch: u64) -> Self {
-        // It's okay to allow this here, since the implementation of `Ord` does not depend on the
-        // mutable parts of the type, BLS12381PublicKey. See https://rust-lang.github.io/rust-clippy/master/index.html#mutable_key_type.
+        // It's okay to allow mutable_key_type here, since the implementation of `Ord` does not
+        // depend on the mutable parts of the type, BLS12381PublicKey.
+        // See also https://rust-lang.github.io/rust-clippy/master/index.html#mutable_key_type.
         #[allow(clippy::mutable_key_type)]
         let mut public_key_to_index = BTreeMap::new();
 
@@ -380,7 +381,7 @@ mod test {
     use fastcrypto::serde_helpers::ToFromByteArray;
     use test_strategy::proptest;
 
-    impl proptest::arbitrary::Arbitrary for HashiBLS12381PrivateKey {
+    impl proptest::arbitrary::Arbitrary for BLS12381PrivateKey {
         type Parameters = ();
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
             use proptest::strategy::Strategy;
@@ -397,13 +398,13 @@ mod test {
     }
 
     #[proptest]
-    fn basic_signing(signer: HashiBLS12381PrivateKey, message: Vec<u8>) {
+    fn basic_signing(signer: BLS12381PrivateKey, message: Vec<u8>) {
         let signature = signer.sign(&message);
         signer.public_key().verify(&message, &signature).unwrap();
     }
 
     #[proptest]
-    fn basic_aggregation(private_keys: [HashiBLS12381PrivateKey; 4], message: Vec<u8>) {
+    fn basic_aggregation(private_keys: [BLS12381PrivateKey; 4], message: Vec<u8>) {
         // Skip cases where we have the same keys
         {
             let mut pks: Vec<BLS12381PublicKey> =
