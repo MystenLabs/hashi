@@ -375,7 +375,6 @@ impl BitMap {
 #[cfg(test)]
 mod test {
     use super::*;
-    use fastcrypto::bls12381::min_pk::BLS12381PrivateKey;
     use fastcrypto::groups::FiatShamirChallenge;
     use fastcrypto::groups::bls12381::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
@@ -389,7 +388,8 @@ mod test {
             proptest::arbitrary::any::<[u8; 48]>()
                 .prop_map(|bytes| {
                     let sk = Scalar::fiat_shamir_reduction_to_group_element(&bytes);
-                    let secret_key = BLS12381PrivateKey::from_bytes(&sk.to_byte_array()).unwrap();
+                    let secret_key =
+                        min_pk::BLS12381PrivateKey::from_bytes(&sk.to_byte_array()).unwrap();
                     Self(secret_key)
                 })
                 .boxed()
