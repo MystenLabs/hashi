@@ -1,5 +1,5 @@
 use fastcrypto::bls12381::min_pk::{
-    BLS12381AggregateSignature, BLS12381PublicKey, BLS12381PublicKeyAsBytes, BLS12381Signature,
+    BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
 };
 use fastcrypto::bls12381::{BLS_PRIVATE_KEY_LENGTH, min_pk};
 use fastcrypto::traits::{
@@ -78,7 +78,7 @@ pub enum RequiredWeight {
 pub struct BlsCommittee {
     members: Vec<BlsCommitteeMember>,
     epoch: u64,
-    public_key_to_index: BTreeMap<BLS12381PublicKeyAsBytes, usize>,
+    public_key_to_index: BTreeMap<BLS12381PublicKey, usize>,
     total_weight: u64,
 }
 
@@ -97,11 +97,14 @@ struct MemberInfo<'a> {
 
 impl BlsCommittee {
     pub fn new(members: Vec<BlsCommitteeMember>, epoch: u64) -> Self {
+        // It's okay to allow this here, since the implementation of `Ord` does not depend on the
+        // mutable parts of the type, BLS12381PublicKey. See https://rust-lang.github.io/rust-clippy/master/index.html#mutable_key_type.
+        #[allow(clippy::mutable_key_type)]
         let mut public_key_to_index = BTreeMap::new();
 
         let mut total_weight = 0u64;
         for (idx, member) in members.iter().enumerate() {
-            public_key_to_index.insert((&member.public_key).into(), idx);
+            public_key_to_index.insert(member.public_key.clone(), idx);
             total_weight += member.weight as u64;
         }
 
@@ -123,7 +126,7 @@ impl BlsCommittee {
 
     fn member(&self, public_key: &BLS12381PublicKey) -> Result<MemberInfo<'_>, SignatureError> {
         self.public_key_to_index
-            .get(&public_key.into())
+            .get(public_key)
             .ok_or_else(|| {
                 SignatureError::from_source(format!(
                     "signature from public_key {public_key} does not belong to this committee",
