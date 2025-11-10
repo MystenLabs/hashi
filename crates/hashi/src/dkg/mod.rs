@@ -4,10 +4,10 @@ pub mod types;
 
 use crate::types::ValidatorAddress;
 use fastcrypto::hash::{Blake2b256, HashFunction};
+use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use sui_crypto::Signer;
 
 pub use types::{
     AddressToPartyId, Authenticated, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult,
@@ -118,7 +118,7 @@ impl DkgManager {
         let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
             validator: self.address.clone(),
-            signature: signature.to_bytes().to_vec(),
+            signature: signature.as_bytes().to_vec(),
         })
     }
 
@@ -481,7 +481,7 @@ mod tests {
             "testchain".to_string(),
         );
         let encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
-        let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(rand::thread_rng());
+        let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng());
         DkgManager::new(
             address,
             dkg_config,
@@ -813,7 +813,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
+            crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
         );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
         let dealer_address = dealer_manager.address.clone();
@@ -825,7 +825,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
-            crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
+            crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
         );
 
         // Receiver processes the dealer's message
@@ -1163,7 +1163,7 @@ mod tests {
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
-                    crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
+                    crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
                 )
             })
             .collect();
@@ -1175,7 +1175,7 @@ mod tests {
             config.clone(),
             session_context.clone(),
             encryption_keys[2].clone(),
-            crate::bls::Bls12381PrivateKey::generate(rand::thread_rng()),
+            crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
         );
 
         // Each dealer creates a message
