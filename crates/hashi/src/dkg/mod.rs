@@ -11,10 +11,10 @@ use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::hash::{Blake2b256, HashFunction};
-use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
+use std::collections::HashMap;
 
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
@@ -214,9 +214,7 @@ impl DkgManager {
             }
         }
 
-        let threshold = RequiredWeight::ThresholdCorrect {
-            threshold: self.dkg_config.threshold as u64,
-        };
+        let threshold = threshold(&self.dkg_config);
         if aggregator.has_weight(&threshold) {
             let aggregated_signature = aggregator.finish(threshold).map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
@@ -526,17 +524,14 @@ impl DkgManager {
 
 fn create_bls_committee(
     dkg_config: &DkgConfig,
-    address_to_public_key: &std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
+    public_keys: &HashMap<ValidatorAddress, BLS12381PublicKey>,
 ) -> BlsCommittee {
     let committee: Vec<BlsCommitteeMember> = dkg_config
         .address_to_party_id
         .iter()
         .map(|(validator_address, &party_id)| BlsCommitteeMember {
             validator_address: validator_address.into(),
-            public_key: address_to_public_key
-                .get(validator_address)
-                .unwrap()
-                .clone(),
+            public_key: public_keys.get(validator_address).unwrap().clone(),
             weight: dkg_config.nodes.weight_of(party_id).unwrap(),
         })
         .collect();
@@ -547,21 +542,23 @@ fn validate_certificate(
     cert: &DkgCertificate,
     dkg_config: &DkgConfig,
     session_context: &SessionContext,
-    public_keys: &std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
-    dealer_messages: &std::collections::HashMap<ValidatorAddress, avss::Message>,
+    public_keys: &HashMap<ValidatorAddress, BLS12381PublicKey>,
+    dealer_messages: &HashMap<ValidatorAddress, avss::Message>,
 ) -> DkgResult<()> {
     validate_message_hash(cert, dealer_messages, session_context)?;
     create_bls_committee(dkg_config, public_keys)
         .verify(
             &cert.message_hash.to_vec(),
-            &(
-                &cert.signatures,
-                RequiredWeight::ThresholdCorrect {
-                    threshold: dkg_config.threshold as u64,
-                },
-            ),
+            &(&cert.signatures, threshold(&dkg_config)),
         )
         .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
+}
+
+fn threshold(dkg_config: &DkgConfig) -> RequiredWeight {
+    RequiredWeight::ThresholdCorrectNodes {
+        threshold: dkg_config.threshold as u64,
+        max_faulty: dkg_config.max_faulty as u64,
+    }
 }
 
 fn validate_message_hash(
