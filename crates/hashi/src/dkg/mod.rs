@@ -38,6 +38,7 @@ pub struct DkgManager {
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
+    pub bls_public_keys: HashMap<ValidatorAddress, BLS12381PublicKey>,
     pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
     // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
@@ -79,6 +80,7 @@ impl DkgManager {
             session_context,
             encryption_key,
             bls_signing_key,
+            bls_public_keys,
             validator_weights,
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
@@ -179,7 +181,7 @@ impl DkgManager {
         let dealer_message = self.create_dealer_message(rng)?;
         let my_signature = self.receive_dealer_message(&dealer_message, self.address.clone())?;
 
-        let bls_committee = create_bls_committee(&self.dkg_config, &self.address_to_public_key);
+        let bls_committee = create_bls_committee(&self.dkg_config, &self.bls_public_keys);
         let message_hash =
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
         let mut aggregator = HashiSignatureAggregator::new(bls_committee, message_hash.to_vec());
@@ -215,7 +217,7 @@ impl DkgManager {
             }
         }
 
-        let threshold = self.dkg_config.required_data_availability_signatures();
+        let threshold = self.dkg_config.required_dkg_signatures();
         if aggregator.has_weight(&threshold) {
             let aggregated_signature = aggregator.finish(threshold).map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
@@ -239,11 +241,10 @@ impl DkgManager {
             OrderedBroadcastMessage,
         >,
     ) -> DkgResult<DkgOutput> {
-        let threshold = self.dkg_config.threshold;
         let mut certified_dealers = std::collections::HashMap::new();
         let mut dealer_weight_sum = 0u32;
         loop {
-            if dealer_weight_sum >= threshold as u32 {
+            if dealer_weight_sum >= self.dkg_config.threshold as u32 {
                 break;
             }
             let tob_msg = ordered_broadcast_channel
@@ -520,6 +521,23 @@ impl DkgManager {
             "Not enough valid complaint responses for dealer {:?}",
             dealer
         )))
+    }
+
+    fn validate_message_hash(&self, cert: &DkgCertificate) -> DkgResult<()> {
+        let message = self.dealer_messages.get(&cert.dealer).ok_or_else(|| {
+            DkgError::InvalidCertificate(format!(
+                "Dealer message not yet received from {:?}",
+                cert.dealer
+            ))
+        })?;
+        let expected_hash = compute_message_hash(&self.session_context, &cert.dealer, message)?;
+        if cert.message_hash != expected_hash {
+            return Err(DkgError::InvalidCertificate(format!(
+                "Message hash mismatch for dealer {:?}",
+                cert.dealer
+            )));
+        }
+        Ok(())
     }
 }
 
