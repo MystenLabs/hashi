@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{HashiAggregatedSignature, HashiSignature};
+use crate::bls::{HashiAggregatedSignature, HashiSignature, RequiredWeight};
 use crate::types::ValidatorAddress;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
@@ -92,12 +92,16 @@ impl DkgConfig {
         self.nodes.total_weight()
     }
 
-    pub fn required_data_availability_signatures(&self) -> usize {
-        (2 * self.max_faulty + 1) as usize
+    pub fn required_data_availability_signatures(&self) -> RequiredWeight {
+        RequiredWeight::Custom {
+            threshold: self.max_faulty + 1,
+        }
     }
 
-    pub fn required_dkg_signatures(&self) -> usize {
-        (self.threshold + self.max_faulty) as usize
+    pub fn required_dkg_signatures(&self) -> RequiredWeight {
+        RequiredWeight::Custom {
+            threshold: self.threshold + self.max_faulty,
+        }
     }
 }
 

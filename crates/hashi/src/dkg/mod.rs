@@ -15,7 +15,7 @@ use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
-
+use sui_crypto::Verifier;
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
     DkgError, DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash,
@@ -208,13 +208,14 @@ impl DkgManager {
                 };
                 // TODO: Add cryptographic verification of response.signature
 
+                // The signature is verified in the call to `add_signature`
                 aggregator.add_signature(response.signature).map_err(|e| {
                     DkgError::CryptoError(format!("Failed to add signature: {}", e))
                 })?;
             }
         }
 
-        let threshold = threshold(&self.dkg_config);
+        let threshold = self.dkg_config.required_data_availability_signatures();
         if aggregator.has_weight(&threshold) {
             let aggregated_signature = aggregator.finish(threshold).map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
@@ -522,6 +523,7 @@ impl DkgManager {
     }
 }
 
+/// Helper function to create a [BlsCommittee] from a [DkgConfig] and public keys.
 fn create_bls_committee(
     dkg_config: &DkgConfig,
     public_keys: &HashMap<ValidatorAddress, BLS12381PublicKey>,
