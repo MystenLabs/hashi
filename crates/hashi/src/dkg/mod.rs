@@ -5,7 +5,6 @@ pub mod types;
 use crate::storage::PublicMessagesStore;
 use crate::bls::{
     BlsCommittee, BlsCommitteeMember, HashiAggregatedSignature, HashiSignatureAggregator,
-    RequiredWeight,
 };
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;

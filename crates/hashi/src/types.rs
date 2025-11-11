@@ -13,8 +13,8 @@ impl fmt::Display for ValidatorAddress {
     }
 }
 
-impl Into<Address> for &ValidatorAddress {
-    fn into(self) -> Address {
-        Address::new(self.0)
+impl From<&ValidatorAddress> for Address {
+    fn from(value: &ValidatorAddress) -> Self {
+        Address::new(value.0)
     }
 }

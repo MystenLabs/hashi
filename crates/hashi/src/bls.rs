@@ -284,7 +284,7 @@ impl HashiSignatureAggregator {
     }
 
     pub fn has_weight(&self, required_weight: &RequiredWeight) -> bool {
-        let threshold = self.committee().threshold(&required_weight);
+        let threshold = self.committee().threshold(required_weight);
         self.signed_weight >= threshold
     }
 
