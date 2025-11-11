@@ -49,8 +49,7 @@ impl Bls12381PrivateKey {
         self.0.sign(message)
     }
 
-    #[cfg(test)]
-    fn sign_hashi(&self, epoch: u64, message: &[u8]) -> HashiSignature {
+    pub fn sign_hashi(&self, epoch: u64, message: &[u8]) -> HashiSignature {
         let signature = self.sign(message);
         HashiSignature {
             epoch,
@@ -69,6 +68,8 @@ pub enum RequiredWeight {
     OneCorrectNode,
     /// Verify that the signers include at least one node.
     OneNode,
+    /// At least `threshold` correct nodes
+    ThresholdCorrect { threshold: u64 },
 }
 
 #[derive(Debug)]
@@ -82,9 +83,9 @@ pub struct BlsCommittee {
 #[derive(Debug)]
 #[allow(unused)]
 pub struct BlsCommitteeMember {
-    validator_address: Address,
-    public_key: BLS12381PublicKey,
-    weight: u16,
+    pub(crate) validator_address: Address,
+    pub(crate) public_key: BLS12381PublicKey,
+    pub(crate) weight: u16,
 }
 
 struct MemberInfo<'a> {
@@ -145,22 +146,24 @@ impl BlsCommittee {
     }
 
     fn threshold(&self, required_weight: &RequiredWeight) -> u64 {
+        let f = (self.total_weight - 1) / 3;
         match required_weight {
-            RequiredWeight::Quorum => ((self.total_weight - 1) / 3) * 2 + 1,
-            RequiredWeight::OneCorrectNode => ((self.total_weight - 1) / 3) + 1,
+            RequiredWeight::Quorum => 2 * f + 1,
+            RequiredWeight::OneCorrectNode => f + 1,
             RequiredWeight::OneNode => 1,
+            RequiredWeight::ThresholdCorrect { threshold } => f + threshold,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashiSignature {
     epoch: u64,
     public_key: BLS12381PublicKey,
     signature: BLS12381Signature,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashiAggregatedSignature {
     epoch: u64,
     signature: BLS12381AggregateSignature,
@@ -280,15 +283,20 @@ impl HashiSignatureAggregator {
         Ok(())
     }
 
+    pub fn has_weight(&self, required_weight: &RequiredWeight) -> bool {
+        let threshold = self.committee().threshold(&required_weight);
+        self.signed_weight >= threshold
+    }
+
     pub fn finish(
         &self,
         required_weight: RequiredWeight,
     ) -> Result<HashiAggregatedSignature, SignatureError> {
-        let threshold = self.committee().threshold(&required_weight);
-        if self.signed_weight < threshold {
+        if !self.has_weight(&required_weight) {
             return Err(SignatureError::from_source(format!(
                 "signature weight of {} is insufficient to reach required weight threshold of {}",
-                self.signed_weight, threshold,
+                self.signed_weight,
+                self.committee.threshold(&required_weight),
             )));
         }
 

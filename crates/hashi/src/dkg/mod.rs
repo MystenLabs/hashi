@@ -3,8 +3,13 @@
 pub mod types;
 
 use crate::storage::PublicMessagesStore;
+use crate::bls::{
+    BlsCommittee, BlsCommitteeMember, HashiAggregatedSignature, HashiSignatureAggregator,
+    RequiredWeight,
+};
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
+use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
@@ -42,6 +47,7 @@ pub struct DkgManager {
     pub complaint_responses:
         std::collections::HashMap<ValidatorAddress, complaint::ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
+    pub address_to_public_key: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
 }
 
 impl DkgManager {
@@ -52,6 +58,7 @@ impl DkgManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
+        address_to_public_key: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
     ) -> Self {
         let party_id = *dkg_config
             .address_to_party_id
@@ -79,6 +86,7 @@ impl DkgManager {
             complaints: std::collections::HashMap::new(),
             complaint_responses: std::collections::HashMap::new(),
             public_messages_store: public_message_store,
+            address_to_public_key,
         }
     }
 
@@ -170,7 +178,15 @@ impl DkgManager {
         // TODO: Return early if DKG is already completed (we're a slow dealer)
         let dealer_message = self.create_dealer_message(rng)?;
         let my_signature = self.receive_dealer_message(&dealer_message, self.address.clone())?;
-        let mut approvals = vec![my_signature];
+
+        let bls_committee = create_bls_committee(&self.dkg_config, &self.address_to_public_key);
+        let message_hash =
+            compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
+        let mut aggregator = HashiSignatureAggregator::new(bls_committee, message_hash.to_vec());
+        aggregator
+            .add_signature(my_signature.signature)
+            .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
+
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
         for validator_address in self.dkg_config.address_to_party_id.keys() {
@@ -191,16 +207,21 @@ impl DkgManager {
                     }
                 };
                 // TODO: Add cryptographic verification of response.signature
-                approvals.push(ValidatorSignature {
-                    validator: validator_address.clone(),
-                    signature: response.signature,
-                });
+
+                aggregator.add_signature(response.signature).map_err(|e| {
+                    DkgError::CryptoError(format!("Failed to add signature: {}", e))
+                })?;
             }
         }
-        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
-        if has_sufficient_weighted_signatures(&approvals, &self.validator_weights, required_weight)
-        {
-            let cert = self.create_certificate(&dealer_message, approvals)?;
+
+        let threshold = RequiredWeight::ThresholdCorrect {
+            threshold: self.dkg_config.threshold as u64,
+        };
+        if aggregator.has_weight(&threshold) {
+            let aggregated_signature = aggregator.finish(threshold).map_err(|e| {
+                DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
+            })?;
+            let cert = self.create_certificate(&dealer_message, aggregated_signature)?;
             // TODO: Add timeout and retries handling when adding RPC layer
             ordered_broadcast_channel
                 .publish(OrderedBroadcastMessage::AvssCertificateV1(cert))
@@ -254,7 +275,7 @@ impl DkgManager {
                     &cert,
                     &self.dkg_config,
                     &self.session_context,
-                    &self.validator_weights,
+                    &self.address_to_public_key,
                     &self.dealer_messages,
                 ) {
                     Ok(()) => {
@@ -331,10 +352,13 @@ impl DkgManager {
         self.dealer_outputs
             .insert(dealer_address.clone(), receiver_output);
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
-        let signature = self.bls_signing_key.sign(&message_hash);
+        let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
+        let signature = self
+            .bls_signing_key
+            .sign_hashi(self.session_context.epoch, &message_hash);
         Ok(ValidatorSignature {
             validator: self.address.clone(),
-            signature: signature.as_bytes().to_vec(),
+            signature,
         })
     }
 
@@ -500,20 +524,44 @@ impl DkgManager {
     }
 }
 
+fn create_bls_committee(
+    dkg_config: &DkgConfig,
+    address_to_public_key: &std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
+) -> BlsCommittee {
+    let committee: Vec<BlsCommitteeMember> = dkg_config
+        .address_to_party_id
+        .iter()
+        .map(|(validator_address, &party_id)| BlsCommitteeMember {
+            validator_address: validator_address.into(),
+            public_key: address_to_public_key
+                .get(validator_address)
+                .unwrap()
+                .clone(),
+            weight: dkg_config.nodes.weight_of(party_id).unwrap(),
+        })
+        .collect();
+    BlsCommittee::new(committee, dkg_config.epoch)
+}
+
 fn validate_certificate(
     cert: &DkgCertificate,
     dkg_config: &DkgConfig,
     session_context: &SessionContext,
-    validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
+    public_keys: &std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
     dealer_messages: &std::collections::HashMap<ValidatorAddress, avss::Message>,
 ) -> DkgResult<()> {
     validate_message_hash(cert, dealer_messages, session_context)?;
-    validate_signatures(
-        &cert.signatures,
-        dkg_config.required_dkg_signatures() as u16,
-        validator_weights,
-    )?;
-    Ok(())
+    create_bls_committee(dkg_config, public_keys)
+        .verify(
+            &cert.message_hash.to_vec(),
+            &(
+                &cert.signatures,
+                RequiredWeight::ThresholdCorrect {
+                    threshold: dkg_config.threshold as u64,
+                },
+            ),
+        )
+        .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
 }
 
 fn validate_message_hash(
@@ -535,67 +583,6 @@ fn validate_message_hash(
         )));
     }
     Ok(())
-}
-
-// TODO: Add cryptographic verification of signatures
-fn validate_signatures(
-    signatures: &[ValidatorSignature],
-    required_weight: u16,
-    validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
-) -> DkgResult<()> {
-    let mut seen_signers = std::collections::HashSet::new();
-    let mut total_weight = 0u32;
-    for sig in signatures {
-        if !seen_signers.insert(&sig.validator) {
-            return Err(DkgError::InvalidCertificate(format!(
-                "Duplicate signer: {:?}",
-                sig.validator
-            )));
-        }
-        let weight = validator_weights.get(&sig.validator).ok_or_else(|| {
-            DkgError::InvalidCertificate(format!("Unknown signer: {:?}", sig.validator))
-        })?;
-        total_weight += *weight as u32;
-    }
-    if total_weight < required_weight as u32 {
-        return Err(DkgError::InvalidCertificate(format!(
-            "Insufficient signature weight: got {}, need {}",
-            total_weight, required_weight
-        )));
-    }
-    Ok(())
-}
-
-fn compute_total_signature_weight(
-    signatures: &[ValidatorSignature],
-    validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
-) -> DkgResult<u32> {
-    let mut total_weight: u32 = 0;
-    for sig in signatures {
-        let weight =
-            validator_weights
-                .get(&sig.validator)
-                .ok_or_else(|| DkgError::InvalidMessage {
-                    sender: sig.validator.clone(),
-                    reason: "Signature from unknown validator".to_string(),
-                })?;
-        total_weight += *weight as u32;
-    }
-    Ok(total_weight)
-}
-
-fn has_sufficient_weighted_signatures(
-    signatures: &[ValidatorSignature],
-    validator_weights: &std::collections::HashMap<ValidatorAddress, u16>,
-    required_weight: u16,
-) -> bool {
-    match compute_total_signature_weight(signatures, validator_weights) {
-        Ok(total_weight) => total_weight >= required_weight as u32,
-        Err(e) => {
-            tracing::info!("Error checking signature weights: {}", e);
-            false
-        }
-    }
 }
 
 fn compute_message_hash(
