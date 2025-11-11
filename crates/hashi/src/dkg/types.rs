@@ -92,16 +92,8 @@ impl DkgConfig {
         self.nodes.total_weight()
     }
 
-    pub fn required_data_availability_signatures(&self) -> RequiredWeight {
-        RequiredWeight::Custom {
-            threshold: self.max_faulty + 1,
-        }
-    }
-
     pub fn required_dkg_signatures(&self) -> RequiredWeight {
-        RequiredWeight::Custom {
-            threshold: self.threshold + self.max_faulty,
-        }
+        RequiredWeight::Custom(self.threshold as u64 + self.max_faulty as u64)
     }
 }
 

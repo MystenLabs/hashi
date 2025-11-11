@@ -68,8 +68,8 @@ pub enum RequiredWeight {
     OneCorrectNode,
     /// Verify that the signers include at least one node.
     OneNode,
-    /// At least `threshold` nodes
-    Custom { threshold: u16 },
+    /// A custom, fixed threshold
+    Custom(u64),
 }
 
 #[derive(Debug)]
@@ -151,7 +151,7 @@ impl BlsCommittee {
             RequiredWeight::Quorum => 2 * f + 1,
             RequiredWeight::OneCorrectNode => f + 1,
             RequiredWeight::OneNode => 1,
-            RequiredWeight::Custom { threshold } => *threshold as u64,
+            RequiredWeight::Custom(t) => *t,
         }
     }
 }
