@@ -4,7 +4,7 @@ pub mod types;
 
 use crate::storage::PublicMessagesStore;
 use crate::bls::{
-    BlsCommittee, BlsCommitteeMember, HashiAggregatedSignature, HashiSignatureAggregator,
+    BLSAggregatedSignature, BLSSignatureAggregator, BlsCommittee, BlsCommitteeMember,
 };
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
@@ -14,7 +14,6 @@ use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
-use sui_crypto::Verifier;
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
     DkgError, DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash,
@@ -36,7 +35,7 @@ pub struct DkgManager {
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub bls_signing_key: crate::bls::Bls12381PrivateKey,
+    pub bls_signing_key: crate::bls::BLSCommittePrivateKey,
     pub bls_public_keys: HashMap<ValidatorAddress, BLS12381PublicKey>,
     pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
     // Mutable during a given session
@@ -183,18 +182,18 @@ impl DkgManager {
         let bls_committee = create_bls_committee(&self.dkg_config, &self.bls_public_keys);
         let message_hash =
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
-        let mut aggregator = HashiSignatureAggregator::new(bls_committee, message_hash.to_vec());
+        let mut aggregator = BLSSignatureAggregator::new(bls_committee, message_hash.to_vec());
         aggregator
-            .add_signature(my_signature.signature)
+            .add_signature(self.party_id as usize, my_signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
 
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
-        for validator_address in self.dkg_config.address_to_party_id.keys() {
+        for (validator_address, party_id) in &self.dkg_config.address_to_party_id {
             if validator_address != &self.address {
                 let response = match p2p_channel
                     .send_share(
-                        validator_address,
+                        &validator_address,
                         &SendShareRequest {
                             message: dealer_message.clone(),
                         },
@@ -210,9 +209,11 @@ impl DkgManager {
                 // TODO: Add cryptographic verification of response.signature
 
                 // The signature is verified in the call to `add_signature`
-                aggregator.add_signature(response.signature).map_err(|e| {
-                    DkgError::CryptoError(format!("Failed to add signature: {}", e))
-                })?;
+                aggregator
+                    .add_signature(*party_id as usize, response.signature)
+                    .map_err(|e| {
+                        DkgError::CryptoError(format!("Failed to add signature: {}", e))
+                    })?;
             }
         }
 
@@ -554,7 +555,7 @@ fn create_bls_committee(
             weight: dkg_config.nodes.weight_of(party_id).unwrap(),
         })
         .collect();
-    BlsCommittee::new(committee, dkg_config.epoch)
+    BlsCommittee::new(committee)
 }
 
 fn validate_certificate(

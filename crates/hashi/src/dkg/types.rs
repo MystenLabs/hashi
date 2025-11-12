@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{HashiAggregatedSignature, HashiSignature, RequiredWeight};
+use crate::bls::{BLSAggregatedSignature, RequiredWeight};
 use crate::types::ValidatorAddress;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
@@ -246,7 +246,7 @@ pub struct SendShareRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendShareResponse {
-    pub signature: HashiSignature,
+    pub signature: BLS12381Signature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -298,7 +298,7 @@ pub struct MessageApproval {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator: ValidatorAddress,
-    pub signature: HashiSignature,
+    pub signature: BLS12381Signature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -306,7 +306,7 @@ pub struct DkgCertificate {
     pub dealer: ValidatorAddress,
     pub message_hash: MessageHash,
     // TODO: Use aggregated BLS signature to reduce footprints
-    pub signatures: HashiAggregatedSignature,
+    pub signatures: BLSAggregatedSignature,
     pub session_context: SessionContext,
 }
 

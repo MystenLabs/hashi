@@ -2,13 +2,13 @@ use std::net::SocketAddr;
 
 use sui_crypto::simple::SimpleKeypair;
 
-use crate::bls::Bls12381PrivateKey;
+use crate::bls::BLSCommittePrivateKey;
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub protocol_private_key: Option<Bls12381PrivateKey>,
+    pub protocol_private_key: Option<BLSCommittePrivateKey>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_private_key: Option<String>,
@@ -52,7 +52,7 @@ impl Config {
         std::fs::write(path, toml).map_err(Into::into)
     }
 
-    pub fn protocol_private_key(&self) -> Option<Bls12381PrivateKey> {
+    pub fn protocol_private_key(&self) -> Option<BLSCommittePrivateKey> {
         self.protocol_private_key.clone()
     }
 
