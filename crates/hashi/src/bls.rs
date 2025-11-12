@@ -13,16 +13,16 @@ pub type Session = Vec<u8>;
 
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct BLSCommittePrivateKey(min_pk::BLS12381PrivateKey);
+pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
 
-impl Clone for BLSCommittePrivateKey {
+impl Clone for Bls12381PrivateKey {
     fn clone(&self) -> Self {
         // A bit of a hack since min_pk::BLS12381PrivateKey doesn't implement Clone
         Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
     }
 }
 
-impl BLSCommittePrivateKey {
+impl Bls12381PrivateKey {
     /// The length of an BLS12381 private key in bytes.
     pub const LENGTH: usize = BLS_PRIVATE_KEY_LENGTH;
 
@@ -262,7 +262,7 @@ mod test {
     use fastcrypto::serde_helpers::ToFromByteArray;
     use test_strategy::proptest;
 
-    impl proptest::arbitrary::Arbitrary for BLSCommittePrivateKey {
+    impl proptest::arbitrary::Arbitrary for Bls12381PrivateKey {
         type Parameters = ();
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
             use proptest::strategy::Strategy;
@@ -280,7 +280,7 @@ mod test {
     }
 
     #[proptest]
-    fn basic_aggregation(private_keys: [BLSCommittePrivateKey; 4], message: Vec<u8>) {
+    fn basic_aggregation(private_keys: [Bls12381PrivateKey; 4], message: Vec<u8>) {
         // Skip cases where we have the same keys
         {
             let mut pks: Vec<BLS12381PublicKey> =

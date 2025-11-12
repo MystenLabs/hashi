@@ -35,7 +35,7 @@ pub struct DkgManager {
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub bls_signing_key: crate::bls::BLSCommittePrivateKey,
+    pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_public_keys: HashMap<ValidatorAddress, BLS12381PublicKey>,
     pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
     // Mutable during a given session
@@ -57,7 +57,7 @@ impl DkgManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
-        address_to_public_key: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
+        bls_public_keys: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
     ) -> Self {
         let party_id = *dkg_config
             .address_to_party_id
@@ -86,7 +86,6 @@ impl DkgManager {
             complaints: std::collections::HashMap::new(),
             complaint_responses: std::collections::HashMap::new(),
             public_messages_store: public_message_store,
-            address_to_public_key,
         }
     }
 
