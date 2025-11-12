@@ -45,19 +45,6 @@ impl BLSCommittePrivateKey {
     }
 }
 
-/// The type of weight verification to perform.
-#[derive(Copy, Clone, Debug)]
-pub enum RequiredWeight {
-    /// Verify that the signers form a quorum.
-    Quorum,
-    /// Verify that the signers include at least one correct node.
-    OneCorrectNode,
-    /// Verify that the signers include at least one node.
-    OneNode,
-    /// A custom, fixed threshold
-    Custom(u64),
-}
-
 #[derive(Debug)]
 pub struct BlsCommittee {
     members: Vec<BlsCommitteeMember>,
@@ -99,16 +86,6 @@ impl BlsCommittee {
         Ok(member)
     }
 
-    fn threshold(&self, required_weight: &RequiredWeight) -> u64 {
-        let f = (self.total_weight - 1) / 3;
-        match required_weight {
-            RequiredWeight::Quorum => 2 * f + 1,
-            RequiredWeight::OneCorrectNode => f + 1,
-            RequiredWeight::OneNode => 1,
-            RequiredWeight::Custom(t) => *t,
-        }
-    }
-
     fn verify(
         &self,
         message: &[u8],
@@ -125,33 +102,19 @@ impl BlsCommittee {
         &self,
         message: &[u8],
         signature: &BLSAggregatedSignature,
-        required_weight: Option<RequiredWeight>,
     ) -> Result<(), SignatureError> {
-        let mut signed_weight = 0u64;
-        let mut pks = Vec::new();
-        for idx in BitMap::new_iter(self.members().len(), &signature.bitmap)? {
-            let member = self.member_by_idx(idx)?;
-            signed_weight += member.weight as u64;
-            pks.push(member.public_key.clone());
-        }
+        let pks: Vec<BLS12381PublicKey> =
+            BitMap::new_iter(self.members().len(), &signature.bitmap)?
+                .map(|idx| {
+                    let member = self.member_by_idx(idx)?;
+                    Ok(member.public_key.clone())
+                })
+                .collect::<Result<_, SignatureError>>()?;
 
         signature
             .signature
             .verify(&pks, message)
-            .map_err(SignatureError::from_source)?;
-
-        if let Some(required_weight) = required_weight {
-            let threshold = self.threshold(&required_weight);
-            return if signed_weight >= threshold {
-                Ok(())
-            } else {
-                Err(SignatureError::from_source(format!(
-                    "insufficient signing weight {}; required weight threshold is {}",
-                    signed_weight, threshold,
-                )))
-            };
-        }
-        Ok(())
+            .map_err(SignatureError::from_source)
     }
 }
 
@@ -190,8 +153,6 @@ impl BLSSignatureAggregator {
         index: usize,
         signature: BLS12381Signature,
     ) -> Result<(), SignatureError> {
-        let member = self.committee.member_by_idx(index)?;
-
         self.committee.verify(&self.message, index, &signature)?;
 
         if self.bitmap.insert(index) {
@@ -206,27 +167,17 @@ impl BLSSignatureAggregator {
                 .add_signature(signature)
                 .map_err(SignatureError::from_source)?,
         }
+
+        let member = self.committee.member_by_idx(index)?;
         self.signed_weight += member.weight as u64;
         Ok(())
     }
 
-    pub fn has_weight(&self, required_weight: &RequiredWeight) -> bool {
-        let threshold = self.committee().threshold(required_weight);
-        self.signed_weight >= threshold
+    pub fn weight(&self) -> u64 {
+        self.signed_weight
     }
 
-    pub fn finish(
-        &self,
-        required_weight: RequiredWeight,
-    ) -> Result<BLSAggregatedSignature, SignatureError> {
-        if !self.has_weight(&required_weight) {
-            return Err(SignatureError::from_source(format!(
-                "signature weight of {} is insufficient to reach required weight threshold of {}",
-                self.signed_weight,
-                self.committee.threshold(&required_weight),
-            )));
-        }
-
+    pub fn finish(&self) -> Result<BLSAggregatedSignature, SignatureError> {
         match &self.aggregate_signature {
             None => Err(SignatureError::from_source(
                 "signature map must have at least one entry",
@@ -238,11 +189,8 @@ impl BLSSignatureAggregator {
                 };
 
                 // Double check that the aggregated sig still verifies
-                self.committee.verify_aggregated_signature(
-                    &self.message,
-                    &aggregated_signature,
-                    Some(required_weight),
-                )?;
+                self.committee
+                    .verify_aggregated_signature(&self.message, &aggregated_signature)?;
 
                 Ok(aggregated_signature)
             }
@@ -344,7 +292,6 @@ mod test {
             }
         }
 
-        let required_weight = RequiredWeight::Quorum;
         let members = private_keys
             .iter()
             .map(|key| BlsCommitteeMember {
@@ -358,7 +305,7 @@ mod test {
         let mut aggregator = BLSSignatureAggregator::new(committee, message.clone());
 
         // Aggregating with no sigs fails
-        aggregator.finish(required_weight).unwrap_err();
+        aggregator.finish().unwrap_err();
 
         aggregator
             .add_signature(0, private_keys[0].sign(&message))
@@ -368,10 +315,6 @@ mod test {
         aggregator
             .add_signature(0, private_keys[0].sign(&message))
             .unwrap_err();
-
-        // Aggregating with insufficient weight fails
-        aggregator.finish(required_weight).unwrap_err();
-
         aggregator
             .add_signature(1, private_keys[1].sign(&message))
             .unwrap();
@@ -380,20 +323,20 @@ mod test {
             .unwrap();
 
         // Aggregating with sufficient weight succeeds and verifies
-        let signature = aggregator.finish(required_weight).unwrap();
+        let signature = aggregator.finish().unwrap();
         aggregator
             .committee()
-            .verify_aggregated_signature(&message, &signature, Some(required_weight))
+            .verify_aggregated_signature(&message, &signature)
             .unwrap();
 
         // We can add the last sig and still be successful
         aggregator
             .add_signature(3, private_keys[3].sign(&message))
             .unwrap();
-        let signature = aggregator.finish(required_weight).unwrap();
+        let signature = aggregator.finish().unwrap();
         aggregator
             .committee()
-            .verify_aggregated_signature(&message, &signature, Some(required_weight))
+            .verify_aggregated_signature(&message, &signature)
             .unwrap();
     }
 }

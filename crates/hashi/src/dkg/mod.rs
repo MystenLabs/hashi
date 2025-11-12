@@ -217,9 +217,9 @@ impl DkgManager {
             }
         }
 
-        let required_weight = self.dkg_config.required_dkg_signatures();
-        if aggregator.has_weight(&required_weight) {
-            let aggregated_signature = aggregator.finish(required_weight).map_err(|e| {
+        let required_weight = self.dkg_config.threshold as u64 + self.dkg_config.max_faulty as u64;
+        if aggregator.weight() >= required_weight {
+            let aggregated_signature = aggregator.finish().map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
             })?;
             let cert = self.create_certificate(&dealer_message, aggregated_signature)?;
