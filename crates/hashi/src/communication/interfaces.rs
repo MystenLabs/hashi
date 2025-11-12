@@ -39,7 +39,7 @@ pub trait P2PChannel: Send + Sync {
 
     async fn retrieve_message(
         &self,
-        dealer: &ValidatorAddress,
+        party: &ValidatorAddress,
         request: &RetrieveMessageRequest,
     ) -> ChannelResult<RetrieveMessageResponse>;
 }

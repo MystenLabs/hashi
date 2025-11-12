@@ -299,17 +299,16 @@ impl DkgManager {
                         "Certificate from dealer {:?} received but message missing, retrieving from signers",
                         cert.dealer
                     );
-                    if let Err(e) = self
-                        .retrieve_dealer_message(cert.dealer.clone(), &cert, p2p_channel)
+                    self.retrieve_dealer_message(cert.dealer.clone(), &cert, p2p_channel)
                         .await
-                    {
-                        tracing::info!(
-                            "Failed to retrieve message from signers for dealer {:?}: {}. Skipping certificate.",
-                            cert.dealer,
+                        .map_err(|e| {
+                            tracing::error!(
+                                "Failed to retrieve message from any signer for dealer {:?}: {}. Certificate exists but message unavailable from all signers.",
+                                cert.dealer,
+                                e
+                            );
                             e
-                        );
-                        continue;
-                    }
+                        })?;
                 }
                 match validate_certificate(
                     &cert,
@@ -458,7 +457,13 @@ impl DkgManager {
         for signer_sig in &certificate.signatures {
             let signer_address = &signer_sig.validator;
             if signer_address == &self.address {
-                continue;
+                tracing::error!(
+                    "Self in certificate signers but message not available for dealer {:?}.",
+                    dealer_address
+                );
+                return Err(DkgError::ProtocolFailed(
+                    "Self in certificate signers but message not available".to_string(),
+                ));
             }
             match p2p_channel.retrieve_message(signer_address, &request).await {
                 Ok(response) => {
@@ -712,14 +717,14 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            recipient: &ValidatorAddress,
+            party: &ValidatorAddress,
             request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             let managers = self.managers.lock().unwrap();
-            let manager = managers.get(recipient).ok_or_else(|| {
+            let manager = managers.get(party).ok_or_else(|| {
                 crate::communication::ChannelError::SendFailed(format!(
-                    "Recipient {:?} not found",
-                    recipient
+                    "Party {:?} not found",
+                    party
                 ))
             })?;
             let response = manager
@@ -853,7 +858,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            _dealer: &ValidatorAddress,
+            _party: &ValidatorAddress,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             Err(crate::communication::ChannelError::SendFailed(
@@ -878,7 +883,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            _dealer: &ValidatorAddress,
+            _party: &ValidatorAddress,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_message")
@@ -912,7 +917,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            _dealer: &ValidatorAddress,
+            _party: &ValidatorAddress,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_message")
@@ -2674,7 +2679,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_as_party_skips_certificate_when_retrieval_fails() {
+    async fn test_run_as_party_aborts_on_retrieval_failure() {
+        // Tests that run_as_party aborts with error when message retrieval fails
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
@@ -2738,19 +2744,23 @@ mod tests {
         dealers.insert(dealer3_addr.clone(), dealer3_mgr);
         let mock_p2p = MockP2PChannel::new(dealers, party_addr.clone());
 
-        // Create mock TOB with all three certificates - threshold is 2
+        // Create mock TOB with all three certificates
         let certificates = vec![cert1, cert2, cert3];
         let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
-        // Run as party - should skip dealer2 certificate and succeed with dealer1 and dealer3
+        // Run as party - should process dealer1 successfully, then ABORT on dealer2 retrieval failure
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
 
-        assert!(result.is_ok());
+        // Should fail with PairwiseCommunicationError
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::PairwiseCommunicationError(_)));
 
-        // Verify party has dealer1 and dealer3 messages but not dealer2
+        // Verify party has dealer1 message (processed before failure)
         assert!(party_manager.dealer_messages.contains_key(&dealer1_addr));
+        // But NOT dealer2 or dealer3 (aborted before processing these)
         assert!(!party_manager.dealer_messages.contains_key(&dealer2_addr));
-        assert!(party_manager.dealer_messages.contains_key(&dealer3_addr));
+        assert!(!party_manager.dealer_messages.contains_key(&dealer3_addr));
     }
 
     #[tokio::test]
@@ -3089,8 +3099,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_dealer_message_skips_self() {
-        // Tests that retrieve_dealer_message skips requesting party in signer list
+    async fn test_retrieve_dealer_message_aborts_when_self_in_signers() {
+        // Tests that retrieve_dealer_message aborts with error when requesting party is in signer list
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
@@ -3103,26 +3113,32 @@ mod tests {
         let (party_addr, mut party_mgr) =
             create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
 
-        // Create certificate with signers: [party itself, dealer]
+        // Create certificate with signers including the requesting party
+        // This is an invalid state - party shouldn't be retrieving a message it signed for
         let cert = create_certificate_with_signers(
             &dealer_addr,
             dealer_mgr.dealer_messages.get(&dealer_addr).unwrap(),
             &session_context,
-            vec![party_addr.clone(), dealer_addr.clone()], // Party first, then dealer
+            vec![party_addr.clone(), dealer_addr.clone()], // Party in signer list
         );
 
-        // MockP2PChannel: only include dealer (party shouldn't call itself)
+        // MockP2PChannel: include dealer
         let mut managers = std::collections::HashMap::new();
         managers.insert(dealer_addr.clone(), dealer_mgr);
         let mock_p2p = MockP2PChannel::new(managers, party_addr.clone());
 
-        // Should skip self and request from dealer
+        // Should abort with ProtocolFailed error due to invariant violation
         let result = party_mgr
             .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
             .await;
 
-        assert!(result.is_ok());
-        assert!(party_mgr.dealer_messages.contains_key(&dealer_addr));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(
+            err.to_string()
+                .contains("Self in certificate signers but message not available")
+        );
     }
 
     #[tokio::test]
