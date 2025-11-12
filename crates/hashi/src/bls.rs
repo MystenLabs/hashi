@@ -154,7 +154,7 @@ impl BLSSignatureAggregator {
     ) -> Result<(), SignatureError> {
         self.committee.verify(&self.message, index, &signature)?;
 
-        if self.bitmap.insert(index) {
+        if self.bitmap.insert(index)? {
             return Err(SignatureError::from_source(
                 "duplicate signature from same committee member",
             ));
@@ -213,9 +213,11 @@ impl BitMap {
 
     /// Set the given index in the bitmap and return the previous value.
     /// If an index larger than the committee size is given, nothing is changed and `false` is returned.
-    fn insert(&mut self, b: usize) -> bool {
+    fn insert(&mut self, b: usize) -> Result<bool, SignatureError> {
         if b >= self.committee_size {
-            return false;
+            return Err(SignatureError::from_source(
+                "index larger than committee size ({b} >= {self.committee_size})",
+            ));
         }
 
         let byte_index = b / 8;
@@ -227,7 +229,7 @@ impl BitMap {
         }
         let previous = self.bitmap[byte_index] & bit_mask != 0;
         self.bitmap[byte_index] |= bit_mask;
-        previous
+        Ok(previous)
     }
 
     fn iter(&self) -> impl Iterator<Item = usize> {
