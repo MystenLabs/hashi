@@ -9,8 +9,6 @@ use serde_derive::{Deserialize, Serialize};
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
-pub type Session = Vec<u8>;
-
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
@@ -76,7 +74,7 @@ impl BlsCommittee {
         self.total_weight
     }
 
-    fn member_by_idx(&self, idx: usize) -> Result<&BlsCommitteeMember, SignatureError> {
+    fn member(&self, idx: usize) -> Result<&BlsCommitteeMember, SignatureError> {
         let member = self.members.get(idx).ok_or_else(|| {
             SignatureError::from_source(format!(
                 "index {idx} out of bounds; committee has {} members",
@@ -92,7 +90,7 @@ impl BlsCommittee {
         index: usize,
         signature: &BLS12381Signature,
     ) -> Result<(), SignatureError> {
-        self.member_by_idx(index)?
+        self.member(index)?
             .public_key
             .verify(message, &signature)
             .map_err(SignatureError::from_source)
@@ -103,13 +101,14 @@ impl BlsCommittee {
         message: &[u8],
         signature: &BLSAggregatedSignature,
     ) -> Result<(), SignatureError> {
-        let pks: Vec<BLS12381PublicKey> =
-            BitMap::new_iter(self.members().len(), &signature.bitmap)?
-                .map(|idx| {
-                    let member = self.member_by_idx(idx)?;
-                    Ok(member.public_key.clone())
-                })
-                .collect::<Result<_, SignatureError>>()?;
+        let pks: Vec<BLS12381PublicKey> = signature
+            .bitmap
+            .iter()
+            .map(|idx| {
+                let member = self.member(idx)?;
+                Ok(member.public_key.clone())
+            })
+            .collect::<Result<_, SignatureError>>()?;
 
         signature
             .signature
@@ -121,7 +120,7 @@ impl BlsCommittee {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BLSAggregatedSignature {
     signature: BLS12381AggregateSignature,
-    bitmap: Vec<u8>,
+    bitmap: BitMap,
 }
 
 #[derive(Debug)]
@@ -168,7 +167,7 @@ impl BLSSignatureAggregator {
                 .map_err(SignatureError::from_source)?,
         }
 
-        let member = self.committee.member_by_idx(index)?;
+        let member = self.committee.member(index)?;
         self.signed_weight += member.weight as u64;
         Ok(())
     }
@@ -185,7 +184,7 @@ impl BLSSignatureAggregator {
             Some(signature) => {
                 let aggregated_signature = BLSAggregatedSignature {
                     signature: signature.clone(),
-                    bitmap: self.bitmap.clone().into_inner(),
+                    bitmap: self.bitmap.clone(),
                 };
 
                 // Double check that the aggregated sig still verifies
@@ -198,7 +197,7 @@ impl BLSSignatureAggregator {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct BitMap {
     committee_size: usize,
     bitmap: Vec<u8>,
@@ -231,26 +230,16 @@ impl BitMap {
         previous
     }
 
-    fn into_inner(self) -> Vec<u8> {
+    fn iter(&self) -> impl Iterator<Item = usize> {
         self.bitmap
-    }
-
-    fn new_iter(
-        committee_size: usize,
-        bitmap: &[u8],
-    ) -> Result<impl Iterator<Item = usize>, SignatureError> {
-        let max_bitmap_len_bytes = committee_size.div_ceil(8);
-
-        if bitmap.len() > max_bitmap_len_bytes {
-            return Err(SignatureError::from_source("invalid bitmap"));
-        }
-
-        Ok(bitmap.iter().enumerate().flat_map(|(byte_index, byte)| {
-            (0..8).filter_map(move |bit_index| {
-                let bit = byte & (1 << (7 - bit_index)) != 0;
-                bit.then(|| byte_index * 8 + bit_index)
+            .iter()
+            .enumerate()
+            .flat_map(|(byte_index, byte)| {
+                (0..8).filter_map(move |bit_index| {
+                    let bit = byte & (1 << (7 - bit_index)) != 0;
+                    bit.then(|| byte_index * 8 + bit_index)
+                })
             })
-        }))
     }
 }
 
