@@ -71,111 +71,6 @@ impl DkgManager {
         }
     }
 
-    pub fn create_dealer_message(
-        &self,
-        rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<avss::Message> {
-        let dealer_session_id = self.session_context.dealer_session_id(&self.address);
-        let dealer = avss::Dealer::new(
-            None,
-            self.dkg_config.nodes.clone(),
-            self.dkg_config.threshold,
-            self.dkg_config.max_faulty,
-            dealer_session_id.to_vec(),
-        )?;
-        let message = dealer.create_message(rng)?;
-        Ok(message)
-    }
-
-    pub fn receive_dealer_message(
-        &mut self,
-        message: &avss::Message,
-        dealer_address: ValidatorAddress,
-    ) -> DkgResult<ValidatorSignature> {
-        let dealer_session_id = self.session_context.dealer_session_id(&dealer_address);
-        let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
-            dealer_session_id.to_vec(),
-            None, // commitment: None for initial DKG
-            self.encryption_key.clone(),
-        );
-        let receiver_output = match receiver.process_message(message)? {
-            avss::ProcessedMessage::Valid(output) => output,
-            // TODO: Add compliant handling
-            avss::ProcessedMessage::Complaint(_) => {
-                return Err(DkgError::ProtocolFailed(
-                    "Invalid message from dealer".into(),
-                ));
-            }
-        };
-        self.dealer_outputs
-            .insert(dealer_address.clone(), receiver_output);
-        self.dealer_messages
-            .insert(dealer_address.clone(), message.clone());
-        let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
-        let signature = self.bls_signing_key.sign(&message_hash);
-        Ok(ValidatorSignature {
-            validator: self.address.clone(),
-            signature: signature.as_bytes().to_vec(),
-        })
-    }
-
-    pub fn create_certificate(
-        &self,
-        message: &avss::Message,
-        signatures: Vec<ValidatorSignature>,
-    ) -> DkgResult<DkgCertificate> {
-        let message_hash = compute_message_hash(&self.session_context, &self.address, message)?;
-        Ok(DkgCertificate {
-            dealer: self.address.clone(),
-            message_hash,
-            signatures,
-            session_context: self.session_context.clone(),
-        })
-    }
-
-    pub fn process_certificates(
-        &self,
-        certified_dealers: &std::collections::HashMap<ValidatorAddress, DkgCertificate>,
-    ) -> DkgResult<DkgOutput> {
-        let threshold = self.dkg_config.threshold;
-        // TODO: Handle missing messages and invalid shares
-        let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
-            .values()
-            .map(|cert| {
-                let dealer_party_id = self
-                    .dkg_config
-                    .address_to_party_id
-                    .get(&cert.dealer)
-                    .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
-                    })?;
-                let output = self
-                    .dealer_outputs
-                    .get(&cert.dealer)
-                    .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
-                            "No dealer output found for dealer: {:?}.",
-                            cert.dealer
-                        ))
-                    })?
-                    .clone();
-                Ok((*dealer_party_id, output))
-            })
-            .collect::<Result<_, DkgError>>()?;
-        let combined_output =
-            avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
-                .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
-        Ok(DkgOutput {
-            public_key: combined_output.vk,
-            key_shares: combined_output.my_shares,
-            commitments: combined_output.commitments,
-            session_context: self.session_context.clone(),
-        })
-    }
-
     /// RPC endpoint handler for `SendShareRequest`
     pub fn handle_send_share_request(
         &mut self,
@@ -383,7 +278,7 @@ impl DkgManager {
         let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
             validator: self.address.clone(),
-            signature: signature.to_bytes().to_vec(),
+            signature: signature.as_bytes().to_vec(),
         })
     }
 
