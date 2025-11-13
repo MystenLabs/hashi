@@ -421,13 +421,8 @@ impl DkgManager {
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
         for signer_id in certificate.signatures.signers_iter() {
-            let signer_address = self
-                .dkg_config
-                .address_to_party_id
-                .iter()
-                .find(|(addr, id)| **id as usize == signer_id)
-                .ok_or_else(|| DkgError::ProtocolFailed("Signer not found in config".to_string()))?
-                .0;
+            let signer_address =
+                &(&self.bls_committee.members()[signer_id].validator_address).into();
             if signer_address == &self.address {
                 tracing::error!(
                     "Self in certificate signers but message not available for dealer {:?}.",

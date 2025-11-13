@@ -18,3 +18,9 @@ impl From<&ValidatorAddress> for Address {
         Address::new(value.0)
     }
 }
+
+impl From<&Address> for ValidatorAddress {
+    fn from(value: &Address) -> Self {
+        ValidatorAddress(value.into_inner())
+    }
+}
