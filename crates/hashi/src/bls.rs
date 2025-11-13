@@ -59,7 +59,7 @@ pub struct BlsCommittee {
 #[derive(Debug)]
 #[allow(unused)]
 pub struct BlsCommitteeMember {
-    validator_address: Address,
+    address: Address,
     public_key: BLS12381PublicKey,
     weight: u16,
 }
@@ -148,7 +148,7 @@ impl BlsCommittee {
         signature: &CommitteeSignature<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
-        let signed_weight = self.signed_weight_of(signature)?;
+        let signed_weight = signature.weight(&self)?;
         if signed_weight < required_weight {
             return Err(SignatureError::from_source(format!(
                 "insufficient signing weight {}; required weight threshold is {}",
@@ -157,48 +157,12 @@ impl BlsCommittee {
         }
         self.verify_signature(message, signature)
     }
-
-    pub fn signed_weight_of<T>(
-        &self,
-        committee_signature: &CommitteeSignature<T>,
-    ) -> Result<u64, SignatureError> {
-        if committee_signature.epoch != self.epoch
-            || committee_signature.bitmap.committee_size != self.members.len() as u64
-        {
-            return Err(SignatureError::from_source(
-                "committee signature does not match committee",
-            ));
-        }
-        Ok(committee_signature
-            .bitmap
-            .iter()
-            .map(|idx| self.member(idx).unwrap().weight as u64)
-            .sum())
-    }
-
-    pub fn signers_of<T>(
-        &self,
-        committee_signature: &CommitteeSignature<T>,
-    ) -> Result<Vec<Address>, SignatureError> {
-        if committee_signature.epoch != self.epoch
-            || committee_signature.bitmap.committee_size != self.members.len() as u64
-        {
-            return Err(SignatureError::from_source(
-                "committee signature does not match committee",
-            ));
-        }
-        Ok(committee_signature
-            .bitmap
-            .iter()
-            .map(|idx| self.member(idx).unwrap().validator_address)
-            .collect())
-    }
 }
 
 impl BlsCommitteeMember {
     pub fn new(validator_address: Address, public_key: BLS12381PublicKey, weight: u16) -> Self {
         Self {
-            validator_address,
+            address: validator_address,
             public_key,
             weight,
         }
@@ -211,6 +175,38 @@ pub struct CommitteeSignature<T> {
     signature: BLS12381AggregateSignature,
     bitmap: BitMap,
     pub(crate) message: T,
+}
+
+impl<T> CommitteeSignature<T> {
+    pub fn signers(&self, committee: &BlsCommittee) -> Result<Vec<Address>, SignatureError> {
+        if committee.epoch != self.epoch
+            || self.bitmap.committee_size != committee.members.len() as u64
+        {
+            return Err(SignatureError::from_source(
+                "committee signature does not match committee",
+            ));
+        }
+        Ok(self
+            .bitmap
+            .iter()
+            .map(|idx| committee.member(idx).unwrap().address))
+        .collect()
+    }
+
+    pub fn weight(&self, committee: &BlsCommittee) -> Result<u64, SignatureError> {
+        if committee.epoch != self.epoch
+            || self.bitmap.committee_size != committee.members.len() as u64
+        {
+            return Err(SignatureError::from_source(
+                "committee signature does not match committee",
+            ));
+        }
+        Ok(self
+            .bitmap
+            .iter()
+            .map(|idx| committee.member(idx).unwrap().weight as u64)
+            .sum())
+    }
 }
 
 #[derive(Debug)]
@@ -376,7 +372,7 @@ mod test {
         let members = private_keys
             .iter()
             .map(|key| BlsCommitteeMember {
-                validator_address: Address::ZERO,
+                address: Address::ZERO,
                 public_key: key.public_key(),
                 weight: 1,
             })
@@ -403,12 +399,7 @@ mod test {
             .add_signature(private_keys[0].sign(epoch, 0, &message))
             .unwrap();
 
-        assert_eq!(
-            committee
-                .signed_weight_of(&aggregator.finish().unwrap())
-                .unwrap(),
-            1
-        );
+        assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 1);
 
         // Aggregating with a sig from the same committee member more than once fails
         aggregator
@@ -422,12 +413,7 @@ mod test {
             .add_signature(private_keys[2].sign(epoch, 2, &message))
             .unwrap();
 
-        assert_eq!(
-            committee
-                .signed_weight_of(&aggregator.finish().unwrap())
-                .unwrap(),
-            3
-        );
+        assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 3);
 
         // Aggregating with sufficient weight succeeds and verifies
         let signature = aggregator.finish().unwrap();
@@ -453,6 +439,6 @@ mod test {
             .committee()
             .verify_signature(&message, &signature)
             .unwrap();
-        assert_eq!(committee.signed_weight_of(&signature).unwrap(), 4);
+        assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
     }
 }

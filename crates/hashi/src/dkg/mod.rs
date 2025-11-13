@@ -211,9 +211,11 @@ impl DkgManager {
                 };
 
                 // The signature is verified in the call to `add_signature`
-                aggregator.add_signature(response.signature.signature).map_err(|e| {
-                    DkgError::CryptoError(format!("Failed to add signature: {}", e))
-                })?;
+                aggregator
+                    .add_signature(response.signature.signature)
+                    .map_err(|e| {
+                        DkgError::CryptoError(format!("Failed to add signature: {}", e))
+                    })?;
             }
         }
 
@@ -413,15 +415,15 @@ impl DkgManager {
         // - Round 1: Call 1-2 random signers, wait ~2s
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
-        for signer_address in self
-            .bls_committee
-            .signers_of(&certificate.signature)
+        let signers = certificate
+            .signature
+            .signers(&self.bls_committee)
             .map_err(|_| {
                 DkgError::ProtocolFailed(
                     "Certificate does not match the current epoch or committee".to_string(),
                 )
-            })?
-        {
+            })?;
+        for signer_address in signers {
             let signer_address = &signer_address.into();
             if signer_address == &self.address {
                 tracing::error!(
