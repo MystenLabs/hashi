@@ -355,7 +355,7 @@ impl DkgManager {
     fn create_certificate(
         &self,
         message: &avss::Message,
-        signatures: CommitteeSignature,
+        signatures: CommitteeSignature<avss::Message>,
     ) -> DkgResult<DkgCertificate> {
         let message_hash = compute_message_hash(&self.session_context, &self.address, message)?;
         Ok(DkgCertificate {
