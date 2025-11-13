@@ -158,7 +158,7 @@ impl SessionContext {
     /// Sub-session ID for a specific dealer, derived from the session ID
     pub fn dealer_session_id(&self, dealer: &Address) -> SessionId {
         let oracle = RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DEALER);
-        evaluate_oracle(&oracle, &(&self.session_id, dealer.0))
+        evaluate_oracle(&oracle, &(&self.session_id, dealer))
     }
 }
 
@@ -274,7 +274,7 @@ pub struct Authenticated<T> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OrderedBroadcastMessage {
-    AvssCertificateV1(DkgCertificate),
+    AvssCertificateV1(CommitteeSignature<DkgMessage>),
     PresignatureV1 {
         sender: Address,
         session_context: SessionContext,
@@ -294,21 +294,6 @@ pub struct MessageApproval {
 pub struct ValidatorSignature {
     pub validator: Address,
     pub signature: MemberSignature,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgCertificate {
-    pub signature: CommitteeSignature<DkgMessage>,
-}
-
-impl DkgCertificate {
-    pub(crate) fn dealer(&self) -> &Address {
-        &self.signature.message.dealer_address
-    }
-
-    pub(crate) fn message_hash(&self) -> &MessageHash {
-        &self.signature.message.message_hash
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

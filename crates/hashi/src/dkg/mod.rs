@@ -257,20 +257,21 @@ impl DkgManager {
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
             if let OrderedBroadcastMessage::AvssCertificateV1(cert) = tob_msg {
-                if certified_dealers.contains_key(cert.dealer()) {
+                let dealer = cert.message.dealer_address;
+                if certified_dealers.contains_key(&dealer) {
                     continue;
                 }
-                if !self.dealer_messages.contains_key(cert.dealer()) {
+                if !self.dealer_messages.contains_key(&dealer) {
                     tracing::info!(
                         "Certificate from dealer {:?} received but message missing, retrieving from signers",
-                        cert.dealer()
+                        &dealer
                     );
-                    self.retrieve_dealer_message(cert.dealer().clone(), &cert, p2p_channel)
+                    self.retrieve_dealer_message(dealer, &cert, p2p_channel)
                         .await
                         .map_err(|e| {
                             tracing::error!(
                                 "Failed to retrieve message from any signer for dealer {:?}: {}. Certificate exists but message unavailable from all signers.",
-                                cert.dealer(),
+                                &dealer,
                                 e
                             );
                             e
@@ -287,14 +288,14 @@ impl DkgManager {
                             .await?;
                         }
                         let dealer_weight =
-                            self.validator_weights.get(cert.dealer()).ok_or_else(|| {
+                            self.validator_weights.get(&dealer).ok_or_else(|| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
                         dealer_weight_sum += *dealer_weight as u32;
-                        certified_dealers.insert(cert.dealer().clone(), cert);
+                        certified_dealers.insert(&dealer.clone(), cert);
                     }
                     Err(e) => {
-                        tracing::info!("Invalid certificate from {:?}: {}", cert.dealer(), e);
+                        tracing::info!("Invalid certificate from {:?}: {}", &dealer, e);
                         continue;
                     }
                 }
@@ -352,7 +353,7 @@ impl DkgManager {
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
-            (&self.address).into(),
+            self.address,
             &DkgMessage {
                 dealer_address,
                 session_context: self.session_context.clone(),
@@ -367,7 +368,7 @@ impl DkgManager {
 
     fn process_certificates(
         &self,
-        certified_dealers: &HashMap<Address, DkgCertificate>,
+        certified_dealers: &HashMap<Address, CommitteeSignature<DkgMessage>>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
@@ -408,7 +409,7 @@ impl DkgManager {
     async fn retrieve_dealer_message(
         &mut self,
         dealer_address: Address,
-        certificate: &DkgCertificate,
+        certificate: &CommitteeSignature<DkgMessage>,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
@@ -418,14 +419,11 @@ impl DkgManager {
         // - Round 1: Call 1-2 random signers, wait ~2s
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
-        let signers = certificate
-            .signature
-            .signers(&self.bls_committee)
-            .map_err(|_| {
-                DkgError::ProtocolFailed(
-                    "Certificate does not match the current epoch or committee".to_string(),
-                )
-            })?;
+        let signers = certificate.signers(&self.bls_committee).map_err(|_| {
+            DkgError::ProtocolFailed(
+                "Certificate does not match the current epoch or committee".to_string(),
+            )
+        })?;
         for signer_address in signers {
             let signer_address = &signer_address.into();
             if signer_address == &self.address {
@@ -445,7 +443,7 @@ impl DkgManager {
                         &dealer_address,
                         &response.message,
                     )?;
-                    if message_hash != certificate.signature.message.message_hash {
+                    if message_hash != certificate.message.message_hash {
                         tracing::info!(
                             "Signer {:?} returned message with wrong hash",
                             signer_address
@@ -520,7 +518,7 @@ impl DkgManager {
         )))
     }
 
-    fn validate_message_hash(&self, cert: &DkgCertificate) -> DkgResult<()> {
+    fn validate_message_hash(&self, cert: &CommitteeSignature<DkgMessage>) -> DkgResult<()> {
         let message = self.dealer_messages.get(&cert.dealer()).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
                 "Dealer message not yet received from {:?}",
@@ -537,7 +535,7 @@ impl DkgManager {
         Ok(())
     }
 
-    fn validate_certificate(&self, cert: &DkgCertificate) -> DkgResult<()> {
+    fn validate_certificate(&self, cert: &CommitteeSignature<DkgMessage>) -> DkgResult<()> {
         self.validate_message_hash(cert)?;
         self.bls_committee
             .verify_signature(&cert.signature.message, &cert.signature)
@@ -555,7 +553,7 @@ fn create_bls_committee(
         .iter()
         .map(|(validator_address, &party_id)| {
             BlsCommitteeMember::new(
-                validator_address.into(),
+                *validator_address,
                 public_keys.get(validator_address).unwrap().clone(),
                 dkg_config.nodes.weight_of(party_id).unwrap() as u64,
             )
