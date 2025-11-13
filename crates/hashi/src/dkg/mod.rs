@@ -554,10 +554,12 @@ fn create_bls_committee(
     let committee: Vec<BlsCommitteeMember> = dkg_config
         .address_to_party_id
         .iter()
-        .map(|(validator_address, &party_id)| BlsCommitteeMember {
-            public_key: public_keys.get(&validator_address).unwrap().clone(),
-            validator_address: validator_address.into(),
-            weight: dkg_config.nodes.weight_of(party_id).unwrap(),
+        .map(|(validator_address, &party_id)| {
+            BlsCommitteeMember::new(
+                validator_address.into(),
+                public_keys.get(&validator_address).unwrap().clone(),
+                dkg_config.nodes.weight_of(party_id).unwrap(),
+            )
         })
         .collect();
     BlsCommittee::new(dkg_config.epoch, committee)

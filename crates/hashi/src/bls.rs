@@ -58,9 +58,9 @@ pub struct BlsCommittee {
 #[derive(Debug)]
 #[allow(unused)]
 pub struct BlsCommitteeMember {
-    pub(crate) validator_address: Address,
-    pub(crate) public_key: BLS12381PublicKey,
-    pub(crate) weight: u16,
+    validator_address: Address,
+    public_key: BLS12381PublicKey,
+    weight: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,7 +168,6 @@ impl BlsCommittee {
             .sum())
     }
 
-    #[inline]
     pub fn signers_of(
         &self,
         committee_signature: &CommitteeSignature,
@@ -185,6 +184,16 @@ impl BlsCommittee {
             .iter()
             .map(|idx| self.member(idx).unwrap().validator_address)
             .collect())
+    }
+}
+
+impl BlsCommitteeMember {
+    pub fn new(validator_address: Address, public_key: BLS12381PublicKey, weight: u16) -> Self {
+        Self {
+            validator_address,
+            public_key,
+            weight,
+        }
     }
 }
 
