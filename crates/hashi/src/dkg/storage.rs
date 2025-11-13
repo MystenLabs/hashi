@@ -3,7 +3,7 @@ use super::types::SessionId;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
 /// Storage for secret shares produced by DKG
-pub trait SecretSharesStore: Send + Sync {
+pub trait SecretSharesStore {
     /// Store the secret shares from a completed DKG session
     /// If shares already exist for this session, they will be overwritten
     fn store_key(&mut self, session_id: SessionId, shares: &avss::SharesForNode) -> DkgResult<()>;
