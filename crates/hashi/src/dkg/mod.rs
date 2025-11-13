@@ -349,7 +349,7 @@ impl DkgManager {
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
-            self.party_id as u64,
+            (&self.address).into(),
             &DkgMessage {
                 dealer_address,
                 session_context: self.session_context.clone(),
