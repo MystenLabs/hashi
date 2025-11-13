@@ -123,17 +123,23 @@ pub struct BLSAggregatedSignature {
     bitmap: BitMap,
 }
 
+impl BLSAggregatedSignature {
+    pub fn signers_iter(&self) -> impl Iterator<Item = usize> {
+        self.bitmap.iter()
+    }
+}
+
 #[derive(Debug)]
-pub struct BLSSignatureAggregator {
-    committee: BlsCommittee,
+pub struct BLSSignatureAggregator<'a> {
+    committee: &'a BlsCommittee,
     aggregate_signature: Option<BLS12381AggregateSignature>,
     bitmap: BitMap,
     signed_weight: u64,
     message: Vec<u8>,
 }
 
-impl BLSSignatureAggregator {
-    pub fn new(committee: BlsCommittee, message: Vec<u8>) -> Self {
+impl<'a> BLSSignatureAggregator<'a> {
+    pub fn new(committee: &'a BlsCommittee, message: Vec<u8>) -> Self {
         Self {
             bitmap: BitMap::new(committee.members().len()),
             committee,
@@ -293,7 +299,7 @@ mod test {
             .collect();
         let committee = BlsCommittee::new(members);
 
-        let mut aggregator = BLSSignatureAggregator::new(committee, message.clone());
+        let mut aggregator = BLSSignatureAggregator::new(&committee, message.clone());
 
         // Aggregating with no sigs fails
         aggregator.finish().unwrap_err();

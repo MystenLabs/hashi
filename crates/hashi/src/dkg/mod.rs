@@ -36,7 +36,7 @@ pub struct DkgManager {
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
-    pub bls_public_keys: HashMap<ValidatorAddress, BLS12381PublicKey>,
+    pub bls_committee: BlsCommittee,
     pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
     // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
@@ -56,8 +56,8 @@ impl DkgManager {
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
-        public_message_store: Box<dyn PublicMessagesStore>,
         bls_public_keys: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
+        public_message_store: Box<dyn PublicMessagesStore>,
     ) -> Self {
         let party_id = *dkg_config
             .address_to_party_id
@@ -71,6 +71,7 @@ impl DkgManager {
                 (addr.clone(), weight)
             })
             .collect();
+        let bls_committee = create_bls_committee(&dkg_config, &bls_public_keys);
         Self {
             party_id,
             address,
@@ -78,7 +79,7 @@ impl DkgManager {
             session_context,
             encryption_key,
             bls_signing_key,
-            bls_public_keys,
+            bls_committee,
             validator_weights,
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
@@ -177,11 +178,10 @@ impl DkgManager {
         // TODO: Return early if DKG is already completed (we're a slow dealer)
         let dealer_message = self.create_dealer_message(rng)?;
         let my_signature = self.receive_dealer_message(&dealer_message, self.address.clone())?;
-
-        let bls_committee = create_bls_committee(&self.dkg_config, &self.bls_public_keys);
         let message_hash =
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
-        let mut aggregator = BLSSignatureAggregator::new(bls_committee, message_hash.to_vec());
+        let mut aggregator =
+            BLSSignatureAggregator::new(&self.bls_committee, message_hash.to_vec());
         aggregator
             .add_signature(self.party_id as usize, my_signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
@@ -270,13 +270,7 @@ impl DkgManager {
                             e
                         })?;
                 }
-                match validate_certificate(
-                    &cert,
-                    &self.dkg_config,
-                    &self.session_context,
-                    &self.address_to_public_key,
-                    &self.dealer_messages,
-                ) {
+                match self.validate_certificate(&cert) {
                     Ok(()) => {
                         if self.complaints.contains_key(&cert.dealer) {
                             self.recover_shares_via_complaint(
@@ -352,9 +346,7 @@ impl DkgManager {
             .insert(dealer_address.clone(), receiver_output);
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
-        let signature = self
-            .bls_signing_key
-            .sign_hashi(self.session_context.epoch, &message_hash);
+        let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
             validator: self.address.clone(),
             signature,
@@ -364,7 +356,7 @@ impl DkgManager {
     fn create_certificate(
         &self,
         message: &avss::Message,
-        signatures: Vec<ValidatorSignature>,
+        signatures: BLSAggregatedSignature,
     ) -> DkgResult<DkgCertificate> {
         let message_hash = compute_message_hash(&self.session_context, &self.address, message)?;
         Ok(DkgCertificate {
@@ -428,8 +420,14 @@ impl DkgManager {
         // - Round 1: Call 1-2 random signers, wait ~2s
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
-        for signer_sig in &certificate.signatures {
-            let signer_address = &signer_sig.validator;
+        for signer_id in certificate.signatures.signers_iter() {
+            let signer_address = self
+                .dkg_config
+                .address_to_party_id
+                .iter()
+                .find(|(addr, id)| **id as usize == signer_id)
+                .ok_or_else(|| DkgError::ProtocolFailed("Signer not found in config".to_string()))?
+                .0;
             if signer_address == &self.address {
                 tracing::error!(
                     "Self in certificate signers but message not available for dealer {:?}.",
@@ -538,6 +536,13 @@ impl DkgManager {
         }
         Ok(())
     }
+
+    fn validate_certificate(&self, cert: &DkgCertificate) -> DkgResult<()> {
+        validate_message_hash(cert, &self.dealer_messages, &self.session_context)?;
+        self.bls_committee
+            .verify_aggregated_signature(&cert.message_hash.to_vec(), &cert.signatures)
+            .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
+    }
 }
 
 /// Helper function to create a [BlsCommittee] from a [DkgConfig] and public keys.
@@ -555,29 +560,6 @@ fn create_bls_committee(
         })
         .collect();
     BlsCommittee::new(committee)
-}
-
-fn validate_certificate(
-    cert: &DkgCertificate,
-    dkg_config: &DkgConfig,
-    session_context: &SessionContext,
-    public_keys: &HashMap<ValidatorAddress, BLS12381PublicKey>,
-    dealer_messages: &HashMap<ValidatorAddress, avss::Message>,
-) -> DkgResult<()> {
-    validate_message_hash(cert, dealer_messages, session_context)?;
-    create_bls_committee(dkg_config, public_keys)
-        .verify(
-            &cert.message_hash.to_vec(),
-            &(&cert.signatures, threshold(&dkg_config)),
-        )
-        .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
-}
-
-fn threshold(dkg_config: &DkgConfig) -> RequiredWeight {
-    RequiredWeight::ThresholdCorrectNodes {
-        threshold: dkg_config.threshold as u64,
-        max_faulty: dkg_config.max_faulty as u64,
-    }
 }
 
 fn validate_message_hash(
