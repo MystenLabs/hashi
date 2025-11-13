@@ -183,12 +183,12 @@ impl DkgManager {
         let mut aggregator =
             BLSSignatureAggregator::new(&self.bls_committee, message_hash.to_vec());
         aggregator
-            .add_signature(self.party_id as usize, my_signature.signature)
+            .add_signature(my_signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
 
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
-        for (validator_address, party_id) in &self.dkg_config.address_to_party_id {
+        for validator_address in self.dkg_config.address_to_party_id.keys() {
             if validator_address != &self.address {
                 let response = match p2p_channel
                     .send_share(
@@ -208,11 +208,9 @@ impl DkgManager {
                 // TODO: Add cryptographic verification of response.signature
 
                 // The signature is verified in the call to `add_signature`
-                aggregator
-                    .add_signature(*party_id as usize, response.signature)
-                    .map_err(|e| {
-                        DkgError::CryptoError(format!("Failed to add signature: {}", e))
-                    })?;
+                aggregator.add_signature(response.signature).map_err(|e| {
+                    DkgError::CryptoError(format!("Failed to add signature: {}", e))
+                })?;
             }
         }
 
@@ -345,8 +343,9 @@ impl DkgManager {
         self.dealer_outputs
             .insert(dealer_address.clone(), receiver_output);
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
-        let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
-        let signature = self.bls_signing_key.sign(&message_hash);
+        let signature =
+            self.bls_signing_key
+                .sign(self.dkg_config.epoch, self.party_id as u64, &message_hash);
         Ok(ValidatorSignature {
             validator: self.address.clone(),
             signature,
@@ -356,7 +355,7 @@ impl DkgManager {
     fn create_certificate(
         &self,
         message: &avss::Message,
-        signatures: BLSAggregatedSignature,
+        signatures: CommitteeSignature,
     ) -> DkgResult<DkgCertificate> {
         let message_hash = compute_message_hash(&self.session_context, &self.address, message)?;
         Ok(DkgCertificate {
@@ -420,9 +419,16 @@ impl DkgManager {
         // - Round 1: Call 1-2 random signers, wait ~2s
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
-        for signer_id in certificate.signatures.signers_iter() {
-            let signer_address =
-                &(&self.bls_committee.members()[signer_id].validator_address).into();
+        for signer_address in self
+            .bls_committee
+            .signers_of(&certificate.signatures)
+            .map_err(|_| {
+                DkgError::ProtocolFailed(
+                    "Certificate does not match the current epoch or committee".to_string(),
+                )
+            })?
+        {
+            let signer_address = &signer_address.into();
             if signer_address == &self.address {
                 tracing::error!(
                     "Self in certificate signers but message not available for dealer {:?}.",
@@ -533,9 +539,9 @@ impl DkgManager {
     }
 
     fn validate_certificate(&self, cert: &DkgCertificate) -> DkgResult<()> {
-        validate_message_hash(cert, &self.dealer_messages, &self.session_context)?;
+        self.validate_message_hash(cert)?;
         self.bls_committee
-            .verify_aggregated_signature(&cert.message_hash.to_vec(), &cert.signatures)
+            .verify_signature(&cert.message_hash.to_vec(), &cert.signatures)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
     }
 }
@@ -549,33 +555,12 @@ fn create_bls_committee(
         .address_to_party_id
         .iter()
         .map(|(validator_address, &party_id)| BlsCommitteeMember {
+            public_key: public_keys.get(&validator_address).unwrap().clone(),
             validator_address: validator_address.into(),
-            public_key: public_keys.get(validator_address).unwrap().clone(),
             weight: dkg_config.nodes.weight_of(party_id).unwrap(),
         })
         .collect();
-    BlsCommittee::new(committee)
-}
-
-fn validate_message_hash(
-    cert: &DkgCertificate,
-    dealer_messages: &std::collections::HashMap<ValidatorAddress, avss::Message>,
-    session_context: &SessionContext,
-) -> DkgResult<()> {
-    let message = dealer_messages.get(&cert.dealer).ok_or_else(|| {
-        DkgError::InvalidCertificate(format!(
-            "Dealer message not yet received from {:?}",
-            cert.dealer
-        ))
-    })?;
-    let expected_hash = compute_message_hash(session_context, &cert.dealer, message)?;
-    if cert.message_hash != expected_hash {
-        return Err(DkgError::InvalidCertificate(format!(
-            "Message hash mismatch for dealer {:?}",
-            cert.dealer
-        )));
-    }
-    Ok(())
+    BlsCommittee::new(dkg_config.epoch, committee)
 }
 
 fn compute_message_hash(

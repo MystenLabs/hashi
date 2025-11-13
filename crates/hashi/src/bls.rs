@@ -1,3 +1,4 @@
+use crate::types::ValidatorAddress;
 pub use fastcrypto::bls12381::min_pk::{
     BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
 };
@@ -38,13 +39,18 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign(&self, message: &[u8]) -> BLS12381Signature {
-        self.0.sign(message)
+    pub fn sign(&self, epoch: u64, index: u64, message: &[u8]) -> MemberSignature {
+        MemberSignature {
+            epoch,
+            index,
+            signature: self.0.sign(message),
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct BlsCommittee {
+    epoch: u64,
     members: Vec<BlsCommitteeMember>,
     total_weight: u64,
 }
@@ -57,10 +63,18 @@ pub struct BlsCommitteeMember {
     pub(crate) weight: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberSignature {
+    epoch: u64,
+    index: u64,
+    signature: BLS12381Signature,
+}
+
 impl BlsCommittee {
-    pub fn new(members: Vec<BlsCommitteeMember>) -> Self {
+    pub fn new(epoch: u64, members: Vec<BlsCommitteeMember>) -> Self {
         let total_weight = members.iter().map(|member| member.weight as u64).sum();
         Self {
+            epoch,
             members,
             total_weight,
         }
@@ -74,8 +88,8 @@ impl BlsCommittee {
         self.total_weight
     }
 
-    fn member(&self, idx: usize) -> Result<&BlsCommitteeMember, SignatureError> {
-        let member = self.members.get(idx).ok_or_else(|| {
+    fn member(&self, idx: u64) -> Result<&BlsCommitteeMember, SignatureError> {
+        let member = self.members.get(idx as usize).ok_or_else(|| {
             SignatureError::from_source(format!(
                 "index {idx} out of bounds; committee has {} members",
                 self.members.len(),
@@ -84,22 +98,26 @@ impl BlsCommittee {
         Ok(member)
     }
 
-    fn verify(
-        &self,
-        message: &[u8],
-        index: usize,
-        signature: &BLS12381Signature,
-    ) -> Result<(), SignatureError> {
-        self.member(index)?
+    /// Verify a single signature provided by a [BlsCommitteeMember].
+    fn verify(&self, message: &[u8], signature: &MemberSignature) -> Result<(), SignatureError> {
+        if self.epoch != signature.epoch {
+            return Err(SignatureError::from_source(format!(
+                "signature epoch {} does not match committee epoch {}",
+                signature.epoch, self.epoch,
+            )));
+        }
+        self.member(signature.index)?
             .public_key
-            .verify(message, &signature)
+            .verify(message, &signature.signature)
             .map_err(SignatureError::from_source)
     }
 
-    pub fn verify_aggregated_signature(
+    /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
+    /// get that with the [signed_weight_of] function of by using [verify_signature_and_weight].
+    pub fn verify_signature(
         &self,
         message: &[u8],
-        signature: &BLSAggregatedSignature,
+        signature: &CommitteeSignature,
     ) -> Result<(), SignatureError> {
         let pks: Vec<BLS12381PublicKey> = signature
             .bitmap
@@ -115,18 +133,66 @@ impl BlsCommittee {
             .verify(&pks, message)
             .map_err(SignatureError::from_source)
     }
+
+    pub fn verify_signature_and_weight(
+        &self,
+        message: &[u8],
+        signature: &CommitteeSignature,
+        required_weight: u64,
+    ) -> Result<(), SignatureError> {
+        let signed_weight = self.signed_weight_of(&signature)?;
+        if signed_weight < required_weight {
+            return Err(SignatureError::from_source(format!(
+                "insufficient signing weight {}; required weight threshold is {}",
+                signed_weight, required_weight,
+            )));
+        }
+        self.verify_signature(message, signature)
+    }
+
+    pub fn signed_weight_of(
+        &self,
+        committee_signature: &CommitteeSignature,
+    ) -> Result<u64, SignatureError> {
+        if committee_signature.epoch != self.epoch
+            || committee_signature.bitmap.committee_size != self.members.len() as u64
+        {
+            return Err(SignatureError::from_source(
+                "committee signature does not match committee",
+            ));
+        }
+        Ok(committee_signature
+            .bitmap
+            .iter()
+            .map(|idx| self.member(idx).unwrap().weight as u64)
+            .sum())
+    }
+
+    #[inline]
+    pub fn signers_of(
+        &self,
+        committee_signature: &CommitteeSignature,
+    ) -> Result<Vec<Address>, SignatureError> {
+        if committee_signature.epoch != self.epoch
+            || committee_signature.bitmap.committee_size != self.members.len() as u64
+        {
+            return Err(SignatureError::from_source(
+                "committee signature does not match committee",
+            ));
+        }
+        Ok(committee_signature
+            .bitmap
+            .iter()
+            .map(|idx| self.member(idx).unwrap().validator_address)
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BLSAggregatedSignature {
+pub struct CommitteeSignature {
+    epoch: u64,
     signature: BLS12381AggregateSignature,
     bitmap: BitMap,
-}
-
-impl BLSAggregatedSignature {
-    pub fn signers_iter(&self) -> impl Iterator<Item = usize> {
-        self.bitmap.iter()
-    }
 }
 
 #[derive(Debug)]
@@ -141,7 +207,7 @@ pub struct BLSSignatureAggregator<'a> {
 impl<'a> BLSSignatureAggregator<'a> {
     pub fn new(committee: &'a BlsCommittee, message: Vec<u8>) -> Self {
         Self {
-            bitmap: BitMap::new(committee.members().len()),
+            bitmap: BitMap::new(committee.members().len() as u64),
             committee,
             aggregate_signature: None,
             signed_weight: 0,
@@ -153,27 +219,23 @@ impl<'a> BLSSignatureAggregator<'a> {
         &self.committee
     }
 
-    pub fn add_signature(
-        &mut self,
-        index: usize,
-        signature: BLS12381Signature,
-    ) -> Result<(), SignatureError> {
-        self.committee.verify(&self.message, index, &signature)?;
+    pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
+        self.committee.verify(&self.message, &signature)?;
 
-        if self.bitmap.insert(index)? {
+        if self.bitmap.insert(signature.index)? {
             return Err(SignatureError::from_source(
                 "duplicate signature from same committee member",
             ));
         }
 
         match self.aggregate_signature {
-            None => self.aggregate_signature = Some(signature.into()),
+            None => self.aggregate_signature = Some(signature.signature.into()),
             Some(ref mut aggregate_signature) => aggregate_signature
-                .add_signature(signature)
+                .add_signature(signature.signature)
                 .map_err(SignatureError::from_source)?,
         }
 
-        let member = self.committee.member(index)?;
+        let member = self.committee.member(signature.index)?;
         self.signed_weight += member.weight as u64;
         Ok(())
     }
@@ -182,20 +244,21 @@ impl<'a> BLSSignatureAggregator<'a> {
         self.signed_weight
     }
 
-    pub fn finish(&self) -> Result<BLSAggregatedSignature, SignatureError> {
+    pub fn finish(&self) -> Result<CommitteeSignature, SignatureError> {
         match &self.aggregate_signature {
             None => Err(SignatureError::from_source(
                 "signature map must have at least one entry",
             )),
             Some(signature) => {
-                let aggregated_signature = BLSAggregatedSignature {
+                let aggregated_signature = CommitteeSignature {
+                    epoch: self.committee.epoch,
                     signature: signature.clone(),
                     bitmap: self.bitmap.clone(),
                 };
 
                 // Double check that the aggregated sig still verifies
                 self.committee
-                    .verify_aggregated_signature(&self.message, &aggregated_signature)?;
+                    .verify_signature(&self.message, &aggregated_signature)?;
 
                 Ok(aggregated_signature)
             }
@@ -205,12 +268,12 @@ impl<'a> BLSSignatureAggregator<'a> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BitMap {
-    committee_size: usize,
+    committee_size: u64,
     bitmap: Vec<u8>,
 }
 
 impl BitMap {
-    fn new(committee_size: usize) -> Self {
+    fn new(committee_size: u64) -> Self {
         Self {
             committee_size,
             bitmap: Vec::new(),
@@ -219,15 +282,15 @@ impl BitMap {
 
     /// Set the given index in the bitmap and return the previous value.
     /// If an index larger than the committee size is given, nothing is changed and `false` is returned.
-    fn insert(&mut self, b: usize) -> Result<bool, SignatureError> {
+    fn insert(&mut self, b: u64) -> Result<bool, SignatureError> {
         if b >= self.committee_size {
             return Err(SignatureError::from_source(
                 "index larger than committee size ({b} >= {self.committee_size})",
             ));
         }
 
-        let byte_index = b / 8;
-        let bit_index = b % 8;
+        let byte_index = (b / 8) as usize;
+        let bit_index = (b % 8) as usize;
         let bit_mask = 1 << (7 - bit_index);
 
         if byte_index >= self.bitmap.len() {
@@ -238,14 +301,14 @@ impl BitMap {
         Ok(previous)
     }
 
-    fn iter(&self) -> impl Iterator<Item = usize> {
+    fn iter(&self) -> impl Iterator<Item = u64> {
         self.bitmap
             .iter()
             .enumerate()
             .flat_map(|(byte_index, byte)| {
                 (0..8).filter_map(move |bit_index| {
                     let bit = byte & (1 << (7 - bit_index)) != 0;
-                    bit.then(|| byte_index * 8 + bit_index)
+                    bit.then(|| (byte_index * 8 + bit_index) as u64)
                 })
             })
     }
@@ -289,6 +352,8 @@ mod test {
             }
         }
 
+        let epoch = 7;
+
         let members = private_keys
             .iter()
             .map(|key| BlsCommitteeMember {
@@ -297,43 +362,78 @@ mod test {
                 weight: 1,
             })
             .collect();
-        let committee = BlsCommittee::new(members);
+        let committee = BlsCommittee::new(epoch, members);
 
         let mut aggregator = BLSSignatureAggregator::new(&committee, message.clone());
 
         // Aggregating with no sigs fails
         aggregator.finish().unwrap_err();
 
+        // Adding a signature with the wrong index fails
         aggregator
-            .add_signature(0, private_keys[0].sign(&message))
+            .add_signature(private_keys[0].sign(epoch, 1, &message))
+            .unwrap_err();
+
+        // Adding a signature with the wrong epoch fails
+        aggregator
+            .add_signature(private_keys[0].sign(4, 0, &message))
+            .unwrap_err();
+
+        // This works
+        aggregator
+            .add_signature(private_keys[0].sign(epoch, 0, &message))
             .unwrap();
+
+        assert_eq!(
+            committee
+                .signed_weight_of(&aggregator.finish().unwrap())
+                .unwrap(),
+            1
+        );
 
         // Aggregating with a sig from the same committee member more than once fails
         aggregator
-            .add_signature(0, private_keys[0].sign(&message))
+            .add_signature(private_keys[0].sign(epoch, 0, &message))
             .unwrap_err();
+
         aggregator
-            .add_signature(1, private_keys[1].sign(&message))
+            .add_signature(private_keys[1].sign(epoch, 1, &message))
             .unwrap();
         aggregator
-            .add_signature(2, private_keys[2].sign(&message))
+            .add_signature(private_keys[2].sign(epoch, 2, &message))
             .unwrap();
+
+        assert_eq!(
+            committee
+                .signed_weight_of(&aggregator.finish().unwrap())
+                .unwrap(),
+            3
+        );
 
         // Aggregating with sufficient weight succeeds and verifies
         let signature = aggregator.finish().unwrap();
         aggregator
             .committee()
-            .verify_aggregated_signature(&message, &signature)
+            .verify_signature(&message, &signature)
             .unwrap();
+
+        committee
+            .verify_signature_and_weight(&message, &signature, 3)
+            .unwrap();
+        committee
+            .verify_signature_and_weight(&message, &signature, 2)
+            .unwrap_err();
 
         // We can add the last sig and still be successful
         aggregator
-            .add_signature(3, private_keys[3].sign(&message))
+            .add_signature(private_keys[3].sign(epoch, 3, &message))
             .unwrap();
+
         let signature = aggregator.finish().unwrap();
         aggregator
             .committee()
-            .verify_aggregated_signature(&message, &signature)
+            .verify_signature(&message, &signature)
             .unwrap();
+        assert_eq!(committee.signed_weight_of(&signature).unwrap(), 4);
     }
 }
