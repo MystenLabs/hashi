@@ -293,7 +293,7 @@ pub struct MessageApproval {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator: ValidatorAddress,
-    pub signature: MemberSignature<DkgMessage>,
+    pub signature: MemberSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

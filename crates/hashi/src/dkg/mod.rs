@@ -554,7 +554,7 @@ fn create_bls_committee(
             BlsCommitteeMember::new(
                 validator_address.into(),
                 public_keys.get(validator_address).unwrap().clone(),
-                dkg_config.nodes.weight_of(party_id).unwrap(),
+                dkg_config.nodes.weight_of(party_id).unwrap() as u64,
             )
         })
         .collect();

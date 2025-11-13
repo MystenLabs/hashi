@@ -7,7 +7,6 @@ use fastcrypto::traits::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -40,17 +39,11 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign<T: Serialize>(
-        &self,
-        epoch: u64,
-        address: Address,
-        message: &T,
-    ) -> MemberSignature<T> {
+    pub fn sign<T: Serialize>(&self, epoch: u64, address: Address, message: &T) -> MemberSignature {
         MemberSignature {
             epoch,
             address,
             signature: self.0.sign(&bcs::to_bytes(message).unwrap()),
-            message: PhantomData,
         }
     }
 }
@@ -68,15 +61,14 @@ pub struct BlsCommittee {
 pub struct BlsCommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
-    weight: u16,
+    weight: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberSignature<T> {
+pub struct MemberSignature {
     epoch: u64,
     address: Address,
     signature: BLS12381Signature,
-    message: PhantomData<T>,
 }
 
 impl BlsCommittee {
@@ -85,7 +77,7 @@ impl BlsCommittee {
         let address_to_index = members
             .iter()
             .enumerate()
-            .map(|(idx, member)| (member.address, idx))
+            .map(|(index, member)| (member.address, index))
             .collect();
         Self {
             epoch,
@@ -99,23 +91,24 @@ impl BlsCommittee {
         &self.members
     }
 
+    /// The total weight of the members of this committee.
     pub fn total_weight(&self) -> u64 {
         self.total_weight
     }
 
     fn member(&self, address: &Address) -> Result<&BlsCommitteeMember, SignatureError> {
-        let idx = self
+        let index = self
             .address_to_index
             .get(address)
             .ok_or_else(|| SignatureError::from_source(format!("unknown address {address}",)))?;
-        Ok(&self.members[*idx])
+        Ok(&self.members[*index])
     }
 
     /// Verify a single signature provided by a [BlsCommitteeMember].
     fn verify<T: Serialize>(
         &self,
         message: &T,
-        signature: &MemberSignature<T>,
+        signature: &MemberSignature,
     ) -> Result<(), SignatureError> {
         if self.epoch != signature.epoch {
             return Err(SignatureError::from_source(format!(
@@ -131,7 +124,8 @@ impl BlsCommittee {
     }
 
     /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
-    /// get that with the [signed_weight_of] function of by using [verify_signature_and_weight].
+    /// get the weight of the signature with [CommitteeSignature::weight] or use the [verify_signature_and_weight]
+    /// function.
     pub fn verify_signature<T: Serialize>(
         &self,
         message: &T,
@@ -140,7 +134,7 @@ impl BlsCommittee {
         let pks = signature
             .bitmap
             .iter()
-            .map(|idx| self.members[idx].public_key.clone())
+            .map(|index| self.members[index].public_key.clone())
             .collect::<Vec<_>>();
 
         let message_bytes = bcs::to_bytes(message).map_err(SignatureError::from_source)?;
@@ -150,6 +144,7 @@ impl BlsCommittee {
             .map_err(SignatureError::from_source)
     }
 
+    /// Verify a signature and check that the weight of the signature is at least `required_weight`.
     pub fn verify_signature_and_weight<T: Serialize>(
         &self,
         message: &T,
@@ -166,15 +161,16 @@ impl BlsCommittee {
         self.verify_signature(message, signature)
     }
 
-    pub fn size(&self) -> usize {
+    /// The number of members of this committee.
+    fn size(&self) -> usize {
         self.members.len()
     }
 }
 
 impl BlsCommitteeMember {
-    pub fn new(validator_address: Address, public_key: BLS12381PublicKey, weight: u16) -> Self {
+    pub fn new(address: Address, public_key: BLS12381PublicKey, weight: u64) -> Self {
         Self {
-            address: validator_address,
+            address,
             public_key,
             weight,
         }
@@ -191,7 +187,7 @@ pub struct CommitteeSignature<T> {
 
 impl<T> CommitteeSignature<T> {
     pub fn signers(&self, committee: &BlsCommittee) -> Result<Vec<Address>, SignatureError> {
-        if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() as u64 {
+        if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() {
             return Err(SignatureError::from_source(
                 "committee signature does not match committee",
             ));
@@ -199,12 +195,12 @@ impl<T> CommitteeSignature<T> {
         Ok(self
             .bitmap
             .iter()
-            .map(|idx| committee.members[idx].address)
+            .map(|index| committee.members[index].address)
             .collect())
     }
 
     pub fn weight(&self, committee: &BlsCommittee) -> Result<u64, SignatureError> {
-        if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() as u64 {
+        if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() {
             return Err(SignatureError::from_source(
                 "committee signature does not match committee",
             ));
@@ -212,7 +208,7 @@ impl<T> CommitteeSignature<T> {
         Ok(self
             .bitmap
             .iter()
-            .map(|idx| committee.members[idx].weight as u64)
+            .map(|index| committee.members[index].weight)
             .sum())
     }
 }
@@ -243,20 +239,18 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
     ///  * a signature from the same member has already been added,
     ///  * if the signer is not a member of the committee,
     ///  * if the signature is not valid.
-    pub fn add_signature(&mut self, signature: MemberSignature<T>) -> Result<(), SignatureError> {
+    pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
         self.committee.verify(&self.message, &signature)?;
 
-        let index = match self.committee.address_to_index.get(&signature.address) {
-            None => {
-                return Err(SignatureError::from_source(format!(
-                    "unknown committee member {}",
-                    signature.address
-                )));
-            }
-            Some(index) => *index,
-        };
+        let index = self
+            .committee
+            .address_to_index
+            .get(&signature.address)
+            .ok_or_else(|| {
+                SignatureError::from_source(format!("unknown address {}", &signature.address))
+            })?;
 
-        if self.bitmap.insert(index)? {
+        if self.bitmap.insert(*index)? {
             return Err(SignatureError::from_source(
                 "duplicate signature from same committee member",
             ));
@@ -269,8 +263,27 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
                 .map_err(SignatureError::from_source)?,
         }
 
-        self.signed_weight += self.committee.members[index].weight as u64;
+        self.signed_weight += self.committee.members[*index].weight as u64;
         Ok(())
+    }
+
+    /// Add a raw [BLS12381Signature] from the given signer to this aggregator.
+    ///
+    /// Returns an error if:
+    ///  * a signature from the same member has already been added,
+    ///  * if the signer is not a member of the committee,
+    ///  * if the signature is not valid.
+    pub fn add_signature_from(
+        &mut self,
+        signer: Address,
+        signature: BLS12381Signature,
+    ) -> Result<(), SignatureError> {
+        let member_signature = MemberSignature {
+            epoch: self.committee.epoch,
+            address: signer,
+            signature,
+        };
+        self.add_signature(member_signature)
     }
 
     /// The total weight of the signatures aggregated so far.
