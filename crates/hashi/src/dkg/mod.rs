@@ -244,7 +244,7 @@ impl DkgManager {
             OrderedBroadcastMessage,
         >,
     ) -> DkgResult<DkgOutput> {
-        let mut certified_dealers = std::collections::HashMap::new();
+        let mut certified_dealers = HashMap::new();
         let mut dealer_weight_sum = 0u32;
         loop {
             if dealer_weight_sum >= self.dkg_config.threshold as u32 {
@@ -366,27 +366,27 @@ impl DkgManager {
 
     fn process_certificates(
         &self,
-        certified_dealers: &std::collections::HashMap<ValidatorAddress, DkgCertificate>,
+        certified_dealers: &HashMap<ValidatorAddress, DkgCertificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
-        let outputs: std::collections::HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
+        let outputs: HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
             .values()
             .map(|cert| {
                 let dealer_party_id = self
                     .dkg_config
                     .address_to_party_id
-                    .get(&cert.dealer)
+                    .get(&cert.dealer())
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer))
+                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer()))
                     })?;
                 let output = self
                     .dealer_outputs
-                    .get(&cert.dealer)
+                    .get(&cert.dealer())
                     .ok_or_else(|| {
                         DkgError::ProtocolFailed(format!(
                             "No dealer output found for dealer: {:?}.",
-                            cert.dealer
+                            cert.dealer()
                         ))
                     })?
                     .clone();
@@ -520,17 +520,17 @@ impl DkgManager {
     }
 
     fn validate_message_hash(&self, cert: &DkgCertificate) -> DkgResult<()> {
-        let message = self.dealer_messages.get(&cert.dealer).ok_or_else(|| {
+        let message = self.dealer_messages.get(&cert.dealer()).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
                 "Dealer message not yet received from {:?}",
-                cert.dealer
+                cert.dealer()
             ))
         })?;
-        let expected_hash = compute_message_hash(&self.session_context, &cert.dealer, message)?;
-        if cert.message_hash != expected_hash {
+        let expected_hash = compute_message_hash(&self.session_context, cert.dealer(), message)?;
+        if cert.message_hash() != &expected_hash {
             return Err(DkgError::InvalidCertificate(format!(
                 "Message hash mismatch for dealer {:?}",
-                cert.dealer
+                cert.dealer()
             )));
         }
         Ok(())
@@ -539,7 +539,7 @@ impl DkgManager {
     fn validate_certificate(&self, cert: &DkgCertificate) -> DkgResult<()> {
         self.validate_message_hash(cert)?;
         self.bls_committee
-            .verify_signature(&cert.message_hash, &cert.signature)
+            .verify_signature(&cert.signature.message, &cert.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
     }
 }

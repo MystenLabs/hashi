@@ -301,6 +301,16 @@ pub struct DkgCertificate {
     pub signature: CommitteeSignature<DkgMessage>,
 }
 
+impl DkgCertificate {
+    pub(crate) fn dealer(&self) -> &ValidatorAddress {
+        &self.signature.message.dealer_address
+    }
+
+    pub(crate) fn message_hash(&self) -> &MessageHash {
+        &self.signature.message.message_hash
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgMessage {
     pub dealer_address: ValidatorAddress,
