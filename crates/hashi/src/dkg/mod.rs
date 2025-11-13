@@ -10,9 +10,9 @@ use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
 pub use types::{
-    AddressToPartyId, Authenticated, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult,
-    EncryptionGroupElement, MessageApproval, MessageHash, MessageType, OrderedBroadcastMessage,
-    P2PMessage, ComplainRequest, ComplainResponse, RetrieveMessageRequest,
+    AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
+    DkgError, DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash,
+    MessageType, OrderedBroadcastMessage, P2PMessage, RetrieveMessageRequest,
     RetrieveMessageResponse, SendShareRequest, SendShareResponse, SessionContext, SessionId,
     SighashType, SignatureBytes, ValidatorSignature,
 };
