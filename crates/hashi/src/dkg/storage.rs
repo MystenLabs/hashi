@@ -3,7 +3,6 @@ use super::types::SessionId;
 use crate::types::ValidatorAddress;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DealerMessageKey {
     pub session_id: SessionId,
     pub dealer: ValidatorAddress,
