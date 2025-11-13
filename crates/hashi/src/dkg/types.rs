@@ -261,6 +261,17 @@ pub struct RetrieveMessageResponse {
     pub message: avss::Message,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComplainRequest {
+    pub dealer: ValidatorAddress,
+    pub complaint: complaint::Complaint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComplainResponse {
+    pub response: complaint::ComplaintResponse,
+}
+
 #[derive(Clone, Debug)]
 pub struct Authenticated<T> {
     pub sender: ValidatorAddress,
