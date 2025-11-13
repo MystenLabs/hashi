@@ -110,10 +110,8 @@ impl DkgManager {
                 })
             };
         }
-        let validator_signature = self.receive_dealer_message(&request.message, sender.clone())?;
-        let response = SendShareResponse {
-            signature: validator_signature.signature,
-        };
+        let signature = self.receive_dealer_message(&request.message, sender.clone())?;
+        let response = SendShareResponse { signature };
         self.share_responses.insert(sender, response.clone());
         Ok(response)
     }
@@ -211,17 +209,16 @@ impl DkgManager {
                         continue;
                     }
                 };
-                // TODO: Add cryptographic verification of response.signature
 
                 // The signature is verified in the call to `add_signature`
-                aggregator.add_signature(response.signature).map_err(|e| {
+                aggregator.add_signature(response.signature.signature).map_err(|e| {
                     DkgError::CryptoError(format!("Failed to add signature: {}", e))
                 })?;
             }
         }
 
-        let required_weight = self.dkg_config.threshold as u64 + self.dkg_config.max_faulty as u64;
-        if aggregator.weight() >= required_weight {
+        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        if aggregator.weight() >= required_weight as u64 {
             let signature = aggregator.finish().map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
             })?;
@@ -255,21 +252,20 @@ impl DkgManager {
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
             if let OrderedBroadcastMessage::AvssCertificateV1(cert) = tob_msg {
-                let dealer = &cert.signature.message.dealer_address;
-                if certified_dealers.contains_key(dealer) {
+                if certified_dealers.contains_key(cert.dealer()) {
                     continue;
                 }
-                if !self.dealer_messages.contains_key(dealer) {
+                if !self.dealer_messages.contains_key(cert.dealer()) {
                     tracing::info!(
                         "Certificate from dealer {:?} received but message missing, retrieving from signers",
-                        dealer
+                        cert.dealer()
                     );
-                    self.retrieve_dealer_message(dealer.clone(), &cert, p2p_channel)
+                    self.retrieve_dealer_message(cert.dealer().clone(), &cert, p2p_channel)
                         .await
                         .map_err(|e| {
                             tracing::error!(
                                 "Failed to retrieve message from any signer for dealer {:?}: {}. Certificate exists but message unavailable from all signers.",
-                                dealer,
+                                cert.dealer(),
                                 e
                             );
                             e
@@ -286,14 +282,14 @@ impl DkgManager {
                             .await?;
                         }
                         let dealer_weight =
-                            self.validator_weights.get(dealer).ok_or_else(|| {
+                            self.validator_weights.get(cert.dealer()).ok_or_else(|| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
                         dealer_weight_sum += *dealer_weight as u32;
-                        certified_dealers.insert(dealer.clone(), cert);
+                        certified_dealers.insert(cert.dealer().clone(), cert);
                     }
                     Err(e) => {
-                        tracing::info!("Invalid certificate from {:?}: {}", dealer, e);
+                        tracing::info!("Invalid certificate from {:?}: {}", cert.dealer(), e);
                         continue;
                     }
                 }

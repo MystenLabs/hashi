@@ -242,7 +242,7 @@ pub struct SendShareRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendShareResponse {
-    pub signature: MemberSignature<DkgMessage>,
+    pub signature: ValidatorSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
