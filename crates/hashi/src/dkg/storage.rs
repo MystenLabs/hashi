@@ -1,5 +1,5 @@
 use super::DkgResult;
-use super::types::{SessionContext, SessionId};
+use super::types::SessionId;
 use crate::types::ValidatorAddress;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
@@ -10,23 +10,18 @@ pub struct DealerMessageKey {
 }
 
 pub trait DealerMessageStore: Send + Sync {
-    /// Store a dealer's message for a specific session
-    /// If message already exists for this (session, dealer), it will be overwritten
+    /// Store a dealer's message for a specific `DealerMessageKey`
+    /// If message already exists for this key, it will be overwritten
     fn store_dealer_message(
         &mut self,
-        session: &SessionContext,
-        dealer: &ValidatorAddress,
+        key: &DealerMessageKey,
         message: &avss::Message,
     ) -> DkgResult<()>;
 
-    /// Retrieve a dealer's message for a specific session
-    /// Returns None if no message exists for this (session, dealer)
-    fn get_dealer_message(
-        &self,
-        session: &SessionContext,
-        dealer: &ValidatorAddress,
-    ) -> DkgResult<Option<avss::Message>>;
+    /// Retrieve a dealer's message for a specific `DealerMessageKey`
+    /// Returns None if no message exists for this key
+    fn get_dealer_message(&self, key: &DealerMessageKey) -> DkgResult<Option<avss::Message>>;
 
     /// Delete all messages for a completed session
-    fn delete_session(&mut self, session: &SessionContext) -> DkgResult<()>;
+    fn delete_session(&mut self, session_id: SessionId) -> DkgResult<()>;
 }
