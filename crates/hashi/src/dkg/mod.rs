@@ -9,6 +9,7 @@ use crate::bls::{
 use crate::dkg::types::DkgMessage;
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
+use ed25519_dalek::ed25519::Error;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
@@ -211,11 +212,12 @@ impl DkgManager {
                 };
 
                 // The signature is verified in the call to `add_signature`
-                aggregator
-                    .add_signature(response.signature.signature)
-                    .map_err(|e| {
-                        DkgError::CryptoError(format!("Failed to add signature: {}", e))
-                    })?;
+                match aggregator.add_signature(response.signature.signature) {
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::info!("Invalid certificate from {:?}: {}", validator_address, e)
+                    }
+                }
             }
         }
 
