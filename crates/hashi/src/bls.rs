@@ -186,6 +186,7 @@ pub struct CommitteeSignature<T> {
 }
 
 impl<T> CommitteeSignature<T> {
+    /// The committee members included in this signature.
     pub fn signers(&self, committee: &BlsCommittee) -> Result<Vec<Address>, SignatureError> {
         if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() {
             return Err(SignatureError::from_source(
@@ -199,6 +200,7 @@ impl<T> CommitteeSignature<T> {
             .collect())
     }
 
+    /// The total weight of the signers of this signature.
     pub fn weight(&self, committee: &BlsCommittee) -> Result<u64, SignatureError> {
         if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() {
             return Err(SignatureError::from_source(
