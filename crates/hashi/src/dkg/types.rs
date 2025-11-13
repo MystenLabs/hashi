@@ -296,6 +296,7 @@ pub struct ValidatorSignature {
     pub signature: MemberSignature,
 }
 
+// TODO: Change this to an enum for dealer messages for other flows
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgMessage {
     pub dealer_address: Address,
