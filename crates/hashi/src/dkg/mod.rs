@@ -6,6 +6,7 @@ use crate::storage::PublicMessagesStore;
 use crate::bls::{
     BLSAggregatedSignature, BLSSignatureAggregator, BlsCommittee, BlsCommitteeMember,
 };
+use crate::dkg::types::DkgMessage;
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
@@ -46,7 +47,6 @@ pub struct DkgManager {
     pub complaint_responses:
         std::collections::HashMap<ValidatorAddress, complaint::ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
-    pub address_to_public_key: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
 }
 
 impl DkgManager {
@@ -180,8 +180,14 @@ impl DkgManager {
         let my_signature = self.receive_dealer_message(&dealer_message, self.address.clone())?;
         let message_hash =
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
-        let mut aggregator =
-            BLSSignatureAggregator::new(&self.bls_committee, message_hash.to_vec());
+        let mut aggregator = BLSSignatureAggregator::new(
+            &self.bls_committee,
+            DkgMessage {
+                dealer_address: self.address.clone(),
+                session_context: self.session_context.clone(),
+                message_hash,
+            },
+        );
         aggregator
             .add_signature(my_signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
@@ -216,10 +222,10 @@ impl DkgManager {
 
         let required_weight = self.dkg_config.threshold as u64 + self.dkg_config.max_faulty as u64;
         if aggregator.weight() >= required_weight {
-            let aggregated_signature = aggregator.finish().map_err(|e| {
+            let signature = aggregator.finish().map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
             })?;
-            let cert = self.create_certificate(&dealer_message, aggregated_signature)?;
+            let cert = DkgCertificate { signature };
             // TODO: Add timeout and retries handling when adding RPC layer
             ordered_broadcast_channel
                 .publish(OrderedBroadcastMessage::AvssCertificateV1(cert))
@@ -249,20 +255,21 @@ impl DkgManager {
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
             if let OrderedBroadcastMessage::AvssCertificateV1(cert) = tob_msg {
-                if certified_dealers.contains_key(&cert.dealer) {
+                let dealer = &cert.signature.message.dealer_address;
+                if certified_dealers.contains_key(dealer) {
                     continue;
                 }
-                if !self.dealer_messages.contains_key(&cert.dealer) {
+                if !self.dealer_messages.contains_key(dealer) {
                     tracing::info!(
                         "Certificate from dealer {:?} received but message missing, retrieving from signers",
-                        cert.dealer
+                        dealer
                     );
-                    self.retrieve_dealer_message(cert.dealer.clone(), &cert, p2p_channel)
+                    self.retrieve_dealer_message(dealer.clone(), &cert, p2p_channel)
                         .await
                         .map_err(|e| {
                             tracing::error!(
                                 "Failed to retrieve message from any signer for dealer {:?}: {}. Certificate exists but message unavailable from all signers.",
-                                cert.dealer,
+                                dealer,
                                 e
                             );
                             e
@@ -279,21 +286,20 @@ impl DkgManager {
                             .await?;
                         }
                         let dealer_weight =
-                            self.validator_weights.get(&cert.dealer).ok_or_else(|| {
+                            self.validator_weights.get(dealer).ok_or_else(|| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
                         dealer_weight_sum += *dealer_weight as u32;
-                        certified_dealers.insert(cert.dealer.clone(), cert);
+                        certified_dealers.insert(dealer.clone(), cert);
                     }
                     Err(e) => {
-                        tracing::info!("Invalid certificate from {:?}: {}", cert.dealer, e);
+                        tracing::info!("Invalid certificate from {:?}: {}", dealer, e);
                         continue;
                     }
                 }
             }
         }
-        let output = self.process_certificates(&certified_dealers)?;
-        Ok(output)
+        self.process_certificates(&certified_dealers)
     }
 
     fn create_dealer_message(
@@ -343,26 +349,18 @@ impl DkgManager {
         self.dealer_outputs
             .insert(dealer_address.clone(), receiver_output);
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
-        let signature =
-            self.bls_signing_key
-                .sign(self.dkg_config.epoch, self.party_id as u64, &message_hash);
+        let signature = self.bls_signing_key.sign(
+            self.dkg_config.epoch,
+            self.party_id as u64,
+            &DkgMessage {
+                dealer_address,
+                session_context: self.session_context.clone(),
+                message_hash,
+            },
+        );
         Ok(ValidatorSignature {
             validator: self.address.clone(),
             signature,
-        })
-    }
-
-    fn create_certificate(
-        &self,
-        message: &avss::Message,
-        signatures: CommitteeSignature<avss::Message>,
-    ) -> DkgResult<DkgCertificate> {
-        let message_hash = compute_message_hash(&self.session_context, &self.address, message)?;
-        Ok(DkgCertificate {
-            dealer: self.address.clone(),
-            message_hash,
-            signatures,
-            session_context: self.session_context.clone(),
         })
     }
 
@@ -421,7 +419,7 @@ impl DkgManager {
         // - and so on
         for signer_address in self
             .bls_committee
-            .signers_of(&certificate.signatures)
+            .signers_of(&certificate.signature)
             .map_err(|_| {
                 DkgError::ProtocolFailed(
                     "Certificate does not match the current epoch or committee".to_string(),
@@ -446,7 +444,7 @@ impl DkgManager {
                         &dealer_address,
                         &response.message,
                     )?;
-                    if message_hash != certificate.message_hash {
+                    if message_hash != certificate.signature.message.message_hash {
                         tracing::info!(
                             "Signer {:?} returned message with wrong hash",
                             signer_address
@@ -541,7 +539,7 @@ impl DkgManager {
     fn validate_certificate(&self, cert: &DkgCertificate) -> DkgResult<()> {
         self.validate_message_hash(cert)?;
         self.bls_committee
-            .verify_signature(&cert.message_hash, &cert.signatures)
+            .verify_signature(&cert.message_hash, &cert.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
     }
 }
@@ -1363,7 +1361,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(certificate.dealer, manager.address);
-        assert_eq!(certificate.signatures.len(), required_sigs);
+        assert_eq!(certificate.signature.len(), required_sigs);
         assert_eq!(
             certificate.session_context.session_id,
             manager.session_context.session_id
@@ -1666,13 +1664,13 @@ mod tests {
         let cert0 = DkgCertificate {
             dealer: addr0.clone(),
             message_hash: [0; 32],
-            signatures: mock_signatures.clone(),
+            signature: mock_signatures.clone(),
             session_context: manager.session_context.clone(),
         };
         let cert1 = DkgCertificate {
             dealer: addr1.clone(),
             message_hash: [0; 32],
-            signatures: mock_signatures,
+            signature: mock_signatures,
             session_context: manager.session_context.clone(),
         };
 
@@ -2583,7 +2581,7 @@ mod tests {
 
         // Verify the dealer's own signature is included
         assert!(
-            cert.signatures
+            cert.signature
                 .iter()
                 .any(|sig| sig.validator == dealer_addr),
             "Dealer's own signature must be included in the certificate"
@@ -2591,16 +2589,16 @@ mod tests {
 
         // Verify the dealer is the first signer
         assert_eq!(
-            cert.signatures[0].validator, dealer_addr,
+            cert.signature[0].validator, dealer_addr,
             "Dealer should be the first signer"
         );
 
         // Verify all signatures are from distinct validators
         let signers: std::collections::HashSet<_> =
-            cert.signatures.iter().map(|sig| &sig.validator).collect();
+            cert.signature.iter().map(|sig| &sig.validator).collect();
         assert_eq!(
             signers.len(),
-            cert.signatures.len(),
+            cert.signature.len(),
             "All signatures should be from distinct validators"
         );
     }
@@ -2749,7 +2747,7 @@ mod tests {
         DkgCertificate {
             dealer: dealer_addr.clone(),
             message_hash,
-            signatures: dkg_sigs,
+            signature: dkg_sigs,
             session_context: session_context.clone(),
         }
     }
@@ -3966,7 +3964,7 @@ mod tests {
         let cert = DkgCertificate {
             dealer: dealer_address.clone(),
             message_hash,
-            signatures: vec![ValidatorSignature {
+            signature: vec![ValidatorSignature {
                 validator: dealer_address.clone(),
                 signature: vec![0u8; 64],
             }],
@@ -4022,7 +4020,7 @@ mod tests {
         let cert = DkgCertificate {
             dealer: dealer_address.clone(),
             message_hash,
-            signatures: vec![ValidatorSignature {
+            signature: vec![ValidatorSignature {
                 validator: dealer_address.clone(),
                 signature: vec![0u8; 64],
             }],
@@ -4314,7 +4312,7 @@ mod tests {
         DkgCertificate {
             dealer: dealer_address.clone(),
             message_hash,
-            signatures: signer_addresses
+            signature: signer_addresses
                 .iter()
                 .map(|addr| ValidatorSignature {
                     validator: addr.clone(),
@@ -4714,7 +4712,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash,
-                signatures: vec![],
+                signature: vec![],
                 session_context: session_context.clone(),
             };
 
@@ -4735,7 +4733,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash: [0; 32],
-                signatures: vec![],
+                signature: vec![],
                 session_context: session_context.clone(),
             };
 
@@ -4766,7 +4764,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash: [99; 32], // Wrong hash
-                signatures: vec![],
+                signature: vec![],
                 session_context: session_context.clone(),
             };
 
@@ -4815,7 +4813,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash,
-                signatures: dkg_sigs,
+                signature: dkg_sigs,
                 session_context: session_context.clone(),
             };
 
@@ -4870,7 +4868,7 @@ mod tests {
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
                 message_hash: wrong_hash, // Hash computed with wrong session
-                signatures: vec![],
+                signature: vec![],
                 session_context: wrong_session_context, // Doesn't matter what we put here
             };
 
@@ -4907,7 +4905,7 @@ mod tests {
             let (mut cert, manager, dealer_messages) = create_valid_cert_and_data();
 
             // Empty DKG signatures - insufficient weight
-            cert.signatures = vec![];
+            cert.signature = vec![];
 
             let validator_weights = create_validator_weights(&manager.dkg_config);
             let result = validate_certificate(

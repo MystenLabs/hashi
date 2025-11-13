@@ -6,6 +6,7 @@ use fastcrypto::traits::{
     AggregateAuthenticator, AllowedRng, KeyPair, Signer, ToFromBytes, VerifyingKey,
 };
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -38,11 +39,12 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign(&self, epoch: u64, index: u64, message: &[u8]) -> MemberSignature {
+    pub fn sign<T: Serialize>(&self, epoch: u64, index: u64, message: &T) -> MemberSignature<T> {
         MemberSignature {
             epoch,
             index,
-            signature: self.0.sign(message),
+            signature: self.0.sign(&bcs::to_bytes(message).unwrap()),
+            message: PhantomData,
         }
     }
 }
@@ -63,10 +65,11 @@ pub struct BlsCommitteeMember {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberSignature {
+pub struct MemberSignature<T> {
     epoch: u64,
     index: u64,
     signature: BLS12381Signature,
+    message: PhantomData<T>,
 }
 
 impl BlsCommittee {
@@ -101,7 +104,7 @@ impl BlsCommittee {
     fn verify<T: Serialize>(
         &self,
         message: &T,
-        signature: &MemberSignature,
+        signature: &MemberSignature<T>,
     ) -> Result<(), SignatureError> {
         if self.epoch != signature.epoch {
             return Err(SignatureError::from_source(format!(
@@ -207,7 +210,7 @@ pub struct CommitteeSignature<T> {
     epoch: u64,
     signature: BLS12381AggregateSignature,
     bitmap: BitMap,
-    message: T,
+    pub(crate) message: T,
 }
 
 #[derive(Debug)]
@@ -234,7 +237,7 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
         self.committee
     }
 
-    pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
+    pub fn add_signature(&mut self, signature: MemberSignature<T>) -> Result<(), SignatureError> {
         self.committee.verify(&self.message, &signature)?;
 
         if self.bitmap.insert(signature.index)? {

@@ -242,7 +242,7 @@ pub struct SendShareRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendShareResponse {
-    pub signature: MemberSignature,
+    pub signature: MemberSignature<DkgMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -286,7 +286,6 @@ pub enum OrderedBroadcastMessage {
 pub struct MessageApproval {
     pub message_hash: MessageHash,
     pub approver: ValidatorAddress,
-    // TODO: Will be replaced with proper signature type when certificate management is implemented.
     pub signature: BLS12381Signature,
     pub timestamp: u64,
 }
@@ -294,16 +293,19 @@ pub struct MessageApproval {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator: ValidatorAddress,
-    pub signature: MemberSignature,
+    pub signature: MemberSignature<DkgMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgCertificate {
-    pub dealer: ValidatorAddress,
-    pub message_hash: MessageHash,
-    // TODO: Use aggregated BLS signature to reduce footprints
-    pub signatures: CommitteeSignature,
+    pub signature: CommitteeSignature<DkgMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DkgMessage {
+    pub dealer_address: ValidatorAddress,
     pub session_context: SessionContext,
+    pub message_hash: MessageHash,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
