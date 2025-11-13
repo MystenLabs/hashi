@@ -1,7 +1,6 @@
 //! Core types for the DKG protocol
 
 use crate::bls::{CommitteeSignature, MemberSignature};
-use crate::types::ValidatorAddress;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
@@ -13,12 +12,13 @@ use fastcrypto_tbls::{
     threshold_schnorr::{G, avss, complaint},
 };
 use serde::{Deserialize, Serialize};
+use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 pub type MessageHash = [u8; 32];
 pub type SignatureBytes = Vec<u8>;
 pub type SessionId = Digest<64>;
-pub type AddressToPartyId = std::collections::HashMap<ValidatorAddress, PartyId>;
+pub type AddressToPartyId = std::collections::HashMap<Address, PartyId>;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str = "hashi";
@@ -156,7 +156,7 @@ impl SessionContext {
     }
 
     /// Sub-session ID for a specific dealer, derived from the session ID
-    pub fn dealer_session_id(&self, dealer: &ValidatorAddress) -> SessionId {
+    pub fn dealer_session_id(&self, dealer: &Address) -> SessionId {
         let oracle = RandomOracle::new(DOMAIN_HASHI).extend(DOMAIN_DEALER);
         evaluate_oracle(&oracle, &(&self.session_id, dealer.0))
     }
@@ -199,38 +199,38 @@ pub struct DkgOutput {
 pub enum P2PMessage {
     ShareV1 {
         session_id: SessionId,
-        sender: ValidatorAddress,
+        sender: Address,
         message: Box<avss::Message>,
     },
     ComplaintV1 {
         session_id: SessionId,
-        accuser: ValidatorAddress,
+        accuser: Address,
         complaint: complaint::Complaint,
     },
     ComplaintResponseV1 {
         session_id: SessionId,
-        responder: ValidatorAddress,
+        responder: Address,
         response: complaint::ComplaintResponse,
     },
     ApprovalV1(MessageApproval),
     DataAvailabilitySignatureV1 {
         session_id: SessionId,
-        signer: ValidatorAddress,
-        dealer: ValidatorAddress,
+        signer: Address,
+        dealer: Address,
         message_hash: MessageHash,
         signature: SignatureBytes,
     },
     DkgSignatureV1 {
         session_id: SessionId,
-        signer: ValidatorAddress,
-        dealer: ValidatorAddress,
+        signer: Address,
+        dealer: Address,
         message_hash: MessageHash,
         signature: SignatureBytes,
     },
     ShareRequestV1 {
         session_id: SessionId,
-        requester: ValidatorAddress,
-        dealer: ValidatorAddress,
+        requester: Address,
+        dealer: Address,
         message_hash: MessageHash,
     },
 }
@@ -247,7 +247,7 @@ pub struct SendShareResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrieveMessageRequest {
-    pub dealer: ValidatorAddress,
+    pub dealer: Address,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -268,7 +268,7 @@ pub struct ComplainResponse {
 
 #[derive(Clone, Debug)]
 pub struct Authenticated<T> {
-    pub sender: ValidatorAddress,
+    pub sender: Address,
     pub message: T,
 }
 
@@ -276,7 +276,7 @@ pub struct Authenticated<T> {
 pub enum OrderedBroadcastMessage {
     AvssCertificateV1(DkgCertificate),
     PresignatureV1 {
-        sender: ValidatorAddress,
+        sender: Address,
         session_context: SessionContext,
         data: Vec<u8>,
     },
@@ -285,14 +285,14 @@ pub enum OrderedBroadcastMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageApproval {
     pub message_hash: MessageHash,
-    pub approver: ValidatorAddress,
+    pub approver: Address,
     pub signature: BLS12381Signature,
     pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
-    pub validator: ValidatorAddress,
+    pub validator: Address,
     pub signature: MemberSignature,
 }
 
@@ -302,7 +302,7 @@ pub struct DkgCertificate {
 }
 
 impl DkgCertificate {
-    pub(crate) fn dealer(&self) -> &ValidatorAddress {
+    pub(crate) fn dealer(&self) -> &Address {
         &self.signature.message.dealer_address
     }
 
@@ -313,7 +313,7 @@ impl DkgCertificate {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgMessage {
-    pub dealer_address: ValidatorAddress,
+    pub dealer_address: Address,
     pub session_context: SessionContext,
     pub message_hash: MessageHash,
 }
@@ -336,10 +336,7 @@ pub enum DkgError {
     NotEnoughParticipants { expected: usize, got: usize },
 
     #[error("Invalid message from {sender}: {reason}")]
-    InvalidMessage {
-        sender: ValidatorAddress,
-        reason: String,
-    },
+    InvalidMessage { sender: Address, reason: String },
 
     #[error("Protocol timeout after {seconds} seconds")]
     Timeout { seconds: u64 },
@@ -388,10 +385,10 @@ mod tests {
     fn create_test_validator(
         party_id: u16,
         weight: u16,
-    ) -> (ValidatorAddress, Node<EncryptionGroupElement>) {
+    ) -> (Address, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
-        let address = ValidatorAddress([party_id as u8; 32]);
+        let address = Address([party_id as u8; 32]);
         let node = Node {
             id: party_id,
             pk: public_key,
@@ -401,7 +398,7 @@ mod tests {
     }
 
     fn build_nodes_and_registry(
-        validators: Vec<(ValidatorAddress, Node<EncryptionGroupElement>)>,
+        validators: Vec<(Address, Node<EncryptionGroupElement>)>,
     ) -> (Nodes<EncryptionGroupElement>, AddressToPartyId) {
         let mut node_vec: Vec<_> = validators.iter().map(|(_, node)| node.clone()).collect();
         node_vec.sort_by_key(|n| n.id);
@@ -559,8 +556,8 @@ mod tests {
     #[test]
     fn test_dealer_session_serialization() {
         let ctx = SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testnet".to_string());
-        let dealer1 = ValidatorAddress([1; 32]);
-        let dealer2 = ValidatorAddress([2; 32]);
+        let dealer1 = Address([1; 32]);
+        let dealer2 = Address([2; 32]);
         let dealer1_session = ctx.dealer_session_id(&dealer1);
         let dealer2_session = ctx.dealer_session_id(&dealer2);
 

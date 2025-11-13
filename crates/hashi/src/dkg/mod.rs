@@ -16,6 +16,7 @@ use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
+use sui_sdk_types::Address;
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
     DkgError, DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash,
@@ -33,13 +34,13 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 pub struct DkgManager {
     // Immutable during a given session
     pub party_id: PartyId,
-    pub address: ValidatorAddress,
+    pub address: Address,
     pub dkg_config: DkgConfig,
     pub session_context: SessionContext,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_committee: BlsCommittee,
-    pub validator_weights: std::collections::HashMap<ValidatorAddress, u16>,
+    pub validator_weights: std::collections::HashMap<Address, u16>,
     // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
@@ -52,7 +53,7 @@ pub struct DkgManager {
 
 impl DkgManager {
     pub fn new(
-        address: ValidatorAddress,
+        address: Address,
         dkg_config: DkgConfig,
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
@@ -64,7 +65,7 @@ impl DkgManager {
             .address_to_party_id
             .get(&address)
             .expect("address not found in validator registry");
-        let validator_weights: std::collections::HashMap<ValidatorAddress, u16> = dkg_config
+        let validator_weights: std::collections::HashMap<Address, u16> = dkg_config
             .address_to_party_id
             .iter()
             .map(|(addr, party_id)| {
@@ -94,7 +95,7 @@ impl DkgManager {
     /// RPC endpoint handler for `SendShareRequest`
     pub fn handle_send_share_request(
         &mut self,
-        sender: ValidatorAddress,
+        sender: Address,
         request: &SendShareRequest,
     ) -> DkgResult<SendShareResponse> {
         if let Some(existing_message) = self.dealer_messages.get(&sender) {
@@ -321,7 +322,7 @@ impl DkgManager {
     fn receive_dealer_message(
         &mut self,
         message: &avss::Message,
-        dealer_address: ValidatorAddress,
+        dealer_address: Address,
     ) -> DkgResult<ValidatorSignature> {
         self.dealer_messages
             .insert(dealer_address.clone(), message.clone());
@@ -366,7 +367,7 @@ impl DkgManager {
 
     fn process_certificates(
         &self,
-        certified_dealers: &HashMap<ValidatorAddress, DkgCertificate>,
+        certified_dealers: &HashMap<Address, DkgCertificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
@@ -406,7 +407,7 @@ impl DkgManager {
 
     async fn retrieve_dealer_message(
         &mut self,
-        dealer_address: ValidatorAddress,
+        dealer_address: Address,
         certificate: &DkgCertificate,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
@@ -547,7 +548,7 @@ impl DkgManager {
 /// Helper function to create a [BlsCommittee] from a [DkgConfig] and public keys.
 fn create_bls_committee(
     dkg_config: &DkgConfig,
-    public_keys: &HashMap<ValidatorAddress, BLS12381PublicKey>,
+    public_keys: &HashMap<Address, BLS12381PublicKey>,
 ) -> BlsCommittee {
     let committee: Vec<BlsCommitteeMember> = dkg_config
         .address_to_party_id
@@ -565,7 +566,7 @@ fn create_bls_committee(
 
 fn compute_message_hash(
     session: &SessionContext,
-    dealer_address: &ValidatorAddress,
+    dealer_address: &Address,
     message: &avss::Message,
 ) -> DkgResult<MessageHash> {
     let message_bytes = bcs::to_bytes(message)
@@ -618,7 +619,7 @@ mod tests {
     fn create_test_validator(party_id: u16) -> (ValidatorAddress, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
-        let address = ValidatorAddress([party_id as u8; 32]);
+        let address = Address([party_id as u8; 32]);
         let weight = 1;
         let node = Node {
             id: party_id,
@@ -629,7 +630,7 @@ mod tests {
     }
 
     fn build_nodes_and_registry(
-        validators: Vec<(ValidatorAddress, Node<EncryptionGroupElement>)>,
+        validators: Vec<(Address, Node<EncryptionGroupElement>)>,
     ) -> (Nodes<EncryptionGroupElement>, AddressToPartyId) {
         let mut node_vec: Vec<_> = validators.iter().map(|(_, node)| node.clone()).collect();
         node_vec.sort_by_key(|n| n.id);
@@ -656,7 +657,7 @@ mod tests {
     }
 
     fn create_test_manager(validator_index: u16, dkg_config: DkgConfig) -> DkgManager {
-        let address = ValidatorAddress([validator_index as u8; 32]);
+        let address = Address([validator_index as u8; 32]);
         let session_context = SessionContext::new(
             dkg_config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -675,16 +676,14 @@ mod tests {
     }
 
     struct MockP2PChannel {
-        managers: std::sync::Arc<
-            std::sync::Mutex<std::collections::HashMap<ValidatorAddress, DkgManager>>,
-        >,
-        current_sender: ValidatorAddress,
+        managers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Address, DkgManager>>>,
+        current_sender: Address,
     }
 
     impl MockP2PChannel {
         fn new(
-            managers: std::collections::HashMap<ValidatorAddress, DkgManager>,
-            current_sender: ValidatorAddress,
+            managers: std::collections::HashMap<Address, DkgManager>,
+            current_sender: Address,
         ) -> Self {
             Self {
                 managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
@@ -697,7 +696,7 @@ mod tests {
     impl crate::communication::P2PChannel for MockP2PChannel {
         async fn send_share(
             &self,
-            recipient: &ValidatorAddress,
+            recipient: &Address,
             request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut managers = self.managers.lock().unwrap();
@@ -717,7 +716,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            party: &ValidatorAddress,
+            party: &Address,
             request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             let managers = self.managers.lock().unwrap();
@@ -832,7 +831,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -849,7 +848,7 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
-        let address = ValidatorAddress([validator_index as u8; 32]);
+        let address = Address([validator_index as u8; 32]);
         let manager = DkgManager::new(
             address,
             config,
@@ -870,7 +869,7 @@ mod tests {
     impl crate::communication::P2PChannel for FailingP2PChannel {
         async fn send_share(
             &self,
-            _recipient: &ValidatorAddress,
+            _recipient: &Address,
             _request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             Err(crate::communication::ChannelError::SendFailed(
@@ -880,7 +879,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            _party: &ValidatorAddress,
+            _party: &Address,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             Err(crate::communication::ChannelError::SendFailed(
@@ -905,7 +904,7 @@ mod tests {
     impl crate::communication::P2PChannel for SucceedingP2PChannel {
         async fn send_share(
             &self,
-            _recipient: &ValidatorAddress,
+            _recipient: &Address,
             _request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             Ok(SendShareResponse {
@@ -915,7 +914,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            _party: &ValidatorAddress,
+            _party: &Address,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_message")
@@ -939,7 +938,7 @@ mod tests {
     impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
         async fn send_share(
             &self,
-            _recipient: &ValidatorAddress,
+            _recipient: &Address,
             _request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut count = self.fail_count.lock().unwrap();
@@ -957,7 +956,7 @@ mod tests {
 
         async fn retrieve_message(
             &self,
-            _party: &ValidatorAddress,
+            _party: &Address,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_message")
@@ -1121,7 +1120,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -1142,7 +1141,7 @@ mod tests {
         );
 
         // Create dealer (party 0) with its encryption key
-        let dealer_address = ValidatorAddress([0; 32]);
+        let dealer_address = Address([0; 32]);
         let dealer_manager = DkgManager::new(
             dealer_address.clone(),
             config.clone(),
@@ -1278,7 +1277,7 @@ mod tests {
 
         // Test case 1: Only validator 0 (weight=5), need 9
         let signatures = vec![ValidatorSignature {
-            validator: ValidatorAddress([0; 32]),
+            validator: Address([0; 32]),
             signature: vec![0; 96],
         }];
         assert!(
@@ -1288,11 +1287,11 @@ mod tests {
         // Test case 2: Validators 0 and 2 (weight=5+2=7), need 9
         let signatures = vec![
             ValidatorSignature {
-                validator: ValidatorAddress([0; 32]),
+                validator: Address([0; 32]),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
-                validator: ValidatorAddress([2; 32]),
+                validator: Address([2; 32]),
                 signature: vec![0; 96],
             },
         ];
@@ -1303,11 +1302,11 @@ mod tests {
         // Test case 3: Validators 0 and 1 (weight=5+3=8), still need 9
         let signatures = vec![
             ValidatorSignature {
-                validator: ValidatorAddress([0; 32]),
+                validator: Address([0; 32]),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
-                validator: ValidatorAddress([1; 32]),
+                validator: Address([1; 32]),
                 signature: vec![0; 96],
             },
         ];
@@ -1318,15 +1317,15 @@ mod tests {
         // Test case 4: Validators 0, 1, and 3 (weight=5+3+1=9), exactly sufficient
         let signatures = vec![
             ValidatorSignature {
-                validator: ValidatorAddress([0; 32]),
+                validator: Address([0; 32]),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
-                validator: ValidatorAddress([1; 32]),
+                validator: Address([1; 32]),
                 signature: vec![0; 96],
             },
             ValidatorSignature {
-                validator: ValidatorAddress([3; 32]),
+                validator: Address([3; 32]),
                 signature: vec![0; 96],
             },
         ];
@@ -1373,7 +1372,7 @@ mod tests {
         // Create validators with different weights
         let validators = vec![
             (
-                ValidatorAddress([0; 32]),
+                Address([0; 32]),
                 Node {
                     id: 0,
                     pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
@@ -1383,7 +1382,7 @@ mod tests {
                 },
             ),
             (
-                ValidatorAddress([1; 32]),
+                Address([1; 32]),
                 Node {
                     id: 1,
                     pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
@@ -1393,7 +1392,7 @@ mod tests {
                 },
             ),
             (
-                ValidatorAddress([2; 32]),
+                Address([2; 32]),
                 Node {
                     id: 2,
                     pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
@@ -1414,7 +1413,7 @@ mod tests {
             .unwrap();
 
         // Only validator 0 (weight=3), which is less than required (threshold + max_faulty = 4)
-        let addr0 = ValidatorAddress([0; 32]);
+        let addr0 = Address([0; 32]);
         let insufficient_sigs = vec![ValidatorSignature {
             validator: addr0.clone(),
             signature: vec![0; 96],
@@ -1429,7 +1428,7 @@ mod tests {
         );
 
         // Validator 0 (weight=3) + validator 1 (weight=1) = 4, which meets the requirement
-        let addr1 = ValidatorAddress([1; 32]);
+        let addr1 = Address([1; 32]);
         let sufficient_sigs = vec![
             ValidatorSignature {
                 validator: addr0.clone(),
@@ -1460,7 +1459,7 @@ mod tests {
         let config = create_test_dkg_config(5);
 
         // Create signatures including one from an unknown validator
-        let unknown_validator = ValidatorAddress([99; 32]);
+        let unknown_validator = Address([99; 32]);
         let known_validator_addr = config.address_to_party_id.keys().next().unwrap();
         let signatures = vec![
             ValidatorSignature {
@@ -1492,7 +1491,7 @@ mod tests {
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
-        let dealer_address = ValidatorAddress([42; 32]);
+        let dealer_address = Address([42; 32]);
 
         let hash1 =
             compute_message_hash(&manager.session_context, &dealer_address, &message).unwrap();
@@ -1512,19 +1511,11 @@ mod tests {
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
 
-        let hash1 = compute_message_hash(
-            &manager.session_context,
-            &ValidatorAddress([1; 32]),
-            &message,
-        )
-        .unwrap();
+        let hash1 =
+            compute_message_hash(&manager.session_context, &Address([1; 32]), &message).unwrap();
 
-        let hash2 = compute_message_hash(
-            &manager.session_context,
-            &ValidatorAddress([2; 32]),
-            &message,
-        )
-        .unwrap();
+        let hash2 =
+            compute_message_hash(&manager.session_context, &Address([2; 32]), &message).unwrap();
 
         assert_ne!(hash1, hash2);
     }
@@ -1544,7 +1535,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = weights[i];
                 let node = Node {
@@ -1572,7 +1563,7 @@ mod tests {
         let dealer_managers: Vec<_> = dealer_indices
             .iter()
             .map(|&i| {
-                let addr = ValidatorAddress([i as u8; 32]);
+                let addr = Address([i as u8; 32]);
                 DkgManager::new(
                     addr.clone(),
                     config.clone(),
@@ -1585,7 +1576,7 @@ mod tests {
             .collect();
 
         // Create receiver (party 2 with weight=4 - will receive 4 shares!)
-        let addr2 = ValidatorAddress([2; 32]);
+        let addr2 = Address([2; 32]);
         let mut receiver_manager = DkgManager::new(
             addr2.clone(),
             config.clone(),
@@ -1612,8 +1603,8 @@ mod tests {
             // Create a certificate (in practice, would collect signatures from other validators)
             // Need threshold + max_faulty = 3 + 1 = 4 weighted signatures
             // Using validators with weights: 0(3) + 1(2) = 5 weight, which is > 4 ✓
-            let addr0 = ValidatorAddress([0; 32]);
-            let addr1 = ValidatorAddress([1; 32]);
+            let addr0 = Address([0; 32]);
+            let addr1 = Address([1; 32]);
             let mock_signatures = vec![
                 ValidatorSignature {
                     validator: addr0.clone(), // weight=3
@@ -1653,8 +1644,8 @@ mod tests {
         let manager = create_test_manager(0, config.clone());
 
         // Create certificates for dealers we haven't received messages from
-        let addr0 = &ValidatorAddress([0; 32]);
-        let addr1 = &ValidatorAddress([1; 32]);
+        let addr0 = &Address([0; 32]);
+        let addr1 = &Address([1; 32]);
 
         let mock_signatures = vec![ValidatorSignature {
             validator: addr0.clone(),
@@ -1708,7 +1699,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = weights[i];
                 let node = Node {
@@ -1729,7 +1720,7 @@ mod tests {
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 DkgManager::new(
                     address.clone(),
                     config.clone(),
@@ -1750,7 +1741,7 @@ mod tests {
         // Phase 2: Pre-compute all signatures and certificates
         let mut certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = ValidatorAddress([dealer_idx as u8; 32]);
+            let dealer_addr = Address([dealer_idx as u8; 32]);
 
             // Collect signatures from all validators
             let mut signatures = Vec::new();
@@ -1776,14 +1767,14 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (ValidatorAddress([(idx + 1) as u8; 32]), mgr))
+            .map(|(idx, mgr)| (Address([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
 
         // Pre-populate validator 0's manager with dealer outputs from all validators (including itself)
         for (j, message) in dealer_messages.iter().enumerate() {
             test_manager
-                .receive_dealer_message(message, ValidatorAddress([j as u8; 32]))
+                .receive_dealer_message(message, Address([j as u8; 32]))
                 .unwrap();
         }
 
@@ -1834,9 +1825,9 @@ mod tests {
 
         // Verify that other validators (in the mock P2P channel) received and processed validator 0's dealer message
         let other_managers = mock_p2p.managers.lock().unwrap();
-        let addr0 = ValidatorAddress([0; 32]);
+        let addr0 = Address([0; 32]);
         for j in 1..num_validators {
-            let addr_j = ValidatorAddress([j as u8; 32]);
+            let addr_j = Address([j as u8; 32]);
             let other_mgr = other_managers.get(&addr_j).unwrap();
             assert!(
                 other_mgr.dealer_outputs.contains_key(&addr0),
@@ -1865,7 +1856,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -1883,7 +1874,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create manager for validator 0
-        let addr0 = ValidatorAddress([0; 32]);
+        let addr0 = Address([0; 32]);
         let mut test_manager = DkgManager::new(
             addr0.clone(),
             config.clone(),
@@ -1896,7 +1887,7 @@ mod tests {
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
-                let addr = ValidatorAddress([i as u8; 32]);
+                let addr = Address([i as u8; 32]);
                 let manager = DkgManager::new(
                     addr.clone(),
                     config.clone(),
@@ -1909,7 +1900,7 @@ mod tests {
             })
             .collect();
 
-        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
         let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         // Call run_as_dealer()
@@ -1921,13 +1912,13 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify own dealer output is stored
-        let addr0 = ValidatorAddress([0; 32]);
+        let addr0 = Address([0; 32]);
         assert!(test_manager.dealer_outputs.contains_key(&addr0));
 
         // Verify other validators received dealer message via P2P
         let other_managers = mock_p2p.managers.lock().unwrap();
         for i in 1..num_validators {
-            let addr = ValidatorAddress([i as u8; 32]);
+            let addr = Address([i as u8; 32]);
             let other_mgr = other_managers.get(&addr).unwrap();
             assert!(
                 other_mgr.dealer_outputs.contains_key(&addr0),
@@ -1959,7 +1950,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -1979,7 +1970,7 @@ mod tests {
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 DkgManager::new(
                     address.clone(),
                     config.clone(),
@@ -2000,7 +1991,7 @@ mod tests {
 
         let mut certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = ValidatorAddress([dealer_idx as u8; 32]);
+            let dealer_addr = Address([dealer_idx as u8; 32]);
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
@@ -2026,9 +2017,9 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (ValidatorAddress([(idx + 1) as u8; 32]), mgr))
+            .map(|(idx, mgr)| (Address([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
         let output = test_manager
             .run_as_party(&mock_p2p, &mut mock_tob)
             .await
@@ -2174,7 +2165,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -2193,7 +2184,7 @@ mod tests {
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 DkgManager::new(
                     address.clone(),
                     config.clone(),
@@ -2214,7 +2205,7 @@ mod tests {
 
         let mut valid_certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = ValidatorAddress([dealer_idx as u8; 32]);
+            let dealer_addr = Address([dealer_idx as u8; 32]);
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
@@ -2234,7 +2225,7 @@ mod tests {
 
         // Create invalid certificate with wrong message hash
         let invalid_dealer_msg = managers[3].create_dealer_message(&mut rng).unwrap();
-        let dealer_addr_3 = ValidatorAddress([3; 32]);
+        let dealer_addr_3 = Address([3; 32]);
 
         let mut invalid_signatures = Vec::new();
         for manager in managers.iter_mut() {
@@ -2266,9 +2257,9 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (ValidatorAddress([(idx + 1) as u8; 32]), mgr))
+            .map(|(idx, mgr)| (Address([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
         let output = test_manager
             .run_as_party(&mock_p2p, &mut mock_tob)
             .await
@@ -2312,7 +2303,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -2332,7 +2323,7 @@ mod tests {
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 DkgManager::new(
                     address.clone(),
                     config.clone(),
@@ -2354,7 +2345,7 @@ mod tests {
         // Create certificates
         let mut certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = ValidatorAddress([dealer_idx as u8; 32]);
+            let dealer_addr = Address([dealer_idx as u8; 32]);
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
@@ -2388,10 +2379,10 @@ mod tests {
             .enumerate()
             .map(|(idx, mgr)| {
                 let addr_idx = if idx < 2 { idx } else { idx + 1 };
-                (ValidatorAddress([addr_idx as u8; 32]), mgr)
+                (Address([addr_idx as u8; 32]), mgr)
             })
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, ValidatorAddress([2; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address([2; 32]));
         let output = test_manager
             .run_as_party(&mock_p2p, &mut mock_tob)
             .await
@@ -2515,7 +2506,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -2533,7 +2524,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create manager for validator 0 (the dealer)
-        let dealer_addr = ValidatorAddress([0; 32]);
+        let dealer_addr = Address([0; 32]);
         let mut test_manager = DkgManager::new(
             dealer_addr.clone(),
             config.clone(),
@@ -2546,7 +2537,7 @@ mod tests {
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
-                let addr = ValidatorAddress([i as u8; 32]);
+                let addr = Address([i as u8; 32]);
                 let manager = DkgManager::new(
                     addr.clone(),
                     config.clone(),
@@ -2613,8 +2604,7 @@ mod tests {
             fail_on_receive: true,
         };
 
-        let mock_p2p =
-            MockP2PChannel::new(std::collections::HashMap::new(), ValidatorAddress([0; 32]));
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), Address([0; 32]));
         let result = test_manager.run_as_party(&mock_p2p, &mut failing_tob).await;
 
         assert!(result.is_err());
@@ -2626,7 +2616,7 @@ mod tests {
     struct WeightBasedTestSetup {
         config: DkgConfig,
         session_context: SessionContext,
-        dealer_messages: Vec<(ValidatorAddress, avss::Message)>,
+        dealer_messages: Vec<(Address, avss::Message)>,
         certificates: Vec<DkgCertificate>,
         encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
         weights: Vec<u16>,
@@ -2651,7 +2641,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = weights[i];
                 let node = Node {
@@ -2675,7 +2665,7 @@ mod tests {
         let dealer_count = num_dealers.unwrap_or(num_validators);
         let dealer_managers: Vec<_> = (0..dealer_count)
             .map(|i| {
-                let addr = ValidatorAddress([i as u8; 32]);
+                let addr = Address([i as u8; 32]);
                 DkgManager::new(
                     addr.clone(),
                     config.clone(),
@@ -2716,7 +2706,7 @@ mod tests {
 
     // Create a test certificate with minimal valid signatures
     fn create_test_certificate(
-        dealer_addr: &ValidatorAddress,
+        dealer_addr: &Address,
         message: &avss::Message,
         config: &DkgConfig,
         session_context: &SessionContext,
@@ -2731,7 +2721,7 @@ mod tests {
 
         // Add signatures from validators until we meet the required weight
         for (i, w) in weights.iter().enumerate() {
-            let signer_addr = ValidatorAddress([i as u8; 32]);
+            let signer_addr = Address([i as u8; 32]);
             let sig = types::ValidatorSignature {
                 validator: signer_addr,
                 signature: vec![0u8; 64], // Dummy signature
@@ -2758,7 +2748,7 @@ mod tests {
         party_index: usize,
     ) -> (DkgResult<DkgOutput>, MockOrderedBroadcastChannel) {
         let mut rng = rand::thread_rng();
-        let party_addr = ValidatorAddress([party_index as u8; 32]);
+        let party_addr = Address([party_index as u8; 32]);
 
         let mut party_manager = DkgManager::new(
             party_addr.clone(),
@@ -2876,7 +2866,7 @@ mod tests {
 
         // Create party manager
         let mut rng = rand::thread_rng();
-        let party_addr = ValidatorAddress([0; 32]);
+        let party_addr = Address([0; 32]);
         let mut party_manager = DkgManager::new(
             party_addr.clone(),
             test_setup.config.clone(),
@@ -3188,7 +3178,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -3209,7 +3199,7 @@ mod tests {
         );
 
         // Create dealer (party 1) with its encryption key
-        let dealer_address = ValidatorAddress([1; 32]);
+        let dealer_address = Address([1; 32]);
         let dealer_manager = DkgManager::new(
             dealer_address.clone(),
             config.clone(),
@@ -3220,7 +3210,7 @@ mod tests {
         );
 
         // Create receiver (party 0) with its encryption key
-        let receiver_address = ValidatorAddress([0; 32]);
+        let receiver_address = Address([0; 32]);
         let mut receiver_manager = DkgManager::new(
             receiver_address.clone(),
             config.clone(),
@@ -3261,7 +3251,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -3282,7 +3272,7 @@ mod tests {
         );
 
         // Create dealer (party 0)
-        let dealer_address = ValidatorAddress([0; 32]);
+        let dealer_address = Address([0; 32]);
         let mut dealer_manager = DkgManager::new(
             dealer_address.clone(),
             config.clone(),
@@ -3328,7 +3318,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -3349,7 +3339,7 @@ mod tests {
         );
 
         // Create dealer (party 0) but don't create/process any message
-        let dealer_address = ValidatorAddress([0; 32]);
+        let dealer_address = Address([0; 32]);
         let dealer_manager = DkgManager::new(
             dealer_address.clone(),
             config.clone(),
@@ -4058,7 +4048,7 @@ mod tests {
             create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
 
         // Create certificate with two signers: offline signer first, then dealer
-        let offline_signer_addr = ValidatorAddress([99; 32]); // Not in mock P2P
+        let offline_signer_addr = Address([99; 32]); // Not in mock P2P
         let cert = create_certificate_with_signers(
             &dealer_addr,
             dealer_mgr.dealer_messages.get(&dealer_addr).unwrap(),
@@ -4143,7 +4133,7 @@ mod tests {
             &dealer_addr,
             dealer_mgr.dealer_messages.get(&dealer_addr).unwrap(),
             &session_context,
-            vec![ValidatorAddress([98; 32]), ValidatorAddress([99; 32])], // All offline
+            vec![Address([98; 32]), Address([99; 32])], // All offline
         );
 
         // MockP2PChannel: empty (no signers available)
@@ -4193,7 +4183,7 @@ mod tests {
 
         // Create Byzantine signer that has WRONG message stored for dealer A
         // (It has dealer B's message stored under dealer A's key.)
-        let byzantine_signer_addr = ValidatorAddress([3; 32]);
+        let byzantine_signer_addr = Address([3; 32]);
         let mut byzantine_signer =
             create_manager_at_index(3, &config, &session_context, &encryption_keys, &mut rng).1;
         // Byzantine: store dealer B's message under dealer A's address
@@ -4244,7 +4234,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -4273,8 +4263,8 @@ mod tests {
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> (ValidatorAddress, DkgManager) {
-        let address = ValidatorAddress([index; 32]);
+    ) -> (Address, DkgManager) {
+        let address = Address([index; 32]);
         let manager = DkgManager::new(
             address.clone(),
             config.clone(),
@@ -4292,7 +4282,7 @@ mod tests {
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> (ValidatorAddress, DkgManager) {
+    ) -> (Address, DkgManager) {
         let (address, mut manager) =
             create_manager_at_index(index, config, session_context, encryption_keys, rng);
         let dealer_message = manager.create_dealer_message(rng).unwrap();
@@ -4303,10 +4293,10 @@ mod tests {
     }
 
     fn create_certificate_with_signers(
-        dealer_address: &ValidatorAddress,
+        dealer_address: &Address,
         message: &avss::Message,
         session_context: &SessionContext,
-        signer_addresses: Vec<ValidatorAddress>,
+        signer_addresses: Vec<Address>,
     ) -> DkgCertificate {
         let message_hash = compute_message_hash(session_context, dealer_address, message).unwrap();
         DkgCertificate {
@@ -4454,7 +4444,7 @@ mod tests {
 
     fn create_handle_send_share_test_setup(
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> (ValidatorAddress, DkgManager, ValidatorAddress, DkgManager) {
+    ) -> (Address, DkgManager, Address, DkgManager) {
         let (config, session_context, encryption_keys) = create_test_config_and_encrption_keys(rng);
         let (dealer_address, dealer_manager) =
             create_manager_at_index(1, &config, &session_context, &encryption_keys, rng);
@@ -4538,7 +4528,7 @@ mod tests {
 
         pub fn create_test_validators_with_weights(
             weights: &[u16],
-        ) -> Vec<(ValidatorAddress, Node<EncryptionGroupElement>)> {
+        ) -> Vec<(Address, Node<EncryptionGroupElement>)> {
             weights
                 .iter()
                 .enumerate()
@@ -4546,7 +4536,7 @@ mod tests {
                     let private_key =
                         PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
                     let public_key = PublicKey::from_private_key(&private_key);
-                    let address = ValidatorAddress([i as u8; 32]);
+                    let address = Address([i as u8; 32]);
                     let party_id = i as u16;
                     let node = Node {
                         id: party_id,
@@ -4570,7 +4560,7 @@ mod tests {
 
         pub fn create_validator_weights(
             config: &DkgConfig,
-        ) -> std::collections::HashMap<ValidatorAddress, u16> {
+        ) -> std::collections::HashMap<Address, u16> {
             config
                 .address_to_party_id
                 .iter()
@@ -4597,7 +4587,7 @@ mod tests {
             validator_indices
                 .iter()
                 .map(|&i| {
-                    let address = ValidatorAddress([i as u8; 32]);
+                    let address = Address([i as u8; 32]);
                     ValidatorSignature {
                         validator: address,
                         signature: vec![0u8; 96], // Dummy BLS signature
@@ -4637,11 +4627,11 @@ mod tests {
             // Duplicate validator 0
             let signatures = vec![
                 ValidatorSignature {
-                    validator: ValidatorAddress([0; 32]),
+                    validator: Address([0; 32]),
                     signature: vec![0u8; 96],
                 },
                 ValidatorSignature {
-                    validator: ValidatorAddress([0; 32]),
+                    validator: Address([0; 32]),
                     signature: vec![0u8; 96],
                 },
             ];
@@ -4659,7 +4649,7 @@ mod tests {
 
             // Validator 99 doesn't exist
             let signatures = vec![ValidatorSignature {
-                validator: ValidatorAddress([99; 32]),
+                validator: Address([99; 32]),
                 signature: vec![0u8; 96],
             }];
 
@@ -4703,7 +4693,7 @@ mod tests {
             let mut rng = rand::thread_rng();
             let manager = create_test_manager(0, config);
             let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
-            let dealer_addr = ValidatorAddress([0; 32]);
+            let dealer_addr = Address([0; 32]);
 
             // Compute correct hash
             let message_hash =
@@ -4728,7 +4718,7 @@ mod tests {
             let _config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
             let session_context =
                 SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
-            let dealer_addr = ValidatorAddress([0; 32]);
+            let dealer_addr = Address([0; 32]);
 
             let cert = DkgCertificate {
                 dealer: dealer_addr.clone(),
@@ -4758,7 +4748,7 @@ mod tests {
             let mut rng = rand::thread_rng();
             let manager = create_test_manager(0, config);
             let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
-            let dealer_addr = ValidatorAddress([0; 32]);
+            let dealer_addr = Address([0; 32]);
 
             // Create cert with wrong hash
             let cert = DkgCertificate {
@@ -4789,7 +4779,7 @@ mod tests {
         fn create_valid_cert_and_data() -> (
             DkgCertificate,
             DkgManager,
-            std::collections::HashMap<ValidatorAddress, avss::Message>,
+            std::collections::HashMap<Address, avss::Message>,
         ) {
             let weights = vec![2, 2, 2, 2, 2]; // 5 validators
             let config = create_test_config_with_weights(&weights, 3, 1);
@@ -4797,7 +4787,7 @@ mod tests {
             let mut rng = rand::thread_rng();
             let temp_manager = create_test_manager(0, config.clone());
             let dealer_message = temp_manager.create_dealer_message(&mut rng).unwrap();
-            let dealer_addr = ValidatorAddress([0; 32]);
+            let dealer_addr = Address([0; 32]);
 
             // Create the final manager that we'll return
             let manager = create_test_manager(0, config.clone());
@@ -4843,7 +4833,7 @@ mod tests {
             // This test verifies that a certificate created with a different session context
             // (and thus different message hash) is properly rejected
             let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1);
-            let dealer_addr = ValidatorAddress([0; 32]);
+            let dealer_addr = Address([0; 32]);
 
             // Create a minimal dealer message using actual dealer (to get valid message structure)
             let manager = create_test_manager(0, config.clone());
