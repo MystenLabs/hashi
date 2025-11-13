@@ -9,15 +9,6 @@ pub struct DealerMessageKey {
     pub dealer: ValidatorAddress,
 }
 
-impl DealerMessageKey {
-    pub fn new(session: &SessionContext, dealer: &ValidatorAddress) -> Self {
-        Self {
-            session_id: session.session_id,
-            dealer: dealer.clone(),
-        }
-    }
-}
-
 pub trait DealerMessageStore: Send + Sync {
     /// Store a dealer's message for a specific session
     /// If message already exists for this (session, dealer), it will be overwritten
