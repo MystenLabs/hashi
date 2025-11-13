@@ -1,4 +1,3 @@
-use crate::types::ValidatorAddress;
 pub use fastcrypto::bls12381::min_pk::{
     BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
 };
@@ -71,7 +70,7 @@ pub struct MemberSignature {
 }
 
 impl BlsCommittee {
-    pub fn new(epoch: u64, members: Vec<BlsCommitteeMember>) -> Self {
+    pub fn new(members: Vec<BlsCommitteeMember>, epoch: u64) -> Self {
         let total_weight = members.iter().map(|member| member.weight as u64).sum();
         Self {
             epoch,
@@ -140,7 +139,7 @@ impl BlsCommittee {
         signature: &CommitteeSignature,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
-        let signed_weight = self.signed_weight_of(&signature)?;
+        let signed_weight = self.signed_weight_of(signature)?;
         if signed_weight < required_weight {
             return Err(SignatureError::from_source(format!(
                 "insufficient signing weight {}; required weight threshold is {}",
@@ -225,7 +224,7 @@ impl<'a> BLSSignatureAggregator<'a> {
     }
 
     pub fn committee(&self) -> &BlsCommittee {
-        &self.committee
+        self.committee
     }
 
     pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
@@ -371,7 +370,7 @@ mod test {
                 weight: 1,
             })
             .collect();
-        let committee = BlsCommittee::new(epoch, members);
+        let committee = BlsCommittee::new(members, epoch);
 
         let mut aggregator = BLSSignatureAggregator::new(&committee, message.clone());
 

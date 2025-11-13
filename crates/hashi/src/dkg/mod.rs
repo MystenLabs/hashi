@@ -192,7 +192,7 @@ impl DkgManager {
             if validator_address != &self.address {
                 let response = match p2p_channel
                     .send_share(
-                        &validator_address,
+                        validator_address,
                         &SendShareRequest {
                             message: dealer_message.clone(),
                         },
@@ -541,7 +541,7 @@ impl DkgManager {
     fn validate_certificate(&self, cert: &DkgCertificate) -> DkgResult<()> {
         self.validate_message_hash(cert)?;
         self.bls_committee
-            .verify_signature(&cert.message_hash.to_vec(), &cert.signatures)
+            .verify_signature(&cert.message_hash, &cert.signatures)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
     }
 }
@@ -557,12 +557,12 @@ fn create_bls_committee(
         .map(|(validator_address, &party_id)| {
             BlsCommitteeMember::new(
                 validator_address.into(),
-                public_keys.get(&validator_address).unwrap().clone(),
+                public_keys.get(validator_address).unwrap().clone(),
                 dkg_config.nodes.weight_of(party_id).unwrap(),
             )
         })
         .collect();
-    BlsCommittee::new(dkg_config.epoch, committee)
+    BlsCommittee::new(committee, dkg_config.epoch)
 }
 
 fn compute_message_hash(
