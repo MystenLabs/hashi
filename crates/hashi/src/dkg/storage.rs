@@ -9,7 +9,7 @@ pub struct DealerMessageKey {
     pub dealer: ValidatorAddress,
 }
 
-pub trait DealerMessageStore: Send + Sync {
+pub trait DealerMessageStore {
     /// Store a dealer's message for a specific `DealerMessageKey`
     /// If message already exists for this key, it will be overwritten
     fn store_dealer_message(
