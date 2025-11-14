@@ -37,7 +37,7 @@ pub struct DkgManager {
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
     pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
-    pub public_message_store: Box<dyn PublicMessagesStore>,
+    pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
 impl DkgManager {
@@ -72,7 +72,7 @@ impl DkgManager {
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
             share_responses: std::collections::HashMap::new(),
-            public_message_store,
+            public_messages_store: public_message_store,
         }
     }
 
@@ -279,7 +279,7 @@ impl DkgManager {
             .insert(dealer_address.clone(), receiver_output);
         self.dealer_messages
             .insert(dealer_address.clone(), message.clone());
-        self.public_message_store
+        self.public_messages_store
             .store_dealer_message(&dealer_address, message)
             .map_err(|e| DkgError::StorageError(e.to_string()))?;
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
@@ -1071,7 +1071,7 @@ mod tests {
 
         // Verify dealer message was persisted to storage
         let stored_message = receiver_manager
-            .public_message_store
+            .public_messages_store
             .get_dealer_message(&dealer_address)
             .unwrap();
         assert!(
