@@ -23,7 +23,7 @@ pub trait PublicMessageStore {
     fn clear(&mut self) -> Result<()>;
 }
 
-pub trait SecretStore {
+pub trait SecretsStore: Send + Sync {
     /// Store DKG secret shares
     ///
     /// Fails if called more than once.
