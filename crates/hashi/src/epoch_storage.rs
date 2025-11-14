@@ -23,7 +23,7 @@ pub trait PublicMessagesStore: Send + Sync {
     fn clear(&mut self) -> Result<()>;
 }
 
-pub trait SecretsStore {
+pub trait SecretsStore: Send + Sync {
     /// Store DKG secret shares
     ///
     /// Fails if called more than once.
@@ -35,6 +35,7 @@ pub trait SecretsStore {
     /// Store encryption private key
     ///
     /// Fails if called more than once.
+    // TODO: Apply at node initialization
     fn store_encryption_key(&mut self, key: &PrivateKey<EncryptionGroupElement>) -> Result<()>;
 
     /// Retrieve encryption private key
