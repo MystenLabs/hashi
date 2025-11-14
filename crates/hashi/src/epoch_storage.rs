@@ -4,7 +4,7 @@ use anyhow::Result;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
-pub trait PublicMessageStore {
+pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's DKG message
     ///
     /// If a message already exists for this dealer, it will be overwritten.
@@ -23,7 +23,7 @@ pub trait PublicMessageStore {
     fn clear(&mut self) -> Result<()>;
 }
 
-pub trait SecretStore {
+pub trait SecretsStore {
     /// Store DKG secret shares
     ///
     /// Fails if called more than once.
