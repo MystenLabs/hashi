@@ -1,6 +1,5 @@
 //! Distributed Key Generation (DKG) module
 
-pub mod storage;
 pub mod types;
 
 use crate::types::ValidatorAddress;
@@ -10,7 +9,6 @@ use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::avss;
 
-pub use storage::{DealerMessageKey, DealerMessageStore};
 pub use types::{
     AddressToPartyId, Authenticated, DkgCertificate, DkgConfig, DkgError, DkgOutput, DkgResult,
     EncryptionGroupElement, MessageApproval, MessageHash, MessageType, OrderedBroadcastMessage,
