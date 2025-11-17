@@ -249,8 +249,8 @@ impl DkgManager {
                     Ok(()) => {
                         if self.dealer_complaints.contains_key(&cert.dealer)
                             && let Err(e) = self
-                            .recover_shares_via_complaint(&cert.dealer, &cert, p2p_channel)
-                            .await
+                                .recover_shares_via_complaint(&cert.dealer, &cert, p2p_channel)
+                                .await
                         {
                             tracing::info!(
                                 "Failed to recover shares for certified dealer {:?}: {}. Skipping.",
