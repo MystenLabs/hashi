@@ -8,7 +8,7 @@ use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::PartyId;
-use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
@@ -37,6 +37,7 @@ pub struct DkgManager {
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
     pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
+    pub dealer_complaints: std::collections::HashMap<ValidatorAddress, complaint::Complaint>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
@@ -72,6 +73,7 @@ impl DkgManager {
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
             share_responses: std::collections::HashMap::new(),
+            dealer_complaints: std::collections::HashMap::new(),
             public_messages_store: public_message_store,
         }
     }
@@ -117,6 +119,33 @@ impl DkgManager {
         Ok(RetrieveMessageResponse {
             message: message.clone(),
         })
+    }
+
+    /// RPC endpoint handler for `ComplainRequest`
+    pub fn handle_complain_request(
+        &self,
+        request: &ComplainRequest,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<ComplainResponse> {
+        // TODO: Cache response to prevent DoS attacks
+        let message = self
+            .dealer_messages
+            .get(&request.dealer)
+            .ok_or_else(|| DkgError::ProtocolFailed("No message from dealer".into()))?;
+        self.dealer_outputs
+            .get(&request.dealer)
+            .ok_or_else(|| DkgError::ProtocolFailed("No shares for dealer".into()))?;
+        let dealer_session_id = self.session_context.dealer_session_id(&request.dealer);
+        let receiver = avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            dealer_session_id.to_vec(),
+            None,
+            self.encryption_key.clone(),
+        );
+        let response = receiver.handle_complaint(message, &request.complaint, rng)?;
+        Ok(ComplainResponse { response })
     }
 
     pub async fn run_as_dealer(
@@ -218,6 +247,18 @@ impl DkgManager {
                     &self.dealer_messages,
                 ) {
                     Ok(()) => {
+                        if self.dealer_complaints.contains_key(&cert.dealer)
+                            && let Err(e) = self
+                            .recover_shares_via_complaint(&cert.dealer, &cert, p2p_channel)
+                            .await
+                        {
+                            tracing::info!(
+                                "Failed to recover shares for certified dealer {:?}: {}. Skipping.",
+                                cert.dealer,
+                                e
+                            );
+                            continue;
+                        }
                         let dealer_weight =
                             self.validator_weights.get(&cert.dealer).ok_or_else(|| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
@@ -268,8 +309,9 @@ impl DkgManager {
         );
         let receiver_output = match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
-            // TODO: Add compliant handling
-            avss::ProcessedMessage::Complaint(_) => {
+            avss::ProcessedMessage::Complaint(complaint) => {
+                self.dealer_complaints
+                    .insert(dealer_address.clone(), complaint);
                 return Err(DkgError::ProtocolFailed(
                     "Invalid message from dealer".into(),
                 ));
@@ -368,6 +410,7 @@ impl DkgManager {
                     "Self in certificate signers but message not available".to_string(),
                 ));
             }
+            // TODO: Add timeout and retries handling when adding RPC layer
             match p2p_channel.retrieve_message(signer_address, &request).await {
                 Ok(response) => {
                     let message_hash = compute_message_hash(
@@ -394,6 +437,44 @@ impl DkgManager {
         Err(DkgError::PairwiseCommunicationError(
             "Failed to retrieve message from any signer".to_string(),
         ))
+    }
+
+    async fn recover_shares_via_complaint(
+        &mut self,
+        dealer: &ValidatorAddress,
+        cert: &DkgCertificate,
+        p2p_channel: &impl crate::communication::P2PChannel,
+    ) -> DkgResult<()> {
+        let complaint = self
+            .dealer_complaints
+            .get(dealer)
+            .ok_or_else(|| DkgError::ProtocolFailed("No complaint for dealer".into()))?
+            .clone();
+        let complaint_request = ComplainRequest {
+            dealer: dealer.clone(),
+            complaint: complaint.clone(),
+        };
+        let mut responses = Vec::new();
+        for sig in &cert.signatures {
+            // TODO: Add timeout and retries handling when adding RPC layer
+            let response = p2p_channel
+                .complain(&sig.validator, &complaint_request)
+                .await?;
+            responses.push(response.response);
+        }
+        let dealer_session_id = self.session_context.dealer_session_id(dealer);
+        let receiver = avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            dealer_session_id.to_vec(),
+            None,
+            self.encryption_key.clone(),
+        );
+        let message = self.dealer_messages.get(dealer).unwrap();
+        let receiver_output = receiver.recover(message, &responses)?;
+        self.dealer_outputs.insert(dealer.clone(), receiver_output);
+        Ok(())
     }
 }
 
@@ -661,6 +742,27 @@ mod tests {
                 })?;
             Ok(response)
         }
+
+        async fn complain(
+            &self,
+            party: &ValidatorAddress,
+            request: &ComplainRequest,
+        ) -> crate::communication::ChannelResult<ComplainResponse> {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(party).ok_or_else(|| {
+                crate::communication::ChannelError::SendFailed(format!(
+                    "Party {:?} not found",
+                    party
+                ))
+            })?;
+            let mut rng = rand::thread_rng();
+            let response = manager
+                .handle_complain_request(request, &mut rng)
+                .map_err(|e| {
+                    crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+                })?;
+            Ok(response)
+        }
     }
 
     struct MockOrderedBroadcastChannel {
@@ -793,6 +895,16 @@ mod tests {
                 self.error_message.clone(),
             ))
         }
+
+        async fn complain(
+            &self,
+            _party: &ValidatorAddress,
+            _request: &ComplainRequest,
+        ) -> crate::communication::ChannelResult<ComplainResponse> {
+            Err(crate::communication::ChannelError::SendFailed(
+                self.error_message.clone(),
+            ))
+        }
     }
 
     struct SucceedingP2PChannel {}
@@ -815,6 +927,14 @@ mod tests {
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_message")
+        }
+
+        async fn complain(
+            &self,
+            _party: &ValidatorAddress,
+            _request: &ComplainRequest,
+        ) -> crate::communication::ChannelResult<ComplainResponse> {
+            unimplemented!("SucceedingP2PChannel does not implement complain")
         }
     }
 
@@ -849,6 +969,14 @@ mod tests {
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_message")
+        }
+
+        async fn complain(
+            &self,
+            _party: &ValidatorAddress,
+            _request: &ComplainRequest,
+        ) -> crate::communication::ChannelResult<ComplainResponse> {
+            unimplemented!("PartiallyFailingP2PChannel does not implement complain")
         }
     }
 
@@ -2843,6 +2971,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_as_party_continues_after_failed_recovery() {
+        // Tests that when complaint recovery fails for one dealer,
+        // run_as_party continues processing other certificates and succeeds overall
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer 0 with a message - this one will have a failed recovery
+        let (dealer0_addr, dealer0_mgr) =
+            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer0_message = dealer0_mgr
+            .dealer_messages
+            .get(&dealer0_addr)
+            .unwrap()
+            .clone();
+
+        // Create dealers 1 and 2 - these will be processed successfully
+        let (dealer1_addr, dealer1_mgr) =
+            create_dealer_with_message(1, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer1_message = dealer1_mgr
+            .dealer_messages
+            .get(&dealer1_addr)
+            .unwrap()
+            .clone();
+
+        let (dealer2_addr, dealer2_mgr) =
+            create_dealer_with_message(2, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer2_message = dealer2_mgr
+            .dealer_messages
+            .get(&dealer2_addr)
+            .unwrap()
+            .clone();
+
+        // Create party manager (validator 4) - not one of the dealers
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(4, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Setup complaint for dealer 0 (recovery will fail - no responders in P2P)
+        let complaint = create_complaint_for_dealer(
+            &dealer0_message,
+            4, // party_id
+            &config,
+            &session_context,
+            &dealer0_addr,
+            &mut rng,
+        );
+        setup_party_with_complaint(
+            &mut party_manager,
+            &dealer0_addr,
+            &dealer0_message,
+            complaint,
+        );
+
+        // Party successfully processes dealers 1 and 2
+        party_manager
+            .receive_dealer_message(&dealer1_message, dealer1_addr.clone())
+            .unwrap();
+        party_manager
+            .receive_dealer_message(&dealer2_message, dealer2_addr.clone())
+            .unwrap();
+
+        // Create certificates for all three dealers (all with sufficient signatures)
+        let cert0 = create_certificate_with_signers(
+            &dealer0_addr,
+            &dealer0_message,
+            &session_context,
+            vec![
+                ValidatorAddress([0; 32]),
+                ValidatorAddress([1; 32]),
+                ValidatorAddress([2; 32]),
+            ],
+        );
+        let cert1 = create_certificate_with_signers(
+            &dealer1_addr,
+            &dealer1_message,
+            &session_context,
+            vec![
+                ValidatorAddress([1; 32]),
+                ValidatorAddress([2; 32]),
+                ValidatorAddress([3; 32]),
+            ],
+        );
+        let cert2 = create_certificate_with_signers(
+            &dealer2_addr,
+            &dealer2_message,
+            &session_context,
+            vec![
+                ValidatorAddress([2; 32]),
+                ValidatorAddress([3; 32]),
+                ValidatorAddress([4; 32]),
+            ],
+        );
+
+        // Create mock P2P with no responders (so recovery for dealer0 will fail)
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr.clone());
+
+        // Create mock TOB with all three certificates
+        // Threshold is 2, so after skipping dealer0, dealers 1 and 2 should be enough
+        let certificates = vec![cert0, cert1, cert2];
+        let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
+
+        // Run as party - should skip dealer0 but process dealer1 and dealer2
+        let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
+
+        // Should succeed despite dealer0 recovery failure
+        assert!(result.is_ok(), "Expected success, got: {:?}", result.err());
+        let output = result.unwrap();
+
+        // Verify output contains shares from dealers 1 and 2 (threshold=2, so we need 2 dealers)
+        assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
+
+        // Dealer0 should NOT be in dealer_outputs (recovery failed, skipped)
+        assert!(!party_manager.dealer_outputs.contains_key(&dealer0_addr));
+
+        // Dealers 1 and 2 should be in dealer_outputs
+        assert!(party_manager.dealer_outputs.contains_key(&dealer1_addr));
+        assert!(party_manager.dealer_outputs.contains_key(&dealer2_addr));
+
+        // Complaint for dealer0 should still be present
+        assert!(party_manager.dealer_complaints.contains_key(&dealer0_addr));
+    }
+
+    #[tokio::test]
     async fn test_handle_send_share_request() {
         // Test that handle_send_share_request works with the new request/response types
         let mut rng = rand::thread_rng();
@@ -3039,6 +3290,175 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, DkgError::ProtocolFailed(_)));
         assert!(err.to_string().contains("Message not available"));
+    }
+
+    #[test]
+    fn test_handle_complain_request_no_message_from_dealer() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+        let (dealer_address, _dealer_message, complaint) = create_dealer_message_and_complaint(
+            &config,
+            &session_context,
+            &encryption_keys,
+            &mut rng,
+        );
+
+        // Create manager (party 1) without any dealer messages
+        let manager = DkgManager::new(
+            ValidatorAddress([1; 32]),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[1].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        let request = ComplainRequest {
+            dealer: dealer_address,
+            complaint,
+        };
+
+        // Manager has no message from this dealer
+        let result = manager.handle_complain_request(&request, &mut rng);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(err.to_string().contains("No message from dealer"));
+    }
+
+    #[test]
+    fn test_handle_complain_request_no_shares_for_dealer() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+        let (dealer_address, dealer_message, complaint) = create_dealer_message_and_complaint(
+            &config,
+            &session_context,
+            &encryption_keys,
+            &mut rng,
+        );
+
+        // Create manager that has the message but NOT dealer_output
+        let mut manager = DkgManager::new(
+            ValidatorAddress([1; 32]),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[1].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Manually insert message without processing (so no dealer_output)
+        manager
+            .dealer_messages
+            .insert(dealer_address.clone(), dealer_message.clone());
+
+        let request = ComplainRequest {
+            dealer: dealer_address,
+            complaint,
+        };
+
+        // Manager has message but no dealer_output
+        let result = manager.handle_complain_request(&request, &mut rng);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(err.to_string().contains("No shares for dealer"));
+    }
+
+    #[tokio::test]
+    async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create manager without any complaints
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Create a dealer address that has no complaint
+        let dealer_addr = ValidatorAddress([0; 32]);
+
+        // Create a minimal certificate
+        let cert = DkgCertificate {
+            dealer: dealer_addr.clone(),
+            message_hash: [0u8; 32],
+            signatures: vec![],
+            session_context: session_context.clone(),
+        };
+
+        // Create empty mock P2P channel
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+
+        // Call recover_shares_via_complaint - should fail because no complaint exists
+        let result = party_manager
+            .recover_shares_via_complaint(&dealer_addr, &cert, &mock_p2p)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(err.to_string().contains("No complaint for dealer"));
+    }
+
+    #[tokio::test]
+    async fn test_recover_shares_via_complaint_p2p_failure() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer with a message
+        let (dealer_addr, dealer_mgr) =
+            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer_message = dealer_mgr
+            .dealer_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
+
+        // Create party manager with a complaint
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Create and setup complaint for dealer
+        let complaint = create_complaint_for_dealer(
+            &dealer_message,
+            1, // party_id
+            &config,
+            &session_context,
+            &dealer_addr,
+            &mut rng,
+        );
+        setup_party_with_complaint(&mut party_manager, &dealer_addr, &dealer_message, complaint);
+
+        // Create certificate with a signer that doesn't exist in mock P2P
+        let signer_addresses = vec![ValidatorAddress([99; 32])]; // This validator doesn't exist
+        let cert = create_certificate_with_signers(
+            &dealer_addr,
+            &dealer_message,
+            &session_context,
+            signer_addresses,
+        );
+
+        // Create empty mock P2P channel (no responders)
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+
+        // Call recover_shares_via_complaint - should fail because P2P call fails
+        let result = party_manager
+            .recover_shares_via_complaint(&dealer_addr, &cert, &mock_p2p)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DkgError::BroadcastError(_)),
+            "Expected BroadcastError, got: {:?}",
+            err
+        );
+        assert!(err.to_string().contains("Party"));
     }
 
     #[tokio::test]
@@ -3329,6 +3749,16 @@ mod tests {
         assert!(party_mgr.dealer_messages.contains_key(&dealer_a_addr));
     }
 
+    // Creates test config with proper cryptographic setup
+    //
+    // This follows fastcrypto's test pattern (see test_share_recovery in avss.rs):
+    // 1. Generate unique private keys for each party
+    // 2. Derive public keys from private keys using PublicKey::from_private_key()
+    // 3. Use the same keys consistently in DkgManager creation
+    //
+    // This ensures that when DkgManager creates AVSS Receivers with encryption_keys[i],
+    // the receiver uses the SAME private key that corresponds to nodes[i].pk,
+    // maintaining the cryptographic relationship required for ECIES encryption/decryption.
     fn create_test_config_and_encrption_keys(
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (
@@ -3344,7 +3774,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key = PublicKey::from_private_key(private_key);
+                let public_key = PublicKey::from_private_key(private_key); // CRITICAL: derive from private key
                 let address = ValidatorAddress([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
@@ -3422,6 +3852,67 @@ mod tests {
                 .collect(),
             session_context: session_context.clone(),
         }
+    }
+
+    fn create_complaint_for_dealer(
+        dealer_message: &avss::Message,
+        party_id: u16,
+        config: &DkgConfig,
+        session_context: &SessionContext,
+        dealer_address: &ValidatorAddress,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> complaint::Complaint {
+        let dealer_session_id = session_context.dealer_session_id(dealer_address);
+        let wrong_key = PrivateKey::<EncryptionGroupElement>::new(rng);
+        let receiver = avss::Receiver::new(
+            config.nodes.clone(),
+            party_id,
+            config.threshold,
+            dealer_session_id.to_vec(),
+            None,
+            wrong_key,
+        );
+        match receiver.process_message(dealer_message).unwrap() {
+            avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint with wrong key"),
+        }
+    }
+
+    fn create_dealer_message_and_complaint(
+        config: &DkgConfig,
+        session_context: &SessionContext,
+        encryption_keys: &[PrivateKey<EncryptionGroupElement>],
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> (ValidatorAddress, avss::Message, complaint::Complaint) {
+        // Create dealer at index 0
+        let (dealer_address, dealer_manager) =
+            create_manager_at_index(0, config, session_context, encryption_keys, rng);
+        let dealer_message = dealer_manager.create_dealer_message(rng).unwrap();
+        // Create complaint from party 1 using wrong encryption key
+        let complaint = create_complaint_for_dealer(
+            &dealer_message,
+            1,
+            config,
+            session_context,
+            &dealer_address,
+            rng,
+        );
+
+        (dealer_address, dealer_message, complaint)
+    }
+
+    fn setup_party_with_complaint(
+        party_manager: &mut DkgManager,
+        dealer_address: &ValidatorAddress,
+        dealer_message: &avss::Message,
+        complaint: complaint::Complaint,
+    ) {
+        party_manager
+            .dealer_complaints
+            .insert(dealer_address.clone(), complaint);
+        party_manager
+            .dealer_messages
+            .insert(dealer_address.clone(), dealer_message.clone());
     }
 
     fn create_handle_send_share_test_setup(

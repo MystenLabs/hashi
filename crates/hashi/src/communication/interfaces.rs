@@ -1,7 +1,8 @@
 //! Communication channel interfaces
 
 use crate::dkg::{
-    RetrieveMessageRequest, RetrieveMessageResponse, SendShareRequest, SendShareResponse,
+    ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
+    SendShareRequest, SendShareResponse,
 };
 use crate::types::ValidatorAddress;
 use async_trait::async_trait;
@@ -42,6 +43,12 @@ pub trait P2PChannel: Send + Sync {
         party: &ValidatorAddress,
         request: &RetrieveMessageRequest,
     ) -> ChannelResult<RetrieveMessageResponse>;
+
+    async fn complain(
+        &self,
+        party: &ValidatorAddress,
+        request: &ComplainRequest,
+    ) -> ChannelResult<ComplainResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages
