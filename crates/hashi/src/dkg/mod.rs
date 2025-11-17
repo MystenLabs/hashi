@@ -3874,7 +3874,6 @@ mod tests {
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (ValidatorAddress, avss::Message, complaint::Complaint) {
-        // Create dealer at index 0
         let (dealer_address, dealer_manager) =
             create_manager_at_index(0, config, session_context, encryption_keys, rng);
         let dealer_message = dealer_manager.create_dealer_message(rng).unwrap();
@@ -3887,7 +3886,6 @@ mod tests {
             &dealer_address,
             rng,
         );
-
         (dealer_address, dealer_message, complaint)
     }
 
