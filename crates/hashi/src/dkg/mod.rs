@@ -2,7 +2,7 @@
 
 pub mod types;
 
-use crate::epoch_storage::PublicMessagesStore;
+use crate::storage::PublicMessagesStore;
 use crate::types::ValidatorAddress;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto::traits::ToFromBytes;

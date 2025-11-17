@@ -5,10 +5,10 @@ pub mod committee;
 pub mod communication;
 pub mod config;
 pub mod dkg;
-pub mod epoch_storage;
 pub mod grpc;
 pub mod metrics;
 pub mod proto;
+pub mod storage;
 pub mod tls;
 pub mod types;
 
