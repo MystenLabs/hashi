@@ -2,7 +2,7 @@
 
 pub mod types;
 
-use crate::epoch_storage::SecretsStore;
+use crate::epoch_storage::PublicMessagesStore;
 use crate::types::ValidatorAddress;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto::traits::ToFromBytes;
@@ -37,7 +37,7 @@ pub struct DkgManager {
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
     pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
-    pub secrets_store: Box<dyn SecretsStore>,
+    pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
 impl DkgManager {
@@ -47,8 +47,8 @@ impl DkgManager {
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
-        mut secrets_store: Box<dyn SecretsStore>,
-    ) -> DkgResult<Self> {
+        public_message_store: Box<dyn PublicMessagesStore>,
+    ) -> Self {
         let party_id = *dkg_config
             .address_to_party_id
             .get(&address)
@@ -61,10 +61,7 @@ impl DkgManager {
                 (addr.clone(), weight)
             })
             .collect();
-        secrets_store
-            .store_encryption_key(&encryption_key)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        Ok(Self {
+        Self {
             party_id,
             address,
             dkg_config,
@@ -72,11 +69,11 @@ impl DkgManager {
             encryption_key,
             bls_signing_key,
             validator_weights,
-            secrets_store,
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
             share_responses: std::collections::HashMap::new(),
-        })
+            public_messages_store: public_message_store,
+        }
     }
 
     /// RPC endpoint handler for `SendShareRequest`
@@ -282,6 +279,9 @@ impl DkgManager {
             .insert(dealer_address.clone(), receiver_output);
         self.dealer_messages
             .insert(dealer_address.clone(), message.clone());
+        self.public_messages_store
+            .store_dealer_message(&dealer_address, message)
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
@@ -519,6 +519,29 @@ mod tests {
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
 
+    struct MockPublicMessagesStore;
+
+    impl PublicMessagesStore for MockPublicMessagesStore {
+        fn store_dealer_message(
+            &mut self,
+            _dealer: &ValidatorAddress,
+            _message: &avss::Message,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn get_dealer_message(
+            &self,
+            _dealer: &ValidatorAddress,
+        ) -> anyhow::Result<Option<avss::Message>> {
+            Ok(None)
+        }
+
+        fn clear(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     fn create_test_validator(party_id: u16) -> (ValidatorAddress, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
@@ -559,103 +582,6 @@ mod tests {
         DkgConfig::new(100, nodes, address_to_party_id, THRESHOLD, MAX_FAULTY).unwrap()
     }
 
-    struct MockSecretsStore;
-
-    impl SecretsStore for MockSecretsStore {
-        fn store_shares(&mut self, _shares: &avss::SharesForNode) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn get_shares(&self) -> anyhow::Result<Option<avss::SharesForNode>> {
-            Ok(None)
-        }
-
-        fn store_encryption_key(
-            &mut self,
-            _key: &PrivateKey<EncryptionGroupElement>,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn get_encryption_key(&self) -> anyhow::Result<Option<PrivateKey<EncryptionGroupElement>>> {
-            Ok(None)
-        }
-
-        fn clear(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct InMemorySecretsStore {
-        stored_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
-        stored_shares: Option<avss::SharesForNode>,
-    }
-
-    impl InMemorySecretsStore {
-        fn new() -> Self {
-            Self {
-                stored_encryption_key: None,
-                stored_shares: None,
-            }
-        }
-    }
-
-    impl SecretsStore for InMemorySecretsStore {
-        fn store_shares(&mut self, shares: &avss::SharesForNode) -> anyhow::Result<()> {
-            self.stored_shares = Some(shares.clone());
-            Ok(())
-        }
-
-        fn get_shares(&self) -> anyhow::Result<Option<avss::SharesForNode>> {
-            Ok(self.stored_shares.clone())
-        }
-
-        fn store_encryption_key(
-            &mut self,
-            key: &PrivateKey<EncryptionGroupElement>,
-        ) -> anyhow::Result<()> {
-            self.stored_encryption_key = Some(key.clone());
-            Ok(())
-        }
-
-        fn get_encryption_key(&self) -> anyhow::Result<Option<PrivateKey<EncryptionGroupElement>>> {
-            Ok(self.stored_encryption_key.clone())
-        }
-
-        fn clear(&mut self) -> anyhow::Result<()> {
-            self.stored_encryption_key = None;
-            self.stored_shares = None;
-            Ok(())
-        }
-    }
-
-    struct FailingSecretsStore;
-
-    impl SecretsStore for FailingSecretsStore {
-        fn store_shares(&mut self, _shares: &avss::SharesForNode) -> anyhow::Result<()> {
-            Err(anyhow::anyhow!("Storage failure"))
-        }
-
-        fn get_shares(&self) -> anyhow::Result<Option<avss::SharesForNode>> {
-            Err(anyhow::anyhow!("Storage failure"))
-        }
-
-        fn store_encryption_key(
-            &mut self,
-            _key: &PrivateKey<EncryptionGroupElement>,
-        ) -> anyhow::Result<()> {
-            Err(anyhow::anyhow!("Encryption key storage failure"))
-        }
-
-        fn get_encryption_key(&self) -> anyhow::Result<Option<PrivateKey<EncryptionGroupElement>>> {
-            Err(anyhow::anyhow!("Storage failure"))
-        }
-
-        fn clear(&mut self) -> anyhow::Result<()> {
-            Err(anyhow::anyhow!("Storage failure"))
-        }
-    }
-
     fn create_test_manager(validator_index: u16, dkg_config: DkgConfig) -> DkgManager {
         let address = ValidatorAddress([validator_index as u8; 32]);
         let session_context = SessionContext::new(
@@ -671,9 +597,8 @@ mod tests {
             session_context,
             encryption_key,
             bls_signing_key,
-            Box::new(MockSecretsStore),
+            Box::new(MockPublicMessagesStore),
         )
-        .unwrap()
     }
 
     struct MockP2PChannel {
@@ -837,9 +762,8 @@ mod tests {
             session_context,
             encryption_keys[validator_index].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         (manager, encryption_keys)
     }
@@ -994,78 +918,6 @@ mod tests {
         assert!(manager.dealer_outputs.is_empty());
     }
 
-    fn setup_manager_init_test() -> (
-        ValidatorAddress,
-        DkgConfig,
-        SessionContext,
-        PrivateKey<EncryptionGroupElement>,
-        crate::bls::Bls12381PrivateKey,
-    ) {
-        let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
-            create_test_config_and_encrption_keys(&mut rng);
-        let address = ValidatorAddress([0; 32]);
-        let encryption_key = encryption_keys[0].clone();
-        let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(&mut rng);
-        (
-            address,
-            config,
-            session_context,
-            encryption_key,
-            bls_signing_key,
-        )
-    }
-
-    #[test]
-    fn test_store_encryption_key_on_init_success() {
-        let (address, config, session_context, encryption_key, bls_signing_key) =
-            setup_manager_init_test();
-        let store = InMemorySecretsStore::new();
-        let manager = DkgManager::new(
-            address,
-            config,
-            session_context,
-            encryption_key.clone(),
-            bls_signing_key,
-            Box::new(store),
-        )
-        .unwrap();
-        let stored_key = manager.secrets_store.get_encryption_key().unwrap();
-        assert!(stored_key.is_some(), "Encryption key should be stored");
-        assert_eq!(
-            stored_key.unwrap(),
-            encryption_key,
-            "Stored key should match the original"
-        );
-    }
-
-    #[test]
-    fn test_store_encryption_key_on_init_failure() {
-        let (address, config, session_context, encryption_key, bls_signing_key) =
-            setup_manager_init_test();
-        let store = FailingSecretsStore;
-        let result = DkgManager::new(
-            address,
-            config,
-            session_context,
-            encryption_key,
-            bls_signing_key,
-            Box::new(store),
-        );
-        assert!(result.is_err(), "Expected storage error");
-        match result {
-            Err(DkgError::StorageError(msg)) => {
-                assert!(
-                    msg.contains("Encryption key storage failure"),
-                    "Error message should mention encryption key storage failure, got: {}",
-                    msg
-                );
-            }
-            Ok(_) => panic!("Expected StorageError, but got Ok"),
-            Err(e) => panic!("Expected StorageError, but got: {:?}", e),
-        }
-    }
-
     #[test]
     fn test_create_dealer_message() {
         let config = create_test_dkg_config(5);
@@ -1075,6 +927,64 @@ mod tests {
         let _message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
+    }
+
+    struct InMemoryPublicMessagesStore {
+        stored: std::collections::HashMap<ValidatorAddress, avss::Message>,
+    }
+
+    impl InMemoryPublicMessagesStore {
+        fn new() -> Self {
+            Self {
+                stored: std::collections::HashMap::new(),
+            }
+        }
+    }
+
+    impl PublicMessagesStore for InMemoryPublicMessagesStore {
+        fn store_dealer_message(
+            &mut self,
+            dealer: &ValidatorAddress,
+            message: &avss::Message,
+        ) -> anyhow::Result<()> {
+            self.stored.insert(dealer.clone(), message.clone());
+            Ok(())
+        }
+
+        fn get_dealer_message(
+            &self,
+            dealer: &ValidatorAddress,
+        ) -> anyhow::Result<Option<avss::Message>> {
+            Ok(self.stored.get(dealer).cloned())
+        }
+
+        fn clear(&mut self) -> anyhow::Result<()> {
+            self.stored.clear();
+            Ok(())
+        }
+    }
+
+    struct FailingPublicMessagesStore;
+
+    impl PublicMessagesStore for FailingPublicMessagesStore {
+        fn store_dealer_message(
+            &mut self,
+            _dealer: &ValidatorAddress,
+            _message: &avss::Message,
+        ) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("Storage failure"))
+        }
+
+        fn get_dealer_message(
+            &self,
+            _dealer: &ValidatorAddress,
+        ) -> anyhow::Result<Option<avss::Message>> {
+            Ok(None)
+        }
+
+        fn clear(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1119,23 +1029,22 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
         let dealer_address = dealer_manager.address.clone();
 
-        // Create receiver (party 1) with its encryption key
+        // Create receiver (party 1) with its encryption key and storage
         let receiver_address = ValidatorAddress([1; 32]);
+        let storage = InMemoryPublicMessagesStore::new();
         let mut receiver_manager = DkgManager::new(
             receiver_address.clone(),
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(storage),
+        );
 
         // Receiver processes the dealer's message
         let signature = receiver_manager
@@ -1146,19 +1055,96 @@ mod tests {
         assert_eq!(signature.validator, receiver_manager.address);
         assert_eq!(signature.signature.len(), 96); // BLS signature length
 
-        // Verify receiver output was stored
+        // Verify receiver output was stored in memory
         assert!(
             receiver_manager
                 .dealer_outputs
                 .contains_key(&dealer_address)
         );
 
-        // Verify dealer message was stored for signature recovery
+        // Verify dealer message was stored in memory for signature recovery
         assert!(
             receiver_manager
                 .dealer_messages
                 .contains_key(&dealer_address)
         );
+
+        // Verify dealer message was persisted to storage
+        let stored_message = receiver_manager
+            .public_messages_store
+            .get_dealer_message(&dealer_address)
+            .unwrap();
+        assert!(
+            stored_message.is_some(),
+            "Dealer message should be persisted to storage"
+        );
+    }
+
+    #[test]
+    fn test_receive_dealer_message_storage_failure() {
+        // Create encryption keys for validators
+        let mut rng = rand::thread_rng();
+        let encryption_keys: Vec<_> = (0..2)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        // Create validators using the encryption public keys
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let public_key = PublicKey::from_private_key(key);
+                let address = ValidatorAddress([i as u8; 32]);
+                let node = Node {
+                    id: i as u16,
+                    pk: public_key,
+                    weight: 1,
+                };
+                (address, node)
+            })
+            .collect();
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 1, 0).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        // Create dealer (party 0)
+        let dealer_address = ValidatorAddress([0; 32]);
+        let dealer_manager = DkgManager::new(
+            dealer_address.clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            Box::new(MockPublicMessagesStore),
+        );
+        let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
+
+        // Create receiver with failing storage
+        let receiver_address = ValidatorAddress([1; 32]);
+        let mut receiver_manager = DkgManager::new(
+            receiver_address.clone(),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[1].clone(),
+            crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            Box::new(FailingPublicMessagesStore),
+        );
+
+        // Receiver processes the dealer's message - should fail due to storage error
+        let result = receiver_manager.receive_dealer_message(&message, dealer_address.clone());
+
+        // Verify operation fails with storage error
+        assert!(result.is_err(), "Should fail when storage fails");
+        match result {
+            Err(DkgError::StorageError(msg)) => {
+                assert!(
+                    msg.contains("Storage failure"),
+                    "Error should mention storage failure"
+                );
+            }
+            _ => panic!("Expected StorageError, got {:?}", result),
+        }
     }
 
     #[test]
@@ -1473,9 +1459,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
-                    Box::new(MockSecretsStore),
+                    Box::new(MockPublicMessagesStore),
                 )
-                .unwrap()
             })
             .collect();
 
@@ -1487,9 +1472,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[2].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Each dealer creates a message
         let dealer_messages: Vec<_> = dealer_managers
@@ -1632,9 +1616,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                    Box::new(MockSecretsStore),
+                    Box::new(MockPublicMessagesStore),
                 )
-                .unwrap()
             })
             .collect();
 
@@ -1787,9 +1770,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             bls_keys[0].clone(),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
@@ -1801,9 +1783,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                    Box::new(MockSecretsStore),
-                )
-                .unwrap();
+                    Box::new(MockPublicMessagesStore),
+                );
                 (addr, manager)
             })
             .collect();
@@ -1885,9 +1866,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                    Box::new(MockSecretsStore),
+                    Box::new(MockPublicMessagesStore),
                 )
-                .unwrap()
             })
             .collect();
 
@@ -1994,9 +1974,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                    Box::new(MockSecretsStore),
+                    Box::new(MockPublicMessagesStore),
                 )
-                .unwrap()
             })
             .collect();
 
@@ -2134,9 +2113,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                    Box::new(MockSecretsStore),
+                    Box::new(MockPublicMessagesStore),
                 )
-                .unwrap()
             })
             .collect();
 
@@ -2336,9 +2314,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             bls_keys[0].clone(),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
@@ -2350,9 +2327,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
-                    Box::new(MockSecretsStore),
-                )
-                .unwrap();
+                    Box::new(MockPublicMessagesStore),
+                );
                 (addr, manager)
             })
             .collect();
@@ -2480,9 +2456,8 @@ mod tests {
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     crate::bls::Bls12381PrivateKey::generate(&mut rng),
-                    Box::new(MockSecretsStore),
+                    Box::new(MockPublicMessagesStore),
                 )
-                .unwrap()
             })
             .collect();
 
@@ -2565,9 +2540,8 @@ mod tests {
             test_setup.session_context.clone(),
             test_setup.encryption_keys[party_index].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Pre-process the dealer messages so validation passes
         for (dealer_addr, message) in &test_setup.dealer_messages {
@@ -2683,9 +2657,8 @@ mod tests {
             test_setup.session_context.clone(),
             test_setup.encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Pre-process the dealer messages
         for (dealer_addr, message) in &test_setup.dealer_messages {
@@ -2913,9 +2886,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Create receiver (party 0) with its encryption key
         let receiver_address = ValidatorAddress([0; 32]);
@@ -2925,9 +2897,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Dealer creates a message
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
@@ -2988,9 +2959,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Dealer creates and processes its own message (stores in dealer_messages)
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
@@ -3056,9 +3026,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
 
         // Party requests the dealer's message
         let request = RetrieveMessageRequest {
@@ -3413,9 +3382,8 @@ mod tests {
             session_context.clone(),
             encryption_keys[index as usize].clone(),
             crate::bls::Bls12381PrivateKey::generate(rng),
-            Box::new(MockSecretsStore),
-        )
-        .unwrap();
+            Box::new(MockPublicMessagesStore),
+        );
         (address, manager)
     }
 
