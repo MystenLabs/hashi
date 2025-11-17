@@ -3764,7 +3764,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
-                let public_key = PublicKey::from_private_key(private_key); // CRITICAL: derive from private key
+                let public_key = PublicKey::from_private_key(private_key);
                 let address = ValidatorAddress([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
