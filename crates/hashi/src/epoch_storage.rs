@@ -24,14 +24,6 @@ pub trait PublicMessagesStore: Send + Sync {
 }
 
 pub trait SecretsStore: Send + Sync {
-    /// Store DKG secret shares
-    ///
-    /// Fails if called more than once.
-    fn store_shares(&mut self, shares: &avss::SharesForNode) -> Result<()>;
-
-    /// Retrieve DKG secret shares
-    fn get_shares(&self) -> Result<Option<avss::SharesForNode>>;
-
     /// Store encryption private key
     ///
     /// Fails if called more than once.
