@@ -3749,16 +3749,6 @@ mod tests {
         assert!(party_mgr.dealer_messages.contains_key(&dealer_a_addr));
     }
 
-    // Creates test config with proper cryptographic setup
-    //
-    // This follows fastcrypto's test pattern (see test_share_recovery in avss.rs):
-    // 1. Generate unique private keys for each party
-    // 2. Derive public keys from private keys using PublicKey::from_private_key()
-    // 3. Use the same keys consistently in DkgManager creation
-    //
-    // This ensures that when DkgManager creates AVSS Receivers with encryption_keys[i],
-    // the receiver uses the SAME private key that corresponds to nodes[i].pk,
-    // maintaining the cryptographic relationship required for ECIES encryption/decryption.
     fn create_test_config_and_encrption_keys(
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (
