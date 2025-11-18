@@ -37,7 +37,7 @@ pub struct DkgManager {
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
     pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
-    pub dealer_complaints: std::collections::HashMap<ValidatorAddress, complaint::Complaint>,
+    pub complaints: std::collections::HashMap<ValidatorAddress, complaint::Complaint>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
@@ -73,7 +73,7 @@ impl DkgManager {
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
             share_responses: std::collections::HashMap::new(),
-            dealer_complaints: std::collections::HashMap::new(),
+            complaints: std::collections::HashMap::new(),
             public_messages_store: public_message_store,
         }
     }
@@ -247,7 +247,7 @@ impl DkgManager {
                     &self.dealer_messages,
                 ) {
                     Ok(()) => {
-                        if self.dealer_complaints.contains_key(&cert.dealer)
+                        if self.complaints.contains_key(&cert.dealer)
                             && let Err(e) = self
                                 .recover_shares_via_complaint(&cert.dealer, &cert, p2p_channel)
                                 .await
@@ -310,8 +310,7 @@ impl DkgManager {
         let receiver_output = match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
             avss::ProcessedMessage::Complaint(complaint) => {
-                self.dealer_complaints
-                    .insert(dealer_address.clone(), complaint);
+                self.complaints.insert(dealer_address.clone(), complaint);
                 return Err(DkgError::ProtocolFailed(
                     "Invalid message from dealer".into(),
                 ));
@@ -446,7 +445,7 @@ impl DkgManager {
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let complaint = self
-            .dealer_complaints
+            .complaints
             .get(dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No complaint for dealer".into()))?
             .clone();
@@ -3090,7 +3089,7 @@ mod tests {
         assert!(party_manager.dealer_outputs.contains_key(&dealer2_addr));
 
         // Complaint for dealer0 should still be present
-        assert!(party_manager.dealer_complaints.contains_key(&dealer0_addr));
+        assert!(party_manager.complaints.contains_key(&dealer0_addr));
     }
 
     #[tokio::test]
@@ -3896,7 +3895,7 @@ mod tests {
         complaint: complaint::Complaint,
     ) {
         party_manager
-            .dealer_complaints
+            .complaints
             .insert(dealer_address.clone(), complaint);
         party_manager
             .dealer_messages
