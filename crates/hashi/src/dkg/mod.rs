@@ -451,9 +451,11 @@ impl DkgManager {
             complaint: complaint.clone(),
         };
         let mut responses = Vec::new();
+        // TODO: Only need to collect t valid responses
         for signer in signers {
             // TODO: Add timeout and retries handling when adding RPC layer
             let response = p2p_channel.complain(signer, &complaint_request).await?;
+            // TODO: Add cryptographic validation of response
             responses.push(response.response);
         }
         let dealer_session_id = self.session_context.dealer_session_id(dealer);
