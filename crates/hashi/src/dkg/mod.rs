@@ -121,6 +121,7 @@ impl DkgManager {
         })
     }
 
+    // TODO: Add functional tests for the entire complaining flow
     /// RPC endpoint handler for `ComplainRequest`
     pub fn handle_complain_request(
         &self,
