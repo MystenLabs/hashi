@@ -4140,7 +4140,7 @@ mod tests {
             config.max_faulty,
             dealer_session_id.to_vec(),
         )
-            .unwrap();
+        .unwrap();
         let template_message = dealer.create_message(rng).unwrap();
 
         // Serialize our corrupted components to construct the Message
