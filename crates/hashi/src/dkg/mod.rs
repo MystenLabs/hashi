@@ -298,6 +298,11 @@ impl DkgManager {
         message: &avss::Message,
         dealer_address: ValidatorAddress,
     ) -> DkgResult<ValidatorSignature> {
+        self.dealer_messages
+            .insert(dealer_address.clone(), message.clone());
+        self.public_messages_store
+            .store_dealer_message(&dealer_address, message)
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
         let dealer_session_id = self.session_context.dealer_session_id(&dealer_address);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
@@ -318,11 +323,6 @@ impl DkgManager {
         };
         self.dealer_outputs
             .insert(dealer_address.clone(), receiver_output);
-        self.dealer_messages
-            .insert(dealer_address.clone(), message.clone());
-        self.public_messages_store
-            .store_dealer_message(&dealer_address, message)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(&message_hash);
         Ok(ValidatorSignature {
@@ -473,6 +473,7 @@ impl DkgManager {
         let message = self.dealer_messages.get(dealer).unwrap();
         let receiver_output = receiver.recover(message, &responses)?;
         self.dealer_outputs.insert(dealer.clone(), receiver_output);
+        self.complaints.remove(dealer);
         Ok(())
     }
 }
@@ -3458,6 +3459,57 @@ mod tests {
             err
         );
         assert!(err.to_string().contains("Party"));
+    }
+
+    #[test]
+    fn test_receive_dealer_message_stores_message_even_on_complaint() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer message
+        let (dealer_addr, dealer_mgr) =
+            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer_message = dealer_mgr
+            .dealer_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
+
+        // Create party that will create a complaint (using wrong encryption key)
+        let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let mut party_manager = DkgManager::new(
+            ValidatorAddress([1; 32]),
+            config.clone(),
+            session_context.clone(),
+            wrong_key, // Wrong key causes complaint
+            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Process dealer message - should create complaint and return error
+        let result = party_manager.receive_dealer_message(&dealer_message, dealer_addr.clone());
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid message from dealer")
+        );
+
+        assert!(
+            party_manager.dealer_messages.contains_key(&dealer_addr),
+            "Dealer message should be stored even when complaint is created"
+        );
+        assert!(
+            party_manager.complaints.contains_key(&dealer_addr),
+            "Complaint should be stored"
+        );
+        assert!(
+            !party_manager.dealer_outputs.contains_key(&dealer_addr),
+            "Dealer output should NOT be stored when complaint is created"
+        );
     }
 
     #[tokio::test]
