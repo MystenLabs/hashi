@@ -249,7 +249,11 @@ impl DkgManager {
                     Ok(()) => {
                         if self.complaints.contains_key(&cert.dealer)
                             && let Err(e) = self
-                                .recover_shares_via_complaint(&cert.dealer, &cert, p2p_channel)
+                                .recover_shares_via_complaint(
+                                    &cert.dealer,
+                                    cert.signatures.iter().map(|s| &s.validator),
+                                    p2p_channel,
+                                )
                                 .await
                         {
                             tracing::info!(
@@ -442,7 +446,7 @@ impl DkgManager {
     async fn recover_shares_via_complaint(
         &mut self,
         dealer: &ValidatorAddress,
-        cert: &DkgCertificate,
+        signers: impl IntoIterator<Item = &ValidatorAddress>,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let complaint = self
@@ -455,11 +459,9 @@ impl DkgManager {
             complaint: complaint.clone(),
         };
         let mut responses = Vec::new();
-        for sig in &cert.signatures {
+        for signer in signers {
             // TODO: Add timeout and retries handling when adding RPC layer
-            let response = p2p_channel
-                .complain(&sig.validator, &complaint_request)
-                .await?;
+            let response = p2p_channel.complain(signer, &complaint_request).await?;
             responses.push(response.response);
         }
         let dealer_session_id = self.session_context.dealer_session_id(dealer);
@@ -3396,7 +3398,11 @@ mod tests {
 
         // Call recover_shares_via_complaint - should fail because no complaint exists
         let result = party_manager
-            .recover_shares_via_complaint(&dealer_addr, &cert, &mock_p2p)
+            .recover_shares_via_complaint(
+                &dealer_addr,
+                cert.signatures.iter().map(|s| &s.validator),
+                &mock_p2p,
+            )
             .await;
 
         assert!(result.is_err());
@@ -3449,7 +3455,11 @@ mod tests {
 
         // Call recover_shares_via_complaint - should fail because P2P call fails
         let result = party_manager
-            .recover_shares_via_complaint(&dealer_addr, &cert, &mock_p2p)
+            .recover_shares_via_complaint(
+                &dealer_addr,
+                cert.signatures.iter().map(|s| &s.validator),
+                &mock_p2p,
+            )
             .await;
 
         assert!(result.is_err());
