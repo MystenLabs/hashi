@@ -38,6 +38,8 @@ pub struct DkgManager {
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
     pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
     pub complaints: std::collections::HashMap<ValidatorAddress, complaint::Complaint>,
+    pub complaint_responses:
+        std::collections::HashMap<ValidatorAddress, complaint::ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
@@ -74,6 +76,7 @@ impl DkgManager {
             dealer_messages: std::collections::HashMap::new(),
             share_responses: std::collections::HashMap::new(),
             complaints: std::collections::HashMap::new(),
+            complaint_responses: std::collections::HashMap::new(),
             public_messages_store: public_message_store,
         }
     }
@@ -123,11 +126,16 @@ impl DkgManager {
 
     /// RPC endpoint handler for `ComplainRequest`
     pub fn handle_complain_request(
-        &self,
+        &mut self,
         request: &ComplainRequest,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<ComplainResponse> {
-        // TODO: Cache response to prevent DoS attacks
+        let cache_key = request.dealer.clone();
+        if let Some(cached_response) = self.complaint_responses.get(&cache_key) {
+            return Ok(ComplainResponse {
+                response: cached_response.clone(),
+            });
+        }
         let message = self
             .dealer_messages
             .get(&request.dealer)
@@ -145,6 +153,7 @@ impl DkgManager {
             self.encryption_key.clone(),
         );
         let response = receiver.handle_complaint(message, &request.complaint, rng)?;
+        self.complaint_responses.insert(cache_key, response.clone());
         Ok(ComplainResponse { response })
     }
 
@@ -434,7 +443,6 @@ impl DkgManager {
         ))
     }
 
-    // TODO: Add functional tests for the entire complaining flow
     async fn recover_shares_via_complaint(
         &mut self,
         dealer: &ValidatorAddress,
@@ -596,9 +604,14 @@ fn compute_message_hash(
 mod tests {
     use super::*;
     use crate::dkg::types::ProtocolType;
-    use fastcrypto_tbls::ecies_v1::PublicKey;
+    use fastcrypto::encoding::{Encoding, Hex};
+    use fastcrypto::groups::Scalar;
+    use fastcrypto_tbls::ecies_v1::{MultiRecipientEncryption, PublicKey};
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
+    use fastcrypto_tbls::polynomial::Poly;
+    use fastcrypto_tbls::random_oracle::RandomOracle;
+    use fastcrypto_tbls::threshold_schnorr::avss;
 
     struct MockPublicMessagesStore;
 
@@ -748,8 +761,8 @@ mod tests {
             party: &ValidatorAddress,
             request: &ComplainRequest,
         ) -> crate::communication::ChannelResult<ComplainResponse> {
-            let managers = self.managers.lock().unwrap();
-            let manager = managers.get(party).ok_or_else(|| {
+            let mut managers = self.managers.lock().unwrap();
+            let manager = managers.get_mut(party).ok_or_else(|| {
                 crate::communication::ChannelError::SendFailed(format!(
                     "Party {:?} not found",
                     party
@@ -3286,7 +3299,7 @@ mod tests {
         );
 
         // Create manager (party 1) without any dealer messages
-        let manager = DkgManager::new(
+        let mut manager = DkgManager::new(
             ValidatorAddress([1; 32]),
             config.clone(),
             session_context.clone(),
@@ -3348,6 +3361,170 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, DkgError::ProtocolFailed(_)));
         assert!(err.to_string().contains("No shares for dealer"));
+    }
+
+    #[test]
+    fn test_handle_complain_request_caches_response() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer (party 0)
+        let (dealer_addr, _dealer_manager) =
+            create_manager_at_index(0, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Create a cheating dealer message with corrupted shares for party 1
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_context,
+            1, // Corrupt shares for party 1
+            &mut rng,
+        );
+
+        // Party 1 processes the corrupted message and gets a complaint
+        let dealer_session_id = session_context.dealer_session_id(&dealer_addr);
+        let receiver1 = avss::Receiver::new(
+            config.nodes.clone(),
+            1,
+            config.threshold,
+            dealer_session_id.to_vec(),
+            None,
+            encryption_keys[1].clone(),
+        );
+
+        let result = receiver1.process_message(&cheating_message);
+        let complaint = match result {
+            Ok(avss::ProcessedMessage::Complaint(c)) => c,
+            Ok(_) => panic!("Expected complaint but got valid shares"),
+            Err(e) => panic!("Processing failed with error: {:?}", e),
+        };
+
+        // Party 2 processes the SAME cheating message
+        // Party 2's shares are valid (not corrupted) so it gets valid output
+        let (_party2_addr, mut party2_manager) =
+            create_manager_at_index(2, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Set up party 2 with the cheating message
+        party2_manager
+            .receive_dealer_message(&cheating_message, dealer_addr.clone())
+            .unwrap();
+
+        let request = ComplainRequest {
+            dealer: dealer_addr.clone(),
+            complaint: complaint.clone(),
+        };
+
+        // First call - should compute and cache
+        let response1 = party2_manager
+            .handle_complain_request(&request, &mut rng)
+            .unwrap();
+
+        // Verify cache contains the response
+        assert_eq!(party2_manager.complaint_responses.len(), 1);
+        assert!(
+            party2_manager
+                .complaint_responses
+                .contains_key(&dealer_addr)
+        );
+
+        // Second call - should return cached response
+        let response2 = party2_manager
+            .handle_complain_request(&request, &mut rng)
+            .unwrap();
+
+        // Verify responses are identical
+        assert_eq!(
+            bcs::to_bytes(&response1.response).unwrap(),
+            bcs::to_bytes(&response2.response).unwrap(),
+            "Second call should return cached response"
+        );
+
+        // Cache size should still be 1
+        assert_eq!(party2_manager.complaint_responses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_recover_shares_via_complaint_succeeds() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer (party 0)
+        let (dealer_addr, _dealer_manager) =
+            create_manager_at_index(0, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Create a cheating dealer message with corrupted shares for party 1
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_context,
+            1, // Corrupt shares for party 1
+            &mut rng,
+        );
+
+        // Party 1 receives the corrupted message and creates a complaint
+        let (party1_addr, mut party1_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+
+        let result = party1_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        assert!(result.is_err(), "Should fail due to corrupted shares");
+
+        // Verify party 1 has a complaint stored
+        assert!(party1_manager.complaints.contains_key(&dealer_addr));
+
+        // Other parties (2, 3, 4) receive the same message and get valid shares
+        let mut other_managers = vec![];
+        for party_id in 2..5 {
+            let (addr, mut mgr) = create_manager_at_index(
+                party_id,
+                &config,
+                &session_context,
+                &encryption_keys,
+                &mut rng,
+            );
+            mgr.receive_dealer_message(&cheating_message, dealer_addr.clone())
+                .unwrap();
+            other_managers.push((addr, mgr));
+        }
+
+        // Create a certificate with the parties that have valid shares as signers
+        let signer_addresses: Vec<_> = other_managers
+            .iter()
+            .map(|(addr, _)| addr.clone())
+            .collect();
+        let cert = create_certificate_with_signers(
+            &dealer_addr,
+            &cheating_message,
+            &session_context,
+            signer_addresses.clone(),
+        );
+
+        // Create mock P2P channel with the other parties
+        let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
+        let mock_p2p = MockP2PChannel::new(managers_map, party1_addr.clone());
+
+        // Party 1 recovers shares via complaint
+        let result = party1_manager
+            .recover_shares_via_complaint(
+                &dealer_addr,
+                cert.signatures.iter().map(|s| &s.validator),
+                &mock_p2p,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Share recovery should succeed: {:?}",
+            result.err()
+        );
+
+        // Verify party 1 now has valid dealer output
+        assert!(party1_manager.dealer_outputs.contains_key(&dealer_addr));
+        assert!(
+            !party1_manager.complaints.contains_key(&dealer_addr),
+            "Complaint should be cleared after successful recovery"
+        );
     }
 
     #[tokio::test]
@@ -3906,6 +4083,76 @@ mod tests {
             avss::ProcessedMessage::Complaint(c) => c,
             _ => panic!("Expected complaint with wrong key"),
         }
+    }
+
+    /// Create a cheating dealer message with corrupted shares for one party.
+    fn create_cheating_message(
+        dealer_address: &ValidatorAddress,
+        config: &DkgConfig,
+        session_context: &SessionContext,
+        corrupt_party_id: u16,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> avss::Message {
+        use fastcrypto::groups::secp256k1::ProjectivePoint;
+        type S = <ProjectivePoint as fastcrypto::groups::GroupElement>::ScalarType;
+
+        let dealer_session_id = session_context.dealer_session_id(dealer_address);
+
+        // Create polynomial
+        let secret = S::rand(rng);
+        let polynomial = Poly::<S>::rand_fixed_c0(config.threshold - 1, secret, rng);
+        let commitment = polynomial.commit::<ProjectivePoint>();
+
+        // Evaluate and serialize shares for each node
+        let mut pk_and_msgs: Vec<_> = config
+            .nodes
+            .iter()
+            .map(|node| {
+                let share_ids = config.nodes.share_ids_of(node.id).unwrap();
+                let shares: Vec<_> = share_ids
+                    .into_iter()
+                    .map(|index| polynomial.eval(index))
+                    .collect();
+                let shares_bytes = bcs::to_bytes(&shares).unwrap();
+                (node.pk.clone(), shares_bytes)
+            })
+            .collect();
+
+        // Corrupt the plaintext shares for the target party
+        if corrupt_party_id < pk_and_msgs.len() as u16 {
+            let idx = corrupt_party_id as usize;
+            if pk_and_msgs[idx].1.len() > 7 {
+                pk_and_msgs[idx].1[7] ^= 1; // Flip one bit
+            }
+        }
+
+        // Encrypt the shares
+        let random_oracle =
+            RandomOracle::new(&Hex::encode(dealer_session_id.digest)).extend("encryption");
+        let corrupted_ciphertext =
+            MultiRecipientEncryption::encrypt(&pk_and_msgs, &random_oracle, rng);
+
+        // Create an honest message to use as a template
+        let dealer = avss::Dealer::new(
+            Some(secret), // Use same secret so commitment matches
+            config.nodes.clone(),
+            config.threshold,
+            config.max_faulty,
+            dealer_session_id.to_vec(),
+        )
+            .unwrap();
+        let template_message = dealer.create_message(rng).unwrap();
+
+        // Serialize our corrupted components to construct the Message
+        let ciphertext_bytes = bcs::to_bytes(&corrupted_ciphertext).unwrap();
+        let commitment_bytes = bcs::to_bytes(&commitment).unwrap();
+
+        // Manually construct the serialized Message (ciphertext, then commitment)
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&ciphertext_bytes);
+        combined.extend_from_slice(&commitment_bytes);
+
+        bcs::from_bytes::<avss::Message>(&combined).unwrap_or(template_message)
     }
 
     fn create_dealer_message_and_complaint(
