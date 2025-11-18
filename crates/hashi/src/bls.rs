@@ -136,7 +136,8 @@ impl BlsCommittee {
             .map(|index| self.members[index].public_key.clone())
             .collect::<Vec<_>>();
 
-        let message_bytes = bcs::to_bytes(&signature.message).map_err(SignatureError::from_source)?;
+        let message_bytes =
+            bcs::to_bytes(&signature.message).map_err(SignatureError::from_source)?;
         signature
             .signature
             .verify(&pks, &message_bytes)
@@ -307,8 +308,7 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
                 };
 
                 // Double check that the aggregated sig still verifies
-                self.committee
-                    .verify_signature(&aggregated_signature)?;
+                self.committee.verify_signature(&aggregated_signature)?;
 
                 Ok(aggregated_signature)
             }
@@ -459,10 +459,7 @@ mod test {
 
         // Aggregating with sufficient weight succeeds and verifies
         let signature = aggregator.finish().unwrap();
-        aggregator
-            .committee
-            .verify_signature(&signature)
-            .unwrap();
+        aggregator.committee.verify_signature(&signature).unwrap();
 
         committee
             .verify_signature_and_weight(&signature, 3)
@@ -477,10 +474,7 @@ mod test {
             .unwrap();
 
         let signature = aggregator.finish().unwrap();
-        aggregator
-            .committee
-            .verify_signature(&signature)
-            .unwrap();
+        aggregator.committee.verify_signature(&signature).unwrap();
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
     }
 }

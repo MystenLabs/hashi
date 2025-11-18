@@ -379,13 +379,13 @@ impl DkgManager {
         let outputs: HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
             .keys()
             .map(|dealer| {
-                let dealer_party_id = self
-                    .dkg_config
-                    .address_to_party_id
-                    .get(dealer)
-                    .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", dealer))
-                    })?;
+                let dealer_party_id =
+                    self.dkg_config
+                        .address_to_party_id
+                        .get(dealer)
+                        .ok_or_else(|| {
+                            DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", dealer))
+                        })?;
                 let output = self
                     .dealer_outputs
                     .get(dealer)
