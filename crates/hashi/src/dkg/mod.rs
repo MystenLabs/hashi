@@ -247,21 +247,13 @@ impl DkgManager {
                     &self.dealer_messages,
                 ) {
                     Ok(()) => {
-                        if self.complaints.contains_key(&cert.dealer)
-                            && let Err(e) = self
-                                .recover_shares_via_complaint(
-                                    &cert.dealer,
-                                    cert.signatures.iter().map(|s| &s.validator),
-                                    p2p_channel,
-                                )
-                                .await
-                        {
-                            tracing::info!(
-                                "Failed to recover shares for certified dealer {:?}: {}. Skipping.",
-                                cert.dealer,
-                                e
-                            );
-                            continue;
+                        if self.complaints.contains_key(&cert.dealer) {
+                            self.recover_shares_via_complaint(
+                                &cert.dealer,
+                                cert.signatures.iter().map(|s| &s.validator),
+                                p2p_channel,
+                            )
+                            .await?;
                         }
                         let dealer_weight =
                             self.validator_weights.get(&cert.dealer).ok_or_else(|| {
@@ -474,7 +466,11 @@ impl DkgManager {
             self.encryption_key.clone(),
         );
         let message = self.dealer_messages.get(dealer).unwrap();
-        let receiver_output = receiver.recover(message, &responses)?;
+        let receiver_output = receiver.recover(message, &responses).map_err(|e| {
+            let error_msg = format!("Share recovery failed for dealer {:?}: {}", dealer, e);
+            tracing::error!("{}", error_msg);
+            DkgError::ProtocolFailed(error_msg)
+        })?;
         self.dealer_outputs.insert(dealer.clone(), receiver_output);
         self.complaints.remove(dealer);
         Ok(())
@@ -2974,14 +2970,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_as_party_continues_after_failed_recovery() {
-        // Tests that when complaint recovery fails for one dealer,
-        // run_as_party continues processing other certificates and succeeds overall
+    async fn test_run_as_party_aborts_on_failed_recovery() {
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
-        // Create dealer 0 with a message - this one will have a failed recovery
+        // Create dealer 0 with a message - recovery will fail
         let (dealer0_addr, dealer0_mgr) =
             create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
         let dealer0_message = dealer0_mgr
@@ -2990,7 +2984,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        // Create dealers 1 and 2 - these will be processed successfully
+        // Create dealer 1 - would be processed if we continued
         let (dealer1_addr, dealer1_mgr) =
             create_dealer_with_message(1, &config, &session_context, &encryption_keys, &mut rng);
         let dealer1_message = dealer1_mgr
@@ -2999,15 +2993,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        let (dealer2_addr, dealer2_mgr) =
-            create_dealer_with_message(2, &config, &session_context, &encryption_keys, &mut rng);
-        let dealer2_message = dealer2_mgr
-            .dealer_messages
-            .get(&dealer2_addr)
-            .unwrap()
-            .clone();
-
-        // Create party manager (validator 4) - not one of the dealers
+        // Create party manager (validator 4)
         let (party_addr, mut party_manager) =
             create_manager_at_index(4, &config, &session_context, &encryption_keys, &mut rng);
 
@@ -3027,15 +3013,7 @@ mod tests {
             complaint,
         );
 
-        // Party successfully processes dealers 1 and 2
-        party_manager
-            .receive_dealer_message(&dealer1_message, dealer1_addr.clone())
-            .unwrap();
-        party_manager
-            .receive_dealer_message(&dealer2_message, dealer2_addr.clone())
-            .unwrap();
-
-        // Create certificates for all three dealers (all with sufficient signatures)
+        // Create certificates
         let cert0 = create_certificate_with_signers(
             &dealer0_addr,
             &dealer0_message,
@@ -3056,44 +3034,43 @@ mod tests {
                 ValidatorAddress([3; 32]),
             ],
         );
-        let cert2 = create_certificate_with_signers(
-            &dealer2_addr,
-            &dealer2_message,
-            &session_context,
-            vec![
-                ValidatorAddress([2; 32]),
-                ValidatorAddress([3; 32]),
-                ValidatorAddress([4; 32]),
-            ],
-        );
 
-        // Create mock P2P with no responders (so recovery for dealer0 will fail)
+        // Create mock P2P with no responders (recovery will fail)
         let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr.clone());
 
-        // Create mock TOB with all three certificates
-        // Threshold is 2, so after skipping dealer0, dealers 1 and 2 should be enough
-        let certificates = vec![cert0, cert1, cert2];
+        // Create mock TOB with both certificates
+        let certificates = vec![cert0, cert1];
         let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
-        // Run as party - should skip dealer0 but process dealer1 and dealer2
+        // Run as party - should ABORT on dealer0 recovery failure
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
 
-        // Should succeed despite dealer0 recovery failure
-        assert!(result.is_ok(), "Expected success, got: {:?}", result.err());
-        let output = result.unwrap();
+        // Should fail with BroadcastError (P2P call failed)
+        assert!(result.is_err(), "Expected error, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DkgError::BroadcastError(_)),
+            "Expected BroadcastError, got: {:?}",
+            err
+        );
 
-        // Verify output contains shares from dealers 1 and 2 (threshold=2, so we need 2 dealers)
-        assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
+        // Verify dealer1 was NOT processed (aborted before reaching it)
+        assert!(
+            !party_manager.dealer_outputs.contains_key(&dealer1_addr),
+            "Dealer1 should NOT be processed - aborted before reaching it"
+        );
 
-        // Dealer0 should NOT be in dealer_outputs (recovery failed, skipped)
-        assert!(!party_manager.dealer_outputs.contains_key(&dealer0_addr));
+        // Dealer0 should NOT be in dealer_outputs (recovery failed, DKG aborted)
+        assert!(
+            !party_manager.dealer_outputs.contains_key(&dealer0_addr),
+            "Dealer0 should NOT have output - recovery failed and aborted"
+        );
 
-        // Dealers 1 and 2 should be in dealer_outputs
-        assert!(party_manager.dealer_outputs.contains_key(&dealer1_addr));
-        assert!(party_manager.dealer_outputs.contains_key(&dealer2_addr));
-
-        // Complaint for dealer0 should still be present
-        assert!(party_manager.complaints.contains_key(&dealer0_addr));
+        // Complaint for dealer0 should still be present (wasn't removed due to failure)
+        assert!(
+            party_manager.complaints.contains_key(&dealer0_addr),
+            "Complaint should remain after recovery failure"
+        );
     }
 
     #[tokio::test]
