@@ -374,7 +374,7 @@ mod tests {
     ) -> (Address, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
-        let address = Address([party_id as u8; 32]);
+        let address = Address::new([party_id as u8; 32]);
         let node = Node {
             id: party_id,
             pk: public_key,

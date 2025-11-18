@@ -128,7 +128,6 @@ impl BlsCommittee {
     /// function.
     pub fn verify_signature<T: Serialize>(
         &self,
-        message: &T,
         signature: &CommitteeSignature<T>,
     ) -> Result<(), SignatureError> {
         let pks = signature
@@ -137,7 +136,7 @@ impl BlsCommittee {
             .map(|index| self.members[index].public_key.clone())
             .collect::<Vec<_>>();
 
-        let message_bytes = bcs::to_bytes(message).map_err(SignatureError::from_source)?;
+        let message_bytes = bcs::to_bytes(&signature.message).map_err(SignatureError::from_source)?;
         signature
             .signature
             .verify(&pks, &message_bytes)
@@ -147,7 +146,6 @@ impl BlsCommittee {
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
     pub fn verify_signature_and_weight<T: Serialize>(
         &self,
-        message: &T,
         signature: &CommitteeSignature<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
@@ -158,7 +156,7 @@ impl BlsCommittee {
                 signed_weight, required_weight,
             )));
         }
-        self.verify_signature(message, signature)
+        self.verify_signature(signature)
     }
 
     /// The number of members of this committee.
@@ -310,7 +308,7 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
 
                 // Double check that the aggregated sig still verifies
                 self.committee
-                    .verify_signature(&self.message, &aggregated_signature)?;
+                    .verify_signature(&aggregated_signature)?;
 
                 Ok(aggregated_signature)
             }
@@ -463,14 +461,14 @@ mod test {
         let signature = aggregator.finish().unwrap();
         aggregator
             .committee
-            .verify_signature(&message, &signature)
+            .verify_signature(&signature)
             .unwrap();
 
         committee
-            .verify_signature_and_weight(&message, &signature, 3)
+            .verify_signature_and_weight(&signature, 3)
             .unwrap();
         committee
-            .verify_signature_and_weight(&message, &signature, 2)
+            .verify_signature_and_weight(&signature, 2)
             .unwrap_err();
 
         // We can add the last sig and still be successful
@@ -481,7 +479,7 @@ mod test {
         let signature = aggregator.finish().unwrap();
         aggregator
             .committee
-            .verify_signature(&message, &signature)
+            .verify_signature(&signature)
             .unwrap();
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
     }

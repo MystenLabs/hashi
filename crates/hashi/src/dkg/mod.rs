@@ -177,13 +177,13 @@ impl DkgManager {
     ) -> DkgResult<()> {
         // TODO: Return early if DKG is already completed (we're a slow dealer)
         let dealer_message = self.create_dealer_message(rng)?;
-        let my_signature = self.receive_dealer_message(&dealer_message, self.address.clone())?;
+        let my_signature = self.receive_dealer_message(&dealer_message, self.address)?;
         let message_hash =
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
         let mut aggregator = BLSSignatureAggregator::new(
             &self.bls_committee,
             DkgMessage {
-                dealer_address: self.address.clone(),
+                dealer_address: self.address,
                 session_context: self.session_context.clone(),
                 message_hash,
             },
@@ -224,10 +224,9 @@ impl DkgManager {
 
         let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
-            let signature = aggregator.finish().map_err(|e| {
+            let cert = aggregator.finish().map_err(|e| {
                 DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
             })?;
-            let cert = DkgCertificate { signature };
             // TODO: Add timeout and retries handling when adding RPC layer
             ordered_broadcast_channel
                 .publish(OrderedBroadcastMessage::AvssCertificateV1(cert))
@@ -292,7 +291,7 @@ impl DkgManager {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
                         dealer_weight_sum += *dealer_weight as u32;
-                        certified_dealers.insert(&dealer.clone(), cert);
+                        certified_dealers.insert(dealer.clone(), cert);
                     }
                     Err(e) => {
                         tracing::info!("Invalid certificate from {:?}: {}", &dealer, e);
@@ -349,7 +348,12 @@ impl DkgManager {
             }
         };
         self.dealer_outputs
-            .insert(dealer_address.clone(), receiver_output);
+            .insert(dealer_address, receiver_output);
+        self.dealer_messages
+            .insert(dealer_address.clone(), message.clone());
+        self.public_messages_store
+            .store_dealer_message(&dealer_address, message)
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
         let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
@@ -361,7 +365,7 @@ impl DkgManager {
             },
         );
         Ok(ValidatorSignature {
-            validator: self.address.clone(),
+            validator: self.address,
             signature,
         })
     }
@@ -373,22 +377,22 @@ impl DkgManager {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
         let outputs: HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
-            .values()
-            .map(|cert| {
+            .keys()
+            .map(|dealer| {
                 let dealer_party_id = self
                     .dkg_config
                     .address_to_party_id
-                    .get(&cert.dealer())
+                    .get(dealer)
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", cert.dealer()))
+                        DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", dealer))
                     })?;
                 let output = self
                     .dealer_outputs
-                    .get(&cert.dealer())
+                    .get(dealer)
                     .ok_or_else(|| {
                         DkgError::ProtocolFailed(format!(
                             "No dealer output found for dealer: {:?}.",
-                            cert.dealer()
+                            dealer
                         ))
                     })?
                     .clone();
@@ -413,7 +417,7 @@ impl DkgManager {
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
-            dealer: dealer_address.clone(),
+            dealer: dealer_address,
         };
         // TODO: Implement gradual escalation strategy for better network efficiency:
         // - Round 1: Call 1-2 random signers, wait ~2s
@@ -519,17 +523,18 @@ impl DkgManager {
     }
 
     fn validate_message_hash(&self, cert: &CommitteeSignature<DkgMessage>) -> DkgResult<()> {
-        let message = self.dealer_messages.get(&cert.dealer()).ok_or_else(|| {
+        let dealer = cert.message.dealer_address;
+        let message = self.dealer_messages.get(&dealer).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
                 "Dealer message not yet received from {:?}",
-                cert.dealer()
+                dealer
             ))
         })?;
-        let expected_hash = compute_message_hash(&self.session_context, cert.dealer(), message)?;
-        if cert.message_hash() != &expected_hash {
+        let expected_hash = compute_message_hash(&self.session_context, &dealer, message)?;
+        if cert.message.message_hash != expected_hash {
             return Err(DkgError::InvalidCertificate(format!(
                 "Message hash mismatch for dealer {:?}",
-                cert.dealer()
+                dealer
             )));
         }
         Ok(())
@@ -538,7 +543,7 @@ impl DkgManager {
     fn validate_certificate(&self, cert: &CommitteeSignature<DkgMessage>) -> DkgResult<()> {
         self.validate_message_hash(cert)?;
         self.bls_committee
-            .verify_signature(&cert.signature.message, &cert.signature)
+            .verify_signature(cert)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
     }
 }
