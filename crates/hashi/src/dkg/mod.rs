@@ -121,7 +121,6 @@ impl DkgManager {
         })
     }
 
-    // TODO: Add functional tests for the entire complaining flow
     /// RPC endpoint handler for `ComplainRequest`
     pub fn handle_complain_request(
         &self,
@@ -439,6 +438,7 @@ impl DkgManager {
         ))
     }
 
+    // TODO: Add functional tests for the entire complaining flow
     async fn recover_shares_via_complaint(
         &mut self,
         dealer: &ValidatorAddress,
