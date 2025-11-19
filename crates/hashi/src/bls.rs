@@ -73,7 +73,7 @@ pub struct MemberSignature {
 
 impl BlsCommittee {
     pub fn new(members: Vec<BlsCommitteeMember>, epoch: u64) -> Self {
-        let total_weight = members.iter().map(|member| member.weight as u64).sum();
+        let total_weight = members.iter().map(|member| member.weight).sum();
         let address_to_index = members
             .iter()
             .enumerate()
@@ -150,7 +150,7 @@ impl BlsCommittee {
         signature: &CommitteeSignature<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
-        let signed_weight = signature.weight(&self)?;
+        let signed_weight = signature.weight(self)?;
         if signed_weight < required_weight {
             return Err(SignatureError::from_source(format!(
                 "insufficient signing weight {}; required weight threshold is {}",
@@ -264,7 +264,7 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
                 .map_err(SignatureError::from_source)?,
         }
 
-        self.signed_weight += self.committee.members[*index].weight as u64;
+        self.signed_weight += self.committee.members[*index].weight;
         Ok(())
     }
 
@@ -333,7 +333,7 @@ impl BitMap {
     /// Set the given index in the bitmap and return the previous value.
     /// If an index larger than the committee size is given, nothing is changed and `false` is returned.
     fn insert(&mut self, b: usize) -> Result<bool, SignatureError> {
-        if b >= self.size as usize {
+        if b >= self.size {
             return Err(SignatureError::from_source(
                 "index larger than committee size ({b} >= {self.committee_size})",
             ));

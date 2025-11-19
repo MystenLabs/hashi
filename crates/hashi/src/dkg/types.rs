@@ -273,6 +273,7 @@ pub struct Authenticated<T> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum OrderedBroadcastMessage {
     AvssCertificateV1(CommitteeSignature<DkgMessage>),
     PresignatureV1 {

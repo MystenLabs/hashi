@@ -70,7 +70,7 @@ impl DkgManager {
             .iter()
             .map(|(addr, party_id)| {
                 let weight = dkg_config.nodes.weight_of(*party_id).unwrap();
-                (addr.clone(), weight)
+                (addr, weight)
             })
             .collect();
         let bls_committee = create_bls_committee(&dkg_config, &bls_public_keys);
@@ -107,12 +107,12 @@ impl DkgManager {
                 Ok(self.share_responses.get(&sender).unwrap().clone())
             } else {
                 Err(DkgError::InvalidMessage {
-                    sender: sender.clone(),
+                    sender,
                     reason: "Dealer sent different messages".to_string(),
                 })
             };
         }
-        let signature = self.receive_dealer_message(&request.message, sender.clone())?;
+        let signature = self.receive_dealer_message(&request.message, sender)?;
         let response = SendShareResponse { signature };
         self.share_responses.insert(sender, response.clone());
         Ok(response)
@@ -291,7 +291,7 @@ impl DkgManager {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
                         dealer_weight_sum += *dealer_weight as u32;
-                        certified_dealers.insert(dealer.clone(), cert);
+                        certified_dealers.insert(dealer, cert);
                     }
                     Err(e) => {
                         tracing::info!("Invalid certificate from {:?}: {}", &dealer, e);
@@ -429,8 +429,7 @@ impl DkgManager {
             )
         })?;
         for signer_address in signers {
-            let signer_address = &signer_address.into();
-            if signer_address == &self.address {
+            if signer_address == self.address {
                 tracing::error!(
                     "Self in certificate signers but message not available for dealer {:?}.",
                     dealer_address
