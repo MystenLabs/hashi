@@ -2493,8 +2493,7 @@ dependencies = [
  "fastcrypto 0.1.9 (git+https://github.com/MystenLabs/fastcrypto?rev=e4127630173582f164c1eb704a5bc3d6eacb0d27)",
  "hashi-guardian-shared",
  "hpke",
- "log",
- "p256 0.13.2",
+ "k256",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
@@ -2664,15 +2663,15 @@ dependencies = [
 name = "hashi-guardian-shared"
 version = "0.1.0"
 dependencies = [
- "aws-sdk-s3",
+ "axum 0.7.9",
  "bincode",
- "bitcoin",
  "fastcrypto 0.1.9 (git+https://github.com/MystenLabs/fastcrypto?rev=e4127630173582f164c1eb704a5bc3d6eacb0d27)",
  "hpke",
- "p256 0.13.2",
+ "k256",
  "rand 0.8.5",
- "rand_core 0.6.4",
  "serde",
+ "serde_json",
+ "tracing",
  "vsss-rs",
 ]
 
@@ -3210,7 +3209,9 @@ dependencies = [
  "cfg-if",
  "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
+ "once_cell",
  "sha2 0.10.9",
+ "signature 2.2.0",
 ]
 
 [[package]]

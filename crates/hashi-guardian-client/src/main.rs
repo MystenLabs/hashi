@@ -1,10 +1,6 @@
 use anyhow::{Context, Result};
-use hashi_guardian_shared::{
-    EncPubKey, EncSecKey, EncryptedShare, GetAttestationResponse, HealthCheckResponse,
-    InitExternalRequest, InitExternalRequestState, InitInternalRequest, S3Config,
-    SetupNewKeyRequest, SetupNewKeyResponse, ShareCommitment, WithdrawConfig, SECRET_SHARING_N,
-    SECRET_SHARING_T,
-};
+use hashi_guardian_shared::*;
+use fastcrypto::hash::HashFunction;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use std::env;
@@ -412,13 +408,14 @@ async fn init_enclave(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<
 
         // Decrypt the share with KP's private key
         info!("   Decrypting share with KP private key...");
-        let serialized_share =
-            decrypt_share(encrypted_share, kp_sk).context("Failed to decrypt share with KP key")?;
+        let serialized_share = decrypt(encrypted_share.ciphertext(), kp_sk, None)
+            .map_err(|e| anyhow::anyhow!("Failed to decrypt share with KP key: {}", e))?;
 
         // Re-encrypt for the enclave's public key
         info!("   Re-encrypting share for enclave...");
-        let new_ciphertext = encrypt_share(&serialized_share, &enclave_encryption_key, &init_state)
-            .context("Failed to encrypt share for enclave")?;
+        let state_hash = fastcrypto::hash::Blake2b256::digest(&init_state);
+        let new_ciphertext = encrypt(&serialized_share, &enclave_encryption_key, Some(&state_hash.digest))
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt share for enclave: {}", e))?;
 
         let new_encrypted_share = EncryptedShare {
             id: *encrypted_share.id(),
@@ -483,55 +480,6 @@ async fn full_setup(base_url: &str, state: Arc<Mutex<ClientState>>, strict: bool
     Ok(())
 }
 
-// Helper functions for encryption/decryption
-use fastcrypto::hash::{Blake2b256, HashFunction};
-use hashi_guardian_shared::Ciphertext;
-use hpke::aead::AesGcm256;
-use hpke::kdf::HkdfSha384;
-
-fn decrypt_share(encrypted_share: &EncryptedShare, sk: &EncSecKey) -> Result<Vec<u8>> {
-    use hpke::Deserializable;
-    let (encapped_key, aes_ciphertext): (<X25519HkdfSha256 as Kem>::EncappedKey, &[u8]) =
-        encrypted_share
-            .ciphertext()
-            .try_into()
-            .map_err(|e: hpke::HpkeError| anyhow::anyhow!("Failed to parse ciphertext: {}", e))?;
-
-    let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
-        &hpke::OpModeR::Base,
-        sk,
-        &encapped_key,
-        &[],
-        aes_ciphertext,
-        &[0; 32],
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to decrypt share: {}", e))?;
-
-    Ok(decrypted)
-}
-
-fn encrypt_share(
-    bytes: &[u8],
-    pk: &EncPubKey,
-    state: &InitExternalRequestState,
-) -> Result<Ciphertext> {
-    let state_hash = Blake2b256::digest(state);
-    let mut rng = rand::thread_rng();
-
-    let (encapsulated_key, aes_ciphertext) =
-        hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
-            &hpke::OpModeS::Base,
-            pk,
-            &[],
-            bytes,
-            &state_hash.digest,
-            &mut rng,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to encrypt share: {}", e))?;
-
-    Ok((encapsulated_key, aes_ciphertext).into())
-}
-
 fn init_tracing_subscriber() {
     let subscriber = ::tracing_subscriber::FmtSubscriber::builder()
         .with_env_filter(
@@ -542,12 +490,4 @@ fn init_tracing_subscriber() {
         .finish();
     ::tracing::subscriber::set_global_default(subscriber)
         .expect("unable to initialize tracing subscriber");
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn dummy_test() {
-        assert_eq!(2 + 2, 4);
-    }
 }

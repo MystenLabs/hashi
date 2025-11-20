@@ -1,32 +1,31 @@
 use anyhow::Result;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::Router;
+use bitcoin::secp256k1::SecretKey;
 use fastcrypto::hash::Digest;
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
 use hashi_guardian_shared::{
-    EncKeyPair, HashiCommittee, MyShare, ShareCommitment, WithdrawConfig, WithdrawalState,
+    EncKeyPair, GuardianError, GuardianResult, HashiCommittee, MyShare, ShareCommitment,
+    WithdrawConfig, WithdrawalState,
 };
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
-use p256::elliptic_curve::SecretKey;
-use p256::NistP256;
-use serde_json::json;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
-use tracing::{error, info};
+use tracing::info;
 
 mod attestation;
 mod health_check;
 mod init;
 mod s3_logger;
+mod setup;
 
 use crate::attestation::get_attestation;
 use crate::health_check::health_check;
 use crate::s3_logger::S3Logger;
-use init::{init_enclave_external, init_enclave_internal, setup_new_key};
+use init::{init_enclave_external, init_enclave_internal};
+use setup::setup_new_key;
 
 /// Enclave's config & state
 pub struct Enclave {
@@ -45,7 +44,7 @@ pub struct EnclaveConfig {
     /// S3 client & config
     pub s3_logger: OnceLock<S3Logger>,
     /// Bitcoin private key
-    pub bitcoin_key: OnceLock<SecretKey<NistP256>>,
+    pub bitcoin_key: OnceLock<SecretKey>,
     /// Rate limiter for withdrawals
     pub withdraw_controls_config: OnceLock<WithdrawConfig>,
 }
@@ -73,16 +72,6 @@ pub struct EphemeralKeyPairs {
     pub signing_keys: Ed25519KeyPair,
     pub encryption_keys: EncKeyPair,
 }
-
-/// Enclave errors.
-#[derive(Debug, PartialEq)]
-pub enum GuardianError {
-    GenericError(String), // TODO: Add other error types
-    EnclaveAlreadyInitialized,
-    Forbidden(String),
-}
-
-pub type GuardianResult<T> = Result<T, GuardianError>;
 
 async fn ping() -> &'static str {
     info!("🏓 /ping - Received request");
@@ -156,25 +145,6 @@ impl Enclave {
     }
 }
 
-/// Implement IntoResponse for EnclaveError.
-impl IntoResponse for GuardianError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            GuardianError::GenericError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            GuardianError::EnclaveAlreadyInitialized => (
-                StatusCode::BAD_REQUEST,
-                "Enclave is already initialized!".into(),
-            ),
-            GuardianError::Forbidden(e) => (StatusCode::FORBIDDEN, e),
-        };
-        error!("Status: {}, Message: {}", status, error_message);
-        let body = Json(json!({
-            "error": error_message,
-        }));
-        (status, body).into_response()
-    }
-}
-
 impl Enclave {
     pub fn is_init_external(&self) -> bool {
         self.config.bitcoin_key.get().is_some()
@@ -193,11 +163,6 @@ impl Enclave {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn dummy_test() {
-        assert_eq!(2 + 2, 4);
-    }
-
     // https://github.com/rozbb/rust-hpke/tree/main
     // Note: using hpke
     use hpke::aead::AesGcm256;
@@ -239,19 +204,19 @@ mod tests {
     }
 
     use elliptic_curve::ff::PrimeField;
-    use p256::{NonZeroScalar, Scalar, SecretKey};
+    use k256::{NonZeroScalar, Scalar, SecretKey};
     use shamir::split_secret;
     use vsss_rs::{shamir, *};
 
     #[test]
     fn secret_sharing() {
-        type P256Share = DefaultShare<IdentifierPrimeField<Scalar>, IdentifierPrimeField<Scalar>>;
+        type K256Share = DefaultShare<IdentifierPrimeField<Scalar>, IdentifierPrimeField<Scalar>>;
 
         let mut osrng = rand_core::OsRng::default();
         let sk = SecretKey::random(&mut osrng);
         let nzs = sk.to_nonzero_scalar();
         let shared_secret = IdentifierPrimeField(*nzs.as_ref());
-        let res = split_secret::<P256Share>(2, 3, &shared_secret, &mut osrng);
+        let res = split_secret::<K256Share>(2, 3, &shared_secret, &mut osrng);
         assert!(res.is_ok());
         let shares = res.unwrap();
         println!("{:?}", shares);
@@ -261,5 +226,42 @@ mod tests {
         let nzs_dup = NonZeroScalar::from_repr(scalar.0.to_repr()).unwrap();
         let sk_dup = SecretKey::from(nzs_dup);
         assert_eq!(sk_dup.to_bytes(), sk.to_bytes());
+    }
+
+    use bitcoin::secp256k1::{Message, Secp256k1};
+
+    #[test]
+    fn test_libs_compat() {
+        let msg = [7u8; 32];
+        let mut osrng = rand_core::OsRng::default();
+        let sk1 = k256::SecretKey::random(&mut osrng);
+        let sk1_bytes = sk1.to_bytes();
+
+        let secp = Secp256k1::new();
+        let sk2 = bitcoin::secp256k1::SecretKey::from_slice(&sk1_bytes).unwrap();
+        let sk2_bytes = sk2.secret_bytes();
+
+        let sk1_dup = k256::SecretKey::from_slice(&sk2_bytes).unwrap();
+        assert_eq!(sk1_dup, sk1);
+
+        // secp signing
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk2);
+        let bytes = [2u8; 32];
+        let msg_dup = Message::from_digest(msg);
+        let signature = secp.sign_schnorr_with_aux_rand(&msg_dup, &keypair, &bytes);
+        let xonly_pubkey = bitcoin::XOnlyPublicKey::from_keypair(&keypair).0;
+        secp.verify_schnorr(&signature, &msg_dup, &xonly_pubkey)
+            .unwrap();
+
+        // k256 Schnorr signing
+        let k256_schnorr_key = k256::schnorr::SigningKey::from_bytes(&sk1_bytes).unwrap();
+        let k256_schnorr_sig = k256_schnorr_key.sign_raw(&msg, &bytes).unwrap();
+        assert_eq!(signature.serialize(), k256_schnorr_sig.to_bytes());
+
+        // Verify with k256 Schnorr
+        let k256_schnorr_vkey = k256_schnorr_key.verifying_key();
+        k256_schnorr_vkey
+            .verify_raw(&msg, &k256_schnorr_sig)
+            .unwrap();
     }
 }

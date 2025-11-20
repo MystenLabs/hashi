@@ -1,21 +1,17 @@
 use crate::s3_logger::test_s3_connectivity;
-use crate::{Enclave, GuardianError, GuardianResult, S3Logger};
+use crate::{Enclave, S3Logger};
 use axum::extract::State;
 use axum::Json;
+use bitcoin::secp256k1::SecretKey;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use hashi_guardian_shared::{
-    Ciphertext, EncPubKey, EncSecKey, InitExternalRequest, InitInternalRequest, MyShare,
-    SetupNewKeyRequest, SetupNewKeyResponse, ShareCommitment, ShareValue, SECRET_SHARING_N,
-    SECRET_SHARING_T,
+    decrypt, GuardianError, GuardianResult, InitExternalRequest, InitExternalRequestState,
+    InitInternalRequest, MyShare, ShareCommitment, ShareValue, SECRET_SHARING_T,
 };
-use hpke::aead::AesGcm256;
-use hpke::kdf::HkdfSha384;
-use hpke::kem::X25519HkdfSha256;
-use p256::elliptic_curve::PrimeField;
-use p256::{NonZeroScalar, SecretKey};
+use k256::elliptic_curve::PrimeField;
 use std::sync::Arc;
 use tracing::{error, info};
-use vsss_rs::{shamir, DefaultShare, IdentifierPrimeField, ReadableShareSet, Share};
+use vsss_rs::{DefaultShare, ReadableShareSet, Share};
 use GuardianError::*;
 
 // TODO: Add some kind of authentication, e.g., an API key or token
@@ -68,7 +64,7 @@ pub async fn init_enclave_external(
     // TODO: Replace with is_fully_initialized?
     if enclave.is_init_external() {
         info!("Enclave initialization already complete!");
-        return Err(GuardianError::EnclaveAlreadyInitialized);
+        return Err(EnclaveAlreadyInitialized);
     }
 
     let sk = enclave.config.eph_keys.encryption_keys.secret();
@@ -133,46 +129,57 @@ pub async fn init_enclave_external(
 
     // 5) If we have enough shares, finish initialization: combine shares & set config.
     if current_share_count >= SECRET_SHARING_T as usize {
-        info!("🎉 Threshold reached! Combining shares...");
-        // Yay, set everything now!
         let vec: Vec<MyShare> = received_shares.iter().cloned().collect::<Vec<_>>();
-        let result = vec
-            .combine()
-            .map_err(|e| GenericError(format!("Failed to combine share: {}", e)))?;
-        info!("✅ Shares combined successfully");
-
-        let nzs = NonZeroScalar::from_repr(result.0.to_repr())
-            .into_option()
-            .ok_or_else(|| GenericError("Failed to deserialize field element".to_string()))?;
-        let sk = SecretKey::from(nzs);
-
-        info!("🔑 Setting Bitcoin private key...");
-        if enclave.config.bitcoin_key.set(sk).is_err() {
-            return Err(GenericError("Bitcoin key already set".into()));
-        }
-        info!("✅ Bitcoin key set");
-
-        info!("⚙️  Setting withdrawal controls...");
-        if enclave
-            .config
-            .withdraw_controls_config
-            .set(request.state.withdraw_config)
-            .is_err()
-        {
-            return Err(GenericError("WithdrawControlsConfig already set".into()));
-        }
-
-        info!("💾 Setting enclave state...");
-        let mut state = enclave
-            .state
-            .lock()
-            .map_err(|e| GenericError(format!("Failed to acquire lock on state: {}", e)))?;
-        state.hashi_committee_info = request.state.hashi_committee_info;
-        state.withdraw_state = request.state.withdraw_state;
-
-        info!("🎊 ENCLAVE INITIALIZATION COMPLETE!");
+        finalize_init(&vec, &enclave, request.state)?;
     }
 
+    Ok(())
+}
+
+fn finalize_init(
+    shares: &[MyShare],
+    enclave: &Arc<Enclave>,
+    incoming_state: InitExternalRequestState,
+) -> GuardianResult<()> {
+    info!("🎉 Threshold reached! Combining shares...");
+    // Yay, set everything now!
+    let result = shares
+        .combine()
+        .map_err(|e| GenericError(format!("Failed to combine share: {}", e)))?;
+    info!("✅ Shares combined successfully");
+
+    // let nzs = NonZeroScalar::from_repr(result.0.to_repr())
+    //     .into_option()
+    //     .ok_or_else(|| GenericError("Failed to deserialize field element".to_string()))?;
+    let sk = result.0.to_repr();
+    let secp_sk = SecretKey::from_slice(&sk)
+        .map_err(|e| GenericError(format!("Failed to cast combined secret key: {}", e)))?;
+
+    info!("🔑 Setting Bitcoin private key...");
+    if enclave.config.bitcoin_key.set(secp_sk).is_err() {
+        return Err(GenericError("Bitcoin key already set".into()));
+    }
+    info!("✅ Bitcoin key set");
+
+    info!("⚙️  Setting withdrawal controls...");
+    if enclave
+        .config
+        .withdraw_controls_config
+        .set(incoming_state.withdraw_config)
+        .is_err()
+    {
+        return Err(GenericError("WithdrawControlsConfig already set".into()));
+    }
+
+    info!("💾 Setting enclave state...");
+    let mut state = enclave
+        .state
+        .lock()
+        .map_err(|e| GenericError(format!("Failed to acquire lock on state: {}", e)))?;
+    state.hashi_committee_info = incoming_state.hashi_committee_info;
+    state.withdraw_state = incoming_state.withdraw_state;
+
+    info!("🎊 ENCLAVE INITIALIZATION COMPLETE!");
     Ok(())
 }
 
@@ -190,111 +197,14 @@ fn verify_share(share: &MyShare, commitments: &[ShareCommitment]) -> GuardianRes
     Ok(())
 }
 
-// Stateless request
-pub async fn setup_new_key(
-    Json(request): Json<SetupNewKeyRequest>,
-) -> GuardianResult<Json<SetupNewKeyResponse>> {
-    info!("📥 /setup_new_key - Received request");
-    const THRESHOLD: usize = SECRET_SHARING_T as usize;
-    const LIMIT: usize = SECRET_SHARING_N as usize;
-
-    info!("🔍 Validating key provisioner public keys...");
-    let key_provisioner_pks: Vec<EncPubKey> = request
-        .try_into()
-        .map_err(|e| GenericError(format!("Failed to deserialize public key: {}", e)))?;
-    if key_provisioner_pks.len() != LIMIT {
-        error!(
-            "❌ Wrong number of public keys: {} (expected {})",
-            key_provisioner_pks.len(),
-            LIMIT
-        );
-        return Err(GenericError(format!(
-            "Only {} public keys provided",
-            key_provisioner_pks.len()
-        )));
-    }
-    info!("✅ Received {} public keys", LIMIT);
-
-    info!("🔑 Generating new Bitcoin private key...");
-    let mut rng = rand::thread_rng();
-    let sk = SecretKey::random(&mut rng);
-    info!("✅ Bitcoin key generated");
-    info!(
-        "🔪 Splitting secret into {} shares (threshold: {})...",
-        LIMIT, THRESHOLD
-    );
-    let nzs = sk.to_nonzero_scalar();
-    let shared_secret = IdentifierPrimeField(*nzs.as_ref());
-    let shares = shamir::split_secret::<MyShare>(THRESHOLD, LIMIT, &shared_secret, &mut rng)
-        .map_err(|e| GenericError(format!("Failed to split secret: {}", e)))?;
-    info!("✅ Secret split into {} shares", LIMIT);
-
-    info!("🔐 Encrypting shares for key provisioners...");
-    let mut encrypted_shares = vec![];
-    let mut share_commitments = vec![];
-    for i in 0..LIMIT {
-        let share = &shares[i];
-        let share_id = share.identifier;
-        let share_value = share.value;
-        let bytes = bincode::serialize(&share_value)
-            .map_err(|e| GenericError(format!("Failed to serialize share: {}", e)))?;
-        let pk = &key_provisioner_pks[i];
-        encrypted_shares.push((share_id, encrypt(&bytes, pk, None)?).into());
-        share_commitments.push((share_id, Blake2b256::digest(&bytes)).into());
-    }
-    info!("✅ All {} shares encrypted", LIMIT);
-    info!("📤 Sending encrypted shares and commitments to client");
-
-    Ok(Json(SetupNewKeyResponse {
-        encrypted_shares,
-        share_commitments,
-    }))
-}
-
-fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> GuardianResult<Ciphertext> {
-    let mut rng = rand::thread_rng();
-    let (encapsulated_key, aes_ciphertext) =
-        hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
-            &hpke::OpModeS::Base,
-            &pk,
-            // TODO: What is the info?
-            &[],
-            &bytes,
-            aad.or(Option::Some(&[0; 32])).expect("REASON"),
-            &mut rng,
-        )
-        .map_err(|e| GenericError(format!("Failed to encrypt share: {}", e)))?;
-
-    Ok((encapsulated_key, aes_ciphertext).into())
-}
-
-fn decrypt(
-    ciphertext: &Ciphertext,
-    sk: &EncSecKey,
-    aad: Option<&[u8; 32]>,
-) -> GuardianResult<Vec<u8>> {
-    let (encapsulated_key, aes_ciphertext) = ciphertext
-        .try_into()
-        .map_err(|e| GenericError(format!("Failed to deserialize ciphertext: {}", e)))?;
-
-    let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
-        &hpke::OpModeR::Base,
-        sk,
-        &encapsulated_key,
-        &[],
-        &aes_ciphertext,
-        aad.or(Option::Some(&[0; 32])).expect("REASON"),
-    )
-    .map_err(|e| GenericError(format!("Failed to decrypt share: {}", e)))?;
-
-    Ok(decrypted)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::setup_new_key;
+    use hashi_guardian_shared::{encrypt, EncSecKey, SetupNewKeyRequest, SECRET_SHARING_N};
     use hpke::kem::X25519HkdfSha256;
     use hpke::Kem;
+
     const LIMIT: usize = SECRET_SHARING_N as usize;
 
     fn mock_setup_new_key_request() -> (SetupNewKeyRequest, Vec<EncSecKey>) {
