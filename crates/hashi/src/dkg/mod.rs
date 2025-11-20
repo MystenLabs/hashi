@@ -68,7 +68,7 @@ impl DkgManager {
         let validator_weights: std::collections::HashMap<Address, u16> = dkg_config
             .address_to_party_id
             .iter()
-            .map(|(addr, party_id)| {
+            .map(|(&addr, party_id)| {
                 let weight = dkg_config.nodes.weight_of(*party_id).unwrap();
                 (addr, weight)
             })
@@ -180,7 +180,7 @@ impl DkgManager {
         let my_signature = self.receive_dealer_message(&dealer_message, self.address)?;
         let message_hash =
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
-        let mut aggregator = BLSSignatureAggregator::new(
+        let mut aggregator = BlsSignatureAggregator::new(
             &self.bls_committee,
             DkgMessage {
                 dealer_address: self.address,
@@ -213,11 +213,8 @@ impl DkgManager {
                 };
 
                 // The signature is verified in the call to `add_signature`
-                match aggregator.add_signature(response.signature.signature) {
-                    Ok(_) => continue,
-                    Err(e) => {
-                        tracing::info!("Invalid certificate from {:?}: {}", validator_address, e)
-                    }
+                if let Err(e) = aggregator.add_signature(response.signature.signature) {
+                    tracing::info!("Invalid certificate from {:?}: {}", validator_address, e)
                 }
             }
         }
@@ -372,7 +369,7 @@ impl DkgManager {
 
     fn process_certificates(
         &self,
-        certified_dealers: &HashMap<Address, CommitteeSignature<DkgMessage>>,
+        certified_dealers: &HashMap<Address, Certificate<DkgMessage>>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
@@ -413,7 +410,7 @@ impl DkgManager {
     async fn retrieve_dealer_message(
         &mut self,
         dealer_address: Address,
-        certificate: &CommitteeSignature<DkgMessage>,
+        certificate: &Certificate<DkgMessage>,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
@@ -439,7 +436,10 @@ impl DkgManager {
                 ));
             }
             // TODO: Add timeout and retries handling when adding RPC layer
-            match p2p_channel.retrieve_message(signer_address, &request).await {
+            match p2p_channel
+                .retrieve_message(&signer_address, &request)
+                .await
+            {
                 Ok(response) => {
                     let message_hash = compute_message_hash(
                         &self.session_context,
@@ -521,7 +521,7 @@ impl DkgManager {
         )))
     }
 
-    fn validate_message_hash(&self, cert: &CommitteeSignature<DkgMessage>) -> DkgResult<()> {
+    fn validate_message_hash(&self, cert: &Certificate<DkgMessage>) -> DkgResult<()> {
         let dealer = cert.message.dealer_address;
         let message = self.dealer_messages.get(&dealer).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
@@ -539,7 +539,7 @@ impl DkgManager {
         Ok(())
     }
 
-    fn validate_certificate(&self, cert: &CommitteeSignature<DkgMessage>) -> DkgResult<()> {
+    fn validate_certificate(&self, cert: &Certificate<DkgMessage>) -> DkgResult<()> {
         self.validate_message_hash(cert)?;
         self.bls_committee
             .verify_signature(cert)

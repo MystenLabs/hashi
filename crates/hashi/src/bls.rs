@@ -6,7 +6,7 @@ use fastcrypto::traits::{
     AggregateAuthenticator, AllowedRng, KeyPair, Signer, ToFromBytes, VerifyingKey,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -52,7 +52,7 @@ impl Bls12381PrivateKey {
 pub struct BlsCommittee {
     epoch: u64,
     members: Vec<BlsCommitteeMember>,
-    address_to_index: BTreeMap<Address, usize>,
+    address_to_index: HashMap<Address, usize>,
     total_weight: u64,
 }
 
@@ -123,15 +123,15 @@ impl BlsCommittee {
             .map_err(SignatureError::from_source)
     }
 
-    /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
-    /// get the weight of the signature with [CommitteeSignature::weight] or use the [verify_signature_and_weight]
+    /// Verify an [Certificate]. If you also need to verify the weight, you can either
+    /// get the weight of the signature with [Certificate::weight] or use the [verify_signature_and_weight]
     /// function.
     pub fn verify_signature<T: Serialize>(
         &self,
-        signature: &CommitteeSignature<T>,
+        signature: &Certificate<T>,
     ) -> Result<(), SignatureError> {
         let pks = signature
-            .bitmap
+            .signers_bitmap
             .iter()
             .map(|index| self.members[index].public_key.clone())
             .collect::<Vec<_>>();
@@ -147,7 +147,7 @@ impl BlsCommittee {
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
     pub fn verify_signature_and_weight<T: Serialize>(
         &self,
-        signature: &CommitteeSignature<T>,
+        signature: &Certificate<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
         let signed_weight = signature.weight(self)?;
@@ -177,23 +177,30 @@ impl BlsCommitteeMember {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommitteeSignature<T> {
+pub struct Certificate<T> {
     epoch: u64,
     signature: BLS12381AggregateSignature,
-    bitmap: BitMap,
+    signers_bitmap: BitMap,
     pub(crate) message: T,
 }
 
-impl<T> CommitteeSignature<T> {
-    /// The committee members included in this signature.
-    pub fn signers(&self, committee: &BlsCommittee) -> Result<Vec<Address>, SignatureError> {
-        if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() {
+impl<T> Certificate<T> {
+    /// Verify that the committee could be used to verify this certificate, e.g., that the epoch and
+    /// the number of signers match.
+    fn verify_committee(&self, committee: &BlsCommittee) -> Result<(), SignatureError> {
+        if committee.epoch != self.epoch || self.signers_bitmap.size != committee.members.len() {
             return Err(SignatureError::from_source(
                 "committee signature does not match committee",
             ));
         }
+        Ok(())
+    }
+
+    /// The committee members included in this signature.
+    pub fn signers(&self, committee: &BlsCommittee) -> Result<Vec<Address>, SignatureError> {
+        self.verify_committee(committee)?;
         Ok(self
-            .bitmap
+            .signers_bitmap
             .iter()
             .map(|index| committee.members[index].address)
             .collect())
@@ -201,13 +208,9 @@ impl<T> CommitteeSignature<T> {
 
     /// The total weight of the signers of this signature.
     pub fn weight(&self, committee: &BlsCommittee) -> Result<u64, SignatureError> {
-        if committee.epoch != self.epoch || self.bitmap.size != committee.members.len() {
-            return Err(SignatureError::from_source(
-                "committee signature does not match committee",
-            ));
-        }
+        self.verify_committee(committee)?;
         Ok(self
-            .bitmap
+            .signers_bitmap
             .iter()
             .map(|index| committee.members[index].weight)
             .sum())
@@ -215,7 +218,7 @@ impl<T> CommitteeSignature<T> {
 }
 
 #[derive(Debug)]
-pub struct BLSSignatureAggregator<'a, T> {
+pub struct BlsSignatureAggregator<'a, T> {
     committee: &'a BlsCommittee,
     aggregate_signature: Option<BLS12381AggregateSignature>,
     bitmap: BitMap,
@@ -223,7 +226,7 @@ pub struct BLSSignatureAggregator<'a, T> {
     message: T,
 }
 
-impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
+impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
     pub fn new(committee: &'a BlsCommittee, message: T) -> Self {
         Self {
             bitmap: BitMap::new(committee.size()),
@@ -294,16 +297,16 @@ impl<'a, T: Serialize + Clone> BLSSignatureAggregator<'a, T> {
 
     /// Return the aggregated signature from the signatures aggregated so far.
     /// Returns an error if no signatures have been added yet.
-    pub fn finish(&self) -> Result<CommitteeSignature<T>, SignatureError> {
+    pub fn finish(&self) -> Result<Certificate<T>, SignatureError> {
         match &self.aggregate_signature {
             None => Err(SignatureError::from_source(
                 "signature map must have at least one entry",
             )),
             Some(signature) => {
-                let aggregated_signature = CommitteeSignature {
+                let aggregated_signature = Certificate {
                     epoch: self.committee.epoch,
                     signature: signature.clone(),
-                    bitmap: self.bitmap.clone(),
+                    signers_bitmap: self.bitmap.clone(),
                     message: self.message.clone(),
                 };
 
@@ -421,7 +424,7 @@ mod test {
             .collect();
         let committee = BlsCommittee::new(members, epoch);
 
-        let mut aggregator = BLSSignatureAggregator::new(&committee, message.clone());
+        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
 
         // Aggregating with no sigs fails
         aggregator.finish().unwrap_err();

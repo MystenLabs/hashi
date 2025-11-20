@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{CommitteeSignature, MemberSignature};
+use crate::bls::{Certificate, MemberSignature};
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
@@ -275,7 +275,7 @@ pub struct Authenticated<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum OrderedBroadcastMessage {
-    AvssCertificateV1(CommitteeSignature<DkgMessage>),
+    AvssCertificateV1(Certificate<DkgMessage>),
     PresignatureV1 {
         sender: Address,
         session_context: SessionContext,
