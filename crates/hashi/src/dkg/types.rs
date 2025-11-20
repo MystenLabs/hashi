@@ -257,7 +257,7 @@ pub struct RetrieveMessageResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
-    pub dealer: ValidatorAddress,
+    pub dealer: Address,
     pub complaint: complaint::Complaint,
 }
 

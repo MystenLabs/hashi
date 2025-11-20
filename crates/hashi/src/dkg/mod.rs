@@ -2,14 +2,12 @@
 
 pub mod types;
 
-use crate::storage::PublicMessagesStore;
-use crate::bls::{
-    BLSAggregatedSignature, BLSSignatureAggregator, BlsCommittee, BlsCommitteeMember,
-};
+use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator, Certificate};
 use crate::dkg::types::DkgMessage;
 use crate::types::ValidatorAddress;
 use fastcrypto::error::FastCryptoError;
 use ed25519_dalek::ed25519::Error;
+use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
@@ -18,11 +16,11 @@ use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 pub use types::{
-    AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgCertificate, DkgConfig,
-    DkgError, DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash,
-    MessageType, OrderedBroadcastMessage, P2PMessage, RetrieveMessageRequest,
-    RetrieveMessageResponse, SendShareRequest, SendShareResponse, SessionContext, SessionId,
-    SighashType, SignatureBytes, ValidatorSignature,
+    AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgConfig, DkgError,
+    DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash, MessageType,
+    OrderedBroadcastMessage, P2PMessage, RetrieveMessageRequest, RetrieveMessageResponse,
+    SendShareRequest, SendShareResponse, SessionContext, SessionId, SighashType, SignatureBytes,
+    ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -58,7 +56,7 @@ impl DkgManager {
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
-        bls_public_keys: std::collections::HashMap<ValidatorAddress, BLS12381PublicKey>,
+        bls_public_keys: std::collections::HashMap<Address, BLS12381PublicKey>,
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> Self {
         let party_id = *dkg_config
@@ -344,8 +342,7 @@ impl DkgManager {
                 ));
             }
         };
-        self.dealer_outputs
-            .insert(dealer_address, receiver_output);
+        self.dealer_outputs.insert(dealer_address, receiver_output);
         self.dealer_messages
             .insert(dealer_address.clone(), message.clone());
         self.public_messages_store
