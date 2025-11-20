@@ -3831,7 +3831,7 @@ mod tests {
         let result = party_manager
             .recover_shares_via_complaint(
                 &dealer_addr,
-                vec![ValidatorAddress([2; 32])].iter(),
+                [ValidatorAddress([2; 32])].iter(),
                 &mock_p2p,
             )
             .await;
