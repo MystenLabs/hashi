@@ -343,3 +343,47 @@ pub fn decrypt(
 
     Ok(decrypted)
 }
+
+
+#[cfg(test)]
+mod encryption_tests {
+    // https://github.com/rozbb/rust-hpke/tree/main
+    // Note: using hpke
+    use hpke::aead::AesGcm256;
+    use hpke::kdf::HkdfSha384;
+    use hpke::kem::X25519HkdfSha256;
+    use hpke::Kem;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    #[test]
+    fn test_hpke() {
+        let plaintext = b"Hello, world!";
+        let aad = b"aad";
+
+        let mut rng = StdRng::from_entropy();
+        let keys = X25519HkdfSha256::gen_keypair(&mut rng);
+
+        let (encapped_key, ciphertext) =
+            hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
+                &hpke::OpModeS::Base,
+                &keys.1,
+                // TODO: What is the info?
+                &[],
+                plaintext,
+                aad,
+                &mut rng,
+            )
+                .unwrap();
+        let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
+            &hpke::OpModeR::Base,
+            &keys.0,
+            &encapped_key,
+            &[],
+            &ciphertext,
+            aad,
+        )
+            .unwrap();
+        println!("decrypted: {:?}", decrypted);
+        assert_eq!(plaintext, decrypted.as_slice());
+    }
+}

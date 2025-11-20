@@ -2,17 +2,16 @@ use crate::s3_logger::test_s3_connectivity;
 use crate::{Enclave, S3Logger};
 use axum::extract::State;
 use axum::Json;
-use bitcoin::secp256k1::SecretKey;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use hashi_guardian_shared::{
     decrypt, GuardianError, GuardianResult, InitExternalRequest, InitExternalRequestState,
     InitInternalRequest, MyShare, ShareCommitment, ShareValue, SECRET_SHARING_T,
 };
-use k256::elliptic_curve::PrimeField;
 use std::sync::Arc;
 use tracing::{error, info};
-use vsss_rs::{DefaultShare, ReadableShareSet, Share};
+use vsss_rs::{DefaultShare, Share};
 use GuardianError::*;
+use crate::setup::k256shares_to_secp_secret_key;
 
 // TODO: Add some kind of authentication, e.g., an API key or token
 pub async fn init_enclave_internal(
@@ -142,18 +141,7 @@ fn finalize_init(
     incoming_state: InitExternalRequestState,
 ) -> GuardianResult<()> {
     info!("🎉 Threshold reached! Combining shares...");
-    // Yay, set everything now!
-    let result = shares
-        .combine()
-        .map_err(|e| GenericError(format!("Failed to combine share: {}", e)))?;
-    info!("✅ Shares combined successfully");
-
-    // let nzs = NonZeroScalar::from_repr(result.0.to_repr())
-    //     .into_option()
-    //     .ok_or_else(|| GenericError("Failed to deserialize field element".to_string()))?;
-    let sk = result.0.to_repr();
-    let secp_sk = SecretKey::from_slice(&sk)
-        .map_err(|e| GenericError(format!("Failed to cast combined secret key: {}", e)))?;
+    let secp_sk = k256shares_to_secp_secret_key(shares)?;
 
     info!("🔑 Setting Bitcoin private key...");
     if enclave.config.bitcoin_key.set(secp_sk).is_err() {
