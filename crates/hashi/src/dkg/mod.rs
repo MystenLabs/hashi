@@ -38,7 +38,6 @@ pub struct DkgManager {
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_committee: BlsCommittee,
-    pub validator_weights: std::collections::HashMap<Address, u16>,
     // Mutable during a given session
     pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
     pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
@@ -63,14 +62,6 @@ impl DkgManager {
             .address_to_party_id
             .get(&address)
             .expect("address not found in validator registry");
-        let validator_weights: std::collections::HashMap<Address, u16> = dkg_config
-            .address_to_party_id
-            .iter()
-            .map(|(&addr, party_id)| {
-                let weight = dkg_config.nodes.weight_of(*party_id).unwrap();
-                (addr, weight)
-            })
-            .collect();
         let bls_committee = create_bls_committee(&dkg_config, &bls_public_keys);
         Self {
             party_id,
@@ -80,7 +71,6 @@ impl DkgManager {
             encryption_key,
             bls_signing_key,
             bls_committee,
-            validator_weights,
             dealer_outputs: std::collections::HashMap::new(),
             dealer_messages: std::collections::HashMap::new(),
             share_responses: std::collections::HashMap::new(),
@@ -282,10 +272,10 @@ impl DkgManager {
                             .await?;
                         }
                         let dealer_weight =
-                            self.validator_weights.get(&dealer).ok_or_else(|| {
+                            self.bls_committee.weight_of(&dealer).map_err(|_| {
                                 DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                             })?;
-                        dealer_weight_sum += *dealer_weight as u32;
+                        dealer_weight_sum += dealer_weight as u32;
                         certified_dealers.insert(dealer, cert);
                     }
                     Err(e) => {

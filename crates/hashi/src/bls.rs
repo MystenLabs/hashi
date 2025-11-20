@@ -104,6 +104,10 @@ impl BlsCommittee {
         Ok(&self.members[*index])
     }
 
+    pub fn weight_of(&self, member: &Address) -> Result<u64, SignatureError> {
+        self.member(member).map(|m| m.weight)
+    }
+
     /// Verify a single signature provided by a [BlsCommitteeMember].
     fn verify<T: Serialize>(
         &self,
