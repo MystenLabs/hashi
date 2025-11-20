@@ -53,7 +53,7 @@ where
         let mut channels = HashMap::new();
         for addr in validator_addresses {
             channels.insert(
-                addr.clone(),
+                addr,
                 Self {
                     shared_queue: shared_queue.clone(),
                     read_position: Arc::new(Mutex::new(INITIAL_READ_POSITION)),

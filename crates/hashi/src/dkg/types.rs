@@ -393,7 +393,7 @@ mod tests {
         let nodes = Nodes::new(node_vec).unwrap();
         let address_to_party_id: AddressToPartyId = validators
             .iter()
-            .map(|(addr, node)| (addr.clone(), node.id))
+            .map(|(addr, node)| (*addr, node.id))
             .collect();
         (nodes, address_to_party_id)
     }
@@ -543,8 +543,8 @@ mod tests {
     #[test]
     fn test_dealer_session_serialization() {
         let ctx = SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testnet".to_string());
-        let dealer1 = Address([1; 32]);
-        let dealer2 = Address([2; 32]);
+        let dealer1 = Address::new([1; 32]);
+        let dealer2 = Address::new([2; 32]);
         let dealer1_session = ctx.dealer_session_id(&dealer1);
         let dealer2_session = ctx.dealer_session_id(&dealer2);
 

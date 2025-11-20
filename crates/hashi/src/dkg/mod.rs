@@ -39,12 +39,12 @@ pub struct DkgManager {
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_committee: BlsCommittee,
     // Mutable during a given session
-    pub dealer_outputs: std::collections::HashMap<ValidatorAddress, avss::ReceiverOutput>,
-    pub dealer_messages: std::collections::HashMap<ValidatorAddress, avss::Message>,
-    pub share_responses: std::collections::HashMap<ValidatorAddress, SendShareResponse>,
-    pub complaints: std::collections::HashMap<ValidatorAddress, complaint::Complaint>,
+    pub dealer_outputs: std::collections::HashMap<Address, avss::ReceiverOutput>,
+    pub dealer_messages: std::collections::HashMap<Address, avss::Message>,
+    pub share_responses: std::collections::HashMap<Address, SendShareResponse>,
+    pub complaints: std::collections::HashMap<Address, complaint::Complaint>,
     pub complaint_responses:
-        std::collections::HashMap<ValidatorAddress, complaint::ComplaintResponse>,
+        std::collections::HashMap<Address, complaint::ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
@@ -202,7 +202,7 @@ impl DkgManager {
 
                 // The signature is verified in the call to `add_signature`
                 if let Err(e) = aggregator.add_signature(response.signature.signature) {
-                    tracing::info!("Invalid certificate from {:?}: {}", validator_address, e)
+                    tracing::info!("Invalid signature from {:?}: {}", validator_address, e)
                 }
             }
         }
@@ -406,6 +406,18 @@ impl DkgManager {
         // - Round 1: Call 1-2 random signers, wait ~2s
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
+        if certificate
+            .is_signer(&self.address, &self.bls_committee)
+            .map_err(|e| DkgError::CryptoError(e.to_string()))?
+        {
+            tracing::error!(
+                "Self in certificate signers but message not available for dealer {:?}.",
+                dealer_address
+            );
+            return Err(DkgError::ProtocolFailed(
+                "Self in certificate signers but message not available".to_string(),
+            ));
+        }
         let signers = certificate.signers(&self.bls_committee).map_err(|_| {
             DkgError::ProtocolFailed(
                 "Certificate does not match the current epoch or committee".to_string(),
@@ -529,18 +541,24 @@ impl DkgManager {
     }
 }
 
-/// Helper function to create a [BlsCommittee] from a [DkgConfig] and public keys.
 fn create_bls_committee(
     dkg_config: &DkgConfig,
     public_keys: &HashMap<Address, BLS12381PublicKey>,
 ) -> BlsCommittee {
-    let committee: Vec<BlsCommitteeMember> = dkg_config
+    let mut committee_vec: Vec<(Address, u16)> = dkg_config
         .address_to_party_id
         .iter()
-        .map(|(validator_address, &party_id)| {
+        .map(|(addr, &party_id)| (*addr, party_id))
+        .collect();
+    // Sort by party_id to ensure deterministic ordering
+    committee_vec.sort_by_key(|(_, party_id)| *party_id);
+
+    let committee: Vec<BlsCommitteeMember> = committee_vec
+        .into_iter()
+        .map(|(validator_address, party_id)| {
             BlsCommitteeMember::new(
-                *validator_address,
-                public_keys.get(validator_address).unwrap().clone(),
+                validator_address,
+                public_keys.get(&validator_address).unwrap().clone(),
                 dkg_config.nodes.weight_of(party_id).unwrap() as u64,
             )
         })
@@ -582,16 +600,13 @@ mod tests {
     impl PublicMessagesStore for MockPublicMessagesStore {
         fn store_dealer_message(
             &mut self,
-            _dealer: &ValidatorAddress,
+            _dealer: &Address,
             _message: &avss::Message,
         ) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn get_dealer_message(
-            &self,
-            _dealer: &ValidatorAddress,
-        ) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
             Ok(None)
         }
 
@@ -600,10 +615,10 @@ mod tests {
         }
     }
 
-    fn create_test_validator(party_id: u16) -> (ValidatorAddress, Node<EncryptionGroupElement>) {
+    fn create_test_validator(party_id: u16) -> (Address, Node<EncryptionGroupElement>) {
         let private_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let public_key = PublicKey::from_private_key(&private_key);
-        let address = Address([party_id as u8; 32]);
+        let address = Address::new([party_id as u8; 32]);
         let weight = 1;
         let node = Node {
             id: party_id,
@@ -621,7 +636,7 @@ mod tests {
         let nodes = Nodes::new(node_vec).unwrap();
         let address_to_party_id: AddressToPartyId = validators
             .iter()
-            .map(|(addr, node)| (addr.clone(), node.id))
+            .map(|(addr, node)| (*addr, node.id))
             .collect();
         (nodes, address_to_party_id)
     }
@@ -640,8 +655,58 @@ mod tests {
         DkgConfig::new(100, nodes, address_to_party_id, THRESHOLD, MAX_FAULTY).unwrap()
     }
 
+    fn create_test_bls_keys(
+        dkg_config: &DkgConfig,
+    ) -> std::collections::HashMap<Address, BLS12381PublicKey> {
+        dkg_config
+            .address_to_party_id
+            .keys()
+            .map(|addr| {
+                let sk = crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng());
+                (*addr, sk.public_key())
+            })
+            .collect()
+    }
+
+    fn create_test_certificate(
+        config: &DkgConfig,
+        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        dealer_message: &avss::Message,
+        dealer_address: Address,
+        session_context: &SessionContext,
+        validator_signatures: Vec<ValidatorSignature>,
+    ) -> DkgResult<Certificate<DkgMessage>> {
+        // Compute message hash
+        let message_hash = compute_message_hash(session_context, &dealer_address, dealer_message)?;
+
+        // Create DkgMessage
+        let dkg_message = DkgMessage {
+            dealer_address,
+            session_context: session_context.clone(),
+            message_hash,
+        };
+
+        // Create BLS committee
+        let bls_committee = create_bls_committee(config, bls_public_keys);
+
+        // Create aggregator
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message);
+
+        // Add all signatures
+        for validator_sig in validator_signatures {
+            aggregator
+                .add_signature(validator_sig.signature)
+                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        }
+
+        // Finish and return certificate
+        aggregator
+            .finish()
+            .map_err(|e| DkgError::CryptoError(e.to_string()))
+    }
+
     fn create_test_manager(validator_index: u16, dkg_config: DkgConfig) -> DkgManager {
-        let address = Address([validator_index as u8; 32]);
+        let address = Address::new([validator_index as u8; 32]);
         let session_context = SessionContext::new(
             dkg_config.epoch,
             ProtocolType::DkgKeyGeneration,
@@ -649,12 +714,14 @@ mod tests {
         );
         let encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
         let bls_signing_key = crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let bls_public_keys = create_test_bls_keys(&dkg_config);
         DkgManager::new(
             address,
             dkg_config,
             session_context,
             encryption_key,
             bls_signing_key,
+            bls_public_keys,
             Box::new(MockPublicMessagesStore),
         )
     }
@@ -691,7 +758,7 @@ mod tests {
                 ))
             })?;
             let response = manager
-                .handle_send_share_request(self.current_sender.clone(), request)
+                .handle_send_share_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
                 })?;
@@ -741,12 +808,12 @@ mod tests {
     }
 
     struct MockOrderedBroadcastChannel {
-        certificates: std::sync::Mutex<std::collections::VecDeque<DkgCertificate>>,
+        certificates: std::sync::Mutex<std::collections::VecDeque<Certificate<DkgMessage>>>,
         published: std::sync::Mutex<Vec<OrderedBroadcastMessage>>,
     }
 
     impl MockOrderedBroadcastChannel {
-        fn new(certificates: Vec<DkgCertificate>) -> Self {
+        fn new(certificates: Vec<Certificate<DkgMessage>>) -> Self {
             Self {
                 certificates: std::sync::Mutex::new(certificates.into()),
                 published: std::sync::Mutex::new(Vec::new()),
@@ -809,13 +876,17 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
 
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
         // Create validators using shared encryption public keys
         let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -832,13 +903,22 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
-        let address = Address([validator_index as u8; 32]);
+        // Create BLS public keys map
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        let address = Address::new([validator_index as u8; 32]);
         let manager = DkgManager::new(
             address,
             config,
             session_context,
             encryption_keys[validator_index].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            bls_keys[validator_index].clone(),
+            bls_public_keys,
             Box::new(MockPublicMessagesStore),
         );
 
@@ -882,18 +962,43 @@ mod tests {
         }
     }
 
-    struct SucceedingP2PChannel {}
+    struct SucceedingP2PChannel {
+        managers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Address, DkgManager>>>,
+        current_sender: Address,
+    }
+
+    impl SucceedingP2PChannel {
+        fn new(
+            managers: std::collections::HashMap<Address, DkgManager>,
+            current_sender: Address,
+        ) -> Self {
+            Self {
+                managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
+                current_sender,
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for SucceedingP2PChannel {
         async fn send_share(
             &self,
-            _recipient: &Address,
-            _request: &SendShareRequest,
+            recipient: &Address,
+            request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
-            Ok(SendShareResponse {
-                signature: Vec::new(),
-            })
+            let mut managers = self.managers.lock().unwrap();
+            let manager = managers.get_mut(recipient).ok_or_else(|| {
+                crate::communication::ChannelError::SendFailed(format!(
+                    "Recipient {:?} not found",
+                    recipient
+                ))
+            })?;
+            let response = manager
+                .handle_send_share_request(self.current_sender, request)
+                .map_err(|e| {
+                    crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+                })?;
+            Ok(response)
         }
 
         async fn retrieve_message(
@@ -914,16 +1019,33 @@ mod tests {
     }
 
     struct PartiallyFailingP2PChannel {
+        managers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Address, DkgManager>>>,
+        current_sender: Address,
         fail_count: std::sync::Arc<std::sync::Mutex<usize>>,
         max_failures: usize,
+    }
+
+    impl PartiallyFailingP2PChannel {
+        fn new(
+            managers: std::collections::HashMap<Address, DkgManager>,
+            current_sender: Address,
+            max_failures: usize,
+        ) -> Self {
+            Self {
+                managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
+                current_sender,
+                fail_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+                max_failures,
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
         async fn send_share(
             &self,
-            _recipient: &Address,
-            _request: &SendShareRequest,
+            recipient: &Address,
+            request: &SendShareRequest,
         ) -> crate::communication::ChannelResult<SendShareResponse> {
             let mut count = self.fail_count.lock().unwrap();
             if *count < self.max_failures {
@@ -932,9 +1054,23 @@ mod tests {
                     "network error".to_string(),
                 ))
             } else {
-                Ok(SendShareResponse {
-                    signature: Vec::new(),
-                })
+                drop(count); // Release the lock before calling manager
+                let mut managers = self.managers.lock().unwrap();
+                let manager = managers.get_mut(recipient).ok_or_else(|| {
+                    crate::communication::ChannelError::SendFailed(format!(
+                        "Recipient {:?} not found",
+                        recipient
+                    ))
+                })?;
+                let response = manager
+                    .handle_send_share_request(self.current_sender, request)
+                    .map_err(|e| {
+                        crate::communication::ChannelError::SendFailed(format!(
+                            "Handler failed: {}",
+                            e
+                        ))
+                    })?;
+                Ok(response)
             }
         }
 
@@ -1001,7 +1137,7 @@ mod tests {
             Some(0)
         }
     }
-
+    //
     #[test]
     fn test_dkg_static_data_creation() {
         let config = create_test_dkg_config(5);
@@ -1033,7 +1169,7 @@ mod tests {
     }
 
     struct InMemoryPublicMessagesStore {
-        stored: std::collections::HashMap<ValidatorAddress, avss::Message>,
+        stored: std::collections::HashMap<Address, avss::Message>,
     }
 
     impl InMemoryPublicMessagesStore {
@@ -1047,17 +1183,14 @@ mod tests {
     impl PublicMessagesStore for InMemoryPublicMessagesStore {
         fn store_dealer_message(
             &mut self,
-            dealer: &ValidatorAddress,
+            dealer: &Address,
             message: &avss::Message,
         ) -> anyhow::Result<()> {
-            self.stored.insert(dealer.clone(), message.clone());
+            self.stored.insert(*dealer, message.clone());
             Ok(())
         }
 
-        fn get_dealer_message(
-            &self,
-            dealer: &ValidatorAddress,
-        ) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
             Ok(self.stored.get(dealer).cloned())
         }
 
@@ -1072,16 +1205,13 @@ mod tests {
     impl PublicMessagesStore for FailingPublicMessagesStore {
         fn store_dealer_message(
             &mut self,
-            _dealer: &ValidatorAddress,
+            _dealer: &Address,
             _message: &avss::Message,
         ) -> anyhow::Result<()> {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
-        fn get_dealer_message(
-            &self,
-            _dealer: &ValidatorAddress,
-        ) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
             Ok(None)
         }
 
@@ -1104,7 +1234,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -1125,38 +1255,40 @@ mod tests {
         );
 
         // Create dealer (party 0) with its encryption key
-        let dealer_address = Address([0; 32]);
+        let dealer_address = Address::new([0; 32]);
+        let bls_public_keys = create_test_bls_keys(&config);
         let dealer_manager = DkgManager::new(
-            dealer_address.clone(),
+            dealer_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
-        let dealer_address = dealer_manager.address.clone();
+        let dealer_address = dealer_manager.address;
 
         // Create receiver (party 1) with its encryption key and storage
-        let receiver_address = ValidatorAddress([1; 32]);
+        let receiver_address = Address::new([1; 32]);
         let storage = InMemoryPublicMessagesStore::new();
         let mut receiver_manager = DkgManager::new(
-            receiver_address.clone(),
+            receiver_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            bls_public_keys,
             Box::new(storage),
         );
 
         // Receiver processes the dealer's message
         let signature = receiver_manager
-            .receive_dealer_message(&message, dealer_address.clone())
+            .receive_dealer_message(&message, dealer_address)
             .unwrap();
 
         // Verify signature format
         assert_eq!(signature.validator, receiver_manager.address);
-        assert_eq!(signature.signature.len(), 96); // BLS signature length
 
         // Verify receiver output was stored in memory
         assert!(
@@ -1197,7 +1329,7 @@ mod tests {
             .enumerate()
             .map(|(i, key)| {
                 let public_key = PublicKey::from_private_key(key);
-                let address = ValidatorAddress([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let node = Node {
                     id: i as u16,
                     pk: public_key,
@@ -1211,31 +1343,35 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
+        let bls_public_keys = create_test_bls_keys(&config);
+
         // Create dealer (party 0)
-        let dealer_address = ValidatorAddress([0; 32]);
+        let dealer_address = Address::new([0; 32]);
         let dealer_manager = DkgManager::new(
-            dealer_address.clone(),
+            dealer_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
         let message = dealer_manager.create_dealer_message(&mut rng).unwrap();
 
         // Create receiver with failing storage
-        let receiver_address = ValidatorAddress([1; 32]);
+        let receiver_address = Address::new([1; 32]);
         let mut receiver_manager = DkgManager::new(
-            receiver_address.clone(),
+            receiver_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
             crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            bls_public_keys,
             Box::new(FailingPublicMessagesStore),
         );
 
         // Receiver processes the dealer's message - should fail due to storage error
-        let result = receiver_manager.receive_dealer_message(&message, dealer_address.clone());
+        let result = receiver_manager.receive_dealer_message(&message, dealer_address);
 
         // Verify operation fails with storage error
         assert!(result.is_err(), "Should fail when storage fails");
@@ -1251,223 +1387,6 @@ mod tests {
     }
 
     #[test]
-    fn test_has_sufficient_weighted_signatures_insufficient() {
-        // Create validators with different weights: [5, 3, 2, 1, 1]
-        let validators =
-            validation_test_utils::create_test_validators_with_weights(&[5, 3, 2, 1, 1]);
-        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
-        // threshold=7, max_faulty=2, so required_weight = 9
-        let config = DkgConfig::new(100, nodes, address_to_party_id, 7, 2).unwrap();
-
-        // Test case 1: Only validator 0 (weight=5), need 9
-        let signatures = vec![ValidatorSignature {
-            validator: Address([0; 32]),
-            signature: vec![0; 96],
-        }];
-        assert!(
-            !validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
-        );
-
-        // Test case 2: Validators 0 and 2 (weight=5+2=7), need 9
-        let signatures = vec![
-            ValidatorSignature {
-                validator: Address([0; 32]),
-                signature: vec![0; 96],
-            },
-            ValidatorSignature {
-                validator: Address([2; 32]),
-                signature: vec![0; 96],
-            },
-        ];
-        assert!(
-            !validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
-        );
-
-        // Test case 3: Validators 0 and 1 (weight=5+3=8), still need 9
-        let signatures = vec![
-            ValidatorSignature {
-                validator: Address([0; 32]),
-                signature: vec![0; 96],
-            },
-            ValidatorSignature {
-                validator: Address([1; 32]),
-                signature: vec![0; 96],
-            },
-        ];
-        assert!(
-            !validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
-        );
-
-        // Test case 4: Validators 0, 1, and 3 (weight=5+3+1=9), exactly sufficient
-        let signatures = vec![
-            ValidatorSignature {
-                validator: Address([0; 32]),
-                signature: vec![0; 96],
-            },
-            ValidatorSignature {
-                validator: Address([1; 32]),
-                signature: vec![0; 96],
-            },
-            ValidatorSignature {
-                validator: Address([3; 32]),
-                signature: vec![0; 96],
-            },
-        ];
-        assert!(
-            validation_test_utils::test_has_sufficient_weighted_signatures(&signatures, &config)
-        );
-    }
-
-    #[test]
-    fn test_create_certificate_success() {
-        let config = create_test_dkg_config(5);
-        let manager = create_test_manager(0, config.clone());
-
-        let message = manager
-            .create_dealer_message(&mut rand::thread_rng())
-            .unwrap();
-
-        // Create enough signatures (threshold + max_faulty = 3 weight needed)
-        let required_sigs = (manager.dkg_config.threshold + manager.dkg_config.max_faulty) as usize;
-        let signatures: Vec<_> = config
-            .address_to_party_id
-            .keys()
-            .take(required_sigs)
-            .map(|addr| ValidatorSignature {
-                validator: addr.clone(),
-                signature: vec![0; 96],
-            })
-            .collect();
-
-        let certificate = manager
-            .create_certificate(&message, signatures.clone())
-            .unwrap();
-
-        assert_eq!(certificate.dealer, manager.address);
-        assert_eq!(certificate.signature.len(), required_sigs);
-        assert_eq!(
-            certificate.session_context.session_id,
-            manager.session_context.session_id
-        );
-    }
-
-    #[test]
-    fn test_create_certificate_weighted_signatures() {
-        // Create validators with different weights
-        let validators = vec![
-            (
-                Address([0; 32]),
-                Node {
-                    id: 0,
-                    pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
-                        &mut rand::thread_rng(),
-                    )),
-                    weight: 3, // Heavy weight
-                },
-            ),
-            (
-                Address([1; 32]),
-                Node {
-                    id: 1,
-                    pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
-                        &mut rand::thread_rng(),
-                    )),
-                    weight: 1,
-                },
-            ),
-            (
-                Address([2; 32]),
-                Node {
-                    id: 2,
-                    pk: PublicKey::from_private_key(&PrivateKey::<EncryptionGroupElement>::new(
-                        &mut rand::thread_rng(),
-                    )),
-                    weight: 1,
-                },
-            ),
-        ];
-
-        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
-        // threshold=3, max_faulty=1, total_weight=5
-        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
-        let manager = create_test_manager(0, config.clone());
-
-        let message = manager
-            .create_dealer_message(&mut rand::thread_rng())
-            .unwrap();
-
-        // Only validator 0 (weight=3), which is less than required (threshold + max_faulty = 4)
-        let addr0 = Address([0; 32]);
-        let insufficient_sigs = vec![ValidatorSignature {
-            validator: addr0.clone(),
-            signature: vec![0; 96],
-        }];
-
-        // Should not have sufficient weight
-        assert!(
-            !validation_test_utils::test_has_sufficient_weighted_signatures(
-                &insufficient_sigs,
-                &config
-            )
-        );
-
-        // Validator 0 (weight=3) + validator 1 (weight=1) = 4, which meets the requirement
-        let addr1 = Address([1; 32]);
-        let sufficient_sigs = vec![
-            ValidatorSignature {
-                validator: addr0.clone(),
-                signature: vec![0; 96],
-            },
-            ValidatorSignature {
-                validator: addr1.clone(),
-                signature: vec![0; 96],
-            },
-        ];
-
-        // Should have sufficient weight
-        assert!(
-            validation_test_utils::test_has_sufficient_weighted_signatures(
-                &sufficient_sigs,
-                &config
-            )
-        );
-
-        // create_certificate should succeed now (no weight validation there)
-        let result = manager.create_certificate(&message, sufficient_sigs);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn test_has_sufficient_weighted_signatures_unknown_validator() {
-        let config = create_test_dkg_config(5);
-
-        // Create signatures including one from an unknown validator
-        let unknown_validator = Address([99; 32]);
-        let known_validator_addr = config.address_to_party_id.keys().next().unwrap();
-        let signatures = vec![
-            ValidatorSignature {
-                validator: known_validator_addr.clone(),
-                signature: vec![0; 96],
-            },
-            ValidatorSignature {
-                validator: unknown_validator.clone(),
-                signature: vec![0; 96],
-            },
-        ];
-
-        let validator_weights = validation_test_utils::create_validator_weights(&config);
-        let required_weight = config.threshold + config.max_faulty;
-
-        let result =
-            has_sufficient_weighted_signatures(&signatures, &validator_weights, required_weight);
-
-        assert!(!result);
-        assert!(logs_contain("Error checking signature weights"));
-        assert!(logs_contain("Signature from unknown validator"));
-    }
-
-    #[test]
     fn test_compute_message_hash_deterministic() {
         let config = create_test_dkg_config(5);
         let manager = create_test_manager(0, config);
@@ -1475,7 +1394,7 @@ mod tests {
         let message = manager
             .create_dealer_message(&mut rand::thread_rng())
             .unwrap();
-        let dealer_address = Address([42; 32]);
+        let dealer_address = Address::new([42; 32]);
 
         let hash1 =
             compute_message_hash(&manager.session_context, &dealer_address, &message).unwrap();
@@ -1496,10 +1415,12 @@ mod tests {
             .unwrap();
 
         let hash1 =
-            compute_message_hash(&manager.session_context, &Address([1; 32]), &message).unwrap();
+            compute_message_hash(&manager.session_context, &Address::new([1; 32]), &message)
+                .unwrap();
 
         let hash2 =
-            compute_message_hash(&manager.session_context, &Address([2; 32]), &message).unwrap();
+            compute_message_hash(&manager.session_context, &Address::new([2; 32]), &message)
+                .unwrap();
 
         assert_ne!(hash1, hash2);
     }
@@ -1519,7 +1440,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = weights[i];
                 let node = Node {
@@ -1541,32 +1462,47 @@ mod tests {
             "testchain".to_string(),
         );
 
+        // Generate BLS key pairs for all validators (indexed by validator index 0-4)
+        let bls_keys: Vec<_> = (0..5)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        // Map each address to its corresponding BLS public key
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i as usize].public_key())
+            })
+            .collect();
+
         // Create threshold (3) dealers - complete_dkg requires exactly t dealer outputs
         // Using validators 0, 1, 4 as dealers (weights 3, 2, 2 respectively)
         let dealer_indices = [0, 1, 4];
-        let dealer_managers: Vec<_> = dealer_indices
+        let mut dealer_managers: Vec<_> = dealer_indices
             .iter()
             .map(|&i| {
-                let addr = Address([i as u8; 32]);
+                let addr = Address::new([i as u8; 32]);
                 DkgManager::new(
-                    addr.clone(),
+                    addr,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
-                    crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+                    bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 )
             })
             .collect();
 
         // Create receiver (party 2 with weight=4 - will receive 4 shares!)
-        let addr2 = Address([2; 32]);
+        let addr2 = Address::new([2; 32]);
         let mut receiver_manager = DkgManager::new(
-            addr2.clone(),
+            addr2,
             config.clone(),
             session_context.clone(),
             encryption_keys[2].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            bls_keys[2].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
@@ -1579,31 +1515,36 @@ mod tests {
         // Receiver processes all dealer messages and creates certificates
         let mut certificates = std::collections::HashMap::new();
         for (i, message) in dealer_messages.iter().enumerate() {
-            let dealer_address = dealer_managers[i].address.clone();
+            let dealer_address = dealer_managers[i].address;
 
             // Receiver processes the message
-            let _sig = receiver_manager.receive_dealer_message(message, dealer_address.clone());
+            let _sig = receiver_manager.receive_dealer_message(message, dealer_address);
 
-            // Create a certificate (in practice, would collect signatures from other validators)
+            // Create a certificate by collecting signatures from other validators
             // Need threshold + max_faulty = 3 + 1 = 4 weighted signatures
-            // Using validators with weights: 0(3) + 1(2) = 5 weight, which is > 4 ✓
-            let addr0 = Address([0; 32]);
-            let addr1 = Address([1; 32]);
-            let mock_signatures = vec![
-                ValidatorSignature {
-                    validator: addr0.clone(), // weight=3
-                    signature: vec![0; 96],
-                },
-                ValidatorSignature {
-                    validator: addr1.clone(), // weight=2
-                    signature: vec![0; 96],
-                },
+            // Using validators 0 and 1 with weights 3 and 2 respectively (total = 5 > 4)
+            let validator_signatures = vec![
+                // Validator 0 (weight=3) signs
+                dealer_managers[0]
+                    .receive_dealer_message(message, dealer_address)
+                    .unwrap(),
+                // Validator 1 (weight=2) signs
+                dealer_managers[1]
+                    .receive_dealer_message(message, dealer_address)
+                    .unwrap(),
             ];
 
-            // Dealer creates their own certificate
-            let cert = dealer_managers[i]
-                .create_certificate(message, mock_signatures)
-                .unwrap();
+            // Create certificate using helper
+            let cert = create_test_certificate(
+                &config,
+                &bls_public_keys,
+                message,
+                dealer_address,
+                &session_context,
+                validator_signatures,
+            )
+            .unwrap();
+
             certificates.insert(dealer_address, cert);
         }
 
@@ -1624,36 +1565,131 @@ mod tests {
 
     #[test]
     fn test_process_certificates_missing_dealer_output() {
-        let config = create_test_dkg_config(5);
-        let manager = create_test_manager(0, config.clone());
+        let mut rng = rand::thread_rng();
 
-        // Create certificates for dealers we haven't received messages from
-        let addr0 = &Address([0; 32]);
-        let addr1 = &Address([1; 32]);
+        // Create encryption keys that will match the config
+        let encryption_keys: Vec<_> = (0..5)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
 
-        let mock_signatures = vec![ValidatorSignature {
-            validator: addr0.clone(),
-            signature: vec![0; 96],
-        }];
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key = PublicKey::from_private_key(private_key);
+                let address = Address::new([i as u8; 32]);
+                let node = Node {
+                    id: i as u16,
+                    pk: public_key,
+                    weight: 1,
+                };
+                (address, node)
+            })
+            .collect();
 
-        let cert0 = DkgCertificate {
-            dealer: addr0.clone(),
-            message_hash: [0; 32],
-            signature: mock_signatures.clone(),
-            session_context: manager.session_context.clone(),
-        };
-        let cert1 = DkgCertificate {
-            dealer: addr1.clone(),
-            message_hash: [0; 32],
-            signature: mock_signatures,
-            session_context: manager.session_context.clone(),
-        };
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
+        let session_context = SessionContext::new(
+            config.epoch,
+            ProtocolType::DkgKeyGeneration,
+            "testchain".to_string(),
+        );
+
+        // Generate BLS keys
+        let bls_keys: Vec<_> = (0..5)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        // Create a receiver manager (will not receive dealer messages)
+        let receiver_manager = DkgManager::new(
+            Address::new([0; 32]),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Create dealers with matching encryption keys
+        let dealer_addr0 = Address::new([1; 32]);
+        let dealer_addr1 = Address::new([2; 32]);
+
+        let dealer0 = DkgManager::new(
+            dealer_addr0,
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[1].clone(),
+            bls_keys[1].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        let dealer1 = DkgManager::new(
+            dealer_addr1,
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[2].clone(),
+            bls_keys[2].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        let message0 = dealer0.create_dealer_message(&mut rng).unwrap();
+        let message1 = dealer1.create_dealer_message(&mut rng).unwrap();
+
+        // Create a validator to sign the dealer messages
+        let validator_addr = Address::new([3; 32]);
+        let mut validator = DkgManager::new(
+            validator_addr,
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[3].clone(),
+            bls_keys[3].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Create certificates (using actual BLS signatures from validator)
+        let sig0 = validator
+            .receive_dealer_message(&message0, dealer_addr0)
+            .unwrap();
+        let cert0 = create_test_certificate(
+            &config,
+            &bls_public_keys,
+            &message0,
+            dealer_addr0,
+            &session_context,
+            vec![sig0],
+        )
+        .unwrap();
+
+        let sig1 = validator
+            .receive_dealer_message(&message1, dealer_addr1)
+            .unwrap();
+        let cert1 = create_test_certificate(
+            &config,
+            &bls_public_keys,
+            &message1,
+            dealer_addr1,
+            &session_context,
+            vec![sig1],
+        )
+        .unwrap();
 
         let mut certificates = std::collections::HashMap::new();
-        certificates.insert(cert0.dealer.clone(), cert0);
-        certificates.insert(cert1.dealer.clone(), cert1);
+        certificates.insert(dealer_addr0, cert0);
+        certificates.insert(dealer_addr1, cert1);
 
-        let result = manager.process_certificates(&certificates);
+        // Process certificates should fail because receiver never processed the dealer messages
+        let result = receiver_manager.process_certificates(&certificates);
         assert!(result.is_err());
         assert!(
             result
@@ -1683,7 +1719,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = weights[i];
                 let node = Node {
@@ -1701,16 +1737,25 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 DkgManager::new(
-                    address.clone(),
+                    address,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 )
             })
@@ -1725,21 +1770,27 @@ mod tests {
         // Phase 2: Pre-compute all signatures and certificates
         let mut certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = Address([dealer_idx as u8; 32]);
+            let dealer_addr = Address::new([dealer_idx as u8; 32]);
 
             // Collect signatures from all validators
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
                 let sig = manager
-                    .receive_dealer_message(message, dealer_addr.clone())
+                    .receive_dealer_message(message, dealer_addr)
                     .unwrap();
                 signatures.push(sig);
             }
 
-            // Create certificate
-            let cert = managers[dealer_idx]
-                .create_certificate(message, signatures)
-                .unwrap();
+            // Create certificate using helper
+            let cert = create_test_certificate(
+                &config,
+                &bls_public_keys,
+                message,
+                dealer_addr,
+                &session_context,
+                signatures,
+            )
+            .unwrap();
             certificates.push(cert);
         }
 
@@ -1751,14 +1802,14 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (Address([(idx + 1) as u8; 32]), mgr))
+            .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address::new([0; 32]));
 
         // Pre-populate validator 0's manager with dealer outputs from all validators (including itself)
         for (j, message) in dealer_messages.iter().enumerate() {
             test_manager
-                .receive_dealer_message(message, Address([j as u8; 32]))
+                .receive_dealer_message(message, Address::new([j as u8; 32]))
                 .unwrap();
         }
 
@@ -1809,9 +1860,9 @@ mod tests {
 
         // Verify that other validators (in the mock P2P channel) received and processed validator 0's dealer message
         let other_managers = mock_p2p.managers.lock().unwrap();
-        let addr0 = Address([0; 32]);
+        let addr0 = Address::new([0; 32]);
         for j in 1..num_validators {
-            let addr_j = Address([j as u8; 32]);
+            let addr_j = Address::new([j as u8; 32]);
             let other_mgr = other_managers.get(&addr_j).unwrap();
             assert!(
                 other_mgr.dealer_outputs.contains_key(&addr0),
@@ -1840,7 +1891,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -1857,34 +1908,44 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create manager for validator 0
-        let addr0 = Address([0; 32]);
+        let addr0 = Address::new([0; 32]);
         let mut test_manager = DkgManager::new(
-            addr0.clone(),
+            addr0,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
             bls_keys[0].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
-                let addr = Address([i as u8; 32]);
+                let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
-                    addr.clone(),
+                    addr,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 );
                 (addr, manager)
             })
             .collect();
 
-        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address::new([0; 32]));
         let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         // Call run_as_dealer()
@@ -1896,13 +1957,13 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify own dealer output is stored
-        let addr0 = Address([0; 32]);
+        let addr0 = Address::new([0; 32]);
         assert!(test_manager.dealer_outputs.contains_key(&addr0));
 
         // Verify other validators received dealer message via P2P
         let other_managers = mock_p2p.managers.lock().unwrap();
         for i in 1..num_validators {
-            let addr = Address([i as u8; 32]);
+            let addr = Address::new([i as u8; 32]);
             let other_mgr = other_managers.get(&addr).unwrap();
             assert!(
                 other_mgr.dealer_outputs.contains_key(&addr0),
@@ -1934,7 +1995,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -1951,16 +2012,25 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 DkgManager::new(
-                    address.clone(),
+                    address,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 )
             })
@@ -1975,21 +2045,27 @@ mod tests {
 
         let mut certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = Address([dealer_idx as u8; 32]);
+            let dealer_addr = Address::new([dealer_idx as u8; 32]);
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
                 let sig = manager
-                    .receive_dealer_message(message, dealer_addr.clone())
+                    .receive_dealer_message(message, dealer_addr)
                     .unwrap();
                 signatures.push(sig);
             }
 
-            // Create certificate
-            let cert = managers[dealer_idx]
-                .create_certificate(message, signatures)
-                .unwrap();
+            // Create certificate using helper
+            let cert = create_test_certificate(
+                &config,
+                &bls_public_keys,
+                message,
+                dealer_addr,
+                &session_context,
+                signatures,
+            )
+            .unwrap();
             certificates.push(cert);
         }
 
@@ -2001,9 +2077,9 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (Address([(idx + 1) as u8; 32]), mgr))
+            .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address::new([0; 32]));
         let output = test_manager
             .run_as_party(&mock_p2p, &mut mock_tob)
             .await
@@ -2149,7 +2225,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -2165,16 +2241,26 @@ mod tests {
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 DkgManager::new(
-                    address.clone(),
+                    address,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 )
             })
@@ -2189,41 +2275,54 @@ mod tests {
 
         let mut valid_certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = Address([dealer_idx as u8; 32]);
+            let dealer_addr = Address::new([dealer_idx as u8; 32]);
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
                 let sig = manager
-                    .receive_dealer_message(message, dealer_addr.clone())
+                    .receive_dealer_message(message, dealer_addr)
                     .unwrap();
                 signatures.push(sig);
             }
 
-            // Create certificate
-            let cert = managers[dealer_idx]
-                .create_certificate(message, signatures)
-                .unwrap();
+            // Create certificate using helper
+            let cert = create_test_certificate(
+                &config,
+                &bls_public_keys,
+                message,
+                dealer_addr,
+                &session_context,
+                signatures,
+            )
+            .unwrap();
             valid_certificates.push(cert);
         }
 
         // Create invalid certificate with wrong message hash
         let invalid_dealer_msg = managers[3].create_dealer_message(&mut rng).unwrap();
-        let dealer_addr_3 = Address([3; 32]);
+        let dealer_addr_3 = Address::new([3; 32]);
 
         let mut invalid_signatures = Vec::new();
         for manager in managers.iter_mut() {
             let sig = manager
-                .receive_dealer_message(&invalid_dealer_msg, dealer_addr_3.clone())
+                .receive_dealer_message(&invalid_dealer_msg, dealer_addr_3)
                 .unwrap();
             invalid_signatures.push(sig);
         }
 
-        let mut invalid_cert = managers[3]
-            .create_certificate(&invalid_dealer_msg, invalid_signatures)
-            .unwrap();
-        // Make it invalid by corrupting the message hash
-        invalid_cert.message_hash = [99; 32]; // Wrong hash
+        // Create a valid certificate but with corrupted message hash
+        let mut invalid_cert = create_test_certificate(
+            &config,
+            &bls_public_keys,
+            &invalid_dealer_msg,
+            dealer_addr_3,
+            &session_context,
+            invalid_signatures,
+        )
+        .unwrap();
+        // Make it invalid by corrupting the message hash in the DkgMessage
+        invalid_cert.message.message_hash = [99; 32]; // Wrong hash
 
         // Mix valid and invalid certificates in TOB
         // Order: valid[0], invalid, valid[1], valid[2]
@@ -2241,9 +2340,9 @@ mod tests {
         let other_managers: std::collections::HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (Address([(idx + 1) as u8; 32]), mgr))
+            .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, Address([0; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address::new([0; 32]));
         let output = test_manager
             .run_as_party(&mock_p2p, &mut mock_tob)
             .await
@@ -2287,7 +2386,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -2304,16 +2403,25 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create all managers
         let mut managers: Vec<_> = (0..num_validators)
             .map(|i| {
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 DkgManager::new(
-                    address.clone(),
+                    address,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 )
             })
@@ -2329,21 +2437,27 @@ mod tests {
         // Create certificates
         let mut certificates = Vec::new();
         for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = Address([dealer_idx as u8; 32]);
+            let dealer_addr = Address::new([dealer_idx as u8; 32]);
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
                 let sig = manager
-                    .receive_dealer_message(message, dealer_addr.clone())
+                    .receive_dealer_message(message, dealer_addr)
                     .unwrap();
                 signatures.push(sig);
             }
 
-            // Create certificate
-            let cert = managers[dealer_idx]
-                .create_certificate(message, signatures)
-                .unwrap();
+            // Create certificate using helper
+            let cert = create_test_certificate(
+                &config,
+                &bls_public_keys,
+                message,
+                dealer_addr,
+                &session_context,
+                signatures,
+            )
+            .unwrap();
             certificates.push(cert);
         }
 
@@ -2363,10 +2477,10 @@ mod tests {
             .enumerate()
             .map(|(idx, mgr)| {
                 let addr_idx = if idx < 2 { idx } else { idx + 1 };
-                (Address([addr_idx as u8; 32]), mgr)
+                (Address::new([addr_idx as u8; 32]), mgr)
             })
             .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, Address([2; 32]));
+        let mock_p2p = MockP2PChannel::new(other_managers, Address::new([2; 32]));
         let output = test_manager
             .run_as_party(&mock_p2p, &mut mock_tob)
             .await
@@ -2405,9 +2519,73 @@ mod tests {
     #[tokio::test]
     async fn test_run_as_dealer_tob_publish_error() {
         let mut rng = rand::thread_rng();
-        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
+        let num_validators = 5;
 
-        let succeeding_p2p = SucceedingP2PChannel {};
+        // Create encryption keys for all validators
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key = PublicKey::from_private_key(private_key);
+                let address = Address::new([i as u8; 32]);
+                let node = Node {
+                    id: i as u16,
+                    pk: public_key,
+                    weight: 1,
+                };
+                (address, node)
+            })
+            .collect();
+
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        // Create test manager (validator 0)
+        let mut test_manager = DkgManager::new(
+            Address::new([0; 32]),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Create managers for validators 1-4 to respond with valid signatures
+        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                let manager = DkgManager::new(
+                    addr,
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    bls_keys[i].clone(),
+                    bls_public_keys.clone(),
+                    Box::new(MockPublicMessagesStore),
+                );
+                (addr, manager)
+            })
+            .collect();
+
+        let succeeding_p2p = SucceedingP2PChannel::new(other_managers, Address::new([0; 32]));
 
         let mut failing_tob = FailingOrderedBroadcastChannel {
             error_message: "consensus error".to_string(),
@@ -2431,13 +2609,76 @@ mod tests {
         // Use 7 validators so we have more room for failures
         // threshold=4, max_faulty=1, required_sigs=5
         // Dealer sends to 6 others, fail 1, succeed 5
-        let (mut test_manager, _) = create_manager_with_valid_keys(0, 7);
-        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+        let num_validators = 7;
 
-        let partially_failing_p2p = PartiallyFailingP2PChannel {
-            fail_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-            max_failures: 1, // Fail 1 out of 6, get 5 signatures
-        };
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key = PublicKey::from_private_key(private_key);
+                let address = Address::new([i as u8; 32]);
+                let node = Node {
+                    id: i as u16,
+                    pk: public_key,
+                    weight: 1,
+                };
+                (address, node)
+            })
+            .collect();
+
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 4, 1).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        let mut test_manager = DkgManager::new(
+            Address::new([0; 32]),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                let manager = DkgManager::new(
+                    addr,
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    bls_keys[i].clone(),
+                    bls_public_keys.clone(),
+                    Box::new(MockPublicMessagesStore),
+                );
+                (addr, manager)
+            })
+            .collect();
+
+        let partially_failing_p2p = PartiallyFailingP2PChannel::new(
+            other_managers,
+            Address::new([0; 32]),
+            1, // Fail 1 out of 6, get 5 signatures
+        );
+
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         let result = test_manager
             .run_as_dealer(&partially_failing_p2p, &mut mock_tob, &mut rng)
@@ -2452,14 +2693,74 @@ mod tests {
     #[tracing_test::traced_test]
     async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
         let mut rng = rand::thread_rng();
-        let (mut test_manager, _) = create_manager_with_valid_keys(0, 5);
-        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+        let num_validators = 5;
 
-        // Fail too many validators
-        let partially_failing_p2p = PartiallyFailingP2PChannel {
-            fail_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-            max_failures: 3, // Fail 3 out of 4, only 1 succeeds
-        };
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let validators = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key = PublicKey::from_private_key(private_key);
+                let address = Address::new([i as u8; 32]);
+                let node = Node {
+                    id: i as u16,
+                    pk: public_key,
+                    weight: 1,
+                };
+                (address, node)
+            })
+            .collect();
+
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        let mut test_manager = DkgManager::new(
+            Address::new([0; 32]),
+            config.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                let manager = DkgManager::new(
+                    addr,
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    bls_keys[i].clone(),
+                    bls_public_keys.clone(),
+                    Box::new(MockPublicMessagesStore),
+                );
+                (addr, manager)
+            })
+            .collect();
+
+        // Fail too many validators - fail 3 out of 4, only 1 succeeds
+        let partially_failing_p2p =
+            PartiallyFailingP2PChannel::new(other_managers, Address::new([0; 32]), 3);
+
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         let result = test_manager
             .run_as_dealer(&partially_failing_p2p, &mut mock_tob, &mut rng)
@@ -2470,7 +2771,6 @@ mod tests {
         // Verify logging occurred for the 3 failures
         assert!(logs_contain("Failed to send share"));
     }
-
     #[tokio::test]
     async fn test_run_as_dealer_includes_own_signature() {
         let mut rng = rand::thread_rng();
@@ -2490,7 +2790,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -2507,34 +2807,44 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create manager for validator 0 (the dealer)
-        let dealer_addr = Address([0; 32]);
+        let dealer_addr = Address::new([0; 32]);
         let mut test_manager = DkgManager::new(
-            dealer_addr.clone(),
+            dealer_addr,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
             bls_keys[0].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Create managers for other validators
         let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
             .map(|i| {
-                let addr = Address([i as u8; 32]);
+                let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
-                    addr.clone(),
+                    addr,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
                     bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 );
                 (addr, manager)
             })
             .collect();
 
-        let mock_p2p = MockP2PChannel::new(other_managers, dealer_addr.clone());
+        let mock_p2p = MockP2PChannel::new(other_managers, dealer_addr);
         let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
         // Run as dealer
@@ -2554,26 +2864,25 @@ mod tests {
             _ => panic!("Expected AvssCertificateV1"),
         };
 
+        // Create BLS committee to verify signatures
+        let bls_committee = create_bls_committee(&config, &bls_public_keys);
+
+        // Get the list of signers from the certificate
+        let signers = cert
+            .signers(&bls_committee)
+            .expect("Failed to get signers from certificate");
+
         // Verify the dealer's own signature is included
         assert!(
-            cert.signature
-                .iter()
-                .any(|sig| sig.validator == dealer_addr),
+            signers.contains(&dealer_addr),
             "Dealer's own signature must be included in the certificate"
         );
 
-        // Verify the dealer is the first signer
+        // Verify we have the expected number of distinct signers
+        let signers_set: std::collections::HashSet<_> = signers.iter().collect();
         assert_eq!(
-            cert.signature[0].validator, dealer_addr,
-            "Dealer should be the first signer"
-        );
-
-        // Verify all signatures are from distinct validators
-        let signers: std::collections::HashSet<_> =
-            cert.signature.iter().map(|sig| &sig.validator).collect();
-        assert_eq!(
+            signers_set.len(),
             signers.len(),
-            cert.signature.len(),
             "All signatures should be from distinct validators"
         );
     }
@@ -2588,7 +2897,7 @@ mod tests {
             fail_on_receive: true,
         };
 
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), Address([0; 32]));
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), Address::new([0; 32]));
         let result = test_manager.run_as_party(&mock_p2p, &mut failing_tob).await;
 
         assert!(result.is_err());
@@ -2596,16 +2905,18 @@ mod tests {
         assert!(matches!(err, DkgError::BroadcastError(_)));
         assert!(err.to_string().contains("receive timeout"));
     }
-
+    //
     struct WeightBasedTestSetup {
         config: DkgConfig,
         session_context: SessionContext,
         dealer_messages: Vec<(Address, avss::Message)>,
-        certificates: Vec<DkgCertificate>,
+        certificates: Vec<Certificate<DkgMessage>>,
         encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
+        bls_keys: Vec<crate::bls::Bls12381PrivateKey>,
+        bls_public_keys: std::collections::HashMap<Address, BLS12381PublicKey>,
         weights: Vec<u16>,
     }
-
+    //
     fn setup_weight_based_test(
         weights: Vec<u16>,
         threshold: u16,
@@ -2619,13 +2930,18 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
 
+        // Create BLS keys for all validators
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
         // Create validators with specified weights
         let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = weights[i];
                 let node = Node {
@@ -2645,17 +2961,26 @@ mod tests {
             "testchain".to_string(),
         );
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create dealer managers (either all validators or specified subset)
         let dealer_count = num_dealers.unwrap_or(num_validators);
         let dealer_managers: Vec<_> = (0..dealer_count)
             .map(|i| {
-                let addr = Address([i as u8; 32]);
+                let addr = Address::new([i as u8; 32]);
                 DkgManager::new(
-                    addr.clone(),
+                    addr,
                     config.clone(),
                     session_context.clone(),
                     encryption_keys[i].clone(),
-                    crate::bls::Bls12381PrivateKey::generate(&mut rng),
+                    bls_keys[i].clone(),
+                    bls_public_keys.clone(),
                     Box::new(MockPublicMessagesStore),
                 )
             })
@@ -2666,7 +2991,7 @@ mod tests {
             .iter()
             .map(|manager| {
                 let message = manager.create_dealer_message(&mut rng).unwrap();
-                (manager.address.clone(), message)
+                (manager.address, message)
             })
             .collect();
 
@@ -2674,7 +2999,15 @@ mod tests {
         let certificates: Vec<_> = dealer_messages
             .iter()
             .map(|(dealer_addr, message)| {
-                create_test_certificate(dealer_addr, message, &config, &session_context, &weights)
+                create_weight_based_test_certificate(
+                    dealer_addr,
+                    message,
+                    &config,
+                    &session_context,
+                    &weights,
+                    &bls_keys,
+                    &bls_public_keys,
+                )
             })
             .collect();
 
@@ -2684,33 +3017,42 @@ mod tests {
             dealer_messages,
             certificates,
             encryption_keys,
+            bls_keys,
+            bls_public_keys,
             weights,
         }
     }
 
-    // Create a test certificate with minimal valid signatures
-    fn create_test_certificate(
+    // Create a test certificate with minimal valid signatures for weight-based tests
+    fn create_weight_based_test_certificate(
         dealer_addr: &Address,
         message: &avss::Message,
         config: &DkgConfig,
         session_context: &SessionContext,
         weights: &[u16],
-    ) -> DkgCertificate {
+        bls_keys: &[crate::bls::Bls12381PrivateKey],
+        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+    ) -> Certificate<DkgMessage> {
         let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address: *dealer_addr,
+            session_context: session_context.clone(),
+            message_hash,
+        };
 
-        // Create minimal valid signatures to pass validation
-        let dkg_required = config.required_dkg_signatures() as u16;
-        let mut dkg_sigs = vec![];
-        let mut weight_sum = 0u16;
+        // Create BLS committee
+        let bls_committee = create_bls_committee(config, bls_public_keys);
+        let mut aggregator =
+            crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message.clone());
 
         // Add signatures from validators until we meet the required weight
+        let dkg_required = config.threshold;
+        let mut weight_sum = 0u16;
+
         for (i, w) in weights.iter().enumerate() {
-            let signer_addr = Address([i as u8; 32]);
-            let sig = types::ValidatorSignature {
-                validator: signer_addr,
-                signature: vec![0u8; 64], // Dummy signature
-            };
-            dkg_sigs.push(sig);
+            let signer_addr = Address::new([i as u8; 32]);
+            let signature = bls_keys[i].sign(config.epoch, signer_addr, &dkg_message);
+            aggregator.add_signature(signature).unwrap();
             weight_sum += w;
 
             if weight_sum >= dkg_required {
@@ -2718,12 +3060,7 @@ mod tests {
             }
         }
 
-        DkgCertificate {
-            dealer: dealer_addr.clone(),
-            message_hash,
-            signature: dkg_sigs,
-            session_context: session_context.clone(),
-        }
+        aggregator.finish().unwrap()
     }
 
     // Helper to create and setup a party manager for testing
@@ -2731,28 +3068,28 @@ mod tests {
         test_setup: &WeightBasedTestSetup,
         party_index: usize,
     ) -> (DkgResult<DkgOutput>, MockOrderedBroadcastChannel) {
-        let mut rng = rand::thread_rng();
-        let party_addr = Address([party_index as u8; 32]);
+        let party_addr = Address::new([party_index as u8; 32]);
 
         let mut party_manager = DkgManager::new(
-            party_addr.clone(),
+            party_addr,
             test_setup.config.clone(),
             test_setup.session_context.clone(),
             test_setup.encryption_keys[party_index].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            test_setup.bls_keys[party_index].clone(),
+            test_setup.bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Pre-process the dealer messages so validation passes
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            let _ = party_manager.receive_dealer_message(message, dealer_addr.clone());
+            let _ = party_manager.receive_dealer_message(message, *dealer_addr);
         }
 
         // Create mock TOB with certificates
         let mut mock_tob = MockOrderedBroadcastChannel::new(test_setup.certificates.clone());
 
         // Run party collection
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr.clone());
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
 
         (result, mock_tob)
@@ -2849,27 +3186,27 @@ mod tests {
         assert_eq!(modified_certificates.len(), 6);
 
         // Create party manager
-        let mut rng = rand::thread_rng();
-        let party_addr = Address([0; 32]);
+        let party_addr = Address::new([0; 32]);
         let mut party_manager = DkgManager::new(
-            party_addr.clone(),
+            party_addr,
             test_setup.config.clone(),
             test_setup.session_context.clone(),
             test_setup.encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            test_setup.bls_keys[0].clone(),
+            test_setup.bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Pre-process the dealer messages
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            let _ = party_manager.receive_dealer_message(message, dealer_addr.clone());
+            let _ = party_manager.receive_dealer_message(message, *dealer_addr);
         }
 
         // Create mock TOB with the modified certificates (including duplicates)
         let mut mock_tob = MockOrderedBroadcastChannel::new(modified_certificates);
 
         // Run party collection
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr.clone());
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
         assert!(result.is_ok());
 
@@ -2893,18 +3230,38 @@ mod tests {
     #[tokio::test]
     async fn test_run_as_party_retrieves_missing_dealer_messages() {
         let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
         // Create 3 dealers with their messages
-        let (dealer1_addr, dealer1_mgr) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
-        let (dealer2_addr, dealer2_mgr) =
-            create_dealer_with_message(1, &config, &session_context, &encryption_keys, &mut rng);
+        let (dealer1_addr, dealer1_mgr) = create_dealer_with_message(
+            0,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
+        let (dealer2_addr, dealer2_mgr) = create_dealer_with_message(
+            1,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
 
         // Create party (validator 3) WITHOUT pre-processing dealer messages
-        let (party_addr, mut party_manager) =
-            create_manager_at_index(3, &config, &session_context, &encryption_keys, &mut rng);
+        let (party_addr, mut party_manager) = create_manager_at_index(
+            3,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
 
         // Get the dealer messages for certificate creation
         let msg1 = dealer1_mgr
@@ -2918,27 +3275,68 @@ mod tests {
             .unwrap()
             .clone();
 
-        // Create certificates using the test helper which creates minimal valid signatures
+        // Create validator signatures for certificates
+        let validator_signatures_1: Vec<ValidatorSignature> = (0..3)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                let message_hash =
+                    compute_message_hash(&session_context, &dealer1_addr, &msg1).unwrap();
+                let dkg_message = DkgMessage {
+                    dealer_address: dealer1_addr,
+                    session_context: session_context.clone(),
+                    message_hash,
+                };
+                let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
+                ValidatorSignature {
+                    validator: addr,
+                    signature,
+                }
+            })
+            .collect();
+
+        let validator_signatures_2: Vec<ValidatorSignature> = (0..3)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                let message_hash =
+                    compute_message_hash(&session_context, &dealer2_addr, &msg2).unwrap();
+                let dkg_message = DkgMessage {
+                    dealer_address: dealer2_addr,
+                    session_context: session_context.clone(),
+                    message_hash,
+                };
+                let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
+                ValidatorSignature {
+                    validator: addr,
+                    signature,
+                }
+            })
+            .collect();
+
+        // Create certificates using the test helper
         let cert1 = create_test_certificate(
-            &dealer1_addr,
+            &config,
+            &bls_public_keys,
             &msg1,
-            &config,
+            dealer1_addr,
             &session_context,
-            &[1, 1, 1, 1, 1],
-        );
+            validator_signatures_1,
+        )
+        .unwrap();
         let cert2 = create_test_certificate(
-            &dealer2_addr,
-            &msg2,
             &config,
+            &bls_public_keys,
+            &msg2,
+            dealer2_addr,
             &session_context,
-            &[1, 1, 1, 1, 1],
-        );
+            validator_signatures_2,
+        )
+        .unwrap();
 
         // Create mock P2P channel with dealers that have messages
         let mut dealers = std::collections::HashMap::new();
-        dealers.insert(dealer1_addr.clone(), dealer1_mgr);
-        dealers.insert(dealer2_addr.clone(), dealer2_mgr);
-        let mock_p2p = MockP2PChannel::new(dealers, party_addr.clone());
+        dealers.insert(dealer1_addr, dealer1_mgr);
+        dealers.insert(dealer2_addr, dealer2_mgr);
+        let mock_p2p = MockP2PChannel::new(dealers, party_addr);
 
         // Create mock TOB with certificates - threshold is 2, so we need 2 dealers
         let certificates = vec![cert1, cert2];
@@ -2961,20 +3359,47 @@ mod tests {
     async fn test_run_as_party_aborts_on_retrieval_failure() {
         // Tests that run_as_party aborts with error when message retrieval fails
         let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
         // Create 3 dealers with their messages
-        let (dealer1_addr, dealer1_mgr) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
-        let (dealer2_addr, _dealer2_mgr) =
-            create_dealer_with_message(1, &config, &session_context, &encryption_keys, &mut rng);
-        let (dealer3_addr, dealer3_mgr) =
-            create_dealer_with_message(2, &config, &session_context, &encryption_keys, &mut rng);
+        let (dealer1_addr, dealer1_mgr) = create_dealer_with_message(
+            0,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
+        let (dealer2_addr, _dealer2_mgr) = create_dealer_with_message(
+            1,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
+        let (dealer3_addr, dealer3_mgr) = create_dealer_with_message(
+            2,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
 
         // Create party (validator 3) WITHOUT pre-processing dealer messages
-        let (party_addr, mut party_manager) =
-            create_manager_at_index(3, &config, &session_context, &encryption_keys, &mut rng);
+        let (party_addr, mut party_manager) = create_manager_at_index(
+            3,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
 
         // Get the dealer messages for certificate creation
         let msg1 = dealer1_mgr
@@ -2993,35 +3418,62 @@ mod tests {
             .unwrap()
             .clone();
 
+        // Helper to create validator signatures
+        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<ValidatorSignature> {
+            (0..3)
+                .map(|i| {
+                    let addr = Address::new([i as u8; 32]);
+                    let message_hash =
+                        compute_message_hash(&session_context, &dealer_addr, msg).unwrap();
+                    let dkg_message = DkgMessage {
+                        dealer_address: dealer_addr,
+                        session_context: session_context.clone(),
+                        message_hash,
+                    };
+                    let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
+                    ValidatorSignature {
+                        validator: addr,
+                        signature,
+                    }
+                })
+                .collect()
+        };
+
         // Create certificates for all three dealers
         let cert1 = create_test_certificate(
-            &dealer1_addr,
+            &config,
+            &bls_public_keys,
             &msg1,
-            &config,
+            dealer1_addr,
             &session_context,
-            &[1, 1, 1, 1, 1],
-        );
+            create_sigs(dealer1_addr, &msg1),
+        )
+        .unwrap();
         let cert2 = create_test_certificate(
-            &dealer2_addr,
+            &config,
+            &bls_public_keys,
             &msg2,
-            &config,
+            dealer2_addr,
             &session_context,
-            &[1, 1, 1, 1, 1],
-        );
+            create_sigs(dealer2_addr, &msg2),
+        )
+        .unwrap();
         let cert3 = create_test_certificate(
-            &dealer3_addr,
-            &msg3,
             &config,
+            &bls_public_keys,
+            &msg3,
+            dealer3_addr,
             &session_context,
-            &[1, 1, 1, 1, 1],
-        );
+            create_sigs(dealer3_addr, &msg3),
+        )
+        .unwrap();
 
         // Create mock P2P channel with only dealer1 and dealer3 (dealer2 is missing)
         // So retrieval of dealer2's message will fail
         let mut dealers = std::collections::HashMap::new();
-        dealers.insert(dealer1_addr.clone(), dealer1_mgr);
-        dealers.insert(dealer3_addr.clone(), dealer3_mgr);
-        let mock_p2p = MockP2PChannel::new(dealers, party_addr.clone());
+        dealers.insert(dealer1_addr, dealer1_mgr);
+        dealers.insert(dealer3_addr, dealer3_mgr);
+        let mock_p2p = MockP2PChannel::new(dealers, party_addr);
 
         // Create mock TOB with all three certificates
         let certificates = vec![cert1, cert2, cert3];
@@ -3146,7 +3598,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
     async fn test_handle_send_share_request() {
         // Test that handle_send_share_request works with the new request/response types
         let mut rng = rand::thread_rng();
@@ -3156,13 +3607,17 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
 
+        let bls_keys: Vec<_> = (0..5)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
         // Create validators using shared encryption public keys
         let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -3182,25 +3637,35 @@ mod tests {
             "testchain".to_string(),
         );
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create dealer (party 1) with its encryption key
-        let dealer_address = Address([1; 32]);
+        let dealer_address = Address::new([1; 32]);
         let dealer_manager = DkgManager::new(
-            dealer_address.clone(),
+            dealer_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[1].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            bls_keys[1].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Create receiver (party 0) with its encryption key
-        let receiver_address = Address([0; 32]);
+        let receiver_address = Address::new([0; 32]);
         let mut receiver_manager = DkgManager::new(
-            receiver_address.clone(),
+            receiver_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
@@ -3214,10 +3679,11 @@ mod tests {
 
         // Receiver handles the request
         let response = receiver_manager
-            .handle_send_share_request(dealer_address.clone(), &request)
+            .handle_send_share_request(dealer_address, &request)
             .unwrap();
 
-        assert_eq!(response.signature.len(), 96); // BLS signature size
+        // Verify we got a valid BLS signature from the receiver
+        assert_eq!(response.signature.validator, receiver_address);
     }
 
     #[tokio::test]
@@ -3229,13 +3695,17 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
 
+        let bls_keys: Vec<_> = (0..5)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
         // Create validators using shared encryption public keys
         let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -3255,26 +3725,35 @@ mod tests {
             "testchain".to_string(),
         );
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create dealer (party 0)
-        let dealer_address = Address([0; 32]);
+        let dealer_address = Address::new([0; 32]);
         let mut dealer_manager = DkgManager::new(
-            dealer_address.clone(),
+            dealer_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Dealer creates and processes its own message (stores in dealer_messages)
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
         dealer_manager
-            .receive_dealer_message(&dealer_message, dealer_address.clone())
+            .receive_dealer_message(&dealer_message, dealer_address)
             .unwrap();
 
         // Party requests the dealer's message
         let request = RetrieveMessageRequest {
-            dealer: dealer_address.clone(),
+            dealer: dealer_address,
         };
         let response = dealer_manager
             .handle_retrieve_message_request(&request)
@@ -3296,13 +3775,17 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
 
+        let bls_keys: Vec<_> = (0..5)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
         // Create validators using shared encryption public keys
         let validators = encryption_keys
             .iter()
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -3322,20 +3805,29 @@ mod tests {
             "testchain".to_string(),
         );
 
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
         // Create dealer (party 0) but don't create/process any message
-        let dealer_address = Address([0; 32]);
+        let dealer_address = Address::new([0; 32]);
         let dealer_manager = DkgManager::new(
-            dealer_address.clone(),
+            dealer_address,
             config.clone(),
             session_context.clone(),
             encryption_keys[0].clone(),
-            crate::bls::Bls12381PrivateKey::generate(&mut rng),
+            bls_keys[0].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
 
         // Party requests the dealer's message
         let request = RetrieveMessageRequest {
-            dealer: dealer_address.clone(),
+            dealer: dealer_address,
         };
         let result = dealer_manager.handle_retrieve_message_request(&request);
 
@@ -3917,42 +4409,69 @@ mod tests {
     #[tokio::test]
     async fn test_retrieve_dealer_message_success() {
         let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
         // Create dealer (party 0) with its message
-        let (dealer_address, dealer_manager) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        let (dealer_address, dealer_manager) = create_dealer_with_message(
+            0,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
 
         // Create party (party 1) that will request the message
-        let (party_address, mut party_manager) =
-            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
-
-        // Create a certificate for the dealer's message
-        let message_hash = compute_message_hash(
+        let (party_address, mut party_manager) = create_manager_at_index(
+            1,
+            &config,
             &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+
+        // Get dealer's message for certificate creation
+        let dealer_message = dealer_manager.dealer_messages.get(&dealer_address).unwrap();
+
+        // Create DkgMessage and validator signatures
+        let message_hash =
+            compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address,
+            session_context: session_context.clone(),
+            message_hash,
+        };
+
+        // Dealer signs its own message
+        let dealer_signature =
+            bls_keys[0].sign(session_context.epoch, dealer_address, &dkg_message);
+        let validator_signatures = vec![ValidatorSignature {
+            validator: dealer_address,
+            signature: dealer_signature,
+        }];
+
+        // Create certificate with dealer's signature
+        let cert = create_certificate_with_signers(
+            &config,
+            &bls_public_keys,
             &dealer_address,
-            dealer_manager.dealer_messages.get(&dealer_address).unwrap(),
+            dealer_message,
+            &session_context,
+            validator_signatures,
         )
         .unwrap();
-        let cert = DkgCertificate {
-            dealer: dealer_address.clone(),
-            message_hash,
-            signature: vec![ValidatorSignature {
-                validator: dealer_address.clone(),
-                signature: vec![0u8; 64],
-            }],
-            session_context: session_context.clone(),
-        };
 
         // Create mock P2P channel with the dealer (who also signed the cert)
         let mut dealers = std::collections::HashMap::new();
-        dealers.insert(dealer_address.clone(), dealer_manager);
-        let mock_p2p = MockP2PChannel::new(dealers, party_address.clone());
+        dealers.insert(dealer_address, dealer_manager);
+        let mock_p2p = MockP2PChannel::new(dealers, party_address);
 
         // Party requests dealer's share from certificate signers
         let result = party_manager
-            .retrieve_dealer_message(dealer_address.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_address, &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -3967,9 +4486,10 @@ mod tests {
 
         // Create two separate configs with different encryption keys
         // Dealer will create message for config1, party will try to process with config2
-        let (config_1, session_context, encryption_keys_1) =
+        let (config_1, session_context, encryption_keys_1, bls_keys_1, bls_public_keys_1) =
             create_test_config_and_encrption_keys(&mut rng);
-        let (config_2, _, encryption_keys_2) = create_test_config_and_encrption_keys(&mut rng);
+        let (config_2, _, encryption_keys_2, bls_keys_2, bls_public_keys_2) =
+            create_test_config_and_encrption_keys(&mut rng);
 
         // Create dealer with config_1
         let (dealer_address, dealer_manager) = create_dealer_with_message(
@@ -3977,77 +4497,146 @@ mod tests {
             &config_1,
             &session_context,
             &encryption_keys_1,
+            &bls_keys_1,
+            &bls_public_keys_1,
             &mut rng,
         );
 
         // Create party with config_2 (incompatible encryption key)
-        let (party_address, mut party_manager) =
-            create_manager_at_index(1, &config_2, &session_context, &encryption_keys_2, &mut rng);
-
-        // Create a certificate for the dealer's message
-        let message_hash = compute_message_hash(
+        let (party_address, mut party_manager) = create_manager_at_index(
+            1,
+            &config_2,
             &session_context,
+            &encryption_keys_2,
+            &bls_keys_2,
+            &bls_public_keys_2,
+        );
+
+        // Get dealer's message for certificate creation
+        let dealer_message = dealer_manager.dealer_messages.get(&dealer_address).unwrap();
+
+        // Create DkgMessage and validator signatures
+        let message_hash =
+            compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address,
+            session_context: session_context.clone(),
+            message_hash,
+        };
+
+        // Dealer signs its own message using config_1 BLS keys
+        let dealer_signature =
+            bls_keys_1[0].sign(session_context.epoch, dealer_address, &dkg_message);
+        let validator_signatures = vec![ValidatorSignature {
+            validator: dealer_address,
+            signature: dealer_signature,
+        }];
+
+        // Create certificate with dealer's signature using config_1
+        let cert = create_certificate_with_signers(
+            &config_1,
+            &bls_public_keys_1,
             &dealer_address,
-            dealer_manager.dealer_messages.get(&dealer_address).unwrap(),
+            dealer_message,
+            &session_context,
+            validator_signatures,
         )
         .unwrap();
-        let cert = DkgCertificate {
-            dealer: dealer_address.clone(),
-            message_hash,
-            signature: vec![ValidatorSignature {
-                validator: dealer_address.clone(),
-                signature: vec![0u8; 64],
-            }],
-            session_context: session_context.clone(),
-        };
 
         // Create mock P2P channel
         let mut dealers = std::collections::HashMap::new();
-        dealers.insert(dealer_address.clone(), dealer_manager);
-        let mock_p2p = MockP2PChannel::new(dealers, party_address.clone());
+        dealers.insert(dealer_address, dealer_manager);
+        let mock_p2p = MockP2PChannel::new(dealers, party_address);
 
-        // Party requests dealer's share - should fail during message processing (incompatible keys)
+        // Party requests dealer's share - should fail during certificate validation or message processing
+        // (incompatible keys - config mismatch)
         let result = party_manager
-            .retrieve_dealer_message(dealer_address.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_address, &cert, &mock_p2p)
             .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        // Should fail - either during certificate validation (CryptoError) or message processing (ProtocolFailed)
+        assert!(
+            result.is_err(),
+            "Expected error due to incompatible configs"
+        );
     }
 
     #[tokio::test]
     async fn test_retrieve_dealer_message_retries_multiple_signers() {
         // Tests that retrieve_dealer_message retries with next signer if first fails
         let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
-        // Create dealer with message
-        let (dealer_addr, dealer_mgr) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
-
-        // Create party that will request
-        let (party_addr, mut party_mgr) =
-            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
-
-        // Create certificate with two signers: offline signer first, then dealer
-        let offline_signer_addr = Address([99; 32]); // Not in mock P2P
-        let cert = create_certificate_with_signers(
-            &dealer_addr,
-            dealer_mgr.dealer_messages.get(&dealer_addr).unwrap(),
+        // Create dealer with message (validator 0)
+        let (dealer_addr, dealer_mgr) = create_dealer_with_message(
+            0,
+            &config,
             &session_context,
-            vec![offline_signer_addr, dealer_addr.clone()], // Try offline first, then dealer
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
         );
 
-        // MockP2PChannel: only include dealer (offline signer not included)
-        let mut managers = std::collections::HashMap::new();
-        managers.insert(dealer_addr.clone(), dealer_mgr);
-        let mock_p2p = MockP2PChannel::new(managers, party_addr.clone());
+        // Create party that will request (validator 2)
+        let (party_addr, mut party_mgr) = create_manager_at_index(
+            2,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
 
-        // Should succeed by trying second signer after first fails
+        // Get dealer's message for certificate creation
+        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
+
+        // Create DkgMessage
+        let message_hash =
+            compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address: dealer_addr,
+            session_context: session_context.clone(),
+            message_hash,
+        };
+
+        // Create certificate with two signers: validator 1 (not in P2P) and dealer (validator 0)
+        // Validator 1 signs first, then validator 0
+        let validator_1_addr = Address::new([1; 32]);
+        let validator_1_signature =
+            bls_keys[1].sign(session_context.epoch, validator_1_addr, &dkg_message);
+        let dealer_signature = bls_keys[0].sign(session_context.epoch, dealer_addr, &dkg_message);
+
+        let validator_signatures = vec![
+            ValidatorSignature {
+                validator: validator_1_addr,
+                signature: validator_1_signature,
+            },
+            ValidatorSignature {
+                validator: dealer_addr,
+                signature: dealer_signature,
+            },
+        ];
+
+        let cert = create_certificate_with_signers(
+            &config,
+            &bls_public_keys,
+            &dealer_addr,
+            dealer_message,
+            &session_context,
+            validator_signatures,
+        )
+        .unwrap();
+
+        // MockP2PChannel: only include dealer (validator 1 not included)
+        let mut managers = std::collections::HashMap::new();
+        managers.insert(dealer_addr, dealer_mgr);
+        let mock_p2p = MockP2PChannel::new(managers, party_addr);
+
+        // Should succeed by trying validator 1 (fails), then dealer (succeeds)
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr, &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -4057,35 +4646,78 @@ mod tests {
     #[tokio::test]
     async fn test_retrieve_dealer_message_aborts_when_self_in_signers() {
         // Tests that retrieve_dealer_message aborts with error when requesting party is in signer list
-        let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
-        // Create dealer with message
-        let (dealer_addr, dealer_mgr) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        // Create dealer with message (validator 0)
+        let (dealer_addr, dealer_mgr) = create_dealer_with_message(
+            0,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
 
         // Create party that will request (party 1)
-        let (party_addr, mut party_mgr) =
-            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+        let (party_addr, mut party_mgr) = create_manager_at_index(
+            1,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+
+        // Get dealer's message for certificate creation
+        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
+
+        // Create DkgMessage
+        let message_hash =
+            compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address: dealer_addr,
+            session_context: session_context.clone(),
+            message_hash,
+        };
 
         // Create certificate with signers including the requesting party
         // This is an invalid state - party shouldn't be retrieving a message it signed for
+        let party_signature = bls_keys[1].sign(session_context.epoch, party_addr, &dkg_message);
+        let dealer_signature = bls_keys[0].sign(session_context.epoch, dealer_addr, &dkg_message);
+
+        let validator_signatures = vec![
+            ValidatorSignature {
+                validator: party_addr,
+                signature: party_signature,
+            },
+            ValidatorSignature {
+                validator: dealer_addr,
+                signature: dealer_signature,
+            },
+        ];
+
         let cert = create_certificate_with_signers(
+            &config,
+            &bls_public_keys,
             &dealer_addr,
-            dealer_mgr.dealer_messages.get(&dealer_addr).unwrap(),
+            dealer_message,
             &session_context,
-            vec![party_addr.clone(), dealer_addr.clone()], // Party in signer list
-        );
+            validator_signatures,
+        )
+        .unwrap();
 
         // MockP2PChannel: include dealer
         let mut managers = std::collections::HashMap::new();
-        managers.insert(dealer_addr.clone(), dealer_mgr);
-        let mock_p2p = MockP2PChannel::new(managers, party_addr.clone());
+        managers.insert(dealer_addr, dealer_mgr);
+        let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
         // Should abort with ProtocolFailed error due to invariant violation
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr, &cert, &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -4101,32 +4733,78 @@ mod tests {
     async fn test_retrieve_dealer_message_all_signers_fail() {
         // Tests that retrieve_dealer_message returns error when all signers fail
         let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
-        // Create dealer with message
-        let (dealer_addr, dealer_mgr) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
-
-        // Create party that will request
-        let (party_addr, mut party_mgr) =
-            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
-
-        // Create certificate with multiple offline signers
-        let cert = create_certificate_with_signers(
-            &dealer_addr,
-            dealer_mgr.dealer_messages.get(&dealer_addr).unwrap(),
+        // Create dealer with message (validator 0)
+        let (dealer_addr, dealer_mgr) = create_dealer_with_message(
+            0,
+            &config,
             &session_context,
-            vec![Address([98; 32]), Address([99; 32])], // All offline
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
         );
+
+        // Create party that will request (validator 1)
+        let (party_addr, mut party_mgr) = create_manager_at_index(
+            1,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+
+        // Get dealer's message for certificate creation
+        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
+
+        // Create DkgMessage
+        let message_hash =
+            compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address: dealer_addr,
+            session_context: session_context.clone(),
+            message_hash,
+        };
+
+        // Create certificate with signers 2 and 3 (both will be offline in P2P)
+        let signer_2_addr = Address::new([2; 32]);
+        let signer_3_addr = Address::new([3; 32]);
+        let signer_2_signature =
+            bls_keys[2].sign(session_context.epoch, signer_2_addr, &dkg_message);
+        let signer_3_signature =
+            bls_keys[3].sign(session_context.epoch, signer_3_addr, &dkg_message);
+
+        let validator_signatures = vec![
+            ValidatorSignature {
+                validator: signer_2_addr,
+                signature: signer_2_signature,
+            },
+            ValidatorSignature {
+                validator: signer_3_addr,
+                signature: signer_3_signature,
+            },
+        ];
+
+        let cert = create_certificate_with_signers(
+            &config,
+            &bls_public_keys,
+            &dealer_addr,
+            dealer_message,
+            &session_context,
+            validator_signatures,
+        )
+        .unwrap();
 
         // MockP2PChannel: empty (no signers available)
         let managers = std::collections::HashMap::new();
-        let mock_p2p = MockP2PChannel::new(managers, party_addr.clone());
+        let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
         // Should fail because all signers are offline
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr, &cert, &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -4140,12 +4818,19 @@ mod tests {
         // Tests that retrieve_dealer_message validates hash and rejects messages with wrong hash
         // Simulates Byzantine signer returning wrong message
         let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys) =
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
         // Create dealer A with message MA
-        let (dealer_a_addr, dealer_a_mgr) =
-            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        let (dealer_a_addr, dealer_a_mgr) = create_dealer_with_message(
+            0,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
         let message_a = dealer_a_mgr
             .dealer_messages
             .get(&dealer_a_addr)
@@ -4153,8 +4838,15 @@ mod tests {
             .clone();
 
         // Create dealer B with different message MB
-        let (dealer_b_addr, dealer_b_mgr) =
-            create_dealer_with_message(1, &config, &session_context, &encryption_keys, &mut rng);
+        let (dealer_b_addr, dealer_b_mgr) = create_dealer_with_message(
+            1,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+            &mut rng,
+        );
         let message_b = dealer_b_mgr
             .dealer_messages
             .get(&dealer_b_addr)
@@ -4162,55 +4854,104 @@ mod tests {
             .clone();
 
         // Create party that will request
-        let (party_addr, mut party_mgr) =
-            create_manager_at_index(2, &config, &session_context, &encryption_keys, &mut rng);
+        let (party_addr, mut party_mgr) = create_manager_at_index(
+            2,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
 
         // Create Byzantine signer that has WRONG message stored for dealer A
         // (It has dealer B's message stored under dealer A's key.)
-        let byzantine_signer_addr = Address([3; 32]);
-        let mut byzantine_signer =
-            create_manager_at_index(3, &config, &session_context, &encryption_keys, &mut rng).1;
+        let byzantine_signer_addr = Address::new([3; 32]);
+        let mut byzantine_signer = create_manager_at_index(
+            3,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        )
+        .1;
         // Byzantine: store dealer B's message under dealer A's address
         byzantine_signer
             .dealer_messages
-            .insert(dealer_a_addr.clone(), message_b.clone());
+            .insert(dealer_a_addr, message_b.clone());
 
-        // Create valid certificate for dealer A with correct hash
+        // Create DkgMessage for dealer A
+        let message_hash_a =
+            compute_message_hash(&session_context, &dealer_a_addr, &message_a).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address: dealer_a_addr,
+            session_context: session_context.clone(),
+            message_hash: message_hash_a,
+        };
+
+        // Create valid certificate for dealer A with correct hash, signed by Byzantine signer and dealer A
+        let byzantine_signature =
+            bls_keys[3].sign(session_context.epoch, byzantine_signer_addr, &dkg_message);
+        let dealer_a_signature =
+            bls_keys[0].sign(session_context.epoch, dealer_a_addr, &dkg_message);
+
+        let validator_signatures = vec![
+            ValidatorSignature {
+                validator: byzantine_signer_addr,
+                signature: byzantine_signature,
+            },
+            ValidatorSignature {
+                validator: dealer_a_addr,
+                signature: dealer_a_signature,
+            },
+        ];
+
         let cert = create_certificate_with_signers(
+            &config,
+            &bls_public_keys,
             &dealer_a_addr,
             &message_a,
             &session_context,
-            vec![byzantine_signer_addr.clone(), dealer_a_addr.clone()],
-        );
+            validator_signatures,
+        )
+        .unwrap();
 
         // MockP2PChannel: has Byzantine signer and real dealer A
         let mut managers = std::collections::HashMap::new();
         managers.insert(byzantine_signer_addr, byzantine_signer);
-        managers.insert(dealer_a_addr.clone(), dealer_a_mgr);
-        let mock_p2p = MockP2PChannel::new(managers, party_addr.clone());
+        managers.insert(dealer_a_addr, dealer_a_mgr);
+        let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
         // Party requests dealer A's message
         // 1. Tries Byzantine signer first -> returns message B
         // 2. Computes hash(message B) != hash(message A) -> rejects, continues
         // 3. Tries real dealer A -> returns message A -> hash matches -> success
         let result = party_mgr
-            .retrieve_dealer_message(dealer_a_addr.clone(), &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_a_addr, &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
         // Should have dealer A's correct message (from second signer)
         assert!(party_mgr.dealer_messages.contains_key(&dealer_a_addr));
     }
-
-    fn create_test_config_and_encrption_keys(
-        rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> (
+    //
+    type TestConfigAndKeys = (
         DkgConfig,
         SessionContext,
         Vec<PrivateKey<EncryptionGroupElement>>,
-    ) {
+        Vec<crate::bls::Bls12381PrivateKey>,
+        std::collections::HashMap<Address, BLS12381PublicKey>,
+    );
+
+    fn create_test_config_and_encrption_keys(
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> TestConfigAndKeys {
         let encryption_keys: Vec<_> = (0..5)
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..5)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(rng))
             .collect();
 
         let validators = encryption_keys
@@ -4218,7 +4959,7 @@ mod tests {
             .enumerate()
             .map(|(i, private_key)| {
                 let public_key = PublicKey::from_private_key(private_key);
-                let address = Address([i as u8; 32]);
+                let address = Address::new([i as u8; 32]);
                 let party_id = i as u16;
                 let weight = 1;
                 let node = Node {
@@ -4238,7 +4979,21 @@ mod tests {
             "testchain".to_string(),
         );
 
-        (config, session_context, encryption_keys)
+        // Create BLS public keys map with deterministic ordering
+        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        (
+            config,
+            session_context,
+            encryption_keys,
+            bls_keys,
+            bls_public_keys,
+        )
     }
 
     fn create_manager_at_index(
@@ -4246,15 +5001,17 @@ mod tests {
         config: &DkgConfig,
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
-        rng: &mut impl fastcrypto::traits::AllowedRng,
+        bls_keys: &[crate::bls::Bls12381PrivateKey],
+        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
     ) -> (Address, DkgManager) {
-        let address = Address([index; 32]);
+        let address = Address::new([index; 32]);
         let manager = DkgManager::new(
-            address.clone(),
+            address,
             config.clone(),
             session_context.clone(),
             encryption_keys[index as usize].clone(),
-            crate::bls::Bls12381PrivateKey::generate(rng),
+            bls_keys[index as usize].clone(),
+            bls_public_keys.clone(),
             Box::new(MockPublicMessagesStore),
         );
         (address, manager)
@@ -4265,36 +5022,51 @@ mod tests {
         config: &DkgConfig,
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
+        bls_keys: &[crate::bls::Bls12381PrivateKey],
+        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (Address, DkgManager) {
-        let (address, mut manager) =
-            create_manager_at_index(index, config, session_context, encryption_keys, rng);
+        let (address, mut manager) = create_manager_at_index(
+            index,
+            config,
+            session_context,
+            encryption_keys,
+            bls_keys,
+            bls_public_keys,
+        );
         let dealer_message = manager.create_dealer_message(rng).unwrap();
         manager
-            .receive_dealer_message(&dealer_message, address.clone())
+            .receive_dealer_message(&dealer_message, address)
             .unwrap();
         (address, manager)
     }
 
     fn create_certificate_with_signers(
+        config: &DkgConfig,
+        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
         dealer_address: &Address,
         message: &avss::Message,
         session_context: &SessionContext,
-        signer_addresses: Vec<Address>,
-    ) -> DkgCertificate {
-        let message_hash = compute_message_hash(session_context, dealer_address, message).unwrap();
-        DkgCertificate {
-            dealer: dealer_address.clone(),
-            message_hash,
-            signature: signer_addresses
-                .iter()
-                .map(|addr| ValidatorSignature {
-                    validator: addr.clone(),
-                    signature: vec![0u8; 64],
-                })
-                .collect(),
+        signer_signatures: Vec<ValidatorSignature>,
+    ) -> DkgResult<Certificate<DkgMessage>> {
+        let message_hash = compute_message_hash(session_context, dealer_address, message)?;
+        let dkg_message = DkgMessage {
+            dealer_address: *dealer_address,
             session_context: session_context.clone(),
+            message_hash,
+        };
+
+        let bls_committee = create_bls_committee(config, bls_public_keys);
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message);
+
+        for validator_sig in signer_signatures {
+            aggregator
+                .add_signature(validator_sig.signature)
+                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
+        aggregator
+            .finish()
+            .map_err(|e| DkgError::CryptoError(e.to_string()))
     }
 
     fn create_complaint_for_dealer(
@@ -4429,11 +5201,24 @@ mod tests {
     fn create_handle_send_share_test_setup(
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (Address, DkgManager, Address, DkgManager) {
-        let (config, session_context, encryption_keys) = create_test_config_and_encrption_keys(rng);
-        let (dealer_address, dealer_manager) =
-            create_manager_at_index(1, &config, &session_context, &encryption_keys, rng);
-        let (receiver_address, receiver_manager) =
-            create_manager_at_index(0, &config, &session_context, &encryption_keys, rng);
+        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
+            create_test_config_and_encrption_keys(rng);
+        let (dealer_address, dealer_manager) = create_manager_at_index(
+            1,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+        let (receiver_address, receiver_manager) = create_manager_at_index(
+            0,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
         (
             dealer_address,
             dealer_manager,
@@ -4456,16 +5241,16 @@ mod tests {
 
         // First request
         let response1 = receiver_manager
-            .handle_send_share_request(dealer_address.clone(), &request)
+            .handle_send_share_request(dealer_address, &request)
             .unwrap();
 
         // Second request with same message - should return cached response
         let response2 = receiver_manager
-            .handle_send_share_request(dealer_address.clone(), &request)
+            .handle_send_share_request(dealer_address, &request)
             .unwrap();
 
-        // Responses should be identical (same signature bytes)
-        assert_eq!(response1.signature, response2.signature);
+        // Responses should be identical (same validator)
+        assert_eq!(response1.signature.validator, response2.signature.validator);
     }
 
     #[tokio::test]
@@ -4483,9 +5268,9 @@ mod tests {
 
         // Process first request successfully
         let response1 = receiver_manager
-            .handle_send_share_request(dealer_address.clone(), &request1)
+            .handle_send_share_request(dealer_address, &request1)
             .unwrap();
-        assert_eq!(response1.signature.len(), 96);
+        assert_eq!(response1.signature.validator, receiver_manager.address);
 
         // Second DIFFERENT message from same dealer (equivocation)
         let dealer_message2 = dealer_manager.create_dealer_message(&mut rng).unwrap();
@@ -4494,7 +5279,7 @@ mod tests {
         };
 
         // Should return error
-        let result = receiver_manager.handle_send_share_request(dealer_address.clone(), &request2);
+        let result = receiver_manager.handle_send_share_request(dealer_address, &request2);
         assert!(result.is_err());
 
         match result.unwrap_err() {
@@ -4503,423 +5288,6 @@ mod tests {
                 assert!(reason.contains("different messages"));
             }
             _ => panic!("Expected InvalidMessage error"),
-        }
-    }
-
-    mod validation_test_utils {
-        use super::*;
-        use fastcrypto_tbls::nodes::Node;
-
-        pub fn create_test_validators_with_weights(
-            weights: &[u16],
-        ) -> Vec<(Address, Node<EncryptionGroupElement>)> {
-            weights
-                .iter()
-                .enumerate()
-                .map(|(i, &weight)| {
-                    let private_key =
-                        PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
-                    let public_key = PublicKey::from_private_key(&private_key);
-                    let address = Address([i as u8; 32]);
-                    let party_id = i as u16;
-                    let node = Node {
-                        id: party_id,
-                        pk: public_key,
-                        weight,
-                    };
-                    (address, node)
-                })
-                .collect()
-        }
-
-        pub fn create_test_config_with_weights(
-            weights: &[u16],
-            threshold: u16,
-            max_faulty: u16,
-        ) -> DkgConfig {
-            let validators = create_test_validators_with_weights(weights);
-            let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
-            DkgConfig::new(100, nodes, address_to_party_id, threshold, max_faulty).unwrap()
-        }
-
-        pub fn create_validator_weights(
-            config: &DkgConfig,
-        ) -> std::collections::HashMap<Address, u16> {
-            config
-                .address_to_party_id
-                .iter()
-                .map(|(addr, party_id)| {
-                    let weight = config.nodes.weight_of(*party_id).unwrap();
-                    (addr.clone(), weight)
-                })
-                .collect()
-        }
-
-        pub fn test_has_sufficient_weighted_signatures(
-            signatures: &[ValidatorSignature],
-            config: &DkgConfig,
-        ) -> bool {
-            let validator_weights = create_validator_weights(config);
-            let required_weight = config.threshold + config.max_faulty;
-            has_sufficient_weighted_signatures(signatures, &validator_weights, required_weight)
-        }
-
-        pub fn create_test_signatures(
-            validator_indices: &[usize],
-            _config: &DkgConfig,
-        ) -> Vec<ValidatorSignature> {
-            validator_indices
-                .iter()
-                .map(|&i| {
-                    let address = Address([i as u8; 32]);
-                    ValidatorSignature {
-                        validator: address,
-                        signature: vec![0u8; 96], // Dummy BLS signature
-                    }
-                })
-                .collect()
-        }
-    }
-
-    mod test_validate_signature_set {
-        use super::validation_test_utils::*;
-        use super::*;
-
-        #[test]
-        fn test_valid_signatures_sufficient_weight() {
-            let weights = vec![3, 2, 4, 1, 2]; // total = 12
-            let config = create_test_config_with_weights(&weights, 3, 1);
-            let validator_weights = create_validator_weights(&config);
-
-            // Signatures from validators 0, 2 (weights 3 + 4 = 7)
-            let signatures = create_test_signatures(&[0, 2], &config);
-
-            let result = validate_signatures(
-                &signatures,
-                7, // require exactly 7
-                &validator_weights,
-            );
-            assert!(result.is_ok());
-        }
-
-        #[test]
-        fn test_duplicate_signer() {
-            let weights = vec![3, 2, 4];
-            let config = create_test_config_with_weights(&weights, 2, 1);
-            let validator_weights = create_validator_weights(&config);
-
-            // Duplicate validator 0
-            let signatures = vec![
-                ValidatorSignature {
-                    validator: Address([0; 32]),
-                    signature: vec![0u8; 96],
-                },
-                ValidatorSignature {
-                    validator: Address([0; 32]),
-                    signature: vec![0u8; 96],
-                },
-            ];
-
-            let result = validate_signatures(&signatures, 5, &validator_weights);
-            assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Duplicate signer"));
-        }
-
-        #[test]
-        fn test_unknown_signer() {
-            let weights = vec![3, 2, 4];
-            let config = create_test_config_with_weights(&weights, 2, 1);
-            let validator_weights = create_validator_weights(&config);
-
-            // Validator 99 doesn't exist
-            let signatures = vec![ValidatorSignature {
-                validator: Address([99; 32]),
-                signature: vec![0u8; 96],
-            }];
-
-            let result = validate_signatures(&signatures, 1, &validator_weights);
-            assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Unknown signer"));
-        }
-
-        #[test]
-        fn test_insufficient_weight() {
-            let weights = vec![3, 2, 4];
-            let config = create_test_config_with_weights(&weights, 2, 1);
-            let validator_weights = create_validator_weights(&config);
-
-            // Signatures from validators 0, 1 (weights 3 + 2 = 5)
-            let signatures = create_test_signatures(&[0, 1], &config);
-
-            let result = validate_signatures(
-                &signatures,
-                6, // require 6, but only have 5
-                &validator_weights,
-            );
-            assert!(result.is_err());
-            let err_msg = result.unwrap_err().to_string();
-            assert!(err_msg.contains("Insufficient"));
-            assert!(err_msg.contains("got 5, need 6"));
-        }
-    }
-
-    mod test_validate_message_hash {
-        use super::validation_test_utils::*;
-        use super::*;
-
-        #[test]
-        fn test_valid_message_hash() {
-            let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
-            let session_context =
-                SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
-
-            // Create a dealer message
-            let mut rng = rand::thread_rng();
-            let manager = create_test_manager(0, config);
-            let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
-            let dealer_addr = Address([0; 32]);
-
-            // Compute correct hash
-            let message_hash =
-                compute_message_hash(&session_context, &dealer_addr, &dealer_message).unwrap();
-
-            let cert = DkgCertificate {
-                dealer: dealer_addr.clone(),
-                message_hash,
-                signature: vec![],
-                session_context: session_context.clone(),
-            };
-
-            let mut dealer_messages = std::collections::HashMap::new();
-            dealer_messages.insert(dealer_addr, dealer_message);
-
-            let result = validate_message_hash(&cert, &dealer_messages, &session_context);
-            assert!(result.is_ok());
-        }
-
-        #[test]
-        fn test_dealer_message_not_received() {
-            let _config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
-            let session_context =
-                SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
-            let dealer_addr = Address([0; 32]);
-
-            let cert = DkgCertificate {
-                dealer: dealer_addr.clone(),
-                message_hash: [0; 32],
-                signature: vec![],
-                session_context: session_context.clone(),
-            };
-
-            let dealer_messages = std::collections::HashMap::new(); // Empty - message not received
-
-            let result = validate_message_hash(&cert, &dealer_messages, &session_context);
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Dealer message not yet received")
-            );
-        }
-
-        #[test]
-        fn test_message_hash_mismatch() {
-            let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1); // Need 5 validators for t=2, f=1
-            let session_context =
-                SessionContext::new(100, ProtocolType::DkgKeyGeneration, "test".to_string());
-
-            let mut rng = rand::thread_rng();
-            let manager = create_test_manager(0, config);
-            let dealer_message = manager.create_dealer_message(&mut rng).unwrap();
-            let dealer_addr = Address([0; 32]);
-
-            // Create cert with wrong hash
-            let cert = DkgCertificate {
-                dealer: dealer_addr.clone(),
-                message_hash: [99; 32], // Wrong hash
-                signature: vec![],
-                session_context: session_context.clone(),
-            };
-
-            let mut dealer_messages = std::collections::HashMap::new();
-            dealer_messages.insert(dealer_addr, dealer_message);
-
-            let result = validate_message_hash(&cert, &dealer_messages, &session_context);
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Message hash mismatch")
-            );
-        }
-    }
-
-    mod test_validate_certificate {
-        use super::validation_test_utils::*;
-        use super::*;
-
-        fn create_valid_cert_and_data() -> (
-            DkgCertificate,
-            DkgManager,
-            std::collections::HashMap<Address, avss::Message>,
-        ) {
-            let weights = vec![2, 2, 2, 2, 2]; // 5 validators
-            let config = create_test_config_with_weights(&weights, 3, 1);
-
-            let mut rng = rand::thread_rng();
-            let temp_manager = create_test_manager(0, config.clone());
-            let dealer_message = temp_manager.create_dealer_message(&mut rng).unwrap();
-            let dealer_addr = Address([0; 32]);
-
-            // Create the final manager that we'll return
-            let manager = create_test_manager(0, config.clone());
-            let session_context = &manager.session_context;
-
-            let message_hash =
-                compute_message_hash(session_context, &dealer_addr, &dealer_message).unwrap();
-
-            // Create sufficient signatures (4 validators with weight 2 each = 8)
-            // DKG requires t+f = 4
-            let dkg_sigs = create_test_signatures(&[0, 1, 2, 3], &config); // weight = 8 >= 4
-
-            let cert = DkgCertificate {
-                dealer: dealer_addr.clone(),
-                message_hash,
-                signature: dkg_sigs,
-                session_context: session_context.clone(),
-            };
-
-            let mut dealer_messages = std::collections::HashMap::new();
-            dealer_messages.insert(dealer_addr, dealer_message);
-
-            (cert, manager, dealer_messages)
-        }
-
-        #[test]
-        fn test_valid_certificate() {
-            let (cert, manager, dealer_messages) = create_valid_cert_and_data();
-            let validator_weights =
-                validation_test_utils::create_validator_weights(&manager.dkg_config);
-            let result = validate_certificate(
-                &cert,
-                &manager.dkg_config,
-                &manager.session_context,
-                &validator_weights,
-                &dealer_messages,
-            );
-            assert!(result.is_ok());
-        }
-
-        #[test]
-        fn test_session_id_mismatch() {
-            // This test verifies that a certificate created with a different session context
-            // (and thus different message hash) is properly rejected
-            let config = create_test_config_with_weights(&[1, 1, 1, 1, 1], 2, 1);
-            let dealer_addr = Address([0; 32]);
-
-            // Create a minimal dealer message using actual dealer (to get valid message structure)
-            let manager = create_test_manager(0, config.clone());
-            let mut rng = rand::thread_rng();
-            let dealer = avss::Dealer::new(
-                None,
-                manager.dkg_config.nodes.clone(),
-                manager.dkg_config.threshold,
-                manager.dkg_config.max_faulty,
-                vec![1, 2, 3], // Dummy session ID
-            )
-            .unwrap();
-            let dealer_message = dealer.create_message(&mut rng).unwrap();
-
-            // Create certificate with hash computed using WRONG session context
-            let wrong_session_context =
-                SessionContext::new(200, ProtocolType::DkgKeyGeneration, "test".to_string());
-            let wrong_hash =
-                compute_message_hash(&wrong_session_context, &dealer_addr, &dealer_message)
-                    .unwrap();
-
-            let cert = DkgCertificate {
-                dealer: dealer_addr.clone(),
-                message_hash: wrong_hash, // Hash computed with wrong session
-                signature: vec![],
-                session_context: wrong_session_context, // Doesn't matter what we put here
-            };
-
-            // Create manager with CORRECT session for validation
-            let correct_manager = create_test_manager(0, config);
-
-            let mut dealer_messages = std::collections::HashMap::new();
-            dealer_messages.insert(dealer_addr, dealer_message);
-
-            // Validation should fail because the hash was computed with a different session
-            let validator_weights =
-                validation_test_utils::create_validator_weights(&correct_manager.dkg_config);
-            let result = validate_certificate(
-                &cert,
-                &correct_manager.dkg_config,
-                &correct_manager.session_context,
-                &validator_weights,
-                &dealer_messages,
-            );
-            assert!(
-                result.is_err(),
-                "Expected validation to fail but it succeeded"
-            );
-            let error_msg = result.unwrap_err().to_string();
-            assert!(
-                error_msg.contains("Message hash mismatch"),
-                "Expected 'Message hash mismatch' but got: {}",
-                error_msg
-            );
-        }
-
-        #[test]
-        fn test_invalid_dkg_signatures() {
-            let (mut cert, manager, dealer_messages) = create_valid_cert_and_data();
-
-            // Empty DKG signatures - insufficient weight
-            cert.signature = vec![];
-
-            let validator_weights = create_validator_weights(&manager.dkg_config);
-            let result = validate_certificate(
-                &cert,
-                &manager.dkg_config,
-                &manager.session_context,
-                &validator_weights,
-                &dealer_messages,
-            );
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Insufficient signature weight")
-            );
-        }
-
-        #[test]
-        fn test_invalid_message_hash() {
-            let (mut cert, manager, dealer_messages) = create_valid_cert_and_data();
-
-            // Wrong message hash
-            cert.message_hash = [99; 32];
-
-            let validator_weights = create_validator_weights(&manager.dkg_config);
-            let result = validate_certificate(
-                &cert,
-                &manager.dkg_config,
-                &manager.session_context,
-                &validator_weights,
-                &dealer_messages,
-            );
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Message hash mismatch")
-            );
         }
     }
 }

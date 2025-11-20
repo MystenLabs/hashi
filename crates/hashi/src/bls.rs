@@ -219,6 +219,20 @@ impl<T> Certificate<T> {
             .map(|index| committee.members[index].weight)
             .sum())
     }
+
+    /// Check if the given address is a signer of this certificate. O(1) operation.
+    pub fn is_signer(
+        &self,
+        address: &Address,
+        committee: &BlsCommittee,
+    ) -> Result<bool, SignatureError> {
+        self.verify_committee(committee)?;
+        let index = committee
+            .address_to_index
+            .get(address)
+            .ok_or_else(|| SignatureError::from_source(format!("unknown address {address}")))?;
+        Ok(self.signers_bitmap.contains(*index))
+    }
 }
 
 #[derive(Debug)]
@@ -324,7 +338,7 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct BitMap {
+pub(crate) struct BitMap {
     size: usize,
     bitmap: Vec<u8>,
 }
@@ -368,6 +382,17 @@ impl BitMap {
                     bit.then(|| byte_index * 8 + bit_index)
                 })
             })
+    }
+
+    /// Check if the given index is set in the bitmap. Returns false if index is out of bounds.
+    fn contains(&self, b: usize) -> bool {
+        if b >= self.size {
+            return false;
+        }
+        let byte_index = b / 8;
+        let bit_index = b % 8;
+        let bit_mask = 1 << (7 - bit_index);
+        byte_index < self.bitmap.len() && (self.bitmap[byte_index] & bit_mask != 0)
     }
 }
 
@@ -472,7 +497,7 @@ mod test {
             .verify_signature_and_weight(&signature, 3)
             .unwrap();
         committee
-            .verify_signature_and_weight(&signature, 2)
+            .verify_signature_and_weight(&signature, 4)
             .unwrap_err();
 
         // We can add the last sig and still be successful
@@ -483,5 +508,84 @@ mod test {
         let signature = aggregator.finish().unwrap();
         aggregator.committee.verify_signature(&signature).unwrap();
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
+    }
+
+    #[proptest]
+    fn test_is_signer(private_keys: [Bls12381PrivateKey; 4], message: Vec<u8>) {
+        // Skip cases where we have the same keys
+        {
+            let mut pks: Vec<BLS12381PublicKey> =
+                private_keys.iter().map(|key| key.public_key()).collect();
+            pks.sort();
+            pks.dedup();
+            if pks.len() != 4 {
+                return Ok(());
+            }
+        }
+
+        let epoch = 7;
+
+        let addresses = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Address::new([i as u8; 32]))
+            .collect::<Vec<_>>();
+
+        let members = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| BlsCommitteeMember {
+                address: addresses[i],
+                public_key: key.public_key(),
+                weight: 1,
+            })
+            .collect();
+        let committee = BlsCommittee::new(members, epoch);
+
+        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+
+        // Add signatures from validators 0, 1, and 2 (but not 3)
+        aggregator
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .unwrap();
+
+        let certificate = aggregator.finish().unwrap();
+
+        // Test is_signer returns true for signers
+        assert!(certificate.is_signer(&addresses[0], &committee).unwrap());
+        assert!(certificate.is_signer(&addresses[1], &committee).unwrap());
+        assert!(certificate.is_signer(&addresses[2], &committee).unwrap());
+
+        // Test is_signer returns false for non-signer
+        assert!(!certificate.is_signer(&addresses[3], &committee).unwrap());
+
+        // Test is_signer returns error for unknown address
+        let unknown_address = Address::new([99; 32]);
+        assert!(certificate.is_signer(&unknown_address, &committee).is_err());
+
+        // Test is_signer returns error for wrong committee (different epoch)
+        let wrong_committee = BlsCommittee::new(
+            private_keys
+                .iter()
+                .enumerate()
+                .map(|(i, key)| BlsCommitteeMember {
+                    address: addresses[i],
+                    public_key: key.public_key(),
+                    weight: 1,
+                })
+                .collect(),
+            999, // Different epoch
+        );
+        assert!(
+            certificate
+                .is_signer(&addresses[0], &wrong_committee)
+                .is_err()
+        );
     }
 }
