@@ -333,8 +333,7 @@ impl DkgManager {
             }
         };
         self.dealer_outputs.insert(dealer_address, receiver_output);
-        self.dealer_messages
-            .insert(dealer_address.clone(), message.clone());
+        self.dealer_messages.insert(dealer_address, message.clone());
         self.public_messages_store
             .store_dealer_message(&dealer_address, message)
             .map_err(|e| DkgError::StorageError(e.to_string()))?;
