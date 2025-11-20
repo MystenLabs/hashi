@@ -2,8 +2,8 @@
 /// Module: hashi
 module hashi::hashi;
 
-use hashi::{config::Config, treasury::Treasury};
 use btc::btc::BTC;
+use hashi::{config::Config, treasury::Treasury};
 use std::string::String;
 use sui::{balance::Balance, coin::Coin, object_bag::ObjectBag, sui::SUI};
 
