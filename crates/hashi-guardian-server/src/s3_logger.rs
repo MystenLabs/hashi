@@ -1,99 +1,75 @@
-use crate::AppState;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::Json;
 use hashi_guardian_shared::S3Config;
-use tracing::error;
 use tracing::info;
 
-use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client as S3Client;
 
-use anyhow::Result;
+use crate::{GuardianError, GuardianResult};
+use aws_config::meta::region::RegionProviderChain;
+use aws_sdk_s3::types::ObjectLockEnabled;
 
-// TODO: Add some kind of authentication, e.g., an API key or token
-pub async fn configure_s3(
-    State(state): State<AppState>,
-    Json(config): Json<S3Config>,
-) -> (StatusCode, String) {
-    // If the configuration has already been set, return an error
-    if state.s3_config.get().is_some() {
-        error!("S3 configuration previously set");
-        return (
-            StatusCode::FORBIDDEN,
-            "S3 configuration previously set".to_string(),
-        );
-    }
+#[derive(Debug)]
+pub struct S3Logger {
+    pub client: S3Client,
+    pub config: S3Config,
+}
 
-    info!("Received S3 configuration");
-    info!("bucket name: {}", config.bucket_name);
+impl S3Logger {
+    pub async fn new(config: S3Config) -> GuardianResult<Self> {
+        info!("📦 S3 Configuration:");
+        info!("   Bucket: {}", config.bucket_name);
 
-    std::env::set_var("AWS_ACCESS_KEY_ID", &config.access_key);
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", &config.secret_key);
+        info!("🔧 Setting AWS credentials...");
+        std::env::set_var("AWS_ACCESS_KEY_ID", &config.access_key);
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", &config.secret_key);
 
-    // Test S3 connectivity with the new credentials
-    match test_s3_connectivity(&config).await {
-        Ok(_) => {
-            info!("✅ S3 configuration tested successfully");
+        info!("🌍 Loading AWS configuration...");
+        let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(region_provider)
+            .load()
+            .await;
 
-            // Remember the configuration
-            if state.s3_config.set(config.clone()).is_err() {
-                error!("Failed to set S3 configuration");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to set S3 configuration".to_string(),
-                );
-            }
-
-            (
-                StatusCode::OK,
-                "S3 configuration received and tested successfully".to_string(),
-            )
-        }
-        Err(e) => {
-            error!("❌ S3 connectivity test failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("S3 connectivity test failed: {}", e),
-            )
-        }
+        let client = S3Client::new(&aws_config);
+        Ok(Self { client, config })
     }
 }
 
-async fn test_s3_connectivity(config: &S3Config) -> Result<()> {
+pub async fn test_s3_connectivity(s3logger: &S3Logger) -> GuardianResult<()> {
     info!("Testing S3 connectivity...");
+    let s3_client = &s3logger.client;
+    let s3_config = &s3logger.config;
 
-    let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
-    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(region_provider)
-        .load()
+    // Verify bucket exists and has Object Lock enabled
+    let bucket_config = s3_client
+        .get_object_lock_configuration()
+        .bucket(&s3_config.bucket_name)
+        .send()
         .await;
 
-    let s3_client = S3Client::new(&aws_config);
+    match bucket_config {
+        Ok(config) => {
+            let object_lock_enabled_config = config
+                .object_lock_configuration()
+                .expect("Object lock configuration missing")
+                .object_lock_enabled()
+                .expect("Object lock enabled field missing");
 
-    let response = s3_client
-        .list_objects_v2()
-        .bucket(&config.bucket_name)
-        .max_keys(10)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("S3 error: {}", e))?;
-
-    info!("✅ S3 connectivity test passed!");
-
-    // Print object list just for sanity check
-    let contents = response.contents();
-    if contents.is_empty() {
-        info!("No objects found in bucket");
-    } else {
-        info!("Found {} objects:", contents.len());
-        for (i, object) in contents.iter().enumerate() {
-            info!(
-                "  [{}] Key: {}, Size: {} bytes",
-                i + 1,
-                object.key().unwrap_or("<no key>"),
-                object.size().unwrap_or(0)
-            );
+            match object_lock_enabled_config {
+                ObjectLockEnabled::Enabled => {
+                    info!("Bucket {} has Object Lock enabled", s3_config.bucket_name);
+                }
+                _ => {
+                    return Err(GuardianError::GenericError(
+                        "Unknown config in object lock".into(),
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            return Err(GuardianError::GenericError(format!(
+                "Failed to verify Object Lock configuration: {}",
+                e
+            )));
         }
     }
 

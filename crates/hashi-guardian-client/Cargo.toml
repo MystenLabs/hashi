@@ -12,3 +12,12 @@ dotenvy = "0.15"
 hashi-guardian-shared = { path = "../hashi-guardian-shared" }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+# Crypto dependencies
+hpke = "0.12.0"# Not using hpke 0.13.0 because it uses rand 0.9 which breaks fastcrypto
+rand = "0.8.5"
+bitcoin = "0.32.7"
+vsss-rs = { git = "https://github.com/mikelodder7/vsss-rs", rev = "cb7425a4c634376b2f5fcc7691b4f6e8e0753b13" }
+p256 = "0.13"
+rand_core = "0.6"
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "e4127630173582f164c1eb704a5bc3d6eacb0d27", features = ["aes"] }
