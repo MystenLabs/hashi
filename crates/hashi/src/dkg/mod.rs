@@ -4,6 +4,7 @@ pub mod types;
 
 use crate::storage::PublicMessagesStore;
 use crate::types::ValidatorAddress;
+use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
@@ -131,6 +132,7 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<ComplainResponse> {
         let cache_key = request.dealer.clone();
+        // It is safe to return a response from cache since we already know that dealer was malicious.
         if let Some(cached_response) = self.complaint_responses.get(&cache_key) {
             return Ok(ComplainResponse {
                 response: cached_response.clone(),
@@ -458,13 +460,6 @@ impl DkgManager {
             dealer: dealer.clone(),
             complaint: complaint.clone(),
         };
-        let mut responses = Vec::new();
-        for signer in signers {
-            // TODO: Add timeout and retries handling when adding RPC layer
-            let response = p2p_channel.complain(signer, &complaint_request).await?;
-            // TODO: Add cryptographic validation of response so that we only need to collect t valid responses
-            responses.push(response.response);
-        }
         let dealer_session_id = self.session_context.dealer_session_id(dealer);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
@@ -474,15 +469,34 @@ impl DkgManager {
             None,
             self.encryption_key.clone(),
         );
-        let message = self.dealer_messages.get(dealer).unwrap();
-        let receiver_output = receiver.recover(message, &responses).map_err(|e| {
-            let error_msg = format!("Share recovery failed for dealer {:?}: {}", dealer, e);
-            tracing::error!("{}", error_msg);
-            DkgError::ProtocolFailed(error_msg)
+        let message = self.dealer_messages.get(dealer).ok_or_else(|| {
+            DkgError::ProtocolFailed(format!("No dealer message found for dealer {:?}", dealer))
         })?;
-        self.dealer_outputs.insert(dealer.clone(), receiver_output);
-        self.complaints.remove(dealer);
-        Ok(())
+        let mut responses = Vec::new();
+        for signer in signers {
+            // TODO: Add timeout and retries handling when adding RPC layer
+            let response = p2p_channel.complain(signer, &complaint_request).await?;
+            responses.push(response.response);
+            match receiver.recover(message, &responses) {
+                Ok(receiver_output) => {
+                    self.dealer_outputs.insert(dealer.clone(), receiver_output);
+                    self.complaints.remove(dealer);
+                    return Ok(());
+                }
+                Err(FastCryptoError::InputTooShort(_)) => {
+                    continue;
+                }
+                Err(e) => {
+                    let error_msg = format!("Share recovery failed for dealer {:?}: {}", dealer, e);
+                    tracing::error!("{}", error_msg);
+                    return Err(DkgError::CryptoError(error_msg));
+                }
+            }
+        }
+        Err(DkgError::ProtocolFailed(format!(
+            "Not enough valid complaint responses for dealer {:?}",
+            dealer
+        )))
     }
 }
 
@@ -2069,6 +2083,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_as_party_recovers_shares_via_complaint() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer 0 with normal message
+        let (dealer_0_addr, dealer_0_mgr) =
+            create_dealer_with_message(0, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer_0_message = dealer_0_mgr
+            .dealer_messages
+            .get(&dealer_0_addr)
+            .unwrap()
+            .clone();
+
+        // Create dealer 1 with cheating message (corrupts party 2's shares)
+        let (dealer_1_addr, _) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+        let dealer_1_message = create_cheating_message(
+            &dealer_1_addr,
+            &config,
+            &session_context,
+            2, // Corrupt shares for party 2
+            &mut rng,
+        );
+
+        // Create party 2 manager (will have complaint for dealer 1)
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(2, &config, &session_context, &encryption_keys, &mut rng);
+
+        // Party 2 successfully processes dealer 0's message
+        party_manager
+            .receive_dealer_message(&dealer_0_message, dealer_0_addr.clone())
+            .unwrap();
+
+        // Party 2 fails on dealer 1's cheating message and creates complaint
+        let result = party_manager.receive_dealer_message(&dealer_1_message, dealer_1_addr.clone());
+        assert!(result.is_err());
+        assert!(party_manager.complaints.contains_key(&dealer_1_addr));
+
+        // Create other parties who can successfully process dealer 1's message
+        let mut other_managers = std::collections::HashMap::new();
+        for party_id in [0, 1, 3, 4] {
+            let (addr, mut mgr) = create_manager_at_index(
+                party_id,
+                &config,
+                &session_context,
+                &encryption_keys,
+                &mut rng,
+            );
+            // They successfully process dealer 1's cheating message
+            mgr.receive_dealer_message(&dealer_1_message, dealer_1_addr.clone())
+                .unwrap();
+            other_managers.insert(addr, mgr);
+        }
+
+        // Create certificates with signers (excluding party 2 who has complaint)
+        let cert_0 = create_certificate_with_signers(
+            &dealer_0_addr,
+            &dealer_0_message,
+            &session_context,
+            vec![
+                ValidatorAddress([0; 32]),
+                ValidatorAddress([1; 32]),
+                ValidatorAddress([3; 32]),
+            ],
+        );
+        let cert_1 = create_certificate_with_signers(
+            &dealer_1_addr,
+            &dealer_1_message,
+            &session_context,
+            vec![
+                ValidatorAddress([0; 32]),
+                ValidatorAddress([1; 32]),
+                ValidatorAddress([3; 32]),
+            ],
+        );
+
+        let certificates = vec![cert_0, cert_1];
+        let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
+        let mock_p2p = MockP2PChannel::new(other_managers, party_addr.clone());
+
+        // Verify complaint exists before run_as_party
+        assert!(party_manager.complaints.contains_key(&dealer_1_addr));
+
+        // Run as party - should recover shares via complaint
+        let output = party_manager
+            .run_as_party(&mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+
+        // Verify complaint was resolved
+        assert!(
+            !party_manager.complaints.contains_key(&dealer_1_addr),
+            "Complaint should be cleared after successful recovery"
+        );
+        assert!(
+            party_manager.dealer_outputs.contains_key(&dealer_1_addr),
+            "Dealer output should exist for dealer 1 after recovery"
+        );
+
+        // Verify output is valid
+        assert_eq!(output.key_shares.shares.len(), 1);
+        assert_eq!(output.commitments.len(), 5);
+    }
+
+    #[tokio::test]
     async fn test_run_as_party_skips_invalid_certificates() {
         // Test that run_as_party() skips invalid certificates and continues collecting valid ones
         let mut rng = rand::thread_rng();
@@ -3445,16 +3565,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recover_shares_via_complaint_succeeds() {
+    async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
-        // Create dealer (party 0)
+        // Create dealer with cheating message
         let (dealer_addr, _dealer_manager) =
             create_manager_at_index(0, &config, &session_context, &encryption_keys, &mut rng);
-
-        // Create a cheating dealer message with corrupted shares for party 1
         let cheating_message = create_cheating_message(
             &dealer_addr,
             &config,
@@ -3463,19 +3581,16 @@ mod tests {
             &mut rng,
         );
 
-        // Party 1 receives the corrupted message and creates a complaint
-        let (party1_addr, mut party1_manager) =
+        // Party 1 receives corrupted message and creates complaint
+        let (party_addr, mut party_manager) =
             create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        assert!(result.is_err());
+        assert!(party_manager.complaints.contains_key(&dealer_addr));
 
-        let result = party1_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
-        assert!(result.is_err(), "Should fail due to corrupted shares");
-
-        // Verify party 1 has a complaint stored
-        assert!(party1_manager.complaints.contains_key(&dealer_addr));
-
-        // Other parties (2, 3, 4) receive the same message and get valid shares
+        // Create exactly threshold (2) parties that can respond
         let mut other_managers = vec![];
-        for party_id in 2..5 {
+        for party_id in 2..4 {
             let (addr, mut mgr) = create_manager_at_index(
                 party_id,
                 &config,
@@ -3488,41 +3603,29 @@ mod tests {
             other_managers.push((addr, mgr));
         }
 
-        // Create a certificate with the parties that have valid shares as signers
         let signer_addresses: Vec<_> = other_managers
             .iter()
             .map(|(addr, _)| addr.clone())
             .collect();
-        let cert = create_certificate_with_signers(
-            &dealer_addr,
-            &cheating_message,
-            &session_context,
-            signer_addresses.clone(),
-        );
 
-        // Create mock P2P channel with the other parties
         let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
-        let mock_p2p = MockP2PChannel::new(managers_map, party1_addr.clone());
+        let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
-        // Party 1 recovers shares via complaint
-        let result = party1_manager
-            .recover_shares_via_complaint(
-                &dealer_addr,
-                cert.signatures.iter().map(|s| &s.validator),
-                &mock_p2p,
-            )
+        // Recover with exactly threshold signers
+        // Tests incremental recovery: receiver.recover() returns InputTooShort after first response,
+        // continues to collect second response, then succeeds
+        let result = party_manager
+            .recover_shares_via_complaint(&dealer_addr, signer_addresses.iter(), &mock_p2p)
             .await;
 
         assert!(
             result.is_ok(),
-            "Share recovery should succeed: {:?}",
+            "Recovery should succeed: {:?}",
             result.err()
         );
-
-        // Verify party 1 now has valid dealer output
-        assert!(party1_manager.dealer_outputs.contains_key(&dealer_addr));
+        assert!(party_manager.dealer_outputs.contains_key(&dealer_addr));
         assert!(
-            !party1_manager.complaints.contains_key(&dealer_addr),
+            !party_manager.complaints.contains_key(&dealer_addr),
             "Complaint should be cleared after successful recovery"
         );
     }
@@ -3625,6 +3728,147 @@ mod tests {
             err
         );
         assert!(err.to_string().contains("Party"));
+    }
+
+    #[tokio::test]
+    async fn test_recover_shares_via_complaint_insufficient_signers() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer with cheating message
+        let (dealer_addr, _dealer_manager) =
+            create_manager_at_index(0, &config, &session_context, &encryption_keys, &mut rng);
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_context,
+            1, // Corrupt shares for party 1
+            &mut rng,
+        );
+
+        // Party 1 receives corrupted message and creates complaint
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        assert!(result.is_err());
+        assert!(party_manager.complaints.contains_key(&dealer_addr));
+
+        // Create only 1 other party that can respond (threshold is 2, so insufficient)
+        let mut other_managers = vec![];
+        for party_id in 2..3 {
+            let (addr, mut mgr) = create_manager_at_index(
+                party_id,
+                &config,
+                &session_context,
+                &encryption_keys,
+                &mut rng,
+            );
+            mgr.receive_dealer_message(&cheating_message, dealer_addr.clone())
+                .unwrap();
+            other_managers.push((addr, mgr));
+        }
+
+        let signer_addresses: Vec<_> = other_managers
+            .iter()
+            .map(|(addr, _)| addr.clone())
+            .collect();
+
+        let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
+        let mock_p2p = MockP2PChannel::new(managers_map, party_addr.clone());
+
+        // Attempt recovery with insufficient signers
+        let result = party_manager
+            .recover_shares_via_complaint(&dealer_addr, signer_addresses.iter(), &mock_p2p)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DkgError::ProtocolFailed(_)),
+            "Expected ProtocolFailed, got: {:?}",
+            err
+        );
+        assert!(
+            err.to_string()
+                .contains("Not enough valid complaint responses"),
+            "Error message should indicate insufficient responses, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recover_shares_via_complaint_crypto_error() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer with cheating message
+        let (dealer_addr, _) =
+            create_manager_at_index(0, &config, &session_context, &encryption_keys, &mut rng);
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_context,
+            1, // Corrupt shares for party 1
+            &mut rng,
+        );
+
+        // Party 1 receives corrupted message and creates complaint
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        assert!(result.is_err());
+        assert!(party_manager.complaints.contains_key(&dealer_addr));
+
+        // Create other parties that can create valid responses
+        let mut other_managers = vec![];
+        for party_id in 2..4 {
+            let (addr, mut mgr) = create_manager_at_index(
+                party_id,
+                &config,
+                &session_context,
+                &encryption_keys,
+                &mut rng,
+            );
+            mgr.receive_dealer_message(&cheating_message, dealer_addr.clone())
+                .unwrap();
+            other_managers.push((addr, mgr));
+        }
+
+        let signer_addresses: Vec<_> = other_managers
+            .iter()
+            .map(|(addr, _)| addr.clone())
+            .collect();
+
+        let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
+        let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
+
+        // Replace party_manager's stored message with a different one to cause crypto mismatch
+        // The responses will be for the original message, but recovery will try to use them with this new message
+        let different_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_context,
+            2, // Different corruption
+            &mut rng,
+        );
+        party_manager
+            .dealer_messages
+            .insert(dealer_addr.clone(), different_message);
+
+        // Attempt recovery - should fail with CryptoError because message doesn't match responses
+        let result = party_manager
+            .recover_shares_via_complaint(&dealer_addr, signer_addresses.iter(), &mock_p2p)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DkgError::CryptoError(_)),
+            "Expected CryptoError, got: {:?}",
+            err
+        );
     }
 
     #[test]
