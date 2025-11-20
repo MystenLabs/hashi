@@ -3798,6 +3798,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_recover_shares_via_complaint_no_dealer_message() {
+        let mut rng = rand::thread_rng();
+        let (config, session_context, encryption_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer with cheating message
+        let (dealer_addr, _) =
+            create_manager_at_index(0, &config, &session_context, &encryption_keys, &mut rng);
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_context,
+            1, // Corrupt shares for party 1
+            &mut rng,
+        );
+
+        // Party 1 receives corrupted message and creates complaint
+        let (party_addr, mut party_manager) =
+            create_manager_at_index(1, &config, &session_context, &encryption_keys, &mut rng);
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        assert!(result.is_err());
+        assert!(party_manager.complaints.contains_key(&dealer_addr));
+
+        // Remove the dealer message to simulate the edge case
+        party_manager.dealer_messages.remove(&dealer_addr);
+
+        // Create mock P2P (empty is fine since we should fail before contacting anyone)
+        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+
+        // Try to recover - should fail because dealer message is missing
+        let result = party_manager
+            .recover_shares_via_complaint(
+                &dealer_addr,
+                vec![ValidatorAddress([2; 32])].iter(),
+                &mock_p2p,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DkgError::ProtocolFailed(_)),
+            "Expected ProtocolFailed, got: {:?}",
+            err
+        );
+        assert!(
+            err.to_string().contains("No dealer message found"),
+            "Error should mention missing dealer message, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
     async fn test_recover_shares_via_complaint_crypto_error() {
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys) =
