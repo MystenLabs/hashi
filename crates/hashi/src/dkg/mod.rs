@@ -55,7 +55,7 @@ impl DkgManager {
         session_context: SessionContext,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
-        bls_public_keys: std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: HashMap<Address, BLS12381PublicKey>,
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> Self {
         let party_id = *dkg_config
