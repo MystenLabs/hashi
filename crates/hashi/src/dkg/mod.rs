@@ -536,11 +536,7 @@ impl DkgManager {
                 dealer
             )));
         }
-        Ok(())
-    }
 
-    fn validate_certificate(&self, cert: &Certificate<DkgMessage>) -> DkgResult<()> {
-        self.validate_message_hash(cert)?;
         self.bls_committee
             .verify_signature(cert)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
