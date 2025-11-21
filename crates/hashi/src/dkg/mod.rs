@@ -37,11 +37,11 @@ pub struct DkgManager {
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_committee: BlsCommittee,
     // Mutable during a given session
-    pub dealer_outputs: std::collections::HashMap<Address, avss::ReceiverOutput>,
-    pub dealer_messages: std::collections::HashMap<Address, avss::Message>,
-    pub share_responses: std::collections::HashMap<Address, SendShareResponse>,
-    pub complaints: std::collections::HashMap<Address, complaint::Complaint>,
-    pub complaint_responses: std::collections::HashMap<Address, complaint::ComplaintResponse>,
+    pub dealer_outputs: HashMap<Address, avss::ReceiverOutput>,
+    pub dealer_messages: HashMap<Address, avss::Message>,
+    pub share_responses: HashMap<Address, SendShareResponse>,
+    pub complaints: HashMap<Address, complaint::Complaint>,
+    pub complaint_responses: HashMap<Address, complaint::ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
@@ -68,11 +68,11 @@ impl DkgManager {
             encryption_key,
             bls_signing_key,
             bls_committee,
-            dealer_outputs: std::collections::HashMap::new(),
-            dealer_messages: std::collections::HashMap::new(),
-            share_responses: std::collections::HashMap::new(),
-            complaints: std::collections::HashMap::new(),
-            complaint_responses: std::collections::HashMap::new(),
+            dealer_outputs: HashMap::new(),
+            dealer_messages: HashMap::new(),
+            share_responses: HashMap::new(),
+            complaints: HashMap::new(),
+            complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
         }
     }
@@ -652,9 +652,7 @@ mod tests {
         DkgConfig::new(100, nodes, address_to_party_id, THRESHOLD, MAX_FAULTY).unwrap()
     }
 
-    fn create_test_bls_keys(
-        dkg_config: &DkgConfig,
-    ) -> std::collections::HashMap<Address, BLS12381PublicKey> {
+    fn create_test_bls_keys(dkg_config: &DkgConfig) -> HashMap<Address, BLS12381PublicKey> {
         dkg_config
             .address_to_party_id
             .keys()
@@ -667,7 +665,7 @@ mod tests {
 
     fn create_test_certificate(
         config: &DkgConfig,
-        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
         dealer_message: &avss::Message,
         dealer_address: Address,
         session_context: &SessionContext,
@@ -724,15 +722,12 @@ mod tests {
     }
 
     struct MockP2PChannel {
-        managers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Address, DkgManager>>>,
+        managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, DkgManager>>>,
         current_sender: Address,
     }
 
     impl MockP2PChannel {
-        fn new(
-            managers: std::collections::HashMap<Address, DkgManager>,
-            current_sender: Address,
-        ) -> Self {
+        fn new(managers: HashMap<Address, DkgManager>, current_sender: Address) -> Self {
             Self {
                 managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
                 current_sender,
@@ -901,7 +896,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -960,15 +955,12 @@ mod tests {
     }
 
     struct SucceedingP2PChannel {
-        managers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Address, DkgManager>>>,
+        managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, DkgManager>>>,
         current_sender: Address,
     }
 
     impl SucceedingP2PChannel {
-        fn new(
-            managers: std::collections::HashMap<Address, DkgManager>,
-            current_sender: Address,
-        ) -> Self {
+        fn new(managers: HashMap<Address, DkgManager>, current_sender: Address) -> Self {
             Self {
                 managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
                 current_sender,
@@ -1016,7 +1008,7 @@ mod tests {
     }
 
     struct PartiallyFailingP2PChannel {
-        managers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Address, DkgManager>>>,
+        managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, DkgManager>>>,
         current_sender: Address,
         fail_count: std::sync::Arc<std::sync::Mutex<usize>>,
         max_failures: usize,
@@ -1024,7 +1016,7 @@ mod tests {
 
     impl PartiallyFailingP2PChannel {
         fn new(
-            managers: std::collections::HashMap<Address, DkgManager>,
+            managers: HashMap<Address, DkgManager>,
             current_sender: Address,
             max_failures: usize,
         ) -> Self {
@@ -1166,13 +1158,13 @@ mod tests {
     }
 
     struct InMemoryPublicMessagesStore {
-        stored: std::collections::HashMap<Address, avss::Message>,
+        stored: HashMap<Address, avss::Message>,
     }
 
     impl InMemoryPublicMessagesStore {
         fn new() -> Self {
             Self {
-                stored: std::collections::HashMap::new(),
+                stored: HashMap::new(),
             }
         }
     }
@@ -1465,7 +1457,7 @@ mod tests {
             .collect();
 
         // Map each address to its corresponding BLS public key
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+        let bls_public_keys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i as usize].public_key())
@@ -1510,7 +1502,7 @@ mod tests {
             .collect();
 
         // Receiver processes all dealer messages and creates certificates
-        let mut certificates = std::collections::HashMap::new();
+        let mut certificates = HashMap::new();
         for (i, message) in dealer_messages.iter().enumerate() {
             let dealer_address = dealer_managers[i].address;
 
@@ -1597,7 +1589,7 @@ mod tests {
             .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
             .collect();
 
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+        let bls_public_keys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -1681,7 +1673,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut certificates = std::collections::HashMap::new();
+        let mut certificates = HashMap::new();
         certificates.insert(dealer_addr0, cert0);
         certificates.insert(dealer_addr1, cert1);
 
@@ -1735,7 +1727,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -1796,7 +1788,7 @@ mod tests {
         let mut test_manager = managers.remove(0);
 
         // Create mock P2P channel with remaining managers (validators 1-4)
-        let other_managers: std::collections::HashMap<_, _> = managers
+        let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
             .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
@@ -1906,7 +1898,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -1926,7 +1918,7 @@ mod tests {
         );
 
         // Create managers for other validators
-        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+        let other_managers: HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
@@ -2010,7 +2002,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2071,7 +2063,7 @@ mod tests {
 
         // Call run_as_party() for validator 0
         let mut test_manager = managers.remove(0);
-        let other_managers: std::collections::HashMap<_, _> = managers
+        let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
             .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
@@ -2169,7 +2161,7 @@ mod tests {
         assert!(party_manager.complaints.contains_key(&dealer_1_addr));
 
         // Create other parties who can successfully process dealer 1's message
-        let mut other_managers = std::collections::HashMap::new();
+        let mut other_managers = HashMap::new();
         for party_id in [0, 1, 3, 4] {
             let (addr, mut mgr) = create_manager_at_index(
                 party_id,
@@ -2293,7 +2285,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2387,7 +2379,7 @@ mod tests {
 
         // Call run_as_party() for validator 0
         let mut test_manager = managers.remove(0);
-        let other_managers: std::collections::HashMap<_, _> = managers
+        let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
             .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
@@ -2454,7 +2446,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2522,7 +2514,7 @@ mod tests {
 
         // Call run_as_party() for validator 2
         let mut test_manager = managers.remove(2);
-        let other_managers: std::collections::HashMap<_, _> = managers
+        let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
             .map(|(idx, mgr)| {
@@ -2600,7 +2592,7 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2619,7 +2611,7 @@ mod tests {
         );
 
         // Create managers for validators 1-4 to respond with valid signatures
-        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+        let other_managers: HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
@@ -2689,7 +2681,7 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2706,7 +2698,7 @@ mod tests {
             Box::new(MockPublicMessagesStore),
         );
 
-        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+        let other_managers: HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
@@ -2773,7 +2765,7 @@ mod tests {
         let session_context =
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2790,7 +2782,7 @@ mod tests {
             Box::new(MockPublicMessagesStore),
         );
 
-        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+        let other_managers: HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
@@ -2858,7 +2850,7 @@ mod tests {
             SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -2878,7 +2870,7 @@ mod tests {
         );
 
         // Create managers for other validators
-        let other_managers: std::collections::HashMap<_, _> = (1..num_validators)
+        let other_managers: HashMap<_, _> = (1..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let manager = DkgManager::new(
@@ -2947,7 +2939,7 @@ mod tests {
             fail_on_receive: true,
         };
 
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), Address::new([0; 32]));
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), Address::new([0; 32]));
         let result = test_manager.run_as_party(&mock_p2p, &mut failing_tob).await;
 
         assert!(result.is_err());
@@ -2963,7 +2955,7 @@ mod tests {
         certificates: Vec<Certificate<DkgMessage>>,
         encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
         bls_keys: Vec<crate::bls::Bls12381PrivateKey>,
-        bls_public_keys: std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: HashMap<Address, BLS12381PublicKey>,
         weights: Vec<u16>,
     }
     //
@@ -3012,7 +3004,7 @@ mod tests {
         );
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..num_validators)
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -3081,7 +3073,7 @@ mod tests {
         session_context: &SessionContext,
         weights: &[u16],
         bls_keys: &[crate::bls::Bls12381PrivateKey],
-        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
     ) -> Certificate<DkgMessage> {
         let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
         let dkg_message = DkgMessage {
@@ -3139,7 +3131,7 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(test_setup.certificates.clone());
 
         // Run party collection
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
 
         (result, mock_tob)
@@ -3256,7 +3248,7 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(modified_certificates);
 
         // Run party collection
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
         assert!(result.is_ok());
 
@@ -3383,7 +3375,7 @@ mod tests {
         .unwrap();
 
         // Create mock P2P channel with dealers that have messages
-        let mut dealers = std::collections::HashMap::new();
+        let mut dealers = HashMap::new();
         dealers.insert(dealer1_addr, dealer1_mgr);
         dealers.insert(dealer2_addr, dealer2_mgr);
         let mock_p2p = MockP2PChannel::new(dealers, party_addr);
@@ -3520,7 +3512,7 @@ mod tests {
 
         // Create mock P2P channel with only dealer1 and dealer3 (dealer2 is missing)
         // So retrieval of dealer2's message will fail
-        let mut dealers = std::collections::HashMap::new();
+        let mut dealers = HashMap::new();
         dealers.insert(dealer1_addr, dealer1_mgr);
         dealers.insert(dealer3_addr, dealer3_mgr);
         let mock_p2p = MockP2PChannel::new(dealers, party_addr);
@@ -3663,7 +3655,7 @@ mod tests {
         .unwrap();
 
         // Create mock P2P with no responders (recovery will fail)
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
         // Create mock TOB with both certificates
         let certificates = vec![cert0, cert1];
@@ -3742,7 +3734,7 @@ mod tests {
         );
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+        let bls_public_keys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -3830,7 +3822,7 @@ mod tests {
         );
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+        let bls_public_keys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -3910,7 +3902,7 @@ mod tests {
         );
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+        let bls_public_keys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -4171,7 +4163,7 @@ mod tests {
 
         let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
 
-        let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
+        let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
         let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
         // Recover with exactly threshold signers
@@ -4247,7 +4239,7 @@ mod tests {
         .unwrap();
 
         // Create empty mock P2P channel
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
         // Call recover_shares_via_complaint - should fail because no complaint exists
         let result = party_manager
@@ -4311,7 +4303,7 @@ mod tests {
         let signer_addresses = vec![Address::new([99; 32])]; // This validator doesn't exist
 
         // Create empty mock P2P channel (no responders)
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
         // Call recover_shares_via_complaint - should fail because P2P call fails
         let result = party_manager
@@ -4382,7 +4374,7 @@ mod tests {
 
         let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
 
-        let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
+        let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
         let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
         // Attempt recovery with insufficient signers
@@ -4445,7 +4437,7 @@ mod tests {
         party_manager.dealer_messages.remove(&dealer_addr);
 
         // Create mock P2P (empty is fine since we should fail before contacting anyone)
-        let mock_p2p = MockP2PChannel::new(std::collections::HashMap::new(), party_addr);
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
         // Try to recover - should fail because dealer message is missing
         let result = party_manager
@@ -4524,7 +4516,7 @@ mod tests {
 
         let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
 
-        let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
+        let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
         let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
         // Replace party_manager's stored message with a different one to cause crypto mismatch
@@ -4672,7 +4664,7 @@ mod tests {
         .unwrap();
 
         // Create mock P2P channel with the dealer (who also signed the cert)
-        let mut dealers = std::collections::HashMap::new();
+        let mut dealers = HashMap::new();
         dealers.insert(dealer_address, dealer_manager);
         let mock_p2p = MockP2PChannel::new(dealers, party_address);
 
@@ -4751,7 +4743,7 @@ mod tests {
         .unwrap();
 
         // Create mock P2P channel
-        let mut dealers = std::collections::HashMap::new();
+        let mut dealers = HashMap::new();
         dealers.insert(dealer_address, dealer_manager);
         let mock_p2p = MockP2PChannel::new(dealers, party_address);
 
@@ -4837,7 +4829,7 @@ mod tests {
         .unwrap();
 
         // MockP2PChannel: only include dealer (validator 1 not included)
-        let mut managers = std::collections::HashMap::new();
+        let mut managers = HashMap::new();
         managers.insert(dealer_addr, dealer_mgr);
         let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
@@ -4918,7 +4910,7 @@ mod tests {
         .unwrap();
 
         // MockP2PChannel: include dealer
-        let mut managers = std::collections::HashMap::new();
+        let mut managers = HashMap::new();
         managers.insert(dealer_addr, dealer_mgr);
         let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
@@ -5006,7 +4998,7 @@ mod tests {
         .unwrap();
 
         // MockP2PChannel: empty (no signers available)
-        let managers = std::collections::HashMap::new();
+        let managers = HashMap::new();
         let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
         // Should fail because all signers are offline
@@ -5124,7 +5116,7 @@ mod tests {
         .unwrap();
 
         // MockP2PChannel: has Byzantine signer and real dealer A
-        let mut managers = std::collections::HashMap::new();
+        let mut managers = HashMap::new();
         managers.insert(byzantine_signer_addr, byzantine_signer);
         managers.insert(dealer_a_addr, dealer_a_mgr);
         let mock_p2p = MockP2PChannel::new(managers, party_addr);
@@ -5147,7 +5139,7 @@ mod tests {
         SessionContext,
         Vec<PrivateKey<EncryptionGroupElement>>,
         Vec<crate::bls::Bls12381PrivateKey>,
-        std::collections::HashMap<Address, BLS12381PublicKey>,
+        HashMap<Address, BLS12381PublicKey>,
     );
 
     fn create_test_config_and_encrption_keys(
@@ -5187,7 +5179,7 @@ mod tests {
         );
 
         // Create BLS public keys map with deterministic ordering
-        let bls_public_keys: std::collections::HashMap<_, _> = (0..5)
+        let bls_public_keys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 (addr, bls_keys[i].public_key())
@@ -5209,7 +5201,7 @@ mod tests {
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
         bls_keys: &[crate::bls::Bls12381PrivateKey],
-        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
     ) -> (Address, DkgManager) {
         let address = Address::new([index; 32]);
         let manager = DkgManager::new(
@@ -5230,7 +5222,7 @@ mod tests {
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
         bls_keys: &[crate::bls::Bls12381PrivateKey],
-        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (Address, DkgManager) {
         let (address, mut manager) = create_manager_at_index(
@@ -5250,7 +5242,7 @@ mod tests {
 
     fn create_certificate_with_signers(
         config: &DkgConfig,
-        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
         dealer_address: &Address,
         message: &avss::Message,
         session_context: &SessionContext,
@@ -5375,7 +5367,7 @@ mod tests {
         session_context: &SessionContext,
         encryption_keys: &[PrivateKey<EncryptionGroupElement>],
         bls_keys: &[crate::bls::Bls12381PrivateKey],
-        bls_public_keys: &std::collections::HashMap<Address, BLS12381PublicKey>,
+        bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (Address, avss::Message, complaint::Complaint) {
         let (dealer_address, dealer_manager) = create_manager_at_index(
