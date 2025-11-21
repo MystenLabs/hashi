@@ -46,7 +46,7 @@ pub trait P2PChannel: Send + Sync {
 
     async fn complain(
         &self,
-        party: &ValidatorAddress,
+        party: &Address,
         request: &ComplainRequest,
     ) -> ChannelResult<ComplainResponse>;
 }
