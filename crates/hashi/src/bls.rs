@@ -128,7 +128,7 @@ impl BlsCommittee {
     }
 
     /// Verify an [Certificate]. If you also need to verify the weight, you can either
-    /// get the weight of the signature with [Certificate::weight] or use the [verify_signature_and_weight]
+    /// get the weight of the signature with [Certificate::weight] or use the [Self::verify_signature_and_weight]
     /// function.
     pub fn verify_signature<T: Serialize>(
         &self,
