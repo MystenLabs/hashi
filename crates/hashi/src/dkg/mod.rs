@@ -545,17 +545,15 @@ fn create_bls_committee(
     dkg_config: &DkgConfig,
     public_keys: &HashMap<Address, BLS12381PublicKey>,
 ) -> BlsCommittee {
-    let mut committee_vec: Vec<(Address, u16)> = dkg_config
+    // Sort by party_id to ensure deterministic ordering
+    let sorted_by_party_id: std::collections::BTreeMap<u16, Address> = dkg_config
         .address_to_party_id
         .iter()
-        .map(|(addr, &party_id)| (*addr, party_id))
+        .map(|(addr, &party_id)| (party_id, *addr))
         .collect();
-    // Sort by party_id to ensure deterministic ordering
-    committee_vec.sort_by_key(|(_, party_id)| *party_id);
-
-    let committee: Vec<BlsCommitteeMember> = committee_vec
+    let committee: Vec<BlsCommitteeMember> = sorted_by_party_id
         .into_iter()
-        .map(|(validator_address, party_id)| {
+        .map(|(party_id, validator_address)| {
             BlsCommitteeMember::new(
                 validator_address,
                 public_keys.get(&validator_address).unwrap().clone(),
