@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use hashi_guardian_shared::*;
 use fastcrypto::hash::HashFunction;
+use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use std::env;
@@ -414,8 +414,12 @@ async fn init_enclave(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<
         // Re-encrypt for the enclave's public key
         info!("   Re-encrypting share for enclave...");
         let state_hash = fastcrypto::hash::Blake2b256::digest(&init_state);
-        let new_ciphertext = encrypt(&serialized_share, &enclave_encryption_key, Some(&state_hash.digest))
-            .map_err(|e| anyhow::anyhow!("Failed to encrypt share for enclave: {}", e))?;
+        let new_ciphertext = encrypt(
+            &serialized_share,
+            &enclave_encryption_key,
+            Some(&state_hash.digest),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt share for enclave: {}", e))?;
 
         let new_encrypted_share = EncryptedShare {
             id: *encrypted_share.id(),

@@ -1,4 +1,5 @@
 use crate::s3_logger::test_s3_connectivity;
+use crate::setup::k256shares_to_secp_secret_key;
 use crate::{Enclave, S3Logger};
 use axum::extract::State;
 use axum::Json;
@@ -11,7 +12,6 @@ use std::sync::Arc;
 use tracing::{error, info};
 use vsss_rs::{DefaultShare, Share};
 use GuardianError::*;
-use crate::setup::k256shares_to_secp_secret_key;
 
 // TODO: Add some kind of authentication, e.g., an API key or token
 pub async fn init_enclave_internal(
@@ -119,7 +119,9 @@ pub async fn init_enclave_external(
         .decrypted_shares
         .lock()
         .map_err(|e| GenericError(format!("Failed to acquire lock on shares: {}", e)))?;
-    received_shares.insert(share);
+    if !received_shares.insert(share) {
+        return Err(GenericError("Duplicate shares!".into()));
+    }
     let current_share_count = received_shares.len();
     info!(
         "   Total shares received: {}/{}",

@@ -1,14 +1,18 @@
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use fastcrypto::hash::Digest;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, HpkeError, Kem, Serializable};
 use k256::Scalar;
 use serde::Deserialize;
 use serde::Serialize;
-use std::time::Duration;
-use axum::http::StatusCode;
-use axum::Json;
-use axum::response::{IntoResponse, Response};
+use std::time::{Duration, SystemTime};
 use vsss_rs::{DefaultShare, IdentifierPrimeField};
+
+// ---------------------------------
+//      Types and Constants
+// ---------------------------------
 
 pub type EncSecKey = <X25519HkdfSha256 as Kem>::PrivateKey;
 pub type EncPubKey = <X25519HkdfSha256 as Kem>::PublicKey;
@@ -22,6 +26,8 @@ pub type K256ShareBase = IdentifierPrimeField<Scalar>;
 pub type ShareID = K256ShareBase;
 pub type ShareValue = K256ShareBase;
 pub type MyShare = DefaultShare<ShareID, ShareValue>;
+
+pub type WithdrawID = String; // TODO: Placeholder
 
 // The threshold and number of key provisioner's
 pub const SECRET_SHARING_T: u16 = 3;
@@ -87,9 +93,53 @@ pub struct HealthCheckResponse {
     pub enc_public_key: Option<Vec<u8>>,
 }
 
+/// A "Delayed Withdraw" request
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DelayedWithdrawRequest {
+    /// Details of the withdrawal
+    pub info: WithdrawInfo,
+    /// Hashi cert over the request
+    pub cert: HashiCert,
+}
+
+/// An (instantaneous) withdraw request
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InstantWithdrawRequest {
+    /// Details of the withdrawal
+    pub info: WithdrawInfo,
+    /// Is the request trying to spend a delayed withdrawal
+    pub delayed: bool,
+    /// Hashi cert over the request
+    pub cert: HashiCert,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct WithdrawInfo {
+    /// Unique withdraw ID assigned by Hashi
+    pub withdraw_id: WithdrawID,
+    /// External addresses and corresponding amounts
+    pub external_dest: Vec<WithdrawOutput>,
+    /// Hashi-assigned timestamp
+    pub timestamp: SystemTime,
+    /// Transaction fee in Satoshi's
+    pub fee_sats: u64,
+}
+
 // ---------------------------------
 //          Helper structs
 // ---------------------------------
+
+/// Transaction output for withdrawal (external parties only)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawOutput {
+    /// Bitcoin address to withdraw to (external party)
+    pub address: String,
+    /// Amount in Satoshi's
+    pub amount: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct HashiCert {} // TODO: Placeholder
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EncryptedShare {
@@ -116,9 +166,8 @@ pub struct S3Config {
     pub bucket_name: String,
 }
 
-/// All the relevant info related to hashi.
-/// Note: BTC pub key is currently stored as a const
-// TODO: Add sui committee, threshold
+/// Hashi keys used to sign messages to Guardian (BLS?).
+// TODO: Placeholder. Add pub keys, threshold.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct HashiCommittee {}
 
@@ -276,7 +325,6 @@ impl std::fmt::Display for GuardianError {
 
 impl std::error::Error for GuardianError {}
 
-
 /// Implement IntoResponse for EnclaveError.
 impl IntoResponse for GuardianError {
     fn into_response(self) -> Response {
@@ -295,7 +343,6 @@ impl IntoResponse for GuardianError {
         (status, body).into_response()
     }
 }
-
 
 // ---------------------------------
 //    Encryption/Decryption utils
@@ -327,9 +374,9 @@ pub fn decrypt(
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Vec<u8>> {
-    let (encapsulated_key, aes_ciphertext) = ciphertext
-        .try_into()
-        .map_err(|e: HpkeError| GuardianError::GenericError(format!("Failed to deserialize ciphertext: {}", e)))?;
+    let (encapsulated_key, aes_ciphertext) = ciphertext.try_into().map_err(|e: HpkeError| {
+        GuardianError::GenericError(format!("Failed to deserialize ciphertext: {}", e))
+    })?;
 
     let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
         &hpke::OpModeR::Base,
@@ -344,18 +391,17 @@ pub fn decrypt(
     Ok(decrypted)
 }
 
-
 #[cfg(test)]
 mod encryption_tests {
     // https://github.com/rozbb/rust-hpke/tree/main
     // Note: using hpke
+    use crate::{decrypt, encrypt};
     use hpke::aead::AesGcm256;
     use hpke::kdf::HkdfSha384;
     use hpke::kem::X25519HkdfSha256;
     use hpke::Kem;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
-    use crate::{decrypt, encrypt};
 
     #[test]
     fn test_hpke() {
@@ -375,7 +421,7 @@ mod encryption_tests {
                 aad,
                 &mut rng,
             )
-                .unwrap();
+            .unwrap();
         let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
             &hpke::OpModeR::Base,
             &keys.0,
@@ -384,7 +430,7 @@ mod encryption_tests {
             &ciphertext,
             aad,
         )
-            .unwrap();
+        .unwrap();
         println!("decrypted: {:?}", decrypted);
         assert_eq!(plaintext, decrypted.as_slice());
     }

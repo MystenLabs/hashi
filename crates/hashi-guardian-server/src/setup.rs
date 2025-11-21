@@ -2,11 +2,11 @@ use crate::GuardianError::GenericError;
 use crate::GuardianResult;
 use axum::Json;
 use fastcrypto::hash::{Blake2b256, HashFunction};
-use k256::elliptic_curve::PrimeField;
 use hashi_guardian_shared::{
     encrypt, EncPubKey, MyShare, SetupNewKeyRequest, SetupNewKeyResponse, SECRET_SHARING_N,
     SECRET_SHARING_T,
 };
+use k256::elliptic_curve::PrimeField;
 use k256::SecretKey;
 use tracing::{error, info};
 use vsss_rs::{shamir, IdentifierPrimeField, ReadableShareSet};
@@ -74,12 +74,11 @@ pub async fn setup_new_key(
 pub fn k256_secret_key_to_shares(sk: SecretKey) -> GuardianResult<Vec<MyShare>> {
     let nzs = sk.to_nonzero_scalar();
     let shared_secret = IdentifierPrimeField(*nzs.as_ref());
-    let shares = shamir::split_secret::<MyShare>(
-        THRESHOLD, LIMIT, &shared_secret, &mut rand::thread_rng()
-    ).map_err(|e| GenericError(format!("Failed to split secret: {}", e)))?;
+    let shares =
+        shamir::split_secret::<MyShare>(THRESHOLD, LIMIT, &shared_secret, &mut rand::thread_rng())
+            .map_err(|e| GenericError(format!("Failed to split secret: {}", e)))?;
     Ok(shares)
 }
-
 
 pub fn k256shares_to_secp_secret_key(
     shares: &[MyShare],
@@ -97,10 +96,10 @@ pub fn k256shares_to_secp_secret_key(
 
 mod secret_sharing_tests {
     use super::*;
-    use elliptic_curve::ff::PrimeField;
-    use k256::{SecretKey};
-    use vsss_rs::{shamir, *};
     use bitcoin::secp256k1::{Message, Secp256k1};
+    use elliptic_curve::ff::PrimeField;
+    use k256::SecretKey;
+    use vsss_rs::{shamir, *};
 
     #[test]
     fn basic_secret_sharing() {
@@ -155,16 +154,24 @@ mod secret_sharing_tests {
     fn test_k256_secret_key_to_shares_generates_correct_number() {
         let mut osrng = rand_core::OsRng::default();
         let sk = SecretKey::random(&mut osrng);
-        
+
         let shares = k256_secret_key_to_shares(sk).unwrap();
-        
+
         // Should generate LIMIT (5) shares
-        assert_eq!(shares.len(), LIMIT, "Should generate exactly {} shares", LIMIT);
-        
+        assert_eq!(
+            shares.len(),
+            LIMIT,
+            "Should generate exactly {} shares",
+            LIMIT
+        );
+
         // Verify all shares have unique identifiers
         let mut identifiers = std::collections::HashSet::new();
         for share in &shares {
-            assert!(identifiers.insert(share.identifier), "Share identifiers should be unique");
+            assert!(
+                identifiers.insert(share.identifier),
+                "Share identifiers should be unique"
+            );
         }
     }
 
@@ -184,12 +191,12 @@ mod secret_sharing_tests {
 
         // Split the secret into shares
         let shares = k256_secret_key_to_shares(original_k256_sk).unwrap();
-        
+
         // Test reconstruction with varying numbers of shares from 0 to LIMIT
         for num_shares in 0..=LIMIT {
             let shares_subset = &shares[0..num_shares];
             let result = k256shares_to_secp_secret_key(shares_subset);
-            
+
             if num_shares < THRESHOLD {
                 // With insufficient shares, either:
                 // 1. The combine operation fails (returns error), OR
@@ -214,7 +221,7 @@ mod secret_sharing_tests {
                 // With threshold or more shares, reconstruction should succeed and match original
                 let reconstructed_secp_sk = result.unwrap();
                 let reconstructed_bytes = reconstructed_secp_sk.secret_bytes();
-                
+
                 // Verify the reconstructed secret matches the original
                 assert_eq!(
                     original_bytes.as_slice(),
@@ -232,16 +239,16 @@ mod secret_sharing_tests {
         let mut osrng = rand_core::OsRng::default();
         let original_sk = SecretKey::random(&mut osrng);
         let original_bytes = original_sk.to_bytes();
-        
+
         // Generate all shares
         let shares = k256_secret_key_to_shares(original_sk).unwrap();
-        
+
         // Test different combinations of THRESHOLD shares
         // Try shares [0,1,2], [1,2,3], [2,3,4], etc.
         for start_idx in 0..=(LIMIT - THRESHOLD) {
             let subset = &shares[start_idx..(start_idx + THRESHOLD)];
             let reconstructed = k256shares_to_secp_secret_key(subset).unwrap();
-            
+
             assert_eq!(
                 original_bytes.as_slice(),
                 &reconstructed.secret_bytes(),
@@ -251,5 +258,4 @@ mod secret_sharing_tests {
             );
         }
     }
-
 }
