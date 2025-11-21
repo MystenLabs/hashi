@@ -5287,4 +5287,140 @@ mod tests {
             _ => panic!("Expected InvalidMessage error"),
         }
     }
+
+    #[tokio::test]
+    async fn test_committee_ordering_consistency_across_independent_construction() {
+        // This test verifies that validators who construct their configs independently
+        // (simulating production) can still verify each other's signatures.
+
+        let mut rng = rand::thread_rng();
+        let num_validators = 5;
+
+        // Create shared validator data
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        // Create validator registry in a specific order
+        let validator_data: Vec<_> = (0..num_validators)
+            .map(|i| {
+                let address = Address::new([i as u8; 32]);
+                let party_id = i as u16;
+                let encryption_pk = PublicKey::from_private_key(&encryption_keys[i]);
+                let bls_pk = bls_keys[i].public_key();
+                let weight = 1;
+                (address, party_id, encryption_pk, bls_pk, weight)
+            })
+            .collect();
+
+        let epoch = 100;
+        let threshold = 2;
+        let max_faulty = 1;
+        let session_context = SessionContext::new(
+            epoch,
+            ProtocolType::DkgKeyGeneration,
+            "testchain".to_string(),
+        );
+
+        let construct_config = |data: &[(
+            Address,
+            u16,
+            PublicKey<EncryptionGroupElement>,
+            BLS12381PublicKey,
+            u16,
+        )]| {
+            // Build nodes and address_to_party_id from scratch (not cloning!)
+            let mut nodes_vec = Vec::new();
+            let mut address_to_party_id = HashMap::new();
+            let mut bls_public_keys = HashMap::new();
+
+            for (addr, party_id, enc_pk, bls_pk, weight) in data {
+                let node = Node {
+                    id: *party_id,
+                    pk: enc_pk.clone(),
+                    weight: *weight,
+                };
+                nodes_vec.push(node);
+                address_to_party_id.insert(*addr, *party_id);
+                bls_public_keys.insert(*addr, bls_pk.clone());
+            }
+
+            let nodes = Nodes::new(nodes_vec).unwrap();
+            let config =
+                DkgConfig::new(epoch, nodes, address_to_party_id, threshold, max_faulty).unwrap();
+            (config, bls_public_keys)
+        };
+
+        // Validator 0 constructs config independently
+        let (config0, bls_public_keys0) = construct_config(&validator_data);
+        let manager0 = DkgManager::new(
+            Address::new([0; 32]),
+            config0.clone(),
+            session_context.clone(),
+            encryption_keys[0].clone(),
+            bls_keys[0].clone(),
+            bls_public_keys0.clone(),
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Validator 1 constructs config independently with REVERSED insertion order
+        // FLAKINESS: Reversing insertion order doesn't guarantee different HashMap iteration
+        // order due to HashMap's internal randomization. However, it increases the likelihood
+        // that the two HashMaps will have different iteration orders, which is what we want
+        // to test.
+        let mut validator_data_reversed = validator_data.clone();
+        validator_data_reversed.reverse();
+        let (config1, bls_public_keys1) = construct_config(&validator_data_reversed);
+        let mut manager1 = DkgManager::new(
+            Address::new([1; 32]),
+            config1,
+            session_context.clone(),
+            encryption_keys[1].clone(),
+            bls_keys[1].clone(),
+            bls_public_keys1,
+            Box::new(MockPublicMessagesStore),
+        );
+
+        // Validator 0 creates a dealer message
+        let dealer_message = manager0.create_dealer_message(&mut rng).unwrap();
+        let dealer_address = Address::new([0; 32]);
+
+        // Collect signatures from all validators
+        let message_hash =
+            compute_message_hash(&session_context, &dealer_address, &dealer_message).unwrap();
+        let dkg_message = DkgMessage {
+            dealer_address,
+            session_context: session_context.clone(),
+            message_hash,
+        };
+
+        // Create certificate using validator 0's committee
+        let bls_committee0 = create_bls_committee(&config0, &bls_public_keys0);
+        let mut aggregator =
+            crate::bls::BlsSignatureAggregator::new(&bls_committee0, dkg_message.clone());
+
+        // Add signatures from validators 0, 1, 2 (threshold is 2, so this is enough)
+        for (i, key) in bls_keys.iter().enumerate().take(3) {
+            let sig = key.sign(epoch, Address::new([i as u8; 32]), &dkg_message);
+            aggregator.add_signature(sig).unwrap();
+        }
+
+        let certificate = aggregator.finish().unwrap();
+
+        // Validator 1 needs to receive the dealer message first
+        manager1
+            .receive_dealer_message(&dealer_message, dealer_address)
+            .unwrap();
+
+        let result = manager1.validate_certificate(&certificate);
+        assert!(
+            result.is_ok(),
+            "Validator with independently constructed config should verify certificate. \
+             This fails without deterministic committee ordering! Error: {:?}",
+            result.err()
+        );
+    }
 }
