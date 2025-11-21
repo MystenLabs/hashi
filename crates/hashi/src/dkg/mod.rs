@@ -108,7 +108,6 @@ impl DkgManager {
         &self,
         request: &RetrieveMessageRequest,
     ) -> DkgResult<RetrieveMessageResponse> {
-        // TODO: Add DoS protection - track retrieval request count per party and rate limit
         let message = self
             .dealer_messages
             .get(&request.dealer)
