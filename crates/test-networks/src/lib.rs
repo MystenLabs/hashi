@@ -1,3 +1,5 @@
+use std::{path::Path, process::Command};
+
 use anyhow::Result;
 
 pub mod bitcoin_node;
@@ -7,8 +9,13 @@ pub mod sui_network;
 pub use bitcoin_node::{BitcoinNodeBuilder, BitcoinNodeHandle};
 pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
 pub use sui_network::{SuiNetworkBuilder, SuiNetworkHandle};
+use tempfile::TempDir;
+
+use crate::sui_network::sui_binary;
 
 pub struct TestNetworks {
+    #[allow(unused)]
+    dir: TempDir,
     pub sui_network: SuiNetworkHandle,
     pub hashi_network: HashiNetwork,
     pub bitcoin_node: BitcoinNodeHandle,
@@ -16,15 +23,7 @@ pub struct TestNetworks {
 
 impl TestNetworks {
     pub async fn new() -> Result<Self> {
-        let sui_network = SuiNetworkBuilder::default().build().await?;
-        let hashi_network = HashiNetworkBuilder::new().build().await?;
-        let bitcoin_node = BitcoinNodeBuilder::new().build().await?;
-        let test_networks = Self {
-            sui_network,
-            hashi_network,
-            bitcoin_node,
-        };
-        Ok(test_networks)
+        Self::builder().build().await
     }
 
     pub fn builder() -> TestNetworksBuilder {
@@ -41,6 +40,13 @@ impl TestNetworks {
 
     pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
         &self.bitcoin_node
+    }
+
+    fn _sui_client_command(&self) -> Command {
+        let client_config = self.dir.path().join("sui/client.yaml");
+        let mut cmd = Command::new(sui_binary());
+        cmd.arg("client").arg("--client.config").arg(client_config);
+        cmd
     }
 }
 
@@ -81,15 +87,42 @@ impl TestNetworksBuilder {
     }
 
     pub async fn build(self) -> Result<TestNetworks> {
-        let sui_network = self.sui_builder.build().await?;
+        let dir = tempfile::Builder::new()
+            .prefix("hashi-test-env-")
+            .tempdir()?;
+
+        let sui_network = self
+            .sui_builder
+            .dir(&dir.path().join("sui"))
+            .build()
+            .await?;
+        let bitcoin_node = self.bitcoin_builder.dir(dir.as_ref()).build().await?;
         let hashi_network = self.hashi_builder.build().await?;
-        let bitcoin_node = self.bitcoin_builder.build().await?;
+        Self::cp_packages(dir.as_ref())?;
         let test_networks = TestNetworks {
+            dir,
             sui_network,
             hashi_network,
             bitcoin_node,
         };
+
         Ok(test_networks)
+    }
+
+    pub fn cp_packages(dir: &Path) -> Result<()> {
+        const PACKAGES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages");
+
+        // Copy packages over to the scratch space
+        let output = Command::new("cp")
+            .arg("-r")
+            .arg(PACKAGES_DIR)
+            .arg(dir)
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!("unable to run 'cp -r {PACKAGES_DIR} {}", dir.display());
+        }
+
+        Ok(())
     }
 }
 

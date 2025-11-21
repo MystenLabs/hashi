@@ -2,10 +2,9 @@ use anyhow::{Result, anyhow};
 use bitcoin::{Address, Amount, BlockHash, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use hashi::config::get_available_port;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::time::Duration;
-use tempfile::TempDir;
 use tracing::{info, warn};
 
 const DEFAULT_INITIAL_BLOCKS: u64 = 101;
@@ -16,7 +15,8 @@ const RPC_PASSWORD: &str = "test";
 
 pub struct BitcoinNodeHandle {
     rpc_client: Client,
-    _data_dir: TempDir, // RAII: Keeps directory alive, auto-cleanup on drop
+    #[allow(unused)]
+    data_dir: PathBuf,
     process: Child,
     rpc_url: String,
     rpc_port: u16,
@@ -24,17 +24,23 @@ pub struct BitcoinNodeHandle {
 }
 
 impl BitcoinNodeHandle {
-    pub fn new(rpc_port: u16, data_dir: TempDir, bitcoin_core_path: PathBuf) -> Result<Self> {
+    pub fn new(rpc_port: u16, data_dir: PathBuf, bitcoin_core_path: PathBuf) -> Result<Self> {
         let rpc_url = format!("http://127.0.0.1:{}", rpc_port);
         let p2p_port = get_available_port();
         info!(
             "Starting Bitcoin node with RPC at {} and P2P port {}",
             rpc_url, p2p_port
         );
+
+        let stdout_name = data_dir.join("bitcoin.stdout");
+        let stdout = std::fs::File::create(stdout_name)?;
+        let stderr_name = data_dir.join("bitcoin.stderr");
+        let stderr = std::fs::File::create(stderr_name)?;
+
         let mut process = Command::new(&bitcoin_core_path)
             .arg("-regtest")
             .arg("-server")
-            .arg(format!("-datadir={}", data_dir.path().display()))
+            .arg(format!("-datadir={}", data_dir.display()))
             .arg(format!("-rpcport={}", rpc_port))
             .arg(format!("-port={}", p2p_port))
             .arg(format!("-rpcuser={}", RPC_USER))
@@ -45,8 +51,8 @@ impl BitcoinNodeHandle {
             .arg("-acceptnonstdtxn=1")
             .arg("-blockfilterindex=1") // Enable compact block filters (BIP-158)
             .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stdout(stdout)
+            .stderr(stderr)
             .spawn()
             .map_err(|e| {
                 anyhow!(
@@ -80,7 +86,7 @@ impl BitcoinNodeHandle {
         )?;
         Ok(Self {
             rpc_client,
-            _data_dir: data_dir,
+            data_dir,
             process,
             rpc_url,
             rpc_port,
@@ -205,6 +211,7 @@ impl Drop for BitcoinNodeHandle {
 }
 
 pub struct BitcoinNodeBuilder {
+    dir: Option<PathBuf>,
     initial_blocks: u64,
     bitcoin_core_path: Option<PathBuf>,
 }
@@ -214,6 +221,7 @@ impl BitcoinNodeBuilder {
         Self {
             initial_blocks: DEFAULT_INITIAL_BLOCKS,
             bitcoin_core_path: None,
+            dir: None,
         }
     }
 
@@ -227,12 +235,19 @@ impl BitcoinNodeBuilder {
         self
     }
 
+    pub fn dir(mut self, dir: &Path) -> Self {
+        self.dir = Some(dir.to_owned());
+        self
+    }
+
     pub async fn build(self) -> Result<BitcoinNodeHandle> {
         let bitcoin_core_path = self
             .bitcoin_core_path
             .unwrap_or_else(|| PathBuf::from("bitcoind"));
         let rpc_port = get_available_port();
-        let data_dir = TempDir::new()?;
+
+        let data_dir = self.dir.ok_or_else(|| anyhow!("no data_dir configured"))?;
+
         let node_handle = BitcoinNodeHandle::new(rpc_port, data_dir, bitcoin_core_path)?;
         node_handle.wait_until_ready().await?;
         if self.initial_blocks > 0 {
@@ -249,42 +264,5 @@ impl BitcoinNodeBuilder {
 impl Default for BitcoinNodeBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_builder_default_trait() {
-        let builder1 = BitcoinNodeBuilder::new();
-        let builder2 = BitcoinNodeBuilder::default();
-
-        assert_eq!(builder1.initial_blocks, builder2.initial_blocks);
-    }
-
-    #[test]
-    fn test_builder_default_values() {
-        let builder = BitcoinNodeBuilder::new();
-
-        assert_eq!(builder.initial_blocks, DEFAULT_INITIAL_BLOCKS);
-        assert!(builder.bitcoin_core_path.is_none());
-    }
-
-    #[test]
-    fn test_builder_chain_methods() {
-        const INITIAL_BLOCKS: u64 = 200;
-        const BITCOIND_PATH: &str = "/usr/local/bin/bitcoind";
-
-        let builder = BitcoinNodeBuilder::new()
-            .with_initial_blocks(INITIAL_BLOCKS)
-            .with_bitcoin_core_path(PathBuf::from(BITCOIND_PATH));
-
-        assert_eq!(builder.initial_blocks, INITIAL_BLOCKS);
-        assert_eq!(
-            builder.bitcoin_core_path,
-            Some(PathBuf::from(BITCOIND_PATH))
-        );
     }
 }

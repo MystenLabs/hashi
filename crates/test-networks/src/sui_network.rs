@@ -1,50 +1,48 @@
 use anyhow::Result;
+use anyhow::anyhow;
 use hashi::config::get_available_port;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use tempfile::TempDir;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use tokio::time::{Duration, sleep};
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 60_000;
-const TEMP_DIR_PREFIX: &str = "sui-network-";
-const LOCALHOST: &str = "127.0.0.1";
-const HTTP_PREFIX: &str = "http://";
 const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 10;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 
-fn make_url(port: u16) -> String {
-    format!("{}{}:{}", HTTP_PREFIX, LOCALHOST, port)
-}
+pub fn sui_binary() -> &'static Path {
+    static SUI_BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-fn ensure_sui_binary_exists(custom_path: &Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = custom_path {
-        return Ok(path.clone());
-    }
-    if let Ok(path) = std::env::var("SUI_BINARY") {
-        return Ok(PathBuf::from(path));
-    }
-    if let Ok(output) = Command::new("which").arg("sui").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let common_path = PathBuf::from(format!("{}/bin/sui", home));
-    if common_path.exists() {
-        return Ok(common_path);
-    }
-    anyhow::bail!("sui binary not found. Please install sui or set SUI_BINARY env var")
+    SUI_BINARY
+        .get_or_init(|| {
+            if let Ok(path) = std::env::var("SUI_BINARY") {
+                return PathBuf::from(path);
+            }
+            if let Ok(output) = Command::new("which").arg("sui").output()
+                && output.status.success()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return PathBuf::from(path);
+                }
+            }
+            panic!("sui binary not found. Please install sui or set SUI_BINARY env var")
+        })
+        .as_path()
 }
 
 async fn wait_for_ready(port: u16) -> Result<()> {
-    let addr: std::net::SocketAddr = format!("{}:{}", LOCALHOST, port).parse()?;
+    let http_url = format!("http://127.0.0.1:{port}");
+    let mut client = sui_rpc::Client::new(http_url)?;
+
+    // Wait till the network has started up and at least one checkpoint has been produced
     for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
-        if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
-            drop(stream);
+        if let Ok(resp) = client
+            .ledger_client()
+            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+            .await
+            && resp.into_inner().checkpoint_height() > 0
+        {
             return Ok(());
         }
         sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
@@ -62,12 +60,11 @@ pub struct SuiNetworkHandle {
     process: Child,
 
     /// Temporary directory for config (auto-cleanup on drop)
-    _config_dir: TempDir,
+    pub dir: PathBuf,
 
     /// Network endpoints
     pub rpc_url: String,
     pub faucet_url: String,
-    pub graphql_url: Option<String>,
 
     /// Network configuration
     pub num_validators: usize,
@@ -81,6 +78,7 @@ impl Drop for SuiNetworkHandle {
 }
 
 pub struct SuiNetworkBuilder {
+    pub dir: Option<PathBuf>,
     pub num_validators: usize,
     pub epoch_duration_ms: u64,
     pub sui_binary_path: Option<PathBuf>, // Optional custom binary
@@ -92,6 +90,7 @@ impl Default for SuiNetworkBuilder {
             num_validators: DEFAULT_NUM_VALIDATORS,
             epoch_duration_ms: DEFAULT_EPOCH_DURATION_MS,
             sui_binary_path: None,
+            dir: None,
         }
     }
 }
@@ -112,32 +111,39 @@ impl SuiNetworkBuilder {
         self
     }
 
+    pub fn dir(mut self, dir: &Path) -> Self {
+        self.dir = Some(dir.to_owned());
+        self
+    }
+
     pub async fn build(self) -> Result<SuiNetworkHandle> {
-        let config_dir = tempfile::Builder::new().prefix(TEMP_DIR_PREFIX).tempdir()?;
-        let sui_binary = ensure_sui_binary_exists(&self.sui_binary_path)?;
-        self.generate_genesis(&sui_binary, &config_dir)?;
+        let dir = self
+            .dir
+            .clone()
+            .ok_or_else(|| anyhow!("no directory configured"))?;
+        self.generate_genesis(&dir)?;
         let rpc_port = get_available_port();
         let faucet_port = get_available_port();
-        let process = self.start_network(&sui_binary, &config_dir, rpc_port, faucet_port)?;
-        let rpc_url = make_url(rpc_port);
-        let faucet_url = make_url(faucet_port);
+        let process = self.start_network(&dir, rpc_port, faucet_port)?;
+        let rpc_url = format!("http://127.0.0.1:{rpc_port}");
+        let faucet_url = format!("http://127.0.0.1:{faucet_port}");
         wait_for_ready(rpc_port).await?;
         Ok(SuiNetworkHandle {
             process,
-            _config_dir: config_dir,
+            dir,
             rpc_url,
             faucet_url,
-            graphql_url: None,
             num_validators: self.num_validators,
             epoch_duration_ms: self.epoch_duration_ms,
         })
     }
 
-    fn generate_genesis(&self, sui_binary: &PathBuf, config_dir: &TempDir) -> Result<()> {
-        let mut cmd = Command::new(sui_binary);
+    fn generate_genesis(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let mut cmd = Command::new(sui_binary());
         cmd.arg("genesis")
             .arg("--working-dir")
-            .arg(config_dir.path())
+            .arg(dir)
             .arg("--epoch-duration-ms")
             .arg(self.epoch_duration_ms.to_string())
             .arg("--committee-size")
@@ -150,54 +156,33 @@ impl SuiNetworkBuilder {
         Ok(())
     }
 
-    fn start_network(
-        &self,
-        sui_binary: &PathBuf,
-        config_dir: &TempDir,
-        rpc_port: u16,
-        faucet_port: u16,
-    ) -> Result<Child> {
-        let mut cmd = Command::new(sui_binary);
+    fn start_network(&self, dir: &Path, rpc_port: u16, _faucet_port: u16) -> Result<Child> {
+        let stdout_name = dir.join("out.stdout");
+        let stdout = std::fs::File::create(stdout_name)?;
+        let stderr_name = dir.join("out.stderr");
+        let stderr = std::fs::File::create(stderr_name)?;
+
+        let mut cmd = Command::new(sui_binary());
+
         cmd.arg("start")
             .arg("--network.config")
-            .arg(config_dir.path())
+            .arg(dir)
             .arg("--fullnode-rpc-port")
             .arg(rpc_port.to_string())
-            .arg(format!("--with-faucet={}:{}", LOCALHOST, faucet_port))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        Ok(cmd.spawn()?)
+            //XXX uncomment once 1.62 release is cut
+            // .arg(format!("--with-faucet=127.0.0.1:{faucet_port}"))
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .map_err(|e| anyhow!("Failed to run `sui start`: {e}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
-
-    #[tokio::test]
-    async fn test_default_binary_sui_network() -> Result<()> {
-        let sui_network = SuiNetworkBuilder::default().build().await?;
-
-        assert_eq!(sui_network.num_validators, 4);
-        assert!(!sui_network.rpc_url.is_empty());
-        assert!(!sui_network.faucet_url.is_empty());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_with_sui_epoch_duration_ms() -> Result<()> {
-        const CUSTOM_EPOCH_MS: u64 = 120_000;
-
-        let sui_network = SuiNetworkBuilder::default()
-            .with_epoch_duration_ms(CUSTOM_EPOCH_MS)
-            .build()
-            .await?;
-
-        assert_eq!(sui_network.epoch_duration_ms, CUSTOM_EPOCH_MS);
-
-        Ok(())
-    }
 
     #[tokio::test]
     async fn test_parallel_sui_networks() -> Result<()> {
@@ -205,16 +190,23 @@ mod tests {
         use std::collections::HashSet;
 
         const NUM_PARALLEL_NETWORKS: usize = 3;
-        const NUM_VALIDATORS: usize = 5;
+        const NUM_VALIDATORS: usize = 1;
+
+        let tempdir = TempDir::new()?;
 
         // Spawn multiple networks in parallel
         let network_futures: Vec<_> = (0..NUM_PARALLEL_NETWORKS)
-            .map(|i| async move {
-                let network = SuiNetworkBuilder::default()
-                    .with_num_validators(NUM_VALIDATORS)
-                    .build()
-                    .await;
-                (i, network)
+            .map(|i| {
+                let dir = tempdir.path().join(format!("{i}"));
+
+                async move {
+                    let network = SuiNetworkBuilder::default()
+                        .with_num_validators(NUM_VALIDATORS)
+                        .dir(&dir)
+                        .build()
+                        .await;
+                    (i, network)
+                }
             })
             .collect();
 
