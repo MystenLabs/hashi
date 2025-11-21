@@ -545,7 +545,6 @@ fn create_bls_committee(
     dkg_config: &DkgConfig,
     public_keys: &HashMap<Address, BLS12381PublicKey>,
 ) -> BlsCommittee {
-    // Sort by party_id to ensure deterministic ordering
     let sorted_by_party_id: std::collections::BTreeMap<u16, Address> = dkg_config
         .address_to_party_id
         .iter()
