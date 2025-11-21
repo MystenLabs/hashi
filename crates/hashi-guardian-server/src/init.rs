@@ -208,16 +208,6 @@ mod tests {
         (public_keys.into(), private_keys)
     }
 
-    #[test]
-    fn test_encrypt_and_decrypt() {
-        let bytes = b"Let's encrypt some stuff!";
-        let mut rng = rand::thread_rng();
-        let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-        let ciphertext = encrypt(bytes, &pk, None).unwrap();
-        let decrypted_plaintext = decrypt(&ciphertext, &sk, None).unwrap();
-        assert_eq!(bytes, &decrypted_plaintext[..]);
-    }
-
     #[tokio::test]
     async fn test_setup_new_key() {
         let (request, priv_keys) = mock_setup_new_key_request();

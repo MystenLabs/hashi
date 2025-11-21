@@ -98,7 +98,7 @@ pub fn k256shares_to_secp_secret_key(
 mod secret_sharing_tests {
     use super::*;
     use elliptic_curve::ff::PrimeField;
-    use k256::{NonZeroScalar, SecretKey};
+    use k256::{SecretKey};
     use vsss_rs::{shamir, *};
     use bitcoin::secp256k1::{Message, Secp256k1};
 
@@ -115,13 +115,12 @@ mod secret_sharing_tests {
         let res = shares.combine();
         assert!(res.is_ok());
         let scalar = res.unwrap();
-        let nzs_dup = NonZeroScalar::from_repr(scalar.0.to_repr()).unwrap();
-        let sk_dup = SecretKey::from(nzs_dup);
+        let sk_dup = SecretKey::from_bytes(&scalar.0.to_repr()).unwrap();
         assert_eq!(sk_dup.to_bytes(), sk.to_bytes());
     }
 
     #[test]
-    fn test_libs_compat() {
+    fn test_libs_signing_compat() {
         let msg = [7u8; 32];
         let mut osrng = rand_core::OsRng::default();
         let sk1 = k256::SecretKey::random(&mut osrng);
@@ -129,14 +128,6 @@ mod secret_sharing_tests {
 
         let secp = Secp256k1::new();
         let sk2 = bitcoin::secp256k1::SecretKey::from_slice(&sk1_bytes).unwrap();
-        let sk2_bytes = sk2.secret_bytes();
-
-        let sk1_dup = k256::SecretKey::from_slice(&sk2_bytes).unwrap();
-        assert_eq!(sk1_dup, sk1);
-
-        let sk1_shares = k256_secret_key_to_shares(sk1).unwrap();
-        let sk2_dup = k256shares_to_secp_secret_key(&sk1_shares).unwrap();
-        assert_eq!(sk2_dup, sk2);
 
         // secp signing
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk2);
@@ -158,4 +149,107 @@ mod secret_sharing_tests {
             .verify_raw(&msg, &k256_schnorr_sig)
             .unwrap();
     }
+
+    // Verify that k256_secret_key_to_shares generates the correct number of shares
+    #[test]
+    fn test_k256_secret_key_to_shares_generates_correct_number() {
+        let mut osrng = rand_core::OsRng::default();
+        let sk = SecretKey::random(&mut osrng);
+        
+        let shares = k256_secret_key_to_shares(sk).unwrap();
+        
+        // Should generate LIMIT (5) shares
+        assert_eq!(shares.len(), LIMIT, "Should generate exactly {} shares", LIMIT);
+        
+        // Verify all shares have unique identifiers
+        let mut identifiers = std::collections::HashSet::new();
+        for share in &shares {
+            assert!(identifiers.insert(share.identifier), "Share identifiers should be unique");
+        }
+    }
+
+    // Verify secret reconstruction with varying number of shares (0 to limit)
+    // Tests that:
+    // - With insufficient shares (< threshold): either error or wrong reconstruction
+    // - Threshold shares can reconstruct the original secret
+    // - Correct conversion to bitcoin::secp256k1::SecretKey
+    // - Full round-trip produces equivalent keys
+    #[test]
+    fn test_roundtrip_reconstruction_varying_shares() {
+        let mut osrng = rand_core::OsRng::default();
+
+        // Start with a k256::SecretKey
+        let original_k256_sk = SecretKey::random(&mut osrng);
+        let original_bytes = original_k256_sk.to_bytes();
+
+        // Split the secret into shares
+        let shares = k256_secret_key_to_shares(original_k256_sk).unwrap();
+        
+        // Test reconstruction with varying numbers of shares from 0 to LIMIT
+        for num_shares in 0..=LIMIT {
+            let shares_subset = &shares[0..num_shares];
+            let result = k256shares_to_secp_secret_key(shares_subset);
+            
+            if num_shares < THRESHOLD {
+                // With insufficient shares, either:
+                // 1. The combine operation fails (returns error), OR
+                // 2. The combine operation succeeds but produces wrong secret
+                match result {
+                    Err(_) => {
+                        // Good: operation failed as expected
+                    }
+                    Ok(reconstructed) => {
+                        // Operation succeeded but should produce wrong secret
+                        let reconstructed_bytes = reconstructed.secret_bytes();
+                        assert_ne!(
+                            original_bytes.as_slice(),
+                            &reconstructed_bytes,
+                            "With {} shares (less than threshold {}), should not reconstruct correct secret",
+                            num_shares,
+                            THRESHOLD
+                        );
+                    }
+                }
+            } else {
+                // With threshold or more shares, reconstruction should succeed and match original
+                let reconstructed_secp_sk = result.unwrap();
+                let reconstructed_bytes = reconstructed_secp_sk.secret_bytes();
+                
+                // Verify the reconstructed secret matches the original
+                assert_eq!(
+                    original_bytes.as_slice(),
+                    &reconstructed_bytes,
+                    "Reconstructed secret should match original (using {} shares)",
+                    num_shares
+                );
+            }
+        }
+    }
+
+    // Verify any subset of THRESHOLD shares works
+    #[test]
+    fn test_any_threshold_subset_reconstructs_secret() {
+        let mut osrng = rand_core::OsRng::default();
+        let original_sk = SecretKey::random(&mut osrng);
+        let original_bytes = original_sk.to_bytes();
+        
+        // Generate all shares
+        let shares = k256_secret_key_to_shares(original_sk).unwrap();
+        
+        // Test different combinations of THRESHOLD shares
+        // Try shares [0,1,2], [1,2,3], [2,3,4], etc.
+        for start_idx in 0..=(LIMIT - THRESHOLD) {
+            let subset = &shares[start_idx..(start_idx + THRESHOLD)];
+            let reconstructed = k256shares_to_secp_secret_key(subset).unwrap();
+            
+            assert_eq!(
+                original_bytes.as_slice(),
+                &reconstructed.secret_bytes(),
+                "Any subset of {} shares should reconstruct the original secret (testing subset starting at index {})",
+                THRESHOLD,
+                start_idx
+            );
+        }
+    }
+
 }

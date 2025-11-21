@@ -355,6 +355,8 @@ mod encryption_tests {
     use hpke::Kem;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use crate::{decrypt, encrypt};
+
     #[test]
     fn test_hpke() {
         let plaintext = b"Hello, world!";
@@ -385,5 +387,15 @@ mod encryption_tests {
             .unwrap();
         println!("decrypted: {:?}", decrypted);
         assert_eq!(plaintext, decrypted.as_slice());
+    }
+
+    #[test]
+    fn test_encrypt_and_decrypt() {
+        let bytes = b"Let's encrypt some stuff!";
+        let mut rng = rand::thread_rng();
+        let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
+        let ciphertext = encrypt(bytes, &pk, None).unwrap();
+        let decrypted_plaintext = decrypt(&ciphertext, &sk, None).unwrap();
+        assert_eq!(bytes, &decrypted_plaintext[..]);
     }
 }
