@@ -196,46 +196,6 @@ pub struct DkgOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum P2PMessage {
-    ShareV1 {
-        session_id: SessionId,
-        sender: Address,
-        message: Box<avss::Message>,
-    },
-    ComplaintV1 {
-        session_id: SessionId,
-        accuser: Address,
-        complaint: complaint::Complaint,
-    },
-    ComplaintResponseV1 {
-        session_id: SessionId,
-        responder: Address,
-        response: complaint::ComplaintResponse,
-    },
-    ApprovalV1(MessageApproval),
-    DataAvailabilitySignatureV1 {
-        session_id: SessionId,
-        signer: Address,
-        dealer: Address,
-        message_hash: MessageHash,
-        signature: SignatureBytes,
-    },
-    DkgSignatureV1 {
-        session_id: SessionId,
-        signer: Address,
-        dealer: Address,
-        message_hash: MessageHash,
-        signature: SignatureBytes,
-    },
-    ShareRequestV1 {
-        session_id: SessionId,
-        requester: Address,
-        dealer: Address,
-        message_hash: MessageHash,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendShareRequest {
     pub message: avss::Message,
 }
@@ -263,7 +223,7 @@ pub struct ComplainRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainResponse {
-    pub response: complaint::ComplaintResponse,
+    pub response: complaint::ComplaintResponse<avss::SharesForNode>,
 }
 
 #[derive(Clone, Debug)]

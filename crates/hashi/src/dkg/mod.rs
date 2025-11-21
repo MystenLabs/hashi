@@ -16,9 +16,8 @@ use sui_sdk_types::Address;
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgConfig, DkgError,
     DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash, MessageType,
-    OrderedBroadcastMessage, P2PMessage, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendShareRequest, SendShareResponse, SessionContext, SessionId, SighashType, SignatureBytes,
-    ValidatorSignature,
+    OrderedBroadcastMessage, RetrieveMessageRequest, RetrieveMessageResponse, SendShareRequest,
+    SendShareResponse, SessionContext, SessionId, SighashType, SignatureBytes, ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -37,11 +36,11 @@ pub struct DkgManager {
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_committee: BlsCommittee,
     // Mutable during a given session
-    pub dealer_outputs: HashMap<Address, avss::ReceiverOutput>,
+    pub dealer_outputs: HashMap<Address, avss::PartialOutput>,
     pub dealer_messages: HashMap<Address, avss::Message>,
     pub share_responses: HashMap<Address, SendShareResponse>,
     pub complaints: HashMap<Address, complaint::Complaint>,
-    pub complaint_responses: HashMap<Address, complaint::ComplaintResponse>,
+    pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
 
@@ -121,7 +120,6 @@ impl DkgManager {
     pub fn handle_complain_request(
         &mut self,
         request: &ComplainRequest,
-        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<ComplainResponse> {
         let cache_key = request.dealer;
         // It is safe to return a response from cache since we already know that dealer was malicious.
@@ -134,7 +132,8 @@ impl DkgManager {
             .dealer_messages
             .get(&request.dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No message from dealer".into()))?;
-        self.dealer_outputs
+        let partial_output = self
+            .dealer_outputs
             .get(&request.dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No shares for dealer".into()))?;
         let dealer_session_id = self.session_context.dealer_session_id(&request.dealer);
@@ -146,7 +145,7 @@ impl DkgManager {
             None,
             self.encryption_key.clone(),
         );
-        let response = receiver.handle_complaint(message, &request.complaint, rng)?;
+        let response = receiver.handle_complaint(message, &request.complaint, partial_output)?;
         self.complaint_responses.insert(cache_key, response.clone());
         Ok(ComplainResponse { response })
     }
@@ -322,7 +321,7 @@ impl DkgManager {
             None, // commitment: None for initial DKG
             self.encryption_key.clone(),
         );
-        let receiver_output = match receiver.process_message(message)? {
+        let partial_output = match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
             avss::ProcessedMessage::Complaint(complaint) => {
                 self.complaints.insert(dealer_address, complaint);
@@ -331,7 +330,7 @@ impl DkgManager {
                 ));
             }
         };
-        self.dealer_outputs.insert(dealer_address, receiver_output);
+        self.dealer_outputs.insert(dealer_address, partial_output);
         self.dealer_messages.insert(dealer_address, message.clone());
         self.public_messages_store
             .store_dealer_message(&dealer_address, message)
@@ -358,7 +357,7 @@ impl DkgManager {
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
-        let outputs: HashMap<PartyId, avss::ReceiverOutput> = certified_dealers
+        let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
             .keys()
             .map(|dealer| {
                 let dealer_party_id =
@@ -496,9 +495,9 @@ impl DkgManager {
             // TODO: Add timeout and retries handling when adding RPC layer
             let response = p2p_channel.complain(&signer, &complaint_request).await?;
             responses.push(response.response);
-            match receiver.recover(message, &responses) {
-                Ok(receiver_output) => {
-                    self.dealer_outputs.insert(*dealer, receiver_output);
+            match receiver.recover(message, responses.clone()) {
+                Ok(partial_output) => {
+                    self.dealer_outputs.insert(*dealer, partial_output);
                     self.complaints.remove(dealer);
                     return Ok(());
                 }
@@ -788,12 +787,9 @@ mod tests {
                     party
                 ))
             })?;
-            let mut rng = rand::thread_rng();
-            let response = manager
-                .handle_complain_request(request, &mut rng)
-                .map_err(|e| {
-                    crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
-                })?;
+            let response = manager.handle_complain_request(request).map_err(|e| {
+                crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+            })?;
             Ok(response)
         }
     }
@@ -1076,6 +1072,52 @@ mod tests {
             _request: &ComplainRequest,
         ) -> crate::communication::ChannelResult<ComplainResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement complain")
+        }
+    }
+
+    /// P2P channel that returns pre-collected complaint responses.
+    /// Useful for testing scenarios where responses are prepared ahead of time.
+    struct PreCollectedP2PChannel {
+        responses: std::sync::Mutex<HashMap<Address, ComplainResponse>>,
+    }
+
+    impl PreCollectedP2PChannel {
+        fn new(responses: HashMap<Address, ComplainResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::communication::P2PChannel for PreCollectedP2PChannel {
+        async fn send_share(
+            &self,
+            _: &Address,
+            _: &SendShareRequest,
+        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            unimplemented!("PreCollectedP2PChannel does not implement send_share")
+        }
+
+        async fn retrieve_message(
+            &self,
+            _: &Address,
+            _: &RetrieveMessageRequest,
+        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+            unimplemented!("PreCollectedP2PChannel does not implement retrieve_message")
+        }
+
+        async fn complain(
+            &self,
+            party: &Address,
+            _request: &ComplainRequest,
+        ) -> crate::communication::ChannelResult<ComplainResponse> {
+            self.responses
+                .lock()
+                .unwrap()
+                .get(party)
+                .cloned()
+                .ok_or_else(|| crate::communication::ChannelError::SendFailed("No response".into()))
         }
     }
 
@@ -3963,7 +4005,7 @@ mod tests {
         };
 
         // Manager has no message from this dealer
-        let result = manager.handle_complain_request(&request, &mut rng);
+        let result = manager.handle_complain_request(&request);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4007,7 +4049,7 @@ mod tests {
         };
 
         // Manager has message but no dealer_output
-        let result = manager.handle_complain_request(&request, &mut rng);
+        let result = manager.handle_complain_request(&request);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4080,9 +4122,7 @@ mod tests {
         };
 
         // First call - should compute and cache
-        let response1 = party2_manager
-            .handle_complain_request(&request, &mut rng)
-            .unwrap();
+        let response1 = party2_manager.handle_complain_request(&request).unwrap();
 
         // Verify cache contains the response
         assert_eq!(party2_manager.complaint_responses.len(), 1);
@@ -4093,9 +4133,7 @@ mod tests {
         );
 
         // Second call - should return cached response
-        let response2 = party2_manager
-            .handle_complain_request(&request, &mut rng)
-            .unwrap();
+        let response2 = party2_manager.handle_complain_request(&request).unwrap();
 
         // Verify responses are identical
         assert_eq!(
@@ -4463,11 +4501,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_shares_via_complaint_crypto_error() {
+        // This test triggers a genuine crypto error by providing complaint responses
+        // from parties whose IDs are not in the receiver's nodes configuration.
+        // When receiver.recover() calls total_weight_of() with invalid party IDs,
+        // it returns a FastCryptoError that gets wrapped as CryptoError.
+
         let mut rng = rand::thread_rng();
         let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
             create_test_config_and_encrption_keys(&mut rng);
 
-        // Create dealer with cheating message
+        // Create dealer and cheating message
         let (dealer_addr, _) = create_manager_at_index(
             0,
             &config,
@@ -4476,16 +4519,34 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let cheating_message = create_cheating_message(
-            &dealer_addr,
+        let dealer_message =
+            create_cheating_message(&dealer_addr, &config, &session_context, 1, &mut rng);
+
+        // Create responders 3 and 4 who successfully process the dealer message
+        let (addr3, mut mgr3) = create_manager_at_index(
+            3,
             &config,
             &session_context,
-            1, // Corrupt shares for party 1
-            &mut rng,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
         );
+        mgr3.receive_dealer_message(&dealer_message, dealer_addr)
+            .unwrap();
 
-        // Party 1 receives corrupted message and creates complaint
-        let (party_addr, mut party_manager) = create_manager_at_index(
+        let (addr4, mut mgr4) = create_manager_at_index(
+            4,
+            &config,
+            &session_context,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+        mgr4.receive_dealer_message(&dealer_message, dealer_addr)
+            .unwrap();
+
+        // Party 1 complains
+        let (_party_addr, mut party_manager) = create_manager_at_index(
             1,
             &config,
             &session_context,
@@ -4493,47 +4554,43 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
-        assert!(result.is_err());
-        assert!(party_manager.complaints.contains_key(&dealer_addr));
-
-        // Create other parties that can create valid responses
-        let mut other_managers = vec![];
-        for party_id in 2..4 {
-            let (addr, mut mgr) = create_manager_at_index(
-                party_id,
-                &config,
-                &session_context,
-                &encryption_keys,
-                &bls_keys,
-                &bls_public_keys,
-            );
-            mgr.receive_dealer_message(&cheating_message, dealer_addr)
-                .unwrap();
-            other_managers.push((addr, mgr));
-        }
-
-        let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
-
-        let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
-        let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
-
-        // Replace party_manager's stored message with a different one to cause crypto mismatch
-        // The responses will be for the original message, but recovery will try to use them with this new message
-        let different_message = create_cheating_message(
-            &dealer_addr,
-            &config,
-            &session_context,
-            2, // Different corruption
-            &mut rng,
-        );
+        party_manager
+            .receive_dealer_message(&dealer_message, dealer_addr)
+            .unwrap_err();
         party_manager
             .dealer_messages
-            .insert(dealer_addr, different_message);
+            .insert(dealer_addr, dealer_message);
 
-        // Attempt recovery - should fail with CryptoError because message doesn't match responses
+        // Pre-collect complaint responses from parties 3 and 4
+        let complaint = party_manager.complaints.get(&dealer_addr).unwrap().clone();
+        let request = ComplainRequest {
+            dealer: dealer_addr,
+            complaint,
+        };
+
+        let resp3 = mgr3.handle_complain_request(&request).unwrap();
+        let resp4 = mgr4.handle_complain_request(&request).unwrap();
+
+        let responses = std::collections::HashMap::from([(addr3, resp3), (addr4, resp4)]);
+
+        // Modify party_manager's config to exclude parties 3 and 4
+        // This makes their responses invalid (party IDs not in the nodes list)
+        let smaller_nodes = fastcrypto_tbls::nodes::Nodes::new(
+            config
+                .nodes
+                .iter()
+                .filter(|node| node.id < 3)
+                .cloned()
+                .collect(),
+        )
+            .unwrap();
+        party_manager.dkg_config.nodes = smaller_nodes;
+
+        let p2p = PreCollectedP2PChannel::new(responses);
+
+        // Attempt recovery - parties 3 and 4 are not in the modified config
         let result = party_manager
-            .recover_shares_via_complaint(&dealer_addr, signer_addresses.into_iter(), &mock_p2p)
+            .recover_shares_via_complaint(&dealer_addr, vec![addr3, addr4].into_iter(), &p2p)
             .await;
 
         assert!(result.is_err());
