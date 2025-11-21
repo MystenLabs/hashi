@@ -2164,7 +2164,7 @@ mod tests {
             .unwrap();
 
         // Party 2 fails on dealer 1's cheating message and creates complaint
-        let result = party_manager.receive_dealer_message(&dealer_1_message, dealer_1_addr.clone());
+        let result = party_manager.receive_dealer_message(&dealer_1_message, dealer_1_addr);
         assert!(result.is_err());
         assert!(party_manager.complaints.contains_key(&dealer_1_addr));
 
@@ -2192,7 +2192,7 @@ mod tests {
             &dealer_0_addr,
             &dealer_0_message,
             &session_context,
-            vec![
+            [
                 (0usize, Address::new([0; 32])),
                 (1, Address::new([1; 32])),
                 (3, Address::new([3; 32])),
@@ -2212,7 +2212,7 @@ mod tests {
             &dealer_1_addr,
             &dealer_1_message,
             &session_context,
-            vec![
+            [
                 (0usize, Address::new([0; 32])),
                 (1, Address::new([1; 32])),
                 (3, Address::new([3; 32])),
@@ -3629,7 +3629,7 @@ mod tests {
             &dealer0_addr,
             &dealer0_message,
             &session_context,
-            vec![
+            [
                 (0usize, Address::new([0; 32])),
                 (1, Address::new([1; 32])),
                 (3, Address::new([3; 32])),
@@ -3648,7 +3648,7 @@ mod tests {
             &dealer1_addr,
             &dealer1_message,
             &session_context,
-            vec![
+            [
                 (0usize, Address::new([0; 32])),
                 (1, Address::new([1; 32])),
                 (3, Address::new([3; 32])),
@@ -4008,7 +4008,7 @@ mod tests {
         // Manually insert message without processing (so no dealer_output)
         manager
             .dealer_messages
-            .insert(dealer_address.clone(), dealer_message.clone());
+            .insert(dealer_address, dealer_message.clone());
 
         let request = ComplainRequest {
             dealer: dealer_address,
@@ -4080,11 +4080,11 @@ mod tests {
 
         // Set up party 2 with the cheating message
         party2_manager
-            .receive_dealer_message(&cheating_message, dealer_addr.clone())
+            .receive_dealer_message(&cheating_message, dealer_addr)
             .unwrap();
 
         let request = ComplainRequest {
-            dealer: dealer_addr.clone(),
+            dealer: dealer_addr,
             complaint: complaint.clone(),
         };
 
@@ -4149,7 +4149,7 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
         assert!(party_manager.complaints.contains_key(&dealer_addr));
 
@@ -4164,15 +4164,12 @@ mod tests {
                 &bls_keys,
                 &bls_public_keys,
             );
-            mgr.receive_dealer_message(&cheating_message, dealer_addr.clone())
+            mgr.receive_dealer_message(&cheating_message, dealer_addr)
                 .unwrap();
             other_managers.push((addr, mgr));
         }
 
-        let signer_addresses: Vec<_> = other_managers
-            .iter()
-            .map(|(addr, _)| addr.clone())
-            .collect();
+        let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
 
         let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
         let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
@@ -4239,7 +4236,7 @@ mod tests {
             &dealer_addr,
             dealer_message,
             &session_context,
-            vec![(1usize, party_addr)]
+            [(1usize, party_addr)]
                 .iter()
                 .map(|(i, a)| ValidatorSignature {
                     validator: *a,
@@ -4363,7 +4360,7 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
         assert!(party_manager.complaints.contains_key(&dealer_addr));
 
@@ -4378,15 +4375,12 @@ mod tests {
                 &bls_keys,
                 &bls_public_keys,
             );
-            mgr.receive_dealer_message(&cheating_message, dealer_addr.clone())
+            mgr.receive_dealer_message(&cheating_message, dealer_addr)
                 .unwrap();
             other_managers.push((addr, mgr));
         }
 
-        let signer_addresses: Vec<_> = other_managers
-            .iter()
-            .map(|(addr, _)| addr.clone())
-            .collect();
+        let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
 
         let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
         let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
@@ -4443,7 +4437,7 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
         assert!(party_manager.complaints.contains_key(&dealer_addr));
 
@@ -4508,7 +4502,7 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr.clone());
+        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
         assert!(party_manager.complaints.contains_key(&dealer_addr));
 
@@ -4523,15 +4517,12 @@ mod tests {
                 &bls_keys,
                 &bls_public_keys,
             );
-            mgr.receive_dealer_message(&cheating_message, dealer_addr.clone())
+            mgr.receive_dealer_message(&cheating_message, dealer_addr)
                 .unwrap();
             other_managers.push((addr, mgr));
         }
 
-        let signer_addresses: Vec<_> = other_managers
-            .iter()
-            .map(|(addr, _)| addr.clone())
-            .collect();
+        let signer_addresses: Vec<_> = other_managers.iter().map(|(addr, _)| *addr).collect();
 
         let managers_map: std::collections::HashMap<_, _> = other_managers.into_iter().collect();
         let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
@@ -4547,7 +4538,7 @@ mod tests {
         );
         party_manager
             .dealer_messages
-            .insert(dealer_addr.clone(), different_message);
+            .insert(dealer_addr, different_message);
 
         // Attempt recovery - should fail with CryptoError because message doesn't match responses
         let result = party_manager
@@ -4598,7 +4589,7 @@ mod tests {
         );
 
         // Process dealer message - should create complaint and return error
-        let result = party_manager.receive_dealer_message(&dealer_message, dealer_addr.clone());
+        let result = party_manager.receive_dealer_message(&dealer_message, dealer_addr);
 
         assert!(result.is_err());
         assert!(
@@ -5414,12 +5405,10 @@ mod tests {
         dealer_message: &avss::Message,
         complaint: complaint::Complaint,
     ) {
-        party_manager
-            .complaints
-            .insert(dealer_address.clone(), complaint);
+        party_manager.complaints.insert(*dealer_address, complaint);
         party_manager
             .dealer_messages
-            .insert(dealer_address.clone(), dealer_message.clone());
+            .insert(*dealer_address, dealer_message.clone());
     }
 
     fn create_handle_send_share_test_setup(
