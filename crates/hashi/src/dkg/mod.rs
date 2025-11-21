@@ -4583,7 +4583,7 @@ mod tests {
                 .cloned()
                 .collect(),
         )
-            .unwrap();
+        .unwrap();
         party_manager.dkg_config.nodes = smaller_nodes;
 
         let p2p = PreCollectedP2PChannel::new(responses);
