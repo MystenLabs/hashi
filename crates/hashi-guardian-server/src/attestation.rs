@@ -19,8 +19,8 @@ pub async fn get_attestation(
 ) -> Result<Json<GetAttestationResponse>, GuardianError> {
     info!("📥 /get_attestation - Received request");
 
-    let signing_pk_bytes = enclave.config.eph_keys.signing_keys.public().as_bytes();
-    let enc_pk_bytes = enclave.config.eph_keys.encryption_keys.public().to_bytes();
+    let signing_pk_bytes = enclave.signing_keypair().public().as_bytes();
+    let enc_pk_bytes = enclave.encryption_public_key().to_bytes();
 
     info!("🔐 Initializing NSM driver...");
     let fd = driver::nsm_init();

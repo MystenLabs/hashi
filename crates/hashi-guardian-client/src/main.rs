@@ -1,35 +1,16 @@
 use anyhow::{Context, Result};
-use fastcrypto::hash::HashFunction;
+use hashi_guardian_shared::crypto::decrypt_share;
+use hashi_guardian_shared::test_utils::{gen_dummy_share_data, mock_init_external_state};
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use std::env;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
-// Shared state for the client session
-struct ClientState {
-    kp_private_keys: Vec<EncSecKey>,
-    encrypted_shares: Vec<EncryptedShare>,
-    share_commitments: Vec<ShareCommitment>,
-    enclave_encryption_key: Option<EncPubKey>,
-}
-
-impl ClientState {
-    fn new() -> Self {
-        ClientState {
-            kp_private_keys: vec![],
-            encrypted_shares: vec![],
-            share_commitments: vec![],
-            enclave_encryption_key: None,
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing_subscriber();
+    init_tracing_subscriber(false);
 
     // Load environment variables from .env file
     dotenvy::dotenv().ok();
@@ -52,17 +33,16 @@ async fn main() -> Result<()> {
     }
     info!("");
 
-    // Create shared state
-    let state = Arc::new(Mutex::new(ClientState::new()));
-
     match command {
-        "ping" => ping(base_url).await?,
-        "health_check" => health_check(base_url).await?,
-        "configure_s3" => configure_s3(base_url, state.clone()).await?,
-        "setup_new_key" => setup_new_key(base_url, state.clone()).await?,
-        "get_attestation" => get_enclave_key(base_url, state.clone(), strict).await?,
-        "init" => init_enclave(base_url, state.clone()).await?,
-        "full_setup" => full_setup(base_url, state.clone(), strict).await?,
+        "health_check" => {
+            _ = health_check(base_url).await?;
+        }
+        "configure_s3" => configure_s3(base_url, None).await?,
+        "get_attestation" => {
+            _ = get_attestation(base_url).await?;
+        }
+        "init_with_test_key" => init_with_test_key(base_url, strict).await?,
+        "init_with_new_key" => init_with_new_key(base_url, strict).await?,
         "help" | "--help" | "-h" => print_help(),
         _ => {
             warn!("Unknown command: {}", command);
@@ -77,48 +57,27 @@ fn print_help() {
     println!("Guardian Client - Usage:");
     println!("  cargo run [COMMAND] [BASE_URL] [--strict]");
     println!("\nCommands:");
-    println!("  ping              - Test server connectivity");
     println!("  health_check      - Get server health and status");
     println!("  configure_s3      - Send S3 configuration to server");
-    println!("  setup_new_key     - Generate and split a new Bitcoin key");
-    println!("  get_attestation   - Get enclave key (attestation or health_check)");
-    println!("  init              - Initialize enclave with shares and state");
-    println!("  full_setup        - Run complete setup workflow");
+    println!("  get_attestation   - Get enclave attestation document");
+    println!("  init_with_test_key - Initialize enclave with dummy test key");
+    println!("  init_with_new_key - Initialize enclave with freshly generated key");
     println!("  help              - Show this help message");
     println!("\nFlags:");
     println!("  --strict          - Require real enclave attestation (production mode)");
     println!("\nExamples:");
-    println!("  cargo run full_setup http://localhost:3000");
-    println!("  cargo run full_setup http://production:3000 --strict");
-}
-
-/// Test server connectivity
-async fn ping(base_url: &str) -> Result<()> {
-    info!("🏓 Pinging server...");
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("{}/ping", base_url))
-        .send()
-        .await
-        .context("Failed to send ping request")?;
-
-    if response.status().is_success() {
-        let body = response.text().await?;
-        info!("✅ Server responded: {}", body);
-    } else {
-        warn!("❌ Ping failed with status: {}", response.status());
-    }
-    Ok(())
+    println!("  cargo run init_with_test_key http://localhost:3000");
+    println!("  cargo run init_with_new_key http://localhost:3000");
+    println!("  cargo run init_with_new_key http://production:3000 --strict");
 }
 
 /// Configure S3 credentials and bucket info
-async fn configure_s3(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<()> {
+async fn configure_s3(
+    base_url: &str,
+    share_commitments: Option<Vec<ShareCommitment>>,
+) -> Result<()> {
     info!("📤 Configuring S3...");
-
-    let share_commitments = {
-        let state = state.lock().unwrap();
-        state.share_commitments.clone()
-    };
+    let share_commitments = share_commitments.unwrap_or(gen_dummy_share_data()?.1);
 
     let s3_config_request = InitInternalRequest {
         config: S3Config {
@@ -156,7 +115,7 @@ async fn configure_s3(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<
 }
 
 /// Setup a new Bitcoin key by generating key provisioner keys and requesting key shares
-async fn setup_new_key(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<()> {
+async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitment>)> {
     info!("🔑 Setting up new key...");
 
     // Generate key provisioner encryption keys
@@ -164,11 +123,11 @@ async fn setup_new_key(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result
     let mut kp_private_keys = vec![];
     let mut kp_public_keys = vec![];
 
-    for i in 0..SECRET_SHARING_N {
+    for i in 0..LIMIT {
         let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
         kp_private_keys.push(sk);
         kp_public_keys.push(pk);
-        info!("   Generated key pair {} of {}", i + 1, SECRET_SHARING_N);
+        info!("   Generated key pair {} of {}", i + 1, LIMIT);
     }
 
     let request: SetupNewKeyRequest = kp_public_keys.into();
@@ -197,23 +156,36 @@ async fn setup_new_key(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result
             setup_response.share_commitments.len()
         );
 
-        // Store in state
-        let mut state = state.lock().unwrap();
-        state.kp_private_keys = kp_private_keys;
-        state.encrypted_shares = setup_response.encrypted_shares;
-        state.share_commitments = setup_response.share_commitments;
-        info!("💾 Stored shares and commitments in session state");
+        // Decrypt the shares with the KP private keys
+        info!("🔓 Decrypting shares...");
+        let mut decrypted_shares = vec![];
+
+        for (i, encrypted_share) in setup_response.encrypted_shares.iter().enumerate() {
+            let kp_sk = &kp_private_keys[i];
+            let share = decrypt_share(encrypted_share, kp_sk, None)
+                .context(format!("Failed to decrypt share {}", i))?;
+            decrypted_shares.push(share);
+        }
+
+        info!("✅ Decrypted {} shares", decrypted_shares.len());
+        info!("\n💡 In production:");
+        info!("   - Each key provisioner stores their share securely");
+        info!("   - Share commitments are used to configure the enclave");
+
+        return Ok((decrypted_shares, setup_response.share_commitments));
     } else {
         let status = response.status();
         let error_body = response.text().await?;
-        warn!("❌ Failed to setup new key: {} - {}", status, error_body);
+        return Err(anyhow::anyhow!(
+            "Failed to setup new key: {} - {}",
+            status,
+            error_body
+        ));
     }
-
-    Ok(())
 }
 
 /// Health check - get server status and encryption key
-async fn health_check(base_url: &str) -> Result<()> {
+async fn health_check(base_url: &str) -> Result<HealthCheckResponse> {
     info!("🏯 Checking server health...");
 
     let client = reqwest::Client::new();
@@ -234,51 +206,70 @@ async fn health_check(base_url: &str) -> Result<()> {
         info!("   Initialized: {}", health_response.btc_key_configured);
         info!(
             "   Shares received: {}/{}",
-            health_response.shares_received, SECRET_SHARING_T
+            health_response.shares_received, THRESHOLD
         );
         if let Some(ref pk) = health_response.enc_public_key {
             info!("   Encryption public key: {} bytes", pk.len());
         }
+
+        Ok(health_response)
     } else {
         let status = response.status();
         let error_body = response.text().await?;
-        warn!("❌ Health check failed: {} - {}", status, error_body);
+        Err(anyhow::anyhow!(
+            "Health check failed: {} - {}",
+            status,
+            error_body
+        ))
     }
+}
 
-    Ok(())
+/// Get attestation document from enclave
+async fn get_attestation(base_url: &str) -> Result<GetAttestationResponse> {
+    info!("📜 Getting attestation document...");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/get_attestation", base_url))
+        .send()
+        .await
+        .context("Failed to request attestation")?;
+
+    if response.status().is_success() {
+        let attestation: GetAttestationResponse = response
+            .json()
+            .await
+            .context("Failed to parse attestation response")?;
+
+        info!("✅ Received attestation document");
+        info!("   Length: {} characters", attestation.attestation.len());
+        info!(
+            "   Attestation (hex): {}...",
+            &attestation.attestation[..64.min(attestation.attestation.len())]
+        );
+
+        Ok(attestation)
+    } else {
+        let status = response.status();
+        let error_body = response.text().await?;
+        Err(anyhow::anyhow!(
+            "Failed to get attestation: {} - {}",
+            status,
+            error_body
+        ))
+    }
 }
 
 /// Get enclave encryption key - tries attestation first (strict), falls back to health_check
-async fn get_enclave_key(
-    base_url: &str,
-    state: Arc<Mutex<ClientState>>,
-    strict: bool,
-) -> Result<()> {
+async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
     info!("🔑 Getting enclave encryption key...");
-
-    let client = reqwest::Client::new();
 
     // Try attestation first
     info!("📜 Trying attestation endpoint...");
-    let attestation_response = client
-        .get(format!("{}/get_attestation", base_url))
-        .send()
-        .await;
+    let attestation_result = get_attestation(base_url).await;
 
-    match attestation_response {
-        Ok(response) if response.status().is_success() => {
-            let attestation: GetAttestationResponse = response
-                .json()
-                .await
-                .context("Failed to parse attestation response")?;
-
-            info!("✅ Received attestation document");
-            info!("   Length: {} characters", attestation.attestation.len());
-            info!(
-                "   Attestation (hex): {}...",
-                &attestation.attestation[..64.min(attestation.attestation.len())]
-            );
-
+    match attestation_result {
+        Ok(_attestation) => {
             // TODO: Extract encryption key from attestation user_data
             // For now, need to parse the attestation document to get the user_data
             warn!("⚠️  TODO: Extract encryption key from attestation user_data");
@@ -286,7 +277,7 @@ async fn get_enclave_key(
 
             // Fall through to health_check
         }
-        _ => {
+        Err(_) => {
             if strict {
                 return Err(anyhow::anyhow!(
                     "Attestation required in strict mode, but attestation endpoint failed"
@@ -297,139 +288,60 @@ async fn get_enclave_key(
     }
 
     // Use health_check endpoint
-    let health_response = client
-        .get(format!("{}/health_check", base_url))
-        .send()
-        .await
-        .context("Failed to request health check")?;
+    let health = health_check(base_url).await?;
 
-    if health_response.status().is_success() {
-        let health: HealthCheckResponse = health_response
-            .json()
-            .await
-            .context("Failed to parse health check response")?;
+    if let Some(enc_pk_bytes) = health.enc_public_key {
+        use hpke::Deserializable;
+        let enc_pk = EncPubKey::from_bytes(&enc_pk_bytes).map_err(|e| {
+            anyhow::anyhow!("Failed to parse enclave encryption public key: {}", e)
+        })?;
 
-        if let Some(enc_pk_bytes) = health.enc_public_key {
-            use hpke::Deserializable;
-            let enc_pk = EncPubKey::from_bytes(&enc_pk_bytes).map_err(|e| {
-                anyhow::anyhow!("Failed to parse enclave encryption public key: {}", e)
-            })?;
-
-            let mut state = state.lock().unwrap();
-            state.enclave_encryption_key = Some(enc_pk);
-            info!(
-                "✅ Stored enclave encryption public key ({} bytes)",
-                enc_pk_bytes.len()
-            );
-
-            if !strict {
-                warn!("\n⚠️  Note: Using health_check endpoint for development.");
-                warn!("⚠️  In production, use --strict flag to require attestation verification!");
-            }
-        } else {
-            return Err(anyhow::anyhow!(
-                "No encryption public key in health check response"
-            ));
+        info!(
+            "✅ Retrieved enclave encryption public key ({} bytes)",
+            enc_pk_bytes.len()
+        );
+        if !strict {
+            warn!("\n⚠️  Note: Using health_check endpoint for development.");
+            warn!("⚠️  In production, use --strict flag to require attestation verification!");
         }
+        Ok(enc_pk)
     } else {
-        let status = health_response.status();
-        let error_body = health_response.text().await?;
-        return Err(anyhow::anyhow!(
-            "Health check failed: {} - {}",
-            status,
-            error_body
-        ));
+        Err(anyhow::anyhow!(
+            "No encryption public key in health check response"
+        ))
     }
-
-    Ok(())
 }
 
-/// Initialize the enclave with encrypted shares and configuration
-/// This simulates sending shares from multiple key provisioners
-async fn init_enclave(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<()> {
-    info!("🚀 Initializing enclave...");
-
-    // Get data from state
-    let (kp_private_keys, encrypted_shares, enclave_encryption_key) = {
-        let state = state.lock().unwrap();
-        if state.encrypted_shares.is_empty() {
-            warn!("❌ No encrypted shares found. Run 'setup_new_key' first!");
-            return Ok(());
-        }
-        if state.kp_private_keys.is_empty() {
-            warn!("❌ No KP private keys found. Run 'setup_new_key' first!");
-            return Ok(());
-        }
-        if state.enclave_encryption_key.is_none() {
-            warn!("❌ No enclave encryption key found. Run 'get_attestation' first!");
-            return Ok(());
-        }
-
-        (
-            state.kp_private_keys.clone(),
-            state.encrypted_shares.clone(),
-            state.enclave_encryption_key.clone().unwrap(),
-        )
-    };
+/// Initialize the enclave with shares and configuration
+/// Takes enclave public key and shares as arguments
+async fn init_enclave(
+    base_url: &str,
+    enclave_pub_key: &EncPubKey,
+    shares: Vec<MyShare>,
+) -> Result<()> {
+    info!("🚀 Initializing enclave with {} shares...", shares.len());
 
     // Create init state
-    let init_state = InitExternalRequestState {
-        hashi_committee_info: hashi_guardian_shared::HashiCommittee::default(),
-        withdraw_config: WithdrawConfig {
-            min_delay: Duration::from_secs(60),
-            max_delay: Duration::from_secs(3600),
-        },
-        withdraw_state: hashi_guardian_shared::WithdrawalState::default(),
-        cached_bytes: std::sync::OnceLock::new(),
-    };
+    let init_state = mock_init_external_state();
 
-    info!("📦 Initialization config:");
-    info!("   Min delay: {:?}", init_state.withdraw_config.min_delay);
-    info!("   Max delay: {:?}", init_state.withdraw_config.max_delay);
-    info!(
-        "   Withdrawal counter: {}",
-        init_state.withdraw_state.counter
-    );
+    info!("📦 Initialization config: {:?}", init_state);
 
-    // Send threshold number of shares
     let client = reqwest::Client::new();
-    let threshold = SECRET_SHARING_T as usize;
+    assert!(shares.len() >= THRESHOLD);
 
     info!(
         "📤 Sending {} shares (threshold) to enclave...\n",
-        threshold
+        THRESHOLD
     );
 
-    for i in 0..threshold {
-        let kp_sk = &kp_private_keys[i];
-        let encrypted_share = &encrypted_shares[i];
+    for i in 0..THRESHOLD.min(shares.len()) {
+        let share = &shares[i];
+        info!("🔑 Processing share {} of {}...", i + 1, THRESHOLD);
 
-        info!("🔑 Processing share {} of {}...", i + 1, threshold);
-
-        // Decrypt the share with KP's private key
-        info!("   Decrypting share with KP private key...");
-        let serialized_share = decrypt(encrypted_share.ciphertext(), kp_sk, None)
-            .map_err(|e| anyhow::anyhow!("Failed to decrypt share with KP key: {}", e))?;
-
-        // Re-encrypt for the enclave's public key
-        info!("   Re-encrypting share for enclave...");
-        let state_hash = fastcrypto::hash::Blake2b256::digest(&init_state);
-        let new_ciphertext = encrypt(
-            &serialized_share,
-            &enclave_encryption_key,
-            Some(&state_hash.digest),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to encrypt share for enclave: {}", e))?;
-
-        let new_encrypted_share = EncryptedShare {
-            id: *encrypted_share.id(),
-            ciphertext: new_ciphertext,
-        };
-
-        let request = InitExternalRequest {
-            encrypted_share: new_encrypted_share,
-            state: init_state.clone(),
-        };
+        // Encrypt with the enclave's public key
+        info!("   Encrypting share for enclave...");
+        let request = InitExternalRequest::new(share, enclave_pub_key, init_state.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to create init request: {}", e))?;
 
         info!("   Sending to server...");
         let response = client
@@ -441,57 +353,77 @@ async fn init_enclave(base_url: &str, state: Arc<Mutex<ClientState>>) -> Result<
 
         if response.status().is_success() {
             info!("✅ Share {} accepted by enclave\n", i + 1);
-            if i + 1 >= threshold {
+            if i + 1 >= THRESHOLD {
                 info!("🎉 Threshold reached! Enclave should now be initialized!");
             }
         } else {
             let status = response.status();
             let error_body = response.text().await?;
-            warn!(
-                "❌ Failed to send share {}: {} - {}",
+            return Err(anyhow::anyhow!(
+                "Failed to send share {}: {} - {}",
                 i + 1,
                 status,
                 error_body
-            );
-            return Ok(());
+            ));
         }
     }
 
     Ok(())
 }
 
-/// Full setup workflow: setup_new_key + configure_s3 + get_enclave_key + init
-async fn full_setup(base_url: &str, state: Arc<Mutex<ClientState>>, strict: bool) -> Result<()> {
-    info!("🚀 Running full setup workflow...\n");
+/// Initialize enclave with dummy test key (for testing)
+async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
+    info!("🚀 Initializing with test key...\n");
 
-    info!("Step 1: Setup new key");
+    // Step 1: Get enclave encryption key
+    info!("Step 1: Get enclave encryption key");
     info!("{}\n", "=".repeat(50));
-    setup_new_key(base_url, state.clone()).await?;
+    let enclave_pub_key = get_enclave_key(base_url, strict).await?;
 
-    info!("\nStep 2: Get enclave encryption key");
+    // Step 2: Generate dummy shares
+    info!("Step 2: Generate dummy test shares locally");
     info!("{}\n", "=".repeat(50));
-    get_enclave_key(base_url, state.clone(), strict).await?;
+    info!("🧪 Creating dummy shares from test secret [1u8; 32]...");
+    info!("⚠️  Note: NOT FOR PRODUCTION!");
+    let (shares, commitments) = test_utils::gen_dummy_share_data().unwrap();
+    for d in &commitments {
+        info!("Share {} Digest {}", d.id, d.digest);
+    }
 
-    info!("\nStep 3: Configure S3");
+    info!("Step 3: Configure S3");
     info!("{}\n", "=".repeat(50));
-    configure_s3(base_url, state.clone()).await?;
+    configure_s3(base_url, Some(commitments)).await?;
 
-    info!("\nStep 4: Initialize enclave");
+    // Step 3: Initialize enclave
+    info!("Step 4: Initialize enclave");
     info!("{}\n", "=".repeat(50));
-    init_enclave(base_url, state.clone()).await?;
+    init_enclave(base_url, &enclave_pub_key, shares).await?;
 
-    info!("\n🎊 Full setup complete!");
+    info!("\n🎊 Initialization with test key complete!");
     Ok(())
 }
 
-fn init_tracing_subscriber() {
-    let subscriber = ::tracing_subscriber::FmtSubscriber::builder()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .finish();
-    ::tracing::subscriber::set_global_default(subscriber)
-        .expect("unable to initialize tracing subscriber");
+/// Initialize enclave with freshly generated key
+/// Full E2E flow: setup_new_key + configure_s3 + get_enclave_key + init
+async fn init_with_new_key(base_url: &str, strict: bool) -> Result<()> {
+    info!("🚀 Initializing with freshly generated key...\n");
+
+    info!("Step 1: Setup new key");
+    info!("{}\n", "=".repeat(50));
+    let (shares, share_commitments) = setup_new_key(base_url).await?;
+
+    info!("\nStep 2: Get enclave encryption key");
+    info!("{}\n", "=".repeat(50));
+    let enclave_pub_key = get_enclave_key(base_url, strict).await?;
+
+    info!("\nStep 3: Configure S3");
+    info!("{}\n", "=".repeat(50));
+    configure_s3(base_url, Some(share_commitments)).await?;
+
+    info!("\nStep 4: Initialize enclave");
+    info!("{}\n", "=".repeat(50));
+    init_enclave(base_url, &enclave_pub_key, shares).await?;
+
+    info!("🎊 Initialization with new key complete!");
+    Ok(())
 }

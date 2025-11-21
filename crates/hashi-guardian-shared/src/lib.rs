@@ -1,37 +1,24 @@
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
-use fastcrypto::hash::Digest;
-use hpke::kem::X25519HkdfSha256;
-use hpke::{Deserializable, HpkeError, Kem, Serializable};
-use k256::Scalar;
+pub mod crypto;
+mod errors;
+pub mod test_utils;
+
+pub use crypto::{
+    EncKeyPair, EncPubKey, EncSecKey, EncapsulatedKey, K256ShareBase, MyShare, ShareID, ShareValue,
+    LIMIT, THRESHOLD,
+};
+pub use errors::{GuardianError, GuardianResult};
+
+use fastcrypto::hash::{Blake2b256, Digest, HashFunction};
+use hpke::{Deserializable, HpkeError, Serializable};
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::{Duration, SystemTime};
-use vsss_rs::{DefaultShare, IdentifierPrimeField};
 
 // ---------------------------------
 //      Types and Constants
 // ---------------------------------
 
-pub type EncSecKey = <X25519HkdfSha256 as Kem>::PrivateKey;
-pub type EncPubKey = <X25519HkdfSha256 as Kem>::PublicKey;
-pub struct EncKeyPair {
-    sk: EncSecKey,
-    pk: EncPubKey,
-}
-pub type EncapsulatedKey = <X25519HkdfSha256 as Kem>::EncappedKey;
-
-pub type K256ShareBase = IdentifierPrimeField<Scalar>;
-pub type ShareID = K256ShareBase;
-pub type ShareValue = K256ShareBase;
-pub type MyShare = DefaultShare<ShareID, ShareValue>;
-
 pub type WithdrawID = String; // TODO: Placeholder
-
-// The threshold and number of key provisioner's
-pub const SECRET_SHARING_T: u16 = 3;
-pub const SECRET_SHARING_N: u16 = 5;
 
 // ---------------------------------
 //    All requests and responses
@@ -147,7 +134,7 @@ pub struct EncryptedShare {
     pub ciphertext: Ciphertext,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ShareCommitment {
     pub id: ShareID,
     pub digest: Digest<32>,
@@ -193,25 +180,6 @@ pub struct WithdrawalState {
 //          Helper impl's
 // ---------------------------------
 
-impl From<Vec<EncPubKey>> for SetupNewKeyRequest {
-    fn from(keys: Vec<EncPubKey>) -> Self {
-        SetupNewKeyRequest {
-            key_provisioner_public_keys: keys.iter().map(|k| k.to_bytes().to_vec()).collect(),
-        }
-    }
-}
-
-impl TryFrom<SetupNewKeyRequest> for Vec<EncPubKey> {
-    type Error = HpkeError;
-    fn try_from(value: SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        value
-            .key_provisioner_public_keys
-            .into_iter()
-            .map(|k| EncPubKey::from_bytes(&k))
-            .collect()
-    }
-}
-
 impl From<(EncapsulatedKey, Vec<u8>)> for Ciphertext {
     fn from((encapped_key, aes_ciphertext): (EncapsulatedKey, Vec<u8>)) -> Self {
         Ciphertext {
@@ -228,24 +196,6 @@ impl<'a> TryFrom<&'a Ciphertext> for (EncapsulatedKey, &'a [u8]) {
             EncapsulatedKey::from_bytes(&value.encapsulated_key)?,
             &value.aes_ciphertext,
         ))
-    }
-}
-
-impl EncKeyPair {
-    pub fn secret(&self) -> &EncSecKey {
-        &self.sk
-    }
-    pub fn public(&self) -> &EncPubKey {
-        &self.pk
-    }
-}
-
-impl From<(EncSecKey, EncPubKey)> for EncKeyPair {
-    fn from((enc_sk, enc_pk): (EncSecKey, EncPubKey)) -> Self {
-        EncKeyPair {
-            sk: enc_sk,
-            pk: enc_pk,
-        }
     }
 }
 
@@ -300,148 +250,45 @@ impl Clone for InitExternalRequestState {
     }
 }
 
-// ---------------------------------
-//          Error types
-// ---------------------------------
-
-#[derive(Debug, PartialEq)]
-pub enum GuardianError {
-    GenericError(String),
-    EnclaveAlreadyInitialized,
-    Forbidden(String),
-}
-
-pub type GuardianResult<T> = Result<T, GuardianError>;
-
-impl std::fmt::Display for GuardianError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GuardianError::GenericError(e) => write!(f, "Error: {}", e),
-            GuardianError::EnclaveAlreadyInitialized => write!(f, "Enclave is already initialized"),
-            GuardianError::Forbidden(e) => write!(f, "Forbidden: {}", e),
-        }
+impl InitExternalRequestState {
+    pub fn digest(&self) -> Digest<32> {
+        Blake2b256::digest(&self)
     }
 }
 
-impl std::error::Error for GuardianError {}
-
-/// Implement IntoResponse for EnclaveError.
-impl IntoResponse for GuardianError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            GuardianError::GenericError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            GuardianError::EnclaveAlreadyInitialized => (
-                StatusCode::BAD_REQUEST,
-                "Enclave is already initialized!".into(),
-            ),
-            GuardianError::Forbidden(e) => (StatusCode::FORBIDDEN, e),
-        };
-        error!("Status: {}, Message: {}", status, error_message);
-        let body = Json(json!({
-            "error": error_message,
-        }));
-        (status, body).into_response()
+impl InitExternalRequest {
+    /// Create a new InitExternalRequest by encrypting the share with the enclave's public key
+    pub fn new(
+        share: &crypto::MyShare,
+        enclave_pub_key: &EncPubKey,
+        state: InitExternalRequestState,
+    ) -> Result<Self, crate::errors::GuardianError> {
+        let state_hash = state.digest().digest;
+        let encrypted_share = crypto::encrypt_share(share, enclave_pub_key, Some(&state_hash))?;
+        Ok(InitExternalRequest {
+            encrypted_share,
+            state,
+        })
     }
 }
 
 // ---------------------------------
-//    Encryption/Decryption utils
+//    Tracing utilities
 // ---------------------------------
 
-use hpke::aead::AesGcm256;
-use hpke::kdf::HkdfSha384;
-use serde_json::json;
-use tracing::error;
+/// Initialize tracing subscriber with optional file/line number logging
+pub fn init_tracing_subscriber(with_file_line: bool) {
+    let mut builder = ::tracing_subscriber::FmtSubscriber::builder().with_env_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
 
-pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> GuardianResult<Ciphertext> {
-    let mut rng = rand::thread_rng();
-    let (encapsulated_key, aes_ciphertext) =
-        hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
-            &hpke::OpModeS::Base,
-            &pk,
-            &[],
-            &bytes,
-            aad.or(Option::Some(&[0; 32])).expect("REASON"),
-            &mut rng,
-        )
-        .map_err(|e| GuardianError::GenericError(format!("Failed to encrypt: {}", e)))?;
-
-    Ok((encapsulated_key, aes_ciphertext).into())
-}
-
-pub fn decrypt(
-    ciphertext: &Ciphertext,
-    sk: &EncSecKey,
-    aad: Option<&[u8; 32]>,
-) -> GuardianResult<Vec<u8>> {
-    let (encapsulated_key, aes_ciphertext) = ciphertext.try_into().map_err(|e: HpkeError| {
-        GuardianError::GenericError(format!("Failed to deserialize ciphertext: {}", e))
-    })?;
-
-    let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
-        &hpke::OpModeR::Base,
-        sk,
-        &encapsulated_key,
-        &[],
-        &aes_ciphertext,
-        aad.or(Option::Some(&[0; 32])).expect("REASON"),
-    )
-    .map_err(|e| GuardianError::GenericError(format!("Failed to decrypt: {}", e)))?;
-
-    Ok(decrypted)
-}
-
-#[cfg(test)]
-mod encryption_tests {
-    // https://github.com/rozbb/rust-hpke/tree/main
-    // Note: using hpke
-    use crate::{decrypt, encrypt};
-    use hpke::aead::AesGcm256;
-    use hpke::kdf::HkdfSha384;
-    use hpke::kem::X25519HkdfSha256;
-    use hpke::Kem;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
-
-    #[test]
-    fn test_hpke() {
-        let plaintext = b"Hello, world!";
-        let aad = b"aad";
-
-        let mut rng = StdRng::from_entropy();
-        let keys = X25519HkdfSha256::gen_keypair(&mut rng);
-
-        let (encapped_key, ciphertext) =
-            hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
-                &hpke::OpModeS::Base,
-                &keys.1,
-                // TODO: What is the info?
-                &[],
-                plaintext,
-                aad,
-                &mut rng,
-            )
-            .unwrap();
-        let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
-            &hpke::OpModeR::Base,
-            &keys.0,
-            &encapped_key,
-            &[],
-            &ciphertext,
-            aad,
-        )
-        .unwrap();
-        println!("decrypted: {:?}", decrypted);
-        assert_eq!(plaintext, decrypted.as_slice());
+    if with_file_line {
+        builder = builder.with_file(true).with_line_number(true);
     }
 
-    #[test]
-    fn test_encrypt_and_decrypt() {
-        let bytes = b"Let's encrypt some stuff!";
-        let mut rng = rand::thread_rng();
-        let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-        let ciphertext = encrypt(bytes, &pk, None).unwrap();
-        let decrypted_plaintext = decrypt(&ciphertext, &sk, None).unwrap();
-        assert_eq!(bytes, &decrypted_plaintext[..]);
-    }
+    let subscriber = builder.finish();
+    ::tracing::subscriber::set_global_default(subscriber)
+        .expect("unable to initialize tracing subscriber");
 }

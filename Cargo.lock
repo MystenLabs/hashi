@@ -2468,15 +2468,11 @@ dependencies = [
  "fastcrypto 0.1.9 (git+https://github.com/MystenLabs/fastcrypto?rev=e4127630173582f164c1eb704a5bc3d6eacb0d27)",
  "hashi-guardian-shared",
  "hpke",
- "p256 0.13.2",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "reqwest",
- "serde",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "vsss-rs",
 ]
 
 [[package]]
@@ -2488,21 +2484,17 @@ dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "aws-sdk-s3",
  "axum 0.7.9",
- "bincode",
  "bitcoin",
  "fastcrypto 0.1.9 (git+https://github.com/MystenLabs/fastcrypto?rev=e4127630173582f164c1eb704a5bc3d6eacb0d27)",
  "hashi-guardian-shared",
  "hpke",
  "k256",
  "rand 0.8.5",
- "rand_core 0.6.4",
  "serde",
  "serde_bytes",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "vsss-rs",
 ]
 
 [[package]]
@@ -2665,13 +2657,16 @@ version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
  "bincode",
+ "bitcoin",
  "fastcrypto 0.1.9 (git+https://github.com/MystenLabs/fastcrypto?rev=e4127630173582f164c1eb704a5bc3d6eacb0d27)",
  "hpke",
  "k256",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tracing",
+ "tracing-subscriber",
  "vsss-rs",
 ]
 

@@ -5,10 +5,7 @@ use axum::Router;
 use bitcoin::secp256k1::SecretKey;
 use fastcrypto::hash::Digest;
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
-use hashi_guardian_shared::{
-    EncKeyPair, GuardianError, GuardianResult, HashiCommittee, MyShare, ShareCommitment,
-    WithdrawConfig, WithdrawalState,
-};
+use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use std::collections::HashSet;
@@ -73,21 +70,15 @@ pub struct EphemeralKeyPairs {
     pub encryption_keys: EncKeyPair,
 }
 
-async fn ping() -> &'static str {
-    info!("🏓 /ping - Received request");
-    "pong"
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing_subscriber();
+    hashi_guardian_shared::init_tracing_subscriber(true);
 
     let signing_keys = Ed25519KeyPair::generate(&mut rand::thread_rng());
     let encryption_keys = X25519HkdfSha256::gen_keypair(&mut rand::thread_rng()).into();
     let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
     let app = Router::new()
-        .route("/ping", get(ping))
         .route("/health_check", get(health_check))
         .route("/get_attestation", get(get_attestation))
         // TODO: Add a config flag that determines whether setup_new_key is exposed
@@ -102,20 +93,6 @@ async fn main() -> Result<()> {
     axum::serve(listener, app.into_make_service())
         .await
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
-}
-
-fn init_tracing_subscriber() {
-    let subscriber = ::tracing_subscriber::FmtSubscriber::builder()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .with_file(true)
-        .with_line_number(true)
-        .finish();
-    ::tracing::subscriber::set_global_default(subscriber)
-        .expect("unable to initialize tracing subscriber");
 }
 
 impl EnclaveConfig {
@@ -158,5 +135,22 @@ impl Enclave {
 
     pub fn is_fully_initialized(&self) -> bool {
         self.is_init_external() && self.is_init_internal()
+    }
+
+    // Convenience getters for common access patterns
+
+    /// Get the enclave's encryption secret key
+    pub fn encryption_secret_key(&self) -> &hashi_guardian_shared::EncSecKey {
+        self.config.eph_keys.encryption_keys.secret()
+    }
+
+    /// Get the enclave's encryption public key
+    pub fn encryption_public_key(&self) -> &hashi_guardian_shared::EncPubKey {
+        self.config.eph_keys.encryption_keys.public()
+    }
+
+    /// Get the enclave's signing keypair
+    pub fn signing_keypair(&self) -> &Ed25519KeyPair {
+        &self.config.eph_keys.signing_keys
     }
 }

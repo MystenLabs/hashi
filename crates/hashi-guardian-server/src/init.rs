@@ -1,16 +1,12 @@
 use crate::s3_logger::test_s3_connectivity;
-use crate::setup::k256shares_to_secp_secret_key;
 use crate::{Enclave, S3Logger};
 use axum::extract::State;
 use axum::Json;
 use fastcrypto::hash::{Blake2b256, HashFunction};
-use hashi_guardian_shared::{
-    decrypt, GuardianError, GuardianResult, InitExternalRequest, InitExternalRequestState,
-    InitInternalRequest, MyShare, ShareCommitment, ShareValue, SECRET_SHARING_T,
-};
+use hashi_guardian_shared::crypto::{commit_share, decrypt_share, k256shares_to_secp_secret_key};
+use hashi_guardian_shared::*;
 use std::sync::Arc;
 use tracing::{error, info};
-use vsss_rs::{DefaultShare, Share};
 use GuardianError::*;
 
 // TODO: Add some kind of authentication, e.g., an API key or token
@@ -40,6 +36,12 @@ pub async fn init_enclave_internal(
         "💾 Storing {} share commitments...",
         request.share_commitments.len()
     );
+    for (i, share_commitment) in request.share_commitments.iter().enumerate() {
+        info!(
+            "Share {}: ID {} Digest {}",
+            i, share_commitment.id, share_commitment.digest
+        );
+    }
     if enclave
         .scratchpad
         .share_commitments
@@ -60,24 +62,25 @@ pub async fn init_enclave_external(
     Json(request): Json<InitExternalRequest>,
 ) -> GuardianResult<()> {
     info!("📥 /init - Received encrypted share");
-    // TODO: Replace with is_fully_initialized?
+    if !enclave.is_init_internal() {
+        return Err(GenericError(
+            "Internal initialization hasn't completed!".into(),
+        ));
+    }
     if enclave.is_init_external() {
-        info!("Enclave initialization already complete!");
-        return Err(EnclaveAlreadyInitialized);
+        return Err(GenericError(
+            "External (KP) initialization already complete!".into(),
+        ));
     }
 
-    let sk = enclave.config.eph_keys.encryption_keys.secret();
+    let sk = enclave.encryption_secret_key();
     let share_id = request.encrypted_share.id();
-    let enc_share_val = request.encrypted_share.ciphertext();
-    let state_hash = Blake2b256::digest(&request.state);
+    let state_hash = request.state.digest();
     info!("   Share ID: {:?}", share_id);
 
     // 1) Decrypt the share!
     info!("🔓 Decrypting share...");
-    let serialized_share = decrypt(&enc_share_val, sk, Some(&state_hash.digest))?;
-    let share_value = bincode::deserialize::<ShareValue>(&serialized_share)
-        .map_err(|e| GenericError(format!("Failed to deserialize share: {}", e)))?;
-    let share: MyShare = DefaultShare::with_identifier_and_value(*share_id, share_value);
+    let share = decrypt_share(&request.encrypted_share, sk, Some(&state_hash.digest))?;
     info!("✅ Share decrypted successfully");
 
     // 2) Verify the share against the commitment
@@ -97,7 +100,6 @@ pub async fn init_enclave_external(
         Some(existing_state_hash) => {
             if *existing_state_hash != state_hash {
                 error!("❌ State hash mismatch!");
-                // TODO: Figure out a better way to deal with it?
                 panic!("State hash mismatch");
             }
             info!("✅ State hash matches existing");
@@ -125,11 +127,11 @@ pub async fn init_enclave_external(
     let current_share_count = received_shares.len();
     info!(
         "   Total shares received: {}/{}",
-        current_share_count, SECRET_SHARING_T
+        current_share_count, THRESHOLD
     );
 
     // 5) If we have enough shares, finish initialization: combine shares & set config.
-    if current_share_count >= SECRET_SHARING_T as usize {
+    if current_share_count >= THRESHOLD {
         let vec: Vec<MyShare> = received_shares.iter().cloned().collect::<Vec<_>>();
         finalize_init(&vec, &enclave, request.state)?;
     }
@@ -144,8 +146,10 @@ fn finalize_init(
 ) -> GuardianResult<()> {
     info!("🎉 Threshold reached! Combining shares...");
     let secp_sk = k256shares_to_secp_secret_key(shares)?;
+    let sk_hash = Blake2b256::digest(&secp_sk.secret_bytes());
+    info!("✅ Bitcoin key created with fingerprint {}", sk_hash);
 
-    info!("🔑 Setting Bitcoin private key...");
+    info!("🔑 Setting private key...");
     if enclave.config.bitcoin_key.set(secp_sk).is_err() {
         return Err(GenericError("Bitcoin key already set".into()));
     }
@@ -174,41 +178,20 @@ fn finalize_init(
 }
 
 fn verify_share(share: &MyShare, commitments: &[ShareCommitment]) -> GuardianResult<()> {
-    let expected_commitment = commitments
-        .iter()
-        .find(|c| *c.id() == share.identifier)
-        .ok_or_else(|| GenericError("No matching share found".to_string()))?;
-    let serialized_share_value = bincode::serialize(&share.value)
-        .map_err(|e| GenericError(format!("Failed to serialize share: {}", e)))?;
-    let actual_digest = Blake2b256::digest(&serialized_share_value);
-    if expected_commitment.digest != actual_digest {
-        return Err(GenericError("Digest mismatch".to_string()));
+    let commitment = commit_share(share)?;
+    if commitments.iter().any(|c| *c == commitment) {
+        Ok(())
+    } else {
+        Err(GenericError("No matching share found".to_string()))
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::setup::setup_new_key;
-    use hashi_guardian_shared::{encrypt, EncSecKey, SetupNewKeyRequest, SECRET_SHARING_N};
-    use hpke::kem::X25519HkdfSha256;
-    use hpke::Kem;
-
-    const LIMIT: usize = SECRET_SHARING_N as usize;
-
-    fn mock_setup_new_key_request() -> (SetupNewKeyRequest, Vec<EncSecKey>) {
-        let mut private_keys = vec![];
-        let mut public_keys = vec![];
-        for _i in 0..LIMIT {
-            let mut rng = rand::thread_rng();
-            let keys = X25519HkdfSha256::gen_keypair(&mut rng);
-            private_keys.push(keys.0);
-            public_keys.push(keys.1);
-        }
-
-        (public_keys.into(), private_keys)
-    }
+    use hashi_guardian_shared::crypto::{commit_share, encrypt_share};
+    use hashi_guardian_shared::test_utils::*;
 
     #[tokio::test]
     async fn test_setup_new_key() {
@@ -219,11 +202,10 @@ mod tests {
         for i in 0..LIMIT {
             let enc_share = &resp.encrypted_shares[i];
             let sk = &priv_keys[i];
-            let serialized_share = decrypt(enc_share.ciphertext(), &sk, None).unwrap();
+            let share = decrypt_share(enc_share, &sk, None).unwrap();
             let commitment = &resp.share_commitments[i];
             assert_eq!(*enc_share.id(), *commitment.id());
-            assert_eq!(Blake2b256::digest(&serialized_share), *commitment.digest());
-            let share = bincode::deserialize::<ShareValue>(&serialized_share).unwrap();
+            assert_eq!(commit_share(&share).unwrap(), *commitment);
             println!(
                 "Received share: (id) {:?} (val) {:?}",
                 enc_share.id(),
@@ -237,11 +219,9 @@ mod tests {
         use crate::Enclave;
         use axum::extract::State;
         use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair as _};
-        use hashi_guardian_shared::{InitExternalRequestState, WithdrawConfig};
+        use hpke::kem::X25519HkdfSha256;
+        use hpke::Kem;
         use std::sync::Arc;
-        use std::time::Duration;
-
-        const THRESHOLD: usize = SECRET_SHARING_T as usize;
 
         // Step 1: Generate KP encryption keys and setup new key
         let (request, kp_private_keys) = mock_setup_new_key_request();
@@ -256,41 +236,30 @@ mod tests {
         let encryption_keys = (enc_sk, enc_pk).into();
         let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
-        // Step 3: Set share commitments in the enclave
+        // Step 3: Mock S3 initialization (required for is_init_internal() to pass)
+        let mock_s3_logger = S3Logger::mock_for_testing().await;
+        enclave.config.s3_logger.set(mock_s3_logger).unwrap();
+
+        // Step 4: Set share commitments in the enclave
         enclave
             .scratchpad
             .share_commitments
             .set(share_commitments.clone())
             .unwrap();
 
-        // Step 4: Create InitExternalRequestState
-        let init_state = InitExternalRequestState {
-            hashi_committee_info: hashi_guardian_shared::HashiCommittee::default(),
-            withdraw_config: WithdrawConfig {
-                min_delay: Duration::from_secs(60),
-                max_delay: Duration::from_secs(3600),
-            },
-            withdraw_state: hashi_guardian_shared::WithdrawalState::default(),
-            cached_bytes: std::sync::OnceLock::new(),
-        };
+        // Step 5: Create InitExternalRequestState
+        let init_state = mock_init_external_state();
 
-        // Step 5: Simulate THRESHOLD KPs calling init_enclave_external
+        // Step 6: Simulate THRESHOLD KPs calling init_enclave_external
         for i in 0..LIMIT {
-            let kp_sk = &kp_private_keys[i];
-            let encrypted_share = &encrypted_shares[i];
-
             // Re-encrypt the share for the enclave's encryption key
-            let serialized_share = decrypt(encrypted_share.ciphertext(), kp_sk, None).unwrap();
-            let new_ciphertext = encrypt(
-                &serialized_share,
-                enclave.config.eph_keys.encryption_keys.public(),
-                Some(&Blake2b256::digest(&init_state).digest),
+            let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();
+            let new_encrypted_share = encrypt_share(
+                &share,
+                enclave.encryption_public_key(),
+                Some(&init_state.digest().digest),
             )
             .unwrap();
-            let new_encrypted_share = hashi_guardian_shared::EncryptedShare {
-                id: *encrypted_share.id(),
-                ciphertext: new_ciphertext,
-            };
 
             let request = InitExternalRequest {
                 encrypted_share: new_encrypted_share,
@@ -323,9 +292,6 @@ mod tests {
                     i,
                     result
                 );
-                if let Err(e) = result {
-                    assert_eq!(e, GuardianError::EnclaveAlreadyInitialized);
-                }
                 assert!(
                     enclave.config.bitcoin_key.get().is_some(),
                     "Bitcoin key should still be set"

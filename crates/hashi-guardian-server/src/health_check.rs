@@ -2,7 +2,7 @@ use crate::s3_logger::test_s3_connectivity;
 use crate::Enclave;
 use axum::extract::State;
 use axum::Json;
-use hashi_guardian_shared::{HealthCheckResponse, SECRET_SHARING_T};
+use hashi_guardian_shared::*;
 use hpke::Serializable;
 use std::sync::Arc;
 use tracing::info;
@@ -39,10 +39,7 @@ pub async fn health_check(State(enclave): State<Arc<Enclave>>) -> Json<HealthChe
 
     info!("   S3 configured: {}", s3_configured);
     info!("   BTC key configured: {}", btc_key_configured);
-    info!(
-        "   Shares received: {}/{}",
-        shares_received, SECRET_SHARING_T
-    );
+    info!("   Shares received: {}/{}", shares_received, THRESHOLD);
     info!(
         "   Encryption public key: {} bytes",
         enc_public_key.as_ref().map(|k| k.len()).unwrap_or(0)

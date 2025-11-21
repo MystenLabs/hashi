@@ -32,6 +32,23 @@ impl S3Logger {
         let client = S3Client::new(&aws_config);
         Ok(Self { client, config })
     }
+
+    #[cfg(test)]
+    pub async fn mock_for_testing() -> Self {
+        let mock_s3_config = S3Config {
+            bucket_name: "test-bucket".to_string(),
+            access_key: "test-access-key".to_string(),
+            secret_key: "test-secret-key".to_string(),
+        };
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .load()
+            .await;
+        Self {
+            client: S3Client::new(&aws_config),
+            config: mock_s3_config,
+        }
+    }
 }
 
 pub async fn test_s3_connectivity(s3logger: &S3Logger) -> GuardianResult<()> {
