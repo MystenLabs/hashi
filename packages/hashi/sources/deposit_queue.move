@@ -1,7 +1,6 @@
 #[allow(unused_function, unused_field, unused_use)]
 module hashi::deposit_queue;
 
-use btc::btc::BTC;
 use hashi::utxo::{Utxo, UtxoId};
 use std::string::String;
 use sui::{bag::Bag, balance::Balance, clock::Clock, object_bag::ObjectBag};
@@ -38,4 +37,10 @@ public(package) fun insert(self: &mut DepositRequestQueue, request: DepositReque
 public(package) fun into_utxo(self: DepositRequest): Utxo {
     let DepositRequest { utxo, timestamp_ms: _ } = self;
     utxo
+}
+
+public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
+    DepositRequestQueue {
+        requests: sui::bag::new(ctx),
+    }
 }

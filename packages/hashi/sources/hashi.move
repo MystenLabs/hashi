@@ -2,13 +2,13 @@
 /// Module: hashi
 module hashi::hashi;
 
-use btc::btc::BTC;
-use hashi::{config::Config, treasury::Treasury};
+use hashi::{btc::BTC, committee_set::CommitteeSet, config::Config, treasury::Treasury};
 use std::string::String;
 use sui::{balance::Balance, coin::Coin, object_bag::ObjectBag, sui::SUI};
 
 public struct Hashi has key {
     id: UID,
+    committees: CommitteeSet,
     config: Config,
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
@@ -60,4 +60,44 @@ public fun confirm_deposit(
     };
 
     hashi.utxo_pool.insert(utxo);
+}
+
+#[allow(unused_function)]
+fun init(ctx: &mut TxContext) {
+    let hashi = Hashi {
+        id: object::new(ctx),
+        committees: hashi::committee_set::create(ctx),
+        config: hashi::config::create(),
+        treasury: hashi::treasury::create(ctx),
+        deposit_queue: hashi::deposit_queue::create(ctx),
+        utxo_pool: hashi::utxo_pool::create(ctx),
+    };
+
+    sui::transfer::share_object(hashi);
+}
+
+entry fun register_btc(
+    self: &mut Hashi,
+    coin_registry: &mut sui::coin_registry::CoinRegistry,
+    ctx: &mut TxContext,
+) {
+    self.config.assert_version();
+
+    let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
+    self.treasury.register_treasury_cap(treasury_cap);
+    self.treasury.register_metadata_cap(metadata_cap);
+}
+
+entry fun register_upgrade_cap(
+    self: &mut Hashi,
+    upgrade_cap: sui::package::UpgradeCap,
+    _ctx: &mut TxContext,
+) {
+    self.config.assert_version();
+
+    let this_package_id = std::type_name::original_id<Hashi>().to_id();
+    // Ensure that the provided cap is for this package
+    assert!(upgrade_cap.package() == this_package_id);
+
+    sui::dynamic_object_field::add(&mut self.id, b"TODO figure out key", upgrade_cap);
 }

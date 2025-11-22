@@ -20,3 +20,9 @@ public(package) fun remove(self: &mut UtxoPool, utxo_id: UtxoId): Utxo {
 public(package) fun insert(self: &mut UtxoPool, utxo: Utxo) {
     self.utxos.add(utxo.id(), utxo)
 }
+
+public(package) fun create(ctx: &mut TxContext): UtxoPool {
+    UtxoPool {
+        utxos: sui::bag::new(ctx),
+    }
+}

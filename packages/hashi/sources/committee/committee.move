@@ -124,6 +124,7 @@ public(package) fun to_vec_map(self: &Committee): VecMap<address, u16> {
     result
 }
 
+#[allow(unused_function)]
 fun verify_proposal(self: &Committee, signers: sui::vec_set::VecSet<address>, threshold: u16): u16 {
     // Compute the total signed weight
     let mut aggregate_weight = 0;
@@ -143,6 +144,7 @@ fun verify_proposal(self: &Committee, signers: sui::vec_set::VecSet<address>, th
 /// The `weight_verification_type` is the type of weight verification to perform,
 /// either check that the signers forms a quorum or includes at least one correct node.
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
+#[allow(unused_function)]
 fun verify_certificate<T>(
     self: &Committee,
     signature: &vector<u8>,

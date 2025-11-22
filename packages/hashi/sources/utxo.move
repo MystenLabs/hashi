@@ -1,7 +1,6 @@
 #[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo;
 
-use btc::btc::BTC;
 use std::string::String;
 use sui::{bag::Bag, balance::Balance, object_bag::ObjectBag};
 

@@ -21,6 +21,14 @@ public struct CommitteeSet has store {
     committees: Bag,
 }
 
+public(package) fun create(ctx: &mut TxContext): CommitteeSet {
+    CommitteeSet {
+        members: sui::bag::new(ctx),
+        epoch: 0,
+        committees: sui::bag::new(ctx),
+    }
+}
+
 fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
     &self.members[validator_address]
 }
@@ -92,7 +100,7 @@ public fun new_member(
     assert!(sui_system.active_validator_addresses_ref().contains(&validator_address));
 
     let next_epoch_public_key = verify_bls_public_key(
-        committee_set.epoch,
+        ctx.epoch(),
         validator_address,
         public_key,
         proof_of_possession_signature,
@@ -122,7 +130,7 @@ fun set_next_epoch_public_key(
     ctx: &TxContext,
 ) {
     let next_epoch_public_key = verify_bls_public_key(
-        self.epoch,
+        ctx.epoch(),
         validator_address,
         next_epoch_public_key,
         proof_of_possession_signature,
