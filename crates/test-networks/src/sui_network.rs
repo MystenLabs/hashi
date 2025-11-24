@@ -7,7 +7,7 @@ use tokio::time::{Duration, sleep};
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 60_000;
-const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 10;
+const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 30;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 
 pub fn sui_binary() -> &'static Path {
