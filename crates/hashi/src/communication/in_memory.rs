@@ -102,6 +102,12 @@ where
         let pos = self.read_position.try_lock().ok()?;
         Some(queue.len().saturating_sub(*pos))
     }
+
+    fn existing_certificate_weight(&self) -> u32 {
+        // Approximate: use pending message count as total weight.
+        // For accurate weight calculation, implementation would need committee info.
+        self.pending_messages().unwrap_or(0) as u32
+    }
 }
 
 #[cfg(test)]

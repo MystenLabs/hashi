@@ -71,4 +71,9 @@ where
     fn pending_messages(&self) -> Option<usize> {
         None
     }
+
+    /// The total weight of certificates already available on the channel
+    fn existing_certificate_weight(&self) -> u32 {
+        0
+    }
 }

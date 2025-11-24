@@ -150,7 +150,28 @@ impl DkgManager {
         Ok(ComplainResponse { response })
     }
 
-    pub async fn run_as_dealer(
+    // TODO: Make dealer and party flows concurrent
+    pub async fn run(
+        &mut self,
+        p2p_channel: &impl crate::communication::P2PChannel,
+        ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<
+            OrderedBroadcastMessage,
+        >,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<DkgOutput> {
+        if ordered_broadcast_channel.existing_certificate_weight()
+            < self.dkg_config.threshold as u32
+            && let Err(e) = self
+                .run_as_dealer(p2p_channel, ordered_broadcast_channel, rng)
+                .await
+        {
+            tracing::warn!("Dealer phase failed: {}. Continuing as party only.", e);
+        }
+        self.run_as_party(p2p_channel, ordered_broadcast_channel)
+            .await
+    }
+
+    async fn run_as_dealer(
         &mut self,
         p2p_channel: &impl crate::communication::P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<
@@ -158,7 +179,6 @@ impl DkgManager {
         >,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
-        // TODO: Return early if DKG is already completed (we're a slow dealer)
         let dealer_message = self.create_dealer_message(rng)?;
         let my_signature = self.receive_dealer_message(&dealer_message, self.address)?;
         let message_hash =
@@ -174,7 +194,6 @@ impl DkgManager {
         aggregator
             .add_signature(my_signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
-
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
         for validator_address in self.dkg_config.address_to_party_id.keys() {
@@ -201,7 +220,6 @@ impl DkgManager {
                 }
             }
         }
-
         let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
             let cert = aggregator.finish().map_err(|e| {
@@ -218,7 +236,7 @@ impl DkgManager {
         Ok(())
     }
 
-    pub async fn run_as_party(
+    async fn run_as_party(
         &mut self,
         p2p_channel: &impl crate::communication::P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<
@@ -797,6 +815,9 @@ mod tests {
     struct MockOrderedBroadcastChannel {
         certificates: std::sync::Mutex<std::collections::VecDeque<Certificate<DkgMessage>>>,
         published: std::sync::Mutex<Vec<OrderedBroadcastMessage>>,
+        /// Override for existing_certificate_weight().
+        /// If set, returns this value instead of the pending message count.
+        override_existing_weight: Option<u32>,
     }
 
     impl MockOrderedBroadcastChannel {
@@ -804,7 +825,13 @@ mod tests {
             Self {
                 certificates: std::sync::Mutex::new(certificates.into()),
                 published: std::sync::Mutex::new(Vec::new()),
+                override_existing_weight: None,
             }
+        }
+
+        fn with_override_weight(mut self, weight: u32) -> Self {
+            self.override_existing_weight = Some(weight);
+            self
         }
 
         fn published_count(&self) -> usize {
@@ -849,6 +876,12 @@ mod tests {
 
         fn pending_messages(&self) -> Option<usize> {
             Some(self.certificates.lock().unwrap().len())
+        }
+
+        fn existing_certificate_weight(&self) -> u32 {
+            // Use override if set, otherwise approximate with pending certificate count.
+            self.override_existing_weight
+                .unwrap_or_else(|| self.certificates.lock().unwrap().len() as u32)
         }
     }
 
@@ -1900,6 +1933,176 @@ mod tests {
                 j
             );
         }
+    }
+
+    /// Test setup for run() tests. Creates managers and certificates.
+    struct RunTestSetup {
+        test_manager: DkgManager,
+        mock_p2p: MockP2PChannel,
+        certificates: Vec<Certificate<DkgMessage>>,
+    }
+
+    fn setup_run_test() -> RunTestSetup {
+        let mut rng = rand::thread_rng();
+        let num_validators = 5;
+
+        // Create encryption keys and BLS keys for all validators
+        let encryption_keys: Vec<_> = (0..num_validators)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+
+        let bls_keys: Vec<_> = (0..num_validators)
+            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+
+        let validators: Vec<_> = encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, private_key)| {
+                let public_key = PublicKey::from_private_key(private_key);
+                let address = Address::new([i as u8; 32]);
+                let party_id = i as u16;
+                let weight = 1;
+                let node = Node {
+                    id: party_id,
+                    pk: public_key,
+                    weight,
+                };
+                (address, node)
+            })
+            .collect();
+
+        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
+        // threshold = 2, max_faulty = 1
+        let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
+        let session_context =
+            SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testchain".to_string());
+
+        let bls_public_keys: HashMap<_, _> = (0..num_validators)
+            .map(|i| {
+                let addr = Address::new([i as u8; 32]);
+                (addr, bls_keys[i].public_key())
+            })
+            .collect();
+
+        // Create all managers
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| {
+                let address = Address::new([i as u8; 32]);
+                DkgManager::new(
+                    address,
+                    config.clone(),
+                    session_context.clone(),
+                    encryption_keys[i].clone(),
+                    bls_keys[i].clone(),
+                    bls_public_keys.clone(),
+                    Box::new(MockPublicMessagesStore),
+                )
+            })
+            .collect();
+
+        // Create dealer messages for validators 1-4 only (not validator 0)
+        // Validator 0 will create its own message when run() is called
+        let dealer_messages: Vec<_> = managers
+            .iter()
+            .skip(1) // Skip validator 0
+            .map(|mgr| mgr.create_dealer_message(&mut rng).unwrap())
+            .collect();
+
+        // Create certificates for dealers 1-4
+        let mut certificates = Vec::new();
+        for (idx, message) in dealer_messages.iter().enumerate() {
+            let dealer_idx = idx + 1; // Dealers 1-4
+            let dealer_addr = Address::new([dealer_idx as u8; 32]);
+
+            let mut signatures = Vec::new();
+            for manager in managers.iter_mut() {
+                let sig = manager
+                    .receive_dealer_message(message, dealer_addr)
+                    .unwrap();
+                signatures.push(sig);
+            }
+
+            let cert = create_test_certificate(
+                &config,
+                &bls_public_keys,
+                message,
+                dealer_addr,
+                &session_context,
+                signatures,
+            )
+            .unwrap();
+            certificates.push(cert);
+        }
+
+        // Extract test_manager (validator 0)
+        let test_manager = managers.remove(0);
+
+        // Create mock P2P with remaining managers
+        let other_managers: HashMap<_, _> = managers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mgr)| (Address::new([(idx + 1) as u8; 32]), mgr))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, Address::new([0; 32]));
+
+        RunTestSetup {
+            test_manager,
+            mock_p2p,
+            certificates,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_triggers_dealer_phase() {
+        let mut rng = rand::thread_rng();
+        let mut setup = setup_run_test();
+
+        // All certificates are from dealers 1-4 (not dealer 0)
+        // Override weight to 0 so dealer phase runs, but provide enough certs for party to complete
+        let mut mock_tob =
+            MockOrderedBroadcastChannel::new(setup.certificates).with_override_weight(0);
+
+        let output = setup
+            .test_manager
+            .run(&setup.mock_p2p, &mut mock_tob, &mut rng)
+            .await
+            .unwrap();
+
+        // Verify dealer published a certificate
+        assert!(
+            mock_tob.published_count() > 0,
+            "Dealer should have published when existing_weight < threshold"
+        );
+
+        // Verify DKG completed successfully
+        assert_eq!(output.key_shares.shares.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_skips_dealer_phase() {
+        let mut rng = rand::thread_rng();
+        let mut setup = setup_run_test();
+
+        // All certificates are from dealers 1-4 (not dealer 0)
+        // With 4 certificates and threshold = 2, existing_weight = 4 >= 2, dealer skips
+        let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates);
+
+        let output = setup
+            .test_manager
+            .run(&setup.mock_p2p, &mut mock_tob, &mut rng)
+            .await
+            .unwrap();
+
+        // Verify dealer did NOT publish (skipped)
+        assert_eq!(
+            mock_tob.published_count(),
+            0,
+            "Dealer should be skipped when existing_weight >= threshold"
+        );
+
+        // Verify DKG completed successfully
+        assert_eq!(output.key_shares.shares.len(), 1);
     }
 
     #[tokio::test]
