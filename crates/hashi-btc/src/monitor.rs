@@ -331,7 +331,7 @@ impl Monitor {
         let pending_deposit = pending_deposit.take();
         let _ = pending_deposit
             .result_tx
-            .send(result.map(|txout| txout.clone()).map_err(|e| e.into()));
+            .send(result.cloned().map_err(|e| e.into()));
     }
 }
 
