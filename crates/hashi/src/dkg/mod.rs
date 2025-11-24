@@ -818,6 +818,8 @@ mod tests {
         /// Override for existing_certificate_weight().
         /// If set, returns this value instead of the pending message count.
         override_existing_weight: Option<u32>,
+        /// If set, publish() will fail with this error message.
+        fail_on_publish: Option<String>,
     }
 
     impl MockOrderedBroadcastChannel {
@@ -826,11 +828,17 @@ mod tests {
                 certificates: std::sync::Mutex::new(certificates.into()),
                 published: std::sync::Mutex::new(Vec::new()),
                 override_existing_weight: None,
+                fail_on_publish: None,
             }
         }
 
         fn with_override_weight(mut self, weight: u32) -> Self {
             self.override_existing_weight = Some(weight);
+            self
+        }
+
+        fn with_fail_on_publish(mut self, error_message: &str) -> Self {
+            self.fail_on_publish = Some(error_message.to_string());
             self
         }
 
@@ -847,6 +855,11 @@ mod tests {
             &self,
             message: OrderedBroadcastMessage,
         ) -> crate::communication::ChannelResult<()> {
+            if let Some(ref error_msg) = self.fail_on_publish {
+                return Err(crate::communication::ChannelError::SendFailed(
+                    error_msg.clone(),
+                ));
+            }
             self.published.lock().unwrap().push(message);
             Ok(())
         }
@@ -2103,6 +2116,32 @@ mod tests {
 
         // Verify DKG completed successfully
         assert_eq!(output.key_shares.shares.len(), 1);
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_run_dealer_failure_party_still_executes() {
+        let mut rng = rand::thread_rng();
+        let mut setup = setup_run_test();
+
+        // All certificates are from dealers 1-4 (not dealer 0)
+        // Override weight to 0 so dealer phase runs, but make publish fail
+        let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates)
+            .with_override_weight(0)
+            .with_fail_on_publish("simulated publish failure");
+
+        let output = setup
+            .test_manager
+            .run(&setup.mock_p2p, &mut mock_tob, &mut rng)
+            .await
+            .unwrap();
+
+        // Verify DKG completed successfully (party phase executed despite dealer failure)
+        assert_eq!(output.key_shares.shares.len(), 1);
+
+        // Verify warning was logged
+        assert!(logs_contain("Dealer phase failed"));
+        assert!(logs_contain("simulated publish failure"));
     }
 
     #[tokio::test]
