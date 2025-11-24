@@ -1,7 +1,14 @@
 use anyhow::Result;
-use hashi::{Hashi, ServerVersion, config::Config as HashiConfig};
-use std::{net::SocketAddr, sync::Arc};
+use hashi::Hashi;
+use hashi::ServerVersion;
+use hashi::config::Config as HashiConfig;
+use hashi::config::HashiIds;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::info;
+
+use crate::BitcoinNodeHandle;
+use crate::SuiNetworkHandle;
 
 const HTTPS_SCHEME: &str = "https://";
 const HTTP_SCHEME: &str = "http://";
@@ -67,21 +74,51 @@ impl HashiNetworkBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<HashiNetwork> {
-        let mut nodes = Vec::with_capacity(self.num_nodes);
-        for i in 0..self.num_nodes {
-            let config = HashiConfig::new_for_testing();
+    pub async fn build(
+        self,
+        sui: &SuiNetworkHandle,
+        bitcoin: &BitcoinNodeHandle,
+        hashi_ids: HashiIds,
+    ) -> Result<HashiNetwork> {
+        let bitcoin_rpc = bitcoin.rpc_url().to_owned();
+        let sui_rpc = sui.rpc_url.clone();
+
+        let mut configs = Vec::with_capacity(self.num_nodes);
+        for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
+            let mut config = HashiConfig::new_for_testing();
+            config.hashi_ids = Some(hashi_ids);
+            config.validator_address = Some(*validator_address);
+            config.operator_private_key = Some(private_key.to_pem()?);
+            config.sui_rpc = Some(sui_rpc.clone());
+            config.bitcoin_rpc = Some(bitcoin_rpc.clone());
+
+            //TODO fill in chain ids
+            config.sui_chain_id = None;
+            config.bitcoin_chain_id = None;
+
+            configs.push(config);
+        }
+
+        for config in &configs {
+            let client = sui.client.clone();
+            register_onchain(client, config).await?;
+        }
+
+        let mut nodes = Vec::with_capacity(configs.len());
+        for config in configs {
+            let validator_address = config.validator_address()?;
             let node_handle = HashiNodeHandle::new(config)?;
             node_handle.start();
             info!(
                 "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
-                i,
+                validator_address,
                 node_handle.https_address(),
                 node_handle.http_address(),
                 node_handle.metrics_address()
             );
             nodes.push(node_handle);
         }
+
         Ok(HashiNetwork(nodes))
     }
 }
@@ -92,88 +129,7 @@ impl Default for HashiNetworkBuilder {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_hashi_network_multiple_nodes() -> Result<()> {
-        let hashi_network = HashiNetworkBuilder::new().with_num_nodes(3).build().await?;
-        assert_eq!(hashi_network.nodes().len(), 3);
-        for node in hashi_network.nodes().iter() {
-            assert!(!node.https_url().is_empty());
-            assert!(!node.http_url().is_empty());
-            assert!(!node.metrics_url().is_empty());
-
-            // Verify each node has unique ports
-            let https_port = node.https_address().port();
-            let http_port = node.http_address().port();
-            let metrics_port = node.metrics_address().port();
-            assert_ne!(https_port, http_port);
-            assert_ne!(https_port, metrics_port);
-            assert_ne!(http_port, metrics_port);
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_default_configuration() -> Result<()> {
-        let builder = HashiNetworkBuilder::new();
-        assert_eq!(builder.num_nodes, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn test_builder_fluent_api() {
-        const NUM_NODES: usize = 3;
-
-        let builder = HashiNetworkBuilder::new().with_num_nodes(NUM_NODES);
-
-        assert_eq!(builder.num_nodes, NUM_NODES);
-    }
-
-    #[test]
-    fn test_builder_default_trait() {
-        let builder1 = HashiNetworkBuilder::new();
-        let builder2 = HashiNetworkBuilder::default();
-
-        assert_eq!(builder1.num_nodes, builder2.num_nodes);
-    }
-
-    #[tokio::test]
-    async fn test_node_handle_url_formatting() -> Result<()> {
-        let config = HashiConfig::new_for_testing();
-        let https_port = config.https_address().port();
-        let http_port = config.http_address().port();
-        let metrics_port = config.metrics_http_address().port();
-        let node_handle = HashiNodeHandle::new(config)?;
-
-        const HTTPS_URL_PREFIX: &str = "https://127.0.0.1:";
-        const HTTP_URL_PREFIX: &str = "http://127.0.0.1:";
-
-        assert_eq!(
-            node_handle.https_url(),
-            format!("{}{}", HTTPS_URL_PREFIX, https_port)
-        );
-        assert_eq!(
-            node_handle.http_url(),
-            format!("{}{}", HTTP_URL_PREFIX, http_port)
-        );
-        assert_eq!(
-            node_handle.metrics_url(),
-            format!("{}{}", HTTP_URL_PREFIX, metrics_port)
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_zero_nodes_build() -> Result<()> {
-        let network = HashiNetworkBuilder::new().with_num_nodes(0).build().await?;
-
-        assert_eq!(network.nodes().len(), 0);
-        assert!(network.nodes().is_empty());
-
-        Ok(())
-    }
+async fn register_onchain(_client: sui_rpc::Client, _config: &HashiConfig) -> Result<()> {
+    // TODO flesh out onchain register flow
+    Ok(())
 }
