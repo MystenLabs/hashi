@@ -72,6 +72,7 @@ pub fn sign_btc_tx(
     let keypair = Keypair::from_secret_key(secp, sk);
     Ok(messages
         .iter()
+        // TODO: Discuss if we want to use auxiliary randomness in the signing process
         .map(|m| secp.sign_schnorr(m, &keypair))
         .map(|s| Signature {
             signature: s,
