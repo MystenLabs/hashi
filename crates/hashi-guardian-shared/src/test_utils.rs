@@ -1,9 +1,19 @@
-use crate::crypto::{commit_share, k256_secret_key_to_shares, LIMIT};
+use crate::crypto::commit_share;
+use crate::crypto::k256_secret_key_to_shares;
+use crate::crypto::LIMIT;
 use crate::errors::GuardianResult;
-use crate::{
-    EncPubKey, EncSecKey, GuardianError, HashiCommittee, InitExternalRequestState, MyShare,
-    SetupNewKeyRequest, ShareCommitment, WithdrawConfig, WithdrawalState,
-};
+use crate::EncPubKey;
+use crate::EncSecKey;
+use crate::GuardianError;
+use crate::HashiCommittee;
+use crate::InitExternalRequestState;
+use crate::MyShare;
+use crate::SetupNewKeyRequest;
+use crate::ShareCommitment;
+use crate::WithdrawConfig;
+use crate::WithdrawalState;
+use bitcoin::Address;
+use bitcoin::Network;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use k256::SecretKey;
@@ -11,6 +21,8 @@ use std::time::Duration;
 
 /// Test enclave secret key
 pub const TEST_ENCLAVE_SK: [u8; 32] = [1u8; 32]; // Fingerprint: 9Azq+G5XdpIzMrjY/TvvhJytsZxplrwnKvH2SNlWakw=
+pub const TEST_HASHI_SK: [u8; 32] = [2u8; 32];
+pub const DUMMY_REGTEST_ADDRESS: &str = "bcrt1q6zpf4gefu4ckuud3pjch563nm7x27u4ruahz3y";
 
 /// Generate LIMIT key provisioner keypairs for testing
 /// Returns (private_keys, public_keys)
@@ -42,6 +54,7 @@ pub fn mock_init_external_state() -> InitExternalRequestState {
             max_delay: Duration::from_secs(3600),
         },
         withdraw_state: WithdrawalState::default(),
+        change_address: DUMMY_REGTEST_ADDRESS.to_string(),
         cached_bytes: std::sync::OnceLock::new(),
     }
 }
@@ -58,4 +71,40 @@ pub fn gen_dummy_share_data() -> GuardianResult<(Vec<MyShare>, Vec<ShareCommitme
     let share_commitments: Result<Vec<_>, _> =
         shares.iter().map(|share| commit_share(share)).collect();
     Ok((shares, share_commitments?))
+}
+
+/// Helper to create a test TaprootUTXO
+pub fn create_test_utxo(amount_sats: u64) -> crate::bitcoin_utils::TaprootUTXO {
+    use bitcoin::hashes::Hash;
+    use bitcoin::Amount;
+    use bitcoin::ScriptBuf;
+    use bitcoin::Txid;
+
+    crate::bitcoin_utils::TaprootUTXO {
+        txid: Txid::from_byte_array([1u8; 32]),
+        vout: 0,
+        amount: Amount::from_sat(amount_sats),
+        script_pubkey: ScriptBuf::new(),
+        leaf_script: ScriptBuf::new(),
+    }
+}
+
+/// Helper to create a test WithdrawOutput with a regtest address
+pub fn create_test_withdraw_output(amount_sats: u64) -> crate::WithdrawOutput {
+    use bitcoin::Address;
+    use bitcoin::Amount;
+
+    let address: Address<_> = DUMMY_REGTEST_ADDRESS.parse().unwrap();
+    crate::WithdrawOutput {
+        address: address.as_unchecked().clone(),
+        amount: Amount::from_sat(amount_sats),
+    }
+}
+
+pub fn create_dummy_regtest_address() -> Address {
+    DUMMY_REGTEST_ADDRESS
+        .parse::<Address<_>>()
+        .unwrap()
+        .require_network(Network::Regtest)
+        .unwrap()
 }

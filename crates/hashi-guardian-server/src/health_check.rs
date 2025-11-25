@@ -12,28 +12,23 @@ use tracing::info;
 pub async fn health_check(State(enclave): State<Arc<Enclave>>) -> Json<HealthCheckResponse> {
     info!("🏥 /health_check - Received request");
 
-    let btc_key_configured = enclave.config.bitcoin_key.get().is_some();
+    let btc_key_configured = enclave.btc_key().is_ok();
 
     let s3_configured = {
-        match enclave.config.s3_logger.get() {
-            Some(logger) => match test_s3_connectivity(&logger).await {
+        match enclave.s3_logger() {
+            Ok(logger) => match test_s3_connectivity(&logger).await {
                 Ok(_) => true,
                 Err(_) => false,
             },
-            None => false,
+            Err(_) => false,
         }
     };
 
-    let shares_received = enclave
-        .scratchpad
-        .decrypted_shares
-        .lock()
-        .map(|shares| shares.len())
-        .unwrap_or(0);
+    let shares_received = enclave.decrypted_shares().lock().await.len();
 
     // Include public key for non-enclave environments
     let enc_public_key = {
-        let pk = enclave.config.eph_keys.encryption_keys.public();
+        let pk = enclave.encryption_public_key();
         Some(pk.to_bytes().to_vec())
     };
 

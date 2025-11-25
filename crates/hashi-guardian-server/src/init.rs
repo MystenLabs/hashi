@@ -1,22 +1,29 @@
 use crate::s3_logger::test_s3_connectivity;
-use crate::{Enclave, S3Logger};
+use crate::Enclave;
+use crate::S3Logger;
 use axum::extract::State;
 use axum::Json;
-use fastcrypto::hash::{Blake2b256, HashFunction};
-use hashi_guardian_shared::crypto::{commit_share, decrypt_share, k256shares_to_secp_secret_key};
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::HashFunction;
+use hashi_guardian_shared::crypto::commit_share;
+use hashi_guardian_shared::crypto::decrypt_share;
+use hashi_guardian_shared::crypto::k256shares_to_secp_secret_key;
 use hashi_guardian_shared::*;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
+use tracing::info;
 use GuardianError::*;
 
-// TODO: Add some kind of authentication, e.g., an API key or token
+// Receives S3 API keys & share commitments.
+// TODO: Another option is to hard-code the share commitments after the key ceremony is over.
+// TODO: Log to S3. Q) what are the must log items for security? Enclave attestation & S3-signing-key. Anything else?
 pub async fn init_enclave_internal(
     State(enclave): State<Arc<Enclave>>,
     Json(request): Json<InitInternalRequest>,
 ) -> GuardianResult<()> {
-    info!("📥 /configure_s3 - Received request");
+    info!("📥 /init_internal - Received request");
     // If the configuration has already been set, return an error
-    if enclave.config.s3_logger.get().is_some() {
+    if enclave.s3_logger().is_ok() {
         return Err(Forbidden("S3 configuration previously set".into()));
     }
 
@@ -28,9 +35,7 @@ pub async fn init_enclave_internal(
 
     info!("✅ S3 connectivity test passed");
     info!("💾 Storing S3 configuration...");
-    if enclave.config.s3_logger.set(logger).is_err() {
-        return Err(GenericError("Failed to set S3 configuration".into()));
-    }
+    enclave.set_s3_logger(logger)?;
 
     info!(
         "💾 Storing {} share commitments...",
@@ -42,26 +47,21 @@ pub async fn init_enclave_internal(
             i, share_commitment.id, share_commitment.digest
         );
     }
-    if enclave
-        .scratchpad
-        .share_commitments
-        .set(request.share_commitments)
-        .is_err()
-    {
-        return Err(GenericError("Failed to set share commitments".into()));
-    }
+    enclave.set_share_commitments(request.share_commitments)?;
 
     info!("✅ S3 configuration complete!");
     Ok(())
 }
 
-// While accumulating shares, we use the state hash to compare if every KP is inputting the same state.
+// Receives btc key share and a bunch of config's ("state") from each KP.
+// While accumulating shares, we use the state hash to compare if every KP is giving us the same state.
 // When we have enough shares, we actually set all the state variables.
+// TODO: Log to S3. Q) what are the must log items for security?
 pub async fn init_enclave_external(
     State(enclave): State<Arc<Enclave>>,
     Json(request): Json<InitExternalRequest>,
 ) -> GuardianResult<()> {
-    info!("📥 /init - Received encrypted share");
+    info!("📥 /init_external - Received encrypted share");
     if !enclave.is_init_internal() {
         return Err(GenericError(
             "Internal initialization hasn't completed!".into(),
@@ -85,18 +85,14 @@ pub async fn init_enclave_external(
 
     // 2) Verify the share against the commitment
     info!("🔍 Verifying share against commitment...");
-    let share_commitments = enclave
-        .scratchpad
-        .share_commitments
-        .get()
-        .ok_or_else(|| GenericError("No share commitments".to_string()))?;
+    let share_commitments = enclave.share_commitments()?;
     verify_share(&share, share_commitments)?;
     info!("✅ Share verified successfully");
 
     // 3) Set state_hash OR make sure whatever was previously set matches.
     //    Panics upon mismatch.
     info!("🔍 Checking state hash...");
-    match enclave.scratchpad.state_hash.get() {
+    match enclave.state_hash() {
         Some(existing_state_hash) => {
             if *existing_state_hash != state_hash {
                 error!("❌ State hash mismatch!");
@@ -105,9 +101,7 @@ pub async fn init_enclave_external(
             info!("✅ State hash matches existing");
         }
         None => {
-            if enclave.scratchpad.state_hash.set(state_hash).is_err() {
-                return Err(GenericError("State hash already set!".into()));
-            }
+            enclave.set_state_hash(state_hash)?;
             info!("✅ State hash set");
         }
     }
@@ -116,11 +110,7 @@ pub async fn init_enclave_external(
 
     // 4) Persist share
     info!("💾 Persisting share...");
-    let mut received_shares = enclave
-        .scratchpad
-        .decrypted_shares
-        .lock()
-        .map_err(|e| GenericError(format!("Failed to acquire lock on shares: {}", e)))?;
+    let mut received_shares = enclave.decrypted_shares().lock().await;
     if !received_shares.insert(share) {
         return Err(GenericError("Duplicate shares!".into()));
     }
@@ -133,43 +123,35 @@ pub async fn init_enclave_external(
     // 5) If we have enough shares, finish initialization: combine shares & set config.
     if current_share_count >= THRESHOLD {
         let vec: Vec<MyShare> = received_shares.iter().cloned().collect::<Vec<_>>();
-        finalize_init(&vec, &enclave, request.state)?;
+        finalize_init(&vec, &enclave, request.state).await?;
     }
 
     Ok(())
 }
 
-fn finalize_init(
+async fn finalize_init(
     shares: &[MyShare],
     enclave: &Arc<Enclave>,
     incoming_state: InitExternalRequestState,
 ) -> GuardianResult<()> {
     info!("🎉 Threshold reached! Combining shares...");
     let secp_sk = k256shares_to_secp_secret_key(shares)?;
+
+    // TODO: Discuss. Find a better solution for prod?
     let sk_hash = Blake2b256::digest(&secp_sk.secret_bytes());
     info!("✅ Bitcoin key created with fingerprint {}", sk_hash);
 
     info!("🔑 Setting private key...");
-    if enclave.config.bitcoin_key.set(secp_sk).is_err() {
-        return Err(GenericError("Bitcoin key already set".into()));
-    }
-    info!("✅ Bitcoin key set");
+    enclave.set_bitcoin_key(secp_sk)?;
 
     info!("⚙️  Setting withdrawal controls...");
-    if enclave
-        .config
-        .withdraw_controls_config
-        .set(incoming_state.withdraw_config)
-        .is_err()
-    {
-        return Err(GenericError("WithdrawControlsConfig already set".into()));
-    }
+    enclave.set_withdraw_controls_config(incoming_state.withdraw_config)?;
+
+    info!("💾 Setting change address...");
+    enclave.set_change_address(&incoming_state.change_address)?;
 
     info!("💾 Setting enclave state...");
-    let mut state = enclave
-        .state
-        .lock()
-        .map_err(|e| GenericError(format!("Failed to acquire lock on state: {}", e)))?;
+    let mut state = enclave.state().await;
     state.hashi_committee_info = incoming_state.hashi_committee_info;
     state.withdraw_state = incoming_state.withdraw_state;
 
@@ -190,7 +172,8 @@ fn verify_share(share: &MyShare, commitments: &[ShareCommitment]) -> GuardianRes
 mod tests {
     use super::*;
     use crate::setup::setup_new_key;
-    use hashi_guardian_shared::crypto::{commit_share, encrypt_share};
+    use hashi_guardian_shared::crypto::commit_share;
+    use hashi_guardian_shared::crypto::encrypt_share;
     use hashi_guardian_shared::test_utils::*;
 
     #[tokio::test]
@@ -218,10 +201,6 @@ mod tests {
     async fn test_init_enclave_external() {
         use crate::Enclave;
         use axum::extract::State;
-        use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair as _};
-        use hpke::kem::X25519HkdfSha256;
-        use hpke::Kem;
-        use std::sync::Arc;
 
         // Step 1: Generate KP encryption keys and setup new key
         let (request, kp_private_keys) = mock_setup_new_key_request();
@@ -229,23 +208,11 @@ mod tests {
         let encrypted_shares = resp.encrypted_shares;
         let share_commitments = resp.share_commitments;
 
-        // Step 2: Create mock Enclave with encryption keys
-        let mut rng = rand::thread_rng();
-        let signing_keys = Ed25519KeyPair::generate(&mut rng);
-        let (enc_sk, enc_pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-        let encryption_keys = (enc_sk, enc_pk).into();
-        let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
-
-        // Step 3: Mock S3 initialization (required for is_init_internal() to pass)
-        let mock_s3_logger = S3Logger::mock_for_testing().await;
-        enclave.config.s3_logger.set(mock_s3_logger).unwrap();
+        // Step 2: Create bare enclave (only S3, no bitcoin key/config since we're testing initialization)
+        let enclave = Enclave::create_bare_for_test().await;
 
         // Step 4: Set share commitments in the enclave
-        enclave
-            .scratchpad
-            .share_commitments
-            .set(share_commitments.clone())
-            .unwrap();
+        enclave.set_share_commitments(share_commitments.clone()).unwrap();
 
         // Step 5: Create InitExternalRequestState
         let init_state = mock_init_external_state();
@@ -277,12 +244,16 @@ mod tests {
                     i
                 );
                 assert!(
-                    enclave.config.bitcoin_key.get().is_some(),
+                    enclave.btc_key().is_ok(),
                     "Bitcoin key should be set after threshold"
                 );
                 assert!(
-                    enclave.config.withdraw_controls_config.get().is_some(),
+                    enclave.withdraw_controls_config().is_ok(),
                     "Withdraw controls config should be set after threshold"
+                );
+                assert!(
+                    enclave.change_address().is_ok(),
+                    "Change address should be set after threshold"
                 );
             } else if i >= THRESHOLD {
                 // After threshold, subsequent init calls should fail
@@ -293,19 +264,23 @@ mod tests {
                     result
                 );
                 assert!(
-                    enclave.config.bitcoin_key.get().is_some(),
+                    enclave.btc_key().is_ok(),
                     "Bitcoin key should still be set"
                 );
             } else {
                 // Before threshold, call should succeed
                 assert!(result.is_ok(), "Init should succeed before threshold");
                 assert!(
-                    enclave.config.bitcoin_key.get().is_none(),
+                    enclave.btc_key().is_err(),
                     "Bitcoin key should not be set before threshold"
                 );
                 assert!(
-                    enclave.config.withdraw_controls_config.get().is_none(),
+                    enclave.withdraw_controls_config().is_err(),
                     "Withdraw controls config should not be set before threshold"
+                );
+                assert!(
+                    enclave.change_address().is_err(),
+                    "Change address should not be set before threshold"
                 );
             }
         }

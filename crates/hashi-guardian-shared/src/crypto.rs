@@ -1,13 +1,26 @@
-use crate::errors::{GuardianError, GuardianResult};
-use crate::{Ciphertext, EncryptedShare, ShareCommitment};
-use fastcrypto::hash::{Blake2b256, HashFunction};
+use crate::errors::GuardianError;
+use crate::errors::GuardianResult;
+use crate::Ciphertext;
+use crate::EncryptedShare;
+use crate::SetupNewKeyRequest;
+use crate::ShareCommitment;
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::HashFunction;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
-use hpke::{Deserializable, HpkeError, Kem, Serializable};
+use hpke::Deserializable;
+use hpke::HpkeError;
+use hpke::Kem;
+use hpke::Serializable;
 use k256::elliptic_curve::PrimeField;
-use k256::{Scalar, SecretKey};
-use vsss_rs::{shamir, DefaultShare, IdentifierPrimeField, ReadableShareSet, Share};
+use k256::Scalar;
+use k256::SecretKey;
+use vsss_rs::shamir;
+use vsss_rs::DefaultShare;
+use vsss_rs::IdentifierPrimeField;
+use vsss_rs::ReadableShareSet;
+use vsss_rs::Share;
 
 // ---------------------------------
 //      Crypto Types
@@ -52,17 +65,17 @@ impl From<(EncSecKey, EncPubKey)> for EncKeyPair {
     }
 }
 
-impl From<Vec<EncPubKey>> for crate::SetupNewKeyRequest {
+impl From<Vec<EncPubKey>> for SetupNewKeyRequest {
     fn from(keys: Vec<EncPubKey>) -> Self {
-        crate::SetupNewKeyRequest {
+        SetupNewKeyRequest {
             key_provisioner_public_keys: keys.iter().map(|k| k.to_bytes().to_vec()).collect(),
         }
     }
 }
 
-impl TryFrom<crate::SetupNewKeyRequest> for Vec<EncPubKey> {
+impl TryFrom<SetupNewKeyRequest> for Vec<EncPubKey> {
     type Error = HpkeError;
-    fn try_from(value: crate::SetupNewKeyRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: SetupNewKeyRequest) -> Result<Self, Self::Error> {
         value
             .key_provisioner_public_keys
             .into_iter()
@@ -83,7 +96,7 @@ pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> Guardian
             &pk,
             &[],
             &bytes,
-            aad.or(Option::Some(&[0; 32])).expect("REASON"),
+            aad.unwrap_or(&[0; 32]),
             &mut rng,
         )
         .map_err(|e| GuardianError::GenericError(format!("Failed to encrypt: {}", e)))?;
@@ -106,7 +119,7 @@ pub fn decrypt(
         &encapsulated_key,
         &[],
         &aes_ciphertext,
-        aad.or(Option::Some(&[0; 32])).expect("REASON"),
+        aad.unwrap_or(&[0; 32]),
     )
     .map_err(|e| GuardianError::GenericError(format!("Failed to decrypt: {}", e)))?;
 
@@ -175,9 +188,10 @@ pub fn k256shares_to_secp_secret_key(
         .map_err(|e| GuardianError::GenericError(format!("Failed to combine share: {}", e)))?;
 
     // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
-    //       use the same representation to store bytes (big-endian). We need this because the
-    //       secret-sharing lib expects RustCrypto traits that secp256k1 does not implement.
-    //       And performing btc operations is easier with secp256k1.
+    //       use the same representation to store bytes (big-endian). We are juggling between two
+    //       libraries because the secret-sharing lib expects RustCrypto traits
+    //       that bitcoin lib does not implement.
+    // TODO: Check if using k256 lib in the sign_btc_tx fn works
     let sk = result.0.to_repr();
     let secp_sk = bitcoin::secp256k1::SecretKey::from_slice(&sk).map_err(|e| {
         GuardianError::GenericError(format!("Failed to cast combined secret key: {}", e))
@@ -189,7 +203,8 @@ pub fn k256shares_to_secp_secret_key(
 mod encryption_tests {
     // https://github.com/rozbb/rust-hpke/tree/main
     // Note: using hpke
-    use super::{decrypt, encrypt};
+    use super::decrypt;
+    use super::encrypt;
     use hpke::aead::AesGcm256;
     use hpke::kdf::HkdfSha384;
     use hpke::kem::X25519HkdfSha256;
@@ -242,9 +257,12 @@ mod encryption_tests {
 #[cfg(test)]
 mod secret_sharing_tests {
     use super::*;
-    use bitcoin::secp256k1::{Message, Secp256k1};
+    use bitcoin::secp256k1::Message;
+    use bitcoin::secp256k1::Secp256k1;
     use k256::elliptic_curve::PrimeField;
-    use vsss_rs::{shamir, IdentifierPrimeField, ReadableShareSet};
+    use vsss_rs::shamir;
+    use vsss_rs::IdentifierPrimeField;
+    use vsss_rs::ReadableShareSet;
 
     #[test]
     fn basic_secret_sharing() {

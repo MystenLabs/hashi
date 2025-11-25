@@ -3,7 +3,8 @@ use tracing::info;
 
 use aws_sdk_s3::Client as S3Client;
 
-use crate::{GuardianError, GuardianResult};
+use crate::GuardianError;
+use crate::GuardianResult;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::types::ObjectLockEnabled;
 
@@ -31,6 +32,18 @@ impl S3Logger {
 
         let client = S3Client::new(&aws_config);
         Ok(Self { client, config })
+    }
+
+    /// Check if an object named in the key exists in the S3 bucket.
+    /// Returns an error if the object exists.
+    pub async fn is_exists(&self, _key: &str) -> GuardianResult<()> {
+        // TODO
+        Ok(())
+    }
+
+    pub async fn log(&self, _folder: &str, _key: &str, _value: &str) -> GuardianResult<()> {
+        // TODO
+        Ok(())
     }
 
     #[cfg(test)]

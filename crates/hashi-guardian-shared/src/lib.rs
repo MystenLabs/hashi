@@ -1,22 +1,31 @@
+pub mod bitcoin_utils;
 pub mod crypto;
 mod errors;
 pub mod test_utils;
 
-pub use crypto::{
-    EncKeyPair, EncPubKey, EncSecKey, EncapsulatedKey, K256ShareBase, MyShare, ShareID, ShareValue,
-    LIMIT, THRESHOLD,
-};
-pub use errors::{GuardianError, GuardianResult};
+pub use crypto::*;
+pub use errors::GuardianError;
+pub use errors::GuardianResult;
+use std::collections::HashMap;
 
-use fastcrypto::hash::{Blake2b256, Digest, HashFunction};
-use hpke::{Deserializable, HpkeError, Serializable};
+use crate::bitcoin_utils::TaprootUTXO;
+use crate::GuardianError::GenericError;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::taproot::Signature;
+use bitcoin::Address;
+use bitcoin::Amount;
+use bitcoin::Network;
+use bitcoin::TxOut;
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::Digest;
+use fastcrypto::hash::HashFunction;
+use hpke::Deserializable;
+use hpke::HpkeError;
+use hpke::Serializable;
 use serde::Deserialize;
 use serde::Serialize;
-use std::time::{Duration, SystemTime};
-
-// ---------------------------------
-//      Types and Constants
-// ---------------------------------
+use std::time::Duration;
+use std::time::SystemTime;
 
 pub type WithdrawID = String; // TODO: Placeholder
 
@@ -55,19 +64,19 @@ pub struct InitExternalRequestState {
     pub withdraw_config: WithdrawConfig,
     /// Enclave state
     pub withdraw_state: WithdrawalState,
+    /// Bitcoin change address for withdrawals
+    pub change_address: String,
     /// Cached serialized bytes
     #[serde(skip)]
     pub cached_bytes: std::sync::OnceLock<Vec<u8>>,
 }
 
-/// Response for get attestation
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetAttestationResponse {
     /// Attestation document serialized in Hex
     pub attestation: String,
 }
 
-/// Response for health check
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HealthCheckResponse {
     /// S3 is configured
@@ -80,49 +89,70 @@ pub struct HealthCheckResponse {
     pub enc_public_key: Option<Vec<u8>>,
 }
 
-/// A "Delayed Withdraw" request
+/// A "delayed withdraw" request
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DelayedWithdrawRequest {
-    /// Details of the withdrawal
-    pub info: WithdrawInfo,
+    /// Withdrawal details
+    pub info: DelayedWithdrawInfo,
     /// Hashi cert over the request
     pub cert: HashiCert,
 }
 
-/// An (instantaneous) withdraw request
+/// An "instantaneous withdraw" request
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InstantWithdrawRequest {
-    /// Details of the withdrawal
-    pub info: WithdrawInfo,
-    /// Is the request trying to spend a delayed withdrawal
+    /// Withdrawal details
+    pub info: FullWithdrawInfo,
+    /// Is it a delayed withdrawal?
     pub delayed: bool,
     /// Hashi cert over the request
     pub cert: HashiCert,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct WithdrawInfo {
-    /// Unique withdraw ID assigned by Hashi
-    pub withdraw_id: WithdrawID,
-    /// External addresses and corresponding amounts
-    pub external_dest: Vec<WithdrawOutput>,
-    /// Hashi-assigned timestamp
-    pub timestamp: SystemTime,
-    /// Transaction fee in Satoshi's
-    pub fee_sats: u64,
+pub struct InstantWithdrawResponse {
+    pub enclave_sign: Vec<Signature>,
 }
 
 // ---------------------------------
 //          Helper structs
 // ---------------------------------
 
+/// Full withdraw details
+/// input utxo's and fee are None for Delayed and Some for Instant
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FullWithdrawInfo {
+    /// Unique withdraw ID assigned by Hashi
+    pub withdraw_id: WithdrawID,
+    /// External addresses and corresponding amounts
+    pub external_dest: Vec<WithdrawOutput>,
+    /// Hashi-assigned timestamp
+    pub timestamp: SystemTime,
+    /// The input UTXOs owned by hashi + guardian
+    pub input_utxos: Vec<TaprootUTXO>,
+    /// Transaction fee in Satoshi's
+    pub fee_sats: u64,
+}
+
+/// Partial withdraw details used for delayed withdrawals
+/// input utxo's and fee are None for Delayed and Some for Instant
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DelayedWithdrawInfo {
+    /// Unique withdraw ID assigned by Hashi
+    pub withdraw_id: WithdrawID,
+    /// External addresses and corresponding amounts
+    pub external_dest: Vec<WithdrawOutput>,
+    /// Hashi-assigned timestamp
+    pub timestamp: SystemTime,
+}
+
 /// Transaction output for withdrawal (external parties only)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WithdrawOutput {
     /// Bitcoin address to withdraw to (external party)
-    pub address: String,
+    pub address: Address<NetworkUnchecked>,
     /// Amount in Satoshi's
-    pub amount: u64,
+    pub amount: Amount,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -154,12 +184,11 @@ pub struct S3Config {
 }
 
 /// Hashi keys used to sign messages to Guardian (BLS?).
-// TODO: Placeholder. Add pub keys, threshold.
+// TODO: Add pub keys, threshold.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct HashiCommittee {}
 
 /// All the rate limiting config's
-// TODO: Add rate limiting stuff
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WithdrawConfig {
     /// The min delay after which any withdrawal is approved
@@ -169,11 +198,15 @@ pub struct WithdrawConfig {
 }
 
 /// Withdrawal info, e.g., in-flight ones, amount withdrawn in the current slot, etc.
-// TODO: Add stuff
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct WithdrawalState {
     /// Total number of withdrawals processed till now
     pub counter: u64,
+    /// Pending delayed withdrawals. We do three types of operations with it:
+    /// 1. Insertion (when "delayed_withdraw()" is called)
+    /// 2. Lookup (when "instant_withdraw()" is called later)
+    /// 3. Prune old records (TODO: To be implemented).
+    pub pending_delayed_withdrawals: HashMap<WithdrawID, DelayedWithdrawInfo>,
 }
 
 // ---------------------------------
@@ -181,9 +214,9 @@ pub struct WithdrawalState {
 // ---------------------------------
 
 impl From<(EncapsulatedKey, Vec<u8>)> for Ciphertext {
-    fn from((encapped_key, aes_ciphertext): (EncapsulatedKey, Vec<u8>)) -> Self {
+    fn from((encapsulated_key, aes_ciphertext): (EncapsulatedKey, Vec<u8>)) -> Self {
         Ciphertext {
-            encapsulated_key: encapped_key.to_bytes().to_vec(),
+            encapsulated_key: encapsulated_key.to_bytes().to_vec(),
             aes_ciphertext,
         }
     }
@@ -245,6 +278,7 @@ impl Clone for InitExternalRequestState {
             hashi_committee_info: self.hashi_committee_info.clone(),
             withdraw_config: self.withdraw_config.clone(),
             withdraw_state: self.withdraw_state.clone(),
+            change_address: self.change_address.clone(),
             cached_bytes: std::sync::OnceLock::new(),
         }
     }
@@ -259,16 +293,56 @@ impl InitExternalRequestState {
 impl InitExternalRequest {
     /// Create a new InitExternalRequest by encrypting the share with the enclave's public key
     pub fn new(
-        share: &crypto::MyShare,
+        share: &MyShare,
         enclave_pub_key: &EncPubKey,
         state: InitExternalRequestState,
-    ) -> Result<Self, crate::errors::GuardianError> {
+    ) -> Result<Self, GuardianError> {
         let state_hash = state.digest().digest;
-        let encrypted_share = crypto::encrypt_share(share, enclave_pub_key, Some(&state_hash))?;
+        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash))?;
         Ok(InitExternalRequest {
             encrypted_share,
             state,
         })
+    }
+}
+
+impl FullWithdrawInfo {
+    /// The total amount of money being withdrawn
+    pub fn withdraw_amount(&self) -> Amount {
+        self.external_dest.iter().map(|utxo| utxo.amount).sum()
+    }
+
+    pub fn change_amount(&self) -> GuardianResult<Amount> {
+        let input_sum: Amount = self.input_utxos.iter().map(|utxo| utxo.amount).sum();
+        let output_sum: Amount = self.withdraw_amount();
+        if input_sum < output_sum {
+            return Err(GenericError(
+                "Input sum is smaller than output sum.".to_string(),
+            ));
+        }
+        // TODO: Also add an error for input_sum - output_sum < threshold?
+        Ok(input_sum - output_sum)
+    }
+}
+
+impl WithdrawOutput {
+    /// Validates the address against the expected network and returns a checked Address
+    pub fn validate_address(&self, expected_network: Network) -> GuardianResult<Address> {
+        self.address
+            .clone()
+            .require_network(expected_network)
+            .map_err(|e| GenericError(format!("Invalid address network: {:?}", e)))
+    }
+}
+
+impl From<&WithdrawOutput> for TxOut {
+    /// Converts to TxOut, assuming the address has already been validated
+    /// Use validate_address() first to ensure the address is for the correct network
+    fn from(output: &WithdrawOutput) -> Self {
+        TxOut {
+            value: output.amount,
+            script_pubkey: output.address.clone().assume_checked().script_pubkey(),
+        }
     }
 }
 

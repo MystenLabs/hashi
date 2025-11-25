@@ -1,16 +1,20 @@
-use crate::{Enclave, GuardianError};
+use crate::Enclave;
+use crate::GuardianError;
 use axum::extract::State;
 use axum::Json;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
-use fastcrypto::traits::{KeyPair, ToFromBytes};
+use fastcrypto::traits::KeyPair;
+use fastcrypto::traits::ToFromBytes;
 use hashi_guardian_shared::GetAttestationResponse;
 use hpke::Serializable;
-use nsm_api::api::{Request as NsmRequest, Response as NsmResponse};
+use nsm_api::api::Request as NsmRequest;
+use nsm_api::api::Response as NsmResponse;
 use nsm_api::driver;
 use serde_bytes::ByteBuf;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
+use tracing::info;
 
 /// Endpoint that returns an attestation committed
 /// to the enclave's public key.

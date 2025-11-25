@@ -16,7 +16,7 @@ rand = "0.8.5"
 vsss-rs = { git = "https://github.com/mikelodder7/vsss-rs", rev = "cb7425a4c634376b2f5fcc7691b4f6e8e0753b13" }
 k256 = "0.13"
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "e4127630173582f164c1eb704a5bc3d6eacb0d27", features = ["aes"] }
-bitcoin = "0.32.7"
+bitcoin = { version =  "0.32.7", features = ["serde"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 [dev-dependencies]

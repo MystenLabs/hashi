@@ -9,8 +9,6 @@ axum = { version = "0.7" }
 anyhow = "1.0"
 hashi-guardian-shared = { path = "../hashi-guardian-shared" }
 serde_bytes = "0.11.17"
-serde_json = "1.0.143"
-serde = { version = "1.0.219", features = ["derive"] }
 
 # Logging dependencies
 tracing = "0.1.41"
@@ -26,3 +24,5 @@ bitcoin = "0.32.7"
 k256 = "0.13"
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "e4127630173582f164c1eb704a5bc3d6eacb0d27", features = ["aes"] }
 nsm_api = { git = "https://github.com/aws/aws-nitro-enclaves-nsm-api.git/", rev = "8ec7eac72bbb2097f1058ee32c13e1ff232f13e8", package="aws-nitro-enclaves-nsm-api", optional = false }
+governor = "0.10.2"
+nonzero_ext = "0.3.0"

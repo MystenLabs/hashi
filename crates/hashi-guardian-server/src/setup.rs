@@ -2,10 +2,13 @@ use crate::GuardianError::GenericError;
 use crate::GuardianResult;
 use axum::Json;
 use fastcrypto::hash::{Blake2b256, HashFunction}; // kept only for fingerprint logging
-use hashi_guardian_shared::crypto::{commit_share, encrypt_share, k256_secret_key_to_shares};
+use hashi_guardian_shared::crypto::commit_share;
+use hashi_guardian_shared::crypto::encrypt_share;
+use hashi_guardian_shared::crypto::k256_secret_key_to_shares;
 use hashi_guardian_shared::*;
 use k256::SecretKey;
-use tracing::{error, info};
+use tracing::error;
+use tracing::info;
 
 // Stateless request
 pub async fn setup_new_key(
@@ -42,7 +45,6 @@ pub async fn setup_new_key(
         LIMIT, THRESHOLD
     );
     let shares = k256_secret_key_to_shares(sk)?;
-    info!("✅ Secret split into {} shares", LIMIT);
 
     info!("🔐 Encrypting shares for key provisioners...");
     let mut encrypted_shares = vec![];
