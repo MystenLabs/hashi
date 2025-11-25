@@ -53,6 +53,6 @@ message ValidatorSignature {
   // The epoch in which this signature was created.
   optional uint64 epoch = 2;
 
-  // The BLS12-381 signature (48 bytes).
+  // The BLS12-381 signature.
   optional bytes signature = 3;
 }

@@ -384,7 +384,7 @@ pub struct ValidatorSignature {
     /// The epoch in which this signature was created.
     #[prost(uint64, optional, tag = "2")]
     pub epoch: ::core::option::Option<u64>,
-    /// The BLS12-381 signature (48 bytes).
+    /// The BLS12-381 signature.
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
