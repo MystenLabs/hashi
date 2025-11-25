@@ -3,7 +3,7 @@
 
 module hashi::treasury;
 
-use sui::{coin::{TreasuryCap, Coin}, object_bag::{Self, ObjectBag}};
+use sui::{coin::{TreasuryCap, Coin}, coin_registry::MetadataCap, object_bag::{Self, ObjectBag}};
 
 //////////////////////////////////////////////////////
 // Types
@@ -23,6 +23,11 @@ fun treasury_cap<T>(self: &mut Treasury): &mut TreasuryCap<T> {
     &mut self.objects[Key<TreasuryCap<T>> {}]
 }
 
+#[allow(unused_function)]
+fun metadata_cap<T>(self: &mut Treasury): &mut MetadataCap<T> {
+    &mut self.objects[Key<MetadataCap<T>> {}]
+}
+
 fun balance<T>(self: &mut Treasury): &mut Coin<T> {
     &mut self.objects[Key<Coin<T>> {}]
 }
@@ -37,6 +42,14 @@ public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContex
 
 public(package) fun deposit_fee<T>(self: &mut Treasury, fee: Coin<T>) {
     self.balance<T>().join(fee);
+}
+
+public(package) fun register_treasury_cap<T>(self: &mut Treasury, treasury_cap: TreasuryCap<T>) {
+    self.objects.add(Key<TreasuryCap<T>> {}, treasury_cap);
+}
+
+public(package) fun register_metadata_cap<T>(self: &mut Treasury, metadata_cap: MetadataCap<T>) {
+    self.objects.add(Key<MetadataCap<T>> {}, metadata_cap);
 }
 
 //

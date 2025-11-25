@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-prost-types = "0.13.3"
-prost = "0.13"
-protox = "0.7"
-tonic-build = "0.13"
+prost-types = "0.14"
+prost = "0.14"
+protox = "0.9"
+tonic-prost-build = "0.14"
 walkdir = "2.5.0"

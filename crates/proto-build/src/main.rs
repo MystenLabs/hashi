@@ -43,10 +43,10 @@ fn main() {
     // Sort files by name to have deterministic codegen output
     fds.file.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if let Err(error) = tonic_build::configure()
+    if let Err(error) = tonic_prost_build::configure()
         .build_client(true)
         .build_server(true)
-        .bytes(["."])
+        .bytes(".")
         .extern_path(".google.rpc", "::sui_rpc::proto::google::rpc")
         .out_dir(&out_dir)
         .compile_fds(fds.clone())

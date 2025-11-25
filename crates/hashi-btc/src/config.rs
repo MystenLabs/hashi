@@ -15,6 +15,12 @@ pub struct MonitorConfig {
 
     /// Starting block height for synchronization
     pub start_height: u32,
+
+    /// bitcoind JSON-RPC server URL to connect to
+    pub bitcoind_rpc_url: String,
+
+    /// bitcoind JSON-RPC server auth config
+    pub bitcoind_rpc_auth: bitcoincore_rpc::Auth,
 }
 
 impl Default for MonitorConfig {
@@ -24,6 +30,8 @@ impl Default for MonitorConfig {
             confirmation_threshold: 6,
             trusted_peers: Vec::new(),
             start_height: 800_000,
+            bitcoind_rpc_url: "http://localhost:8332".to_string(),
+            bitcoind_rpc_auth: bitcoincore_rpc::Auth::None,
         }
     }
 }
@@ -42,6 +50,8 @@ pub struct MonitorConfigBuilder {
     confirmation_threshold: Option<u32>,
     trusted_peers: Vec<kyoto::TrustedPeer>,
     start_height: u32,
+    bitcoind_rpc_url: Option<String>,
+    bitcoind_rpc_auth: Option<bitcoincore_rpc::Auth>,
 }
 
 impl MonitorConfigBuilder {
@@ -69,6 +79,13 @@ impl MonitorConfigBuilder {
         self
     }
 
+    /// Set the bitcoind JSON-RPC server config.
+    pub fn bitcoind_rpc_config(mut self, url: String, auth: bitcoincore_rpc::Auth) -> Self {
+        self.bitcoind_rpc_url = Some(url);
+        self.bitcoind_rpc_auth = Some(auth);
+        self
+    }
+
     pub fn build(self) -> MonitorConfig {
         let default = MonitorConfig::default();
 
@@ -83,6 +100,8 @@ impl MonitorConfigBuilder {
                 self.trusted_peers
             },
             start_height: self.start_height,
+            bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
+            bitcoind_rpc_auth: self.bitcoind_rpc_auth.unwrap_or(default.bitcoind_rpc_auth),
         }
     }
 }

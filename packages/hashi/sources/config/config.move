@@ -68,7 +68,14 @@ public(package) fun set_paused(self: &mut Config, paused: bool) {
 //
 
 public(package) fun create(): Config {
-    Config {
+    let mut config = Config {
         config: vec_map::empty(),
-    }
+    };
+
+    // Set initial config values
+    config.upsert(VERSION_KEY, config_value::new_u64(PACKAGE_VERSION));
+    config.upsert(PAUSED_KEY, config_value::new_bool(true));
+    config.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(0));
+
+    config
 }

@@ -7,6 +7,7 @@ description = "Bitcoin management library for the Hashi system"
 [dependencies]
 # Bitcoin libraries
 bitcoin = "0.32.7"
+bitcoincore-rpc = "0.19.0"
 bdk_chain = "0.23.1"
 bdk_core = "0.6.1"
 kyoto-cbf = "0.13.2"

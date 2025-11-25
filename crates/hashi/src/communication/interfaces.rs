@@ -1,11 +1,12 @@
 //! Communication channel interfaces
 
 use crate::dkg::{
-    RetrieveMessageRequest, RetrieveMessageResponse, SendShareRequest, SendShareResponse,
+    ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
+    SendShareRequest, SendShareResponse,
 };
-use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::time::Duration;
+use sui_sdk_types::Address;
 use thiserror::Error;
 
 /// Result type for channel operations
@@ -33,15 +34,21 @@ pub enum ChannelError {
 pub trait P2PChannel: Send + Sync {
     async fn send_share(
         &self,
-        recipient: &ValidatorAddress,
+        recipient: &Address,
         request: &SendShareRequest,
     ) -> ChannelResult<SendShareResponse>;
 
     async fn retrieve_message(
         &self,
-        party: &ValidatorAddress,
+        party: &Address,
         request: &RetrieveMessageRequest,
     ) -> ChannelResult<RetrieveMessageResponse>;
+
+    async fn complain(
+        &self,
+        party: &Address,
+        request: &ComplainRequest,
+    ) -> ChannelResult<ComplainResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages

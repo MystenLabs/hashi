@@ -27,6 +27,7 @@ test-move: ## Run all move tests
 
 .PHONY: fmt-move
 fmt-move: ## Format code
+	prettier-move -w packages/*/sources/*.move
 	prettier-move -w packages/*/sources/**/*.move
 
 .PHONY: proto

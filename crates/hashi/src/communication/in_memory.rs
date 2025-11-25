@@ -1,12 +1,12 @@
 //! In-memory channel implementations for testing
 
 use crate::communication::interfaces::{ChannelResult, OrderedBroadcastChannel};
-use crate::types::ValidatorAddress;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use sui_sdk_types::Address;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
@@ -48,14 +48,12 @@ impl<M> InMemoryOrderedBroadcastChannel<M>
 where
     M: Clone + Send + Sync + 'static,
 {
-    pub fn new_network(
-        validator_addresses: Vec<ValidatorAddress>,
-    ) -> HashMap<ValidatorAddress, Self> {
+    pub fn new_network(validator_addresses: Vec<Address>) -> HashMap<Address, Self> {
         let shared_queue = Arc::new(Mutex::new(VecDeque::new()));
         let mut channels = HashMap::new();
         for addr in validator_addresses {
             channels.insert(
-                addr.clone(),
+                addr,
                 Self {
                     shared_queue: shared_queue.clone(),
                     read_position: Arc::new(Mutex::new(INITIAL_READ_POSITION)),
@@ -116,10 +114,8 @@ mod tests {
         data: String,
     }
 
-    fn create_validator_addresses(count: usize) -> Vec<ValidatorAddress> {
-        (1..=count)
-            .map(|i| ValidatorAddress([i as u8; 32]))
-            .collect()
+    fn create_validator_addresses(count: usize) -> Vec<Address> {
+        (1..=count).map(|i| Address::new([i as u8; 32])).collect()
     }
 
     #[tokio::test]

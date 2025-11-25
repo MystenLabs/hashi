@@ -66,12 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TrustedPeer::from("91.83.65.73:48333".parse::<SocketAddr>()?),
     ];
 
-    let config = MonitorConfig {
-        network: Network::Testnet4,
-        confirmation_threshold: args.confirmations,
-        trusted_peers: testnet_peers,
-        start_height: args.start_height,
-    };
+    let config = MonitorConfig::builder()
+        .network(Network::Testnet4)
+        .confirmation_threshold(args.confirmations)
+        .trusted_peers(testnet_peers)
+        .start_height(args.start_height)
+        .build();
 
     info!("Monitor configuration:");
     info!("  Network: {:?}", config.network);
