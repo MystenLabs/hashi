@@ -212,7 +212,9 @@ mod tests {
         let enclave = Enclave::create_bare_for_test().await;
 
         // Step 4: Set share commitments in the enclave
-        enclave.set_share_commitments(share_commitments.clone()).unwrap();
+        enclave
+            .set_share_commitments(share_commitments.clone())
+            .unwrap();
 
         // Step 5: Create InitExternalRequestState
         let init_state = mock_init_external_state();
@@ -263,10 +265,7 @@ mod tests {
                     i,
                     result
                 );
-                assert!(
-                    enclave.btc_key().is_ok(),
-                    "Bitcoin key should still be set"
-                );
+                assert!(enclave.btc_key().is_ok(), "Bitcoin key should still be set");
             } else {
                 // Before threshold, call should succeed
                 assert!(result.is_ok(), "Init should succeed before threshold");

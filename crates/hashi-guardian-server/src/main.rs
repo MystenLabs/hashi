@@ -416,10 +416,14 @@ impl Enclave {
             min_delay: min_delay.unwrap_or(Duration::from_secs(60)),
             max_delay: Duration::from_secs(3600),
         };
-        enclave.set_withdraw_controls_config(withdraw_config).unwrap();
+        enclave
+            .set_withdraw_controls_config(withdraw_config)
+            .unwrap();
 
         // Set change address
-        enclave.set_change_address(test_utils::DUMMY_REGTEST_ADDRESS).unwrap();
+        enclave
+            .set_change_address(test_utils::DUMMY_REGTEST_ADDRESS)
+            .unwrap();
 
         enclave
     }

@@ -1,3 +1,5 @@
+use crate::GuardianError::GenericError;
+use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::All;
@@ -22,8 +24,6 @@ use bitcoin::Witness;
 use rand::thread_rng;
 use serde::Deserialize;
 use serde::Serialize;
-use crate::GuardianError::GenericError;
-use crate::GuardianResult;
 
 // Represents a UTXO that will be spent using taproot script-path spending.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -168,9 +168,16 @@ fn create_2_of_2_taproot_address(
     enclave_pubkey: bitcoin::XOnlyPublicKey,
     hashi_pubkey: bitcoin::XOnlyPublicKey,
     network: bitcoin::KnownHrp,
-) -> (bitcoin::Address, bitcoin::taproot::TaprootSpendInfo, ScriptBuf) {
+) -> (
+    bitcoin::Address,
+    bitcoin::taproot::TaprootSpendInfo,
+    ScriptBuf,
+) {
     use bitcoin::key::UntweakedPublicKey;
-    use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL, OP_PUSHNUM_2};
+    use bitcoin::opcodes::all::OP_CHECKSIG;
+    use bitcoin::opcodes::all::OP_CHECKSIGADD;
+    use bitcoin::opcodes::all::OP_NUMEQUAL;
+    use bitcoin::opcodes::all::OP_PUSHNUM_2;
     use bitcoin::script::Builder;
     use bitcoin::taproot::TaprootBuilder;
     // Tapscript 2-of-2 with CHECKSIGADD pattern:
@@ -331,7 +338,8 @@ mod bitcoin_tests {
             &[spend_out.clone()],
             change_out.clone(),
             &enclave_keypair,
-        ).unwrap();
+        )
+        .unwrap();
 
         // D) Hashi signs the transaction.
         let hashi_signatures = sign_btc_tx(
@@ -340,7 +348,8 @@ mod bitcoin_tests {
             &[spend_out.clone()],
             change_out.clone(),
             &hashi_keypair,
-        ).unwrap();
+        )
+        .unwrap();
 
         // E) Relayer combines the signatures and finalizes the transaction.
         // Note: If there are multiple inputs, we need to construct the witness for each input.

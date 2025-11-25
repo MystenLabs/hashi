@@ -398,9 +398,7 @@ mod tests {
 
         fn setup_rate_limiter() -> MyRateLimiter {
             // A bucket of max size 1 BTC with a continuous refill rate of 1 BTC per hour
-            RateLimiter::direct(
-                Quota::per_minute(nonzero!(100_000_000u32)),
-            )
+            RateLimiter::direct(Quota::per_minute(nonzero!(100_000_000u32)))
         }
 
         #[test]
