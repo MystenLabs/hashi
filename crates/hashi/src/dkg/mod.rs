@@ -165,7 +165,7 @@ impl DkgManager {
                 .run_as_dealer(p2p_channel, ordered_broadcast_channel, rng)
                 .await
         {
-            tracing::warn!("Dealer phase failed: {}. Continuing as party only.", e);
+            tracing::error!("Dealer phase failed: {}. Continuing as party only.", e);
         }
         self.run_as_party(p2p_channel, ordered_broadcast_channel)
             .await
@@ -213,7 +213,6 @@ impl DkgManager {
                         continue;
                     }
                 };
-
                 // The signature is verified in the call to `add_signature`
                 if let Err(e) = aggregator.add_signature(response.signature.signature) {
                     tracing::info!("Invalid signature from {:?}: {}", validator_address, e)
