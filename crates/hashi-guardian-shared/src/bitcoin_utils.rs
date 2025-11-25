@@ -129,9 +129,9 @@ fn gen_keypair_and_address(
         bytes
     });
     let secret_key = SecretKey::from_slice(&bytes).expect("valid secret key");
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret_key);
     let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
-    let address = bitcoin::Address::p2tr(&secp, internal_key, None, network);
+    let address = bitcoin::Address::p2tr(secp, internal_key, None, network);
     (keypair, address)
 }
 
@@ -142,7 +142,6 @@ fn construct_witness(
     script: &ScriptBuf,
     spend_info: &bitcoin::taproot::TaprootSpendInfo,
 ) -> Witness {
-    use bitcoin::taproot::TaprootSpendInfo;
     let control_block = spend_info
         .control_block(&(script.clone(), LeafVersion::TapScript))
         .expect("control block");
@@ -218,7 +217,9 @@ mod bitcoin_tests {
     use crate::test_utils::TEST_ENCLAVE_SK;
     use crate::test_utils::TEST_HASHI_SK;
     use bitcoin::key::TapTweak;
+    use bitcoin::key::UntweakedPublicKey;
     use bitcoin::KnownHrp::Regtest;
+    use bitcoin::XOnlyPublicKey;
 
     #[test]
     fn test_taproot_key_spend_path() {
@@ -334,8 +335,8 @@ mod bitcoin_tests {
         // C) Enclave signs the transaction.
         let enclave_signatures = sign_btc_tx(
             &secp,
-            &[input_utxo.clone()],
-            &[spend_out.clone()],
+            std::slice::from_ref(&input_utxo),
+            std::slice::from_ref(&spend_out),
             change_out.clone(),
             &enclave_keypair,
         )
@@ -344,8 +345,8 @@ mod bitcoin_tests {
         // D) Hashi signs the transaction.
         let hashi_signatures = sign_btc_tx(
             &secp,
-            &[input_utxo.clone()],
-            &[spend_out.clone()],
+            std::slice::from_ref(&input_utxo),
+            std::slice::from_ref(&spend_out),
             change_out.clone(),
             &hashi_keypair,
         )

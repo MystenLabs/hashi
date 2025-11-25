@@ -75,7 +75,7 @@ pub async fn instant_withdraw(
     // Log to S3
     s3_logger
         .log(
-            &"instant_withdraw",
+            "instant_withdraw",
             &log_key,
             &format!("Request {:?}\nResponse {:?}", request, response),
         )
@@ -107,10 +107,10 @@ fn rate_limit(satoshis: u64, rate_limiter: &MyRateLimiter) -> GuardianResult<()>
     }
     let x = NonZeroU32::new(cost as u32)
         .ok_or(GenericError("Zero amount? This shouldn't happen.".into()))?;
-    Ok(rate_limiter
+    rate_limiter
         .check_n(x)
         .map_err(|_| GenericError("Withdrawing more than the burst limit".into()))?
-        .map_err(|_| GenericError("Withdraw after some time".into()))?)
+        .map_err(|_| GenericError("Withdraw after some time".into()))
     // TODO: Improve the second error message indicating when this call can be next made.
 }
 
@@ -122,7 +122,7 @@ fn sign(
     change_address: Address,
 ) -> GuardianResult<Vec<Signature>> {
     let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, &sk);
+    let keypair = Keypair::from_secret_key(&secp, sk);
 
     // Derive change amount
     let change_utxo = TxOut {
@@ -183,8 +183,8 @@ pub async fn delayed_withdraw(
     let s3_logger = enclave.s3_logger()?;
     s3_logger
         .log(
-            &"delayed_withdraw",
-            &log_key,
+            "delayed_withdraw",
+            log_key,
             &format!("Request {:?}", request),
         )
         .await?;
@@ -237,10 +237,10 @@ fn approve_delayed_withdrawal(
         .duration_since(pending.timestamp)
         .map_err(|_| GenericError("Time is earlier".into()))?;
     if gap < min_delay {
-        return Err(GenericError(format!(
+        Err(GenericError(format!(
             "Withdrawal timestamp {:?} is not sufficiently delayed ({:?} + {:?})",
             withdrawal.timestamp, pending.timestamp, min_delay
-        )));
+        )))
     } else {
         Ok(())
     }

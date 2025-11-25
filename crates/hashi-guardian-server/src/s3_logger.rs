@@ -16,14 +16,14 @@ pub struct S3Logger {
 
 impl S3Logger {
     pub async fn new(config: S3Config) -> GuardianResult<Self> {
-        info!("📦 S3 Configuration:");
+        info!("S3 Configuration:");
         info!("   Bucket: {}", config.bucket_name);
 
-        info!("🔧 Setting AWS credentials...");
+        info!("Setting AWS credentials...");
         std::env::set_var("AWS_ACCESS_KEY_ID", &config.access_key);
         std::env::set_var("AWS_SECRET_ACCESS_KEY", &config.secret_key);
 
-        info!("🌍 Loading AWS configuration...");
+        info!("Loading AWS configuration...");
         let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(region_provider)

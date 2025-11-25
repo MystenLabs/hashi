@@ -4,8 +4,8 @@ use crate::Ciphertext;
 use crate::EncryptedShare;
 use crate::SetupNewKeyRequest;
 use crate::ShareCommitment;
-use fastcrypto::hash::Blake2b256;
-use fastcrypto::hash::HashFunction;
+use blake2::{Blake2b, Digest};
+use blake2::digest::consts::U32;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
@@ -93,9 +93,9 @@ pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> Guardian
     let (encapsulated_key, aes_ciphertext) =
         hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
             &hpke::OpModeS::Base,
-            &pk,
+            pk,
             &[],
-            &bytes,
+            bytes,
             aad.unwrap_or(&[0; 32]),
             &mut rng,
         )
@@ -118,7 +118,7 @@ pub fn decrypt(
         sk,
         &encapsulated_key,
         &[],
-        &aes_ciphertext,
+        aes_ciphertext,
         aad.unwrap_or(&[0; 32]),
     )
     .map_err(|e| GuardianError::GenericError(format!("Failed to decrypt: {}", e)))?;
@@ -147,7 +147,7 @@ pub fn commit_share(share: &MyShare) -> GuardianResult<ShareCommitment> {
     let bytes = bincode::serialize(&share_value).map_err(|e| {
         GuardianError::GenericError(format!("Failed to serialize share value: {}", e))
     })?;
-    Ok((share_id, Blake2b256::digest(&bytes)).into())
+    Ok((share_id, Blake2b::<U32>::digest(&bytes).into()).into())
 }
 
 /// Encrypt a share for a given public key with optional AAD
@@ -266,7 +266,7 @@ mod secret_sharing_tests {
 
     #[test]
     fn basic_secret_sharing() {
-        let mut osrng = rand_core::OsRng::default();
+        let mut osrng = rand_core::OsRng;
         let sk = SecretKey::random(&mut osrng);
         let nzs = sk.to_nonzero_scalar();
         let shared_secret = IdentifierPrimeField(*nzs.as_ref());
@@ -284,7 +284,7 @@ mod secret_sharing_tests {
     #[test]
     fn test_libs_signing_compat() {
         let msg = [7u8; 32];
-        let mut osrng = rand_core::OsRng::default();
+        let mut osrng = rand_core::OsRng;
         let sk1 = k256::SecretKey::random(&mut osrng);
         let sk1_bytes = sk1.to_bytes();
 
@@ -315,7 +315,7 @@ mod secret_sharing_tests {
     // Verify that k256_secret_key_to_shares generates the correct number of shares
     #[test]
     fn test_k256_secret_key_to_shares_generates_correct_number() {
-        let mut osrng = rand_core::OsRng::default();
+        let mut osrng = rand_core::OsRng;
         let sk = SecretKey::random(&mut osrng);
 
         let shares = k256_secret_key_to_shares(sk).unwrap();
@@ -346,7 +346,7 @@ mod secret_sharing_tests {
     // - Full round-trip produces equivalent keys
     #[test]
     fn test_roundtrip_reconstruction_varying_shares() {
-        let mut osrng = rand_core::OsRng::default();
+        let mut osrng = rand_core::OsRng;
 
         // Start with a k256::SecretKey
         let original_k256_sk = SecretKey::random(&mut osrng);
@@ -399,7 +399,7 @@ mod secret_sharing_tests {
     // Verify any subset of THRESHOLD shares works
     #[test]
     fn test_any_threshold_subset_reconstructs_secret() {
-        let mut osrng = rand_core::OsRng::default();
+        let mut osrng = rand_core::OsRng;
         let original_sk = SecretKey::random(&mut osrng);
         let original_bytes = original_sk.to_bytes();
 

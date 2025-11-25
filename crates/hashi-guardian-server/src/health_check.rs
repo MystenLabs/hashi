@@ -16,10 +16,7 @@ pub async fn health_check(State(enclave): State<Arc<Enclave>>) -> Json<HealthChe
 
     let s3_configured = {
         match enclave.s3_logger() {
-            Ok(logger) => match test_s3_connectivity(&logger).await {
-                Ok(_) => true,
-                Err(_) => false,
-            },
+            Ok(logger) => (test_s3_connectivity(logger).await).is_ok(),
             Err(_) => false,
         }
     };

@@ -16,9 +16,9 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::TxOut;
-use fastcrypto::hash::Blake2b256;
-use fastcrypto::hash::Digest;
-use fastcrypto::hash::HashFunction;
+use blake2::{Blake2b, Digest};
+use blake2::digest::consts::U32;
+
 use hpke::Deserializable;
 use hpke::HpkeError;
 use hpke::Serializable;
@@ -28,6 +28,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 pub type WithdrawID = String; // TODO: Placeholder
+pub type DigestBytes = [u8; 32];
 
 // ---------------------------------
 //    All requests and responses
@@ -167,7 +168,7 @@ pub struct EncryptedShare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ShareCommitment {
     pub id: ShareID,
-    pub digest: Digest<32>,
+    pub digest: DigestBytes,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -237,13 +238,13 @@ impl ShareCommitment {
         &self.id
     }
 
-    pub fn digest(&self) -> &Digest<32> {
+    pub fn digest(&self) -> &DigestBytes {
         &self.digest
     }
 }
 
-impl From<(ShareID, Digest<32>)> for ShareCommitment {
-    fn from((id, digest): (ShareID, Digest<32>)) -> ShareCommitment {
+impl From<(ShareID, DigestBytes)> for ShareCommitment {
+    fn from((id, digest): (ShareID, DigestBytes)) -> ShareCommitment {
         ShareCommitment { id, digest }
     }
 }
@@ -285,8 +286,8 @@ impl Clone for InitExternalRequestState {
 }
 
 impl InitExternalRequestState {
-    pub fn digest(&self) -> Digest<32> {
-        Blake2b256::digest(&self)
+    pub fn digest(&self) -> DigestBytes {
+        Blake2b::<U32>::digest(self).into()
     }
 }
 
@@ -297,7 +298,7 @@ impl InitExternalRequest {
         enclave_pub_key: &EncPubKey,
         state: InitExternalRequestState,
     ) -> Result<Self, GuardianError> {
-        let state_hash = state.digest().digest;
+        let state_hash = state.digest();
         let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash))?;
         Ok(InitExternalRequest {
             encrypted_share,

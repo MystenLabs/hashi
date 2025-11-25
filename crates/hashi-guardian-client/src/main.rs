@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     // Check for --strict flag
     let strict = args.iter().any(|arg| arg == "--strict");
 
-    info!("🔍 Connecting to server at: {}", base_url);
+    info!("Connecting to server at: {}", base_url);
     if strict {
         info!("   Mode: STRICT (requires real enclave attestation)");
     } else {
@@ -78,7 +78,7 @@ async fn configure_s3(
     base_url: &str,
     share_commitments: Option<Vec<ShareCommitment>>,
 ) -> Result<()> {
-    info!("📤 Configuring S3...");
+    info!("Configuring S3...");
     let share_commitments = share_commitments.unwrap_or(gen_dummy_share_data()?.1);
 
     let s3_config_request = InitInternalRequest {
@@ -104,13 +104,13 @@ async fn configure_s3(
         .context("Failed to send S3 configuration")?;
 
     if response.status().is_success() {
-        info!("✅ S3 configuration sent successfully!");
+        info!("S3 configuration sent successfully!");
         let body = response.text().await?;
         info!("   Response: {}", body);
     } else {
         let status = response.status();
         let error_body = response.text().await?;
-        warn!("❌ Failed to configure S3: {} - {}", status, error_body);
+        warn!("Failed to configure S3: {} - {}", status, error_body);
     }
 
     Ok(())
@@ -118,7 +118,7 @@ async fn configure_s3(
 
 /// Setup a new Bitcoin key by generating key provisioner keys and requesting key shares
 async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitment>)> {
-    info!("🔑 Setting up new key...");
+    info!("Setting up new key...");
 
     // Generate key provisioner encryption keys
     let mut rng = rand::thread_rng();
@@ -134,7 +134,7 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitm
 
     let request: SetupNewKeyRequest = kp_public_keys.into();
 
-    info!("📤 Sending setup request to server...");
+    info!("Sending setup request to server...");
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{}/setup_new_key", base_url))
@@ -150,16 +150,16 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitm
             .context("Failed to parse setup response")?;
 
         info!(
-            "✅ Received {} encrypted shares",
+            "Received {} encrypted shares",
             setup_response.encrypted_shares.len()
         );
         info!(
-            "✅ Received {} share commitments",
+            "Received {} share commitments",
             setup_response.share_commitments.len()
         );
 
         // Decrypt the shares with the KP private keys
-        info!("🔓 Decrypting shares...");
+        info!("Decrypting shares...");
         let mut decrypted_shares = vec![];
 
         for (i, encrypted_share) in setup_response.encrypted_shares.iter().enumerate() {
@@ -169,26 +169,26 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitm
             decrypted_shares.push(share);
         }
 
-        info!("✅ Decrypted {} shares", decrypted_shares.len());
-        info!("\n💡 In production:");
+        info!("Decrypted {} shares", decrypted_shares.len());
+        info!("\nIn production:");
         info!("   - Each key provisioner stores their share securely");
         info!("   - Share commitments are used to configure the enclave");
 
-        return Ok((decrypted_shares, setup_response.share_commitments));
+        Ok((decrypted_shares, setup_response.share_commitments))
     } else {
         let status = response.status();
         let error_body = response.text().await?;
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "Failed to setup new key: {} - {}",
             status,
             error_body
-        ));
+        ))
     }
 }
 
 /// Health check - get server status and encryption key
 async fn health_check(base_url: &str) -> Result<HealthCheckResponse> {
-    info!("🏯 Checking server health...");
+    info!("Checking server health...");
 
     let client = reqwest::Client::new();
     let response = client
@@ -203,7 +203,7 @@ async fn health_check(base_url: &str) -> Result<HealthCheckResponse> {
             .await
             .context("Failed to parse health check response")?;
 
-        info!("✅ Server is healthy");
+        info!("Server is healthy");
         info!("   S3 configured: {}", health_response.s3_configured);
         info!("   Initialized: {}", health_response.btc_key_configured);
         info!(
@@ -228,7 +228,7 @@ async fn health_check(base_url: &str) -> Result<HealthCheckResponse> {
 
 /// Get attestation document from enclave
 async fn get_attestation(base_url: &str) -> Result<GetAttestationResponse> {
-    info!("📜 Getting attestation document...");
+    info!("Getting attestation document...");
 
     let client = reqwest::Client::new();
     let response = client
@@ -243,7 +243,7 @@ async fn get_attestation(base_url: &str) -> Result<GetAttestationResponse> {
             .await
             .context("Failed to parse attestation response")?;
 
-        info!("✅ Received attestation document");
+        info!("Received attestation document");
         info!("   Length: {} characters", attestation.attestation.len());
         info!(
             "   Attestation (hex): {}...",
@@ -264,18 +264,18 @@ async fn get_attestation(base_url: &str) -> Result<GetAttestationResponse> {
 
 /// Get enclave encryption key - tries attestation first (strict), falls back to health_check
 async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
-    info!("🔑 Getting enclave encryption key...");
+    info!("Getting enclave encryption key...");
 
     // Try attestation first
-    info!("📜 Trying attestation endpoint...");
+    info!("Trying attestation endpoint...");
     let attestation_result = get_attestation(base_url).await;
 
     match attestation_result {
         Ok(_attestation) => {
             // TODO: Extract encryption key from attestation user_data
             // For now, need to parse the attestation document to get the user_data
-            warn!("⚠️  TODO: Extract encryption key from attestation user_data");
-            warn!("⚠️  Falling back to health_check endpoint...");
+            warn!("TODO: Extract encryption key from attestation user_data");
+            warn!("Falling back to health_check endpoint...");
 
             // Fall through to health_check
         }
@@ -285,7 +285,7 @@ async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
                     "Attestation required in strict mode, but attestation endpoint failed"
                 ));
             }
-            info!("🔄 Attestation not available, using health_check endpoint...");
+            info!("Attestation not available, using health_check endpoint...");
         }
     }
 
@@ -298,12 +298,12 @@ async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
             .map_err(|e| anyhow::anyhow!("Failed to parse enclave encryption public key: {}", e))?;
 
         info!(
-            "✅ Retrieved enclave encryption public key ({} bytes)",
+            "Retrieved enclave encryption public key ({} bytes)",
             enc_pk_bytes.len()
         );
         if !strict {
-            warn!("\n⚠️  Note: Using health_check endpoint for development.");
-            warn!("⚠️  In production, use --strict flag to require attestation verification!");
+            warn!("\nNote: Using health_check endpoint for development.");
+            warn!("In production, use --strict flag to require attestation verification!");
         }
         Ok(enc_pk)
     } else {
@@ -320,24 +320,23 @@ async fn init_enclave(
     enclave_pub_key: &EncPubKey,
     shares: Vec<MyShare>,
 ) -> Result<()> {
-    info!("🚀 Initializing enclave with {} shares...", shares.len());
+    info!("Initializing enclave with {} shares...", shares.len());
 
     // Create init state
     let init_state = mock_init_external_state();
 
-    info!("📦 Initialization config: {:?}", init_state);
+    info!("Initialization config: {:?}", init_state);
 
     let client = reqwest::Client::new();
     assert!(shares.len() >= THRESHOLD);
 
     info!(
-        "📤 Sending {} shares (threshold) to enclave...\n",
+        "Sending {} shares (threshold) to enclave...\n",
         THRESHOLD
     );
 
-    for i in 0..THRESHOLD.min(shares.len()) {
-        let share = &shares[i];
-        info!("🔑 Processing share {} of {}...", i + 1, THRESHOLD);
+    for (i, share) in shares.iter().enumerate().take(THRESHOLD.min(shares.len())) {
+        info!("Processing share {} of {}...", i + 1, THRESHOLD);
 
         // Encrypt with the enclave's public key
         info!("   Encrypting share for enclave...");
@@ -353,9 +352,9 @@ async fn init_enclave(
             .context("Failed to send init request")?;
 
         if response.status().is_success() {
-            info!("✅ Share {} accepted by enclave\n", i + 1);
+            info!("Share {} accepted by enclave\n", i + 1);
             if i + 1 >= THRESHOLD {
-                info!("🎉 Threshold reached! Enclave should now be initialized!");
+                info!("Threshold reached! Enclave should now be initialized!");
             }
         } else {
             let status = response.status();
@@ -374,7 +373,7 @@ async fn init_enclave(
 
 /// Initialize enclave with dummy test key (for testing)
 async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
-    info!("🚀 Initializing with test key...\n");
+    info!("Initializing with test key...\n");
 
     // Step 1: Get enclave encryption key
     info!("Step 1: Get enclave encryption key");
@@ -384,8 +383,8 @@ async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
     // Step 2: Generate dummy shares
     info!("Step 2: Generate dummy test shares locally");
     info!("{}\n", "=".repeat(50));
-    info!("🧪 Creating dummy shares from test secret [1u8; 32]...");
-    info!("⚠️  Note: NOT FOR PRODUCTION!");
+    info!("Creating dummy shares from test secret [1u8; 32]...");
+    info!("Note: NOT FOR PRODUCTION!");
     let (shares, commitments) = test_utils::gen_dummy_share_data().unwrap();
     for d in &commitments {
         info!("Share {} Digest {}", d.id, d.digest);
@@ -400,14 +399,14 @@ async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
     info!("{}\n", "=".repeat(50));
     init_enclave(base_url, &enclave_pub_key, shares).await?;
 
-    info!("\n🎊 Initialization with test key complete!");
+    info!("\nInitialization with test key complete!");
     Ok(())
 }
 
 /// Initialize enclave with freshly generated key
 /// Full E2E flow: setup_new_key + configure_s3 + get_enclave_key + init
 async fn init_with_new_key(base_url: &str, strict: bool) -> Result<()> {
-    info!("🚀 Initializing with freshly generated key...\n");
+    info!("Initializing with freshly generated key...\n");
 
     info!("Step 1: Setup new key");
     info!("{}\n", "=".repeat(50));
@@ -425,6 +424,6 @@ async fn init_with_new_key(base_url: &str, strict: bool) -> Result<()> {
     info!("{}\n", "=".repeat(50));
     init_enclave(base_url, &enclave_pub_key, shares).await?;
 
-    info!("🎊 Initialization with new key complete!");
+    info!("Initialization with new key complete!");
     Ok(())
 }

@@ -68,8 +68,7 @@ pub fn gen_dummy_share_data() -> GuardianResult<(Vec<MyShare>, Vec<ShareCommitme
     let k256_sk = SecretKey::from_bytes(&sk.secret_bytes().into())
         .map_err(|e| GuardianError::GenericError(format!("Failed to convert key: {}", e)))?;
     let shares = k256_secret_key_to_shares(k256_sk)?;
-    let share_commitments: Result<Vec<_>, _> =
-        shares.iter().map(|share| commit_share(share)).collect();
+    let share_commitments: Result<Vec<_>, _> = shares.iter().map(commit_share).collect();
     Ok((shares, share_commitments?))
 }
 

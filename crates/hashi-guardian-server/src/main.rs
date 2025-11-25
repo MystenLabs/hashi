@@ -5,9 +5,7 @@ use axum::Router;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
 use bitcoin::Network;
-use fastcrypto::ed25519::Ed25519KeyPair;
-use fastcrypto::hash::Digest;
-use fastcrypto::traits::KeyPair;
+use ed25519_consensus::SigningKey;
 use governor::clock::DefaultClock;
 use governor::state::InMemoryState;
 use governor::state::NotKeyed;
@@ -90,11 +88,11 @@ pub struct Scratchpad {
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in InitExternalRequest
-    pub state_hash: OnceLock<Digest<32>>,
+    pub state_hash: OnceLock<DigestBytes>,
 }
 
 pub struct EphemeralKeyPairs {
-    pub signing_keys: Ed25519KeyPair,
+    pub signing_keys: SigningKey,
     pub encryption_keys: EncKeyPair,
 }
 
@@ -115,7 +113,7 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<NonZeroU32>().ok());
     info!("Max spend per hour: {:?} satoshi's", max_per_hour);
 
-    let signing_keys = Ed25519KeyPair::generate(&mut rand::thread_rng());
+    let signing_keys = SigningKey::new(rand::thread_rng());
     let encryption_keys = X25519HkdfSha256::gen_keypair(&mut rand::thread_rng()).into();
     let enclave = Arc::new(Enclave::new(
         signing_keys,
@@ -155,7 +153,7 @@ async fn main() -> Result<()> {
 
 impl EnclaveConfig {
     pub fn new(
-        signing_keys: Ed25519KeyPair,
+        signing_keys: SigningKey,
         encryption_keys: EncKeyPair,
         bitcoin_network: Option<Network>,
         max_per_hour: Option<NonZeroU32>,
@@ -184,7 +182,7 @@ impl Enclave {
 
     /// Create a new Enclave. Setting None to network leads to Regtest
     pub fn new(
-        signing_keys: Ed25519KeyPair,
+        signing_keys: SigningKey,
         encryption_keys: EncKeyPair,
         bitcoin_network: Option<Network>,
         max_per_hour: Option<NonZeroU32>,
@@ -237,7 +235,7 @@ impl Enclave {
     }
 
     /// Get the enclave's signing keypair
-    pub fn signing_keypair(&self) -> &Ed25519KeyPair {
+    pub fn signing_keypair(&self) -> &SigningKey {
         &self.config.eph_keys.signing_keys
     }
 
@@ -363,11 +361,11 @@ impl Enclave {
             .map_err(|_| GenericError("Share commitments already set".into()))
     }
 
-    pub fn state_hash(&self) -> Option<&Digest<32>> {
+    pub fn state_hash(&self) -> Option<&DigestBytes> {
         self.scratchpad.state_hash.get()
     }
 
-    pub fn set_state_hash(&self, hash: Digest<32>) -> GuardianResult<()> {
+    pub fn set_state_hash(&self, hash: DigestBytes) -> GuardianResult<()> {
         self.scratchpad
             .state_hash
             .set(hash)
@@ -393,7 +391,7 @@ impl Enclave {
     /// * `min_delay` - Optional custom min_delay (defaults to 60 seconds)
     pub async fn create_for_test_with_min_delay(min_delay: Option<Duration>) -> Arc<Self> {
         let mut rng = rand::thread_rng();
-        let signing_keys = Ed25519KeyPair::generate(&mut rng);
+        let signing_keys = SigningKey::new(rand::thread_rng());
         let (enc_sk, enc_pk) = X25519HkdfSha256::gen_keypair(&mut rng);
         let encryption_keys = (enc_sk, enc_pk).into();
         let enclave = Arc::new(Enclave::new(
@@ -437,7 +435,7 @@ impl Enclave {
     /// Only sets up S3 logger, no bitcoin key or withdraw config
     pub async fn create_bare_for_test() -> Arc<Self> {
         let mut rng = rand::thread_rng();
-        let signing_keys = Ed25519KeyPair::generate(&mut rng);
+        let signing_keys = SigningKey::new(rand::thread_rng());
         let (enc_sk, enc_pk) = X25519HkdfSha256::gen_keypair(&mut rng);
         let encryption_keys = (enc_sk, enc_pk).into();
         let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, None, None));
