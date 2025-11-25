@@ -150,7 +150,7 @@ impl DkgManager {
         Ok(ComplainResponse { response })
     }
 
-    // TODO: Make dealer and party flows concurrent
+    // TODO: Consider making dealer and party flows concurrent
     pub async fn run(
         &mut self,
         p2p_channel: &impl crate::communication::P2PChannel,
