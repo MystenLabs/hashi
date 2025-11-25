@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+service DkgService {
+    // Send a dealer message to a party and receive their signature.
+    rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
+
+    // Retrieve a dealer's message from the certificate signers.
+    rpc RetrieveMessage (RetrieveMessageRequest) returns (RetrieveMessageResponse);
+
+    // Send a complaint about invalid shares and receive the correct shares.
+    rpc Complain (ComplainRequest) returns (ComplainResponse);
+}
+
+message SendMessageRequest {
+    // The BCS-serialized AVSS dealer message containing encrypted shares.
+    optional bytes message = 1;
+}
+
+message SendMessageResponse {
+    // The signature from the receiving validator.
+    optional ValidatorSignature signature = 1;
+}
+
+message RetrieveMessageRequest {
+    // The hex-encoded Sui address of the dealer whose message is requested.
+    optional string dealer = 1;
+}
+
+message RetrieveMessageResponse {
+    // The BCS-serialized AVSS dealer message.
+    optional bytes message = 1;
+}
+
+message ComplainRequest {
+    // The hex-encoded Sui address of the dealer who sent invalid shares.
+    optional string dealer = 1;
+
+    // The BCS-serialized complaint containing proof of invalid shares.
+    optional bytes complaint = 2;
+}
+
+message ComplainResponse {
+    // The BCS-serialized complaint response containing the correct shares.
+    optional bytes response = 1;
+}
+
+message ValidatorSignature {
+    // The hex-encoded Sui address of the validator who created this signature.
+    optional string validator = 1;
+
+    // The epoch in which this signature was created.
+    optional uint64 epoch = 2;
+
+    // The BLS12-381 signature (48 bytes).
+    optional bytes signature = 3;
+}
