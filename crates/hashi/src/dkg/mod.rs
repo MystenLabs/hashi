@@ -16,8 +16,9 @@ use sui_sdk_types::Address;
 pub use types::{
     AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgConfig, DkgError,
     DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash, MessageType,
-    OrderedBroadcastMessage, RetrieveMessageRequest, RetrieveMessageResponse, SendShareRequest,
-    SendShareResponse, SessionContext, SessionId, SighashType, SignatureBytes, ValidatorSignature,
+    OrderedBroadcastMessage, RetrieveMessageRequest, RetrieveMessageResponse, SendMessageRequest,
+    SendMessageResponse, SessionContext, SessionId, SighashType, SignatureBytes,
+    ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -38,7 +39,7 @@ pub struct DkgManager {
     // Mutable during a given session
     pub dealer_outputs: HashMap<Address, avss::PartialOutput>,
     pub dealer_messages: HashMap<Address, avss::Message>,
-    pub share_responses: HashMap<Address, SendShareResponse>,
+    pub message_responses: HashMap<Address, SendMessageResponse>,
     pub complaints: HashMap<Address, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
@@ -69,26 +70,26 @@ impl DkgManager {
             bls_committee,
             dealer_outputs: HashMap::new(),
             dealer_messages: HashMap::new(),
-            share_responses: HashMap::new(),
+            message_responses: HashMap::new(),
             complaints: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
         }
     }
 
-    /// RPC endpoint handler for `SendShareRequest`
-    pub fn handle_send_share_request(
+    /// RPC endpoint handler for `SendMessageRequest`
+    pub fn handle_send_message_request(
         &mut self,
         sender: Address,
-        request: &SendShareRequest,
-    ) -> DkgResult<SendShareResponse> {
+        request: &SendMessageRequest,
+    ) -> DkgResult<SendMessageResponse> {
         if let Some(existing_message) = self.dealer_messages.get(&sender) {
             let existing_hash =
                 compute_message_hash(&self.session_context, &sender, existing_message)?;
             let incoming_hash =
                 compute_message_hash(&self.session_context, &sender, &request.message)?;
             return if existing_hash == incoming_hash {
-                Ok(self.share_responses.get(&sender).unwrap().clone())
+                Ok(self.message_responses.get(&sender).unwrap().clone())
             } else {
                 Err(DkgError::InvalidMessage {
                     sender,
@@ -97,8 +98,8 @@ impl DkgManager {
             };
         }
         let signature = self.receive_dealer_message(&request.message, sender)?;
-        let response = SendShareResponse { signature };
-        self.share_responses.insert(sender, response.clone());
+        let response = SendMessageResponse { signature };
+        self.message_responses.insert(sender, response.clone());
         Ok(response)
     }
 
@@ -199,9 +200,9 @@ impl DkgManager {
         for validator_address in self.dkg_config.address_to_party_id.keys() {
             if validator_address != &self.address {
                 let response = match p2p_channel
-                    .send_share(
+                    .send_message(
                         validator_address,
-                        &SendShareRequest {
+                        &SendMessageRequest {
                             message: dealer_message.clone(),
                         },
                     )
@@ -752,11 +753,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for MockP2PChannel {
-        async fn send_share(
+        async fn send_message(
             &self,
             recipient: &Address,
-            request: &SendShareRequest,
-        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            request: &SendMessageRequest,
+        ) -> crate::communication::ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::SendFailed(format!(
@@ -765,7 +766,7 @@ mod tests {
                 ))
             })?;
             let response = manager
-                .handle_send_share_request(self.current_sender, request)
+                .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
                 })?;
@@ -963,11 +964,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for FailingP2PChannel {
-        async fn send_share(
+        async fn send_message(
             &self,
             _recipient: &Address,
-            _request: &SendShareRequest,
-        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            _request: &SendMessageRequest,
+        ) -> crate::communication::ChannelResult<SendMessageResponse> {
             Err(crate::communication::ChannelError::SendFailed(
                 self.error_message.clone(),
             ))
@@ -1010,11 +1011,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for SucceedingP2PChannel {
-        async fn send_share(
+        async fn send_message(
             &self,
             recipient: &Address,
-            request: &SendShareRequest,
-        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            request: &SendMessageRequest,
+        ) -> crate::communication::ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::SendFailed(format!(
@@ -1023,7 +1024,7 @@ mod tests {
                 ))
             })?;
             let response = manager
-                .handle_send_share_request(self.current_sender, request)
+                .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
                 })?;
@@ -1071,11 +1072,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
-        async fn send_share(
+        async fn send_message(
             &self,
             recipient: &Address,
-            request: &SendShareRequest,
-        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            request: &SendMessageRequest,
+        ) -> crate::communication::ChannelResult<SendMessageResponse> {
             let mut count = self.fail_count.lock().unwrap();
             if *count < self.max_failures {
                 *count += 1;
@@ -1092,7 +1093,7 @@ mod tests {
                     ))
                 })?;
                 let response = manager
-                    .handle_send_share_request(self.current_sender, request)
+                    .handle_send_message_request(self.current_sender, request)
                     .map_err(|e| {
                         crate::communication::ChannelError::SendFailed(format!(
                             "Handler failed: {}",
@@ -1136,11 +1137,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for PreCollectedP2PChannel {
-        async fn send_share(
+        async fn send_message(
             &self,
             _: &Address,
-            _: &SendShareRequest,
-        ) -> crate::communication::ChannelResult<SendShareResponse> {
+            _: &SendMessageRequest,
+        ) -> crate::communication::ChannelResult<SendMessageResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement send_share")
         }
 
@@ -4051,13 +4052,13 @@ mod tests {
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
 
         // Create a request as if dealer sent it to receiver
-        let request = SendShareRequest {
+        let request = SendMessageRequest {
             message: dealer_message.clone(),
         };
 
         // Receiver handles the request
         let response = receiver_manager
-            .handle_send_share_request(dealer_address, &request)
+            .handle_send_message_request(dealer_address, &request)
             .unwrap();
 
         // Verify we got a valid BLS signature from the receiver
@@ -5737,18 +5738,18 @@ mod tests {
             create_handle_send_share_test_setup(&mut rng);
 
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
-        let request = SendShareRequest {
+        let request = SendMessageRequest {
             message: dealer_message.clone(),
         };
 
         // First request
         let response1 = receiver_manager
-            .handle_send_share_request(dealer_address, &request)
+            .handle_send_message_request(dealer_address, &request)
             .unwrap();
 
         // Second request with same message - should return cached response
         let response2 = receiver_manager
-            .handle_send_share_request(dealer_address, &request)
+            .handle_send_message_request(dealer_address, &request)
             .unwrap();
 
         // Responses should be identical (same validator)
@@ -5764,24 +5765,24 @@ mod tests {
 
         // First message from dealer
         let dealer_message1 = dealer_manager.create_dealer_message(&mut rng).unwrap();
-        let request1 = SendShareRequest {
+        let request1 = SendMessageRequest {
             message: dealer_message1.clone(),
         };
 
         // Process first request successfully
         let response1 = receiver_manager
-            .handle_send_share_request(dealer_address, &request1)
+            .handle_send_message_request(dealer_address, &request1)
             .unwrap();
         assert_eq!(response1.signature.validator, receiver_manager.address);
 
         // Second DIFFERENT message from same dealer (equivocation)
         let dealer_message2 = dealer_manager.create_dealer_message(&mut rng).unwrap();
-        let request2 = SendShareRequest {
+        let request2 = SendMessageRequest {
             message: dealer_message2.clone(),
         };
 
         // Should return error
-        let result = receiver_manager.handle_send_share_request(dealer_address, &request2);
+        let result = receiver_manager.handle_send_message_request(dealer_address, &request2);
         assert!(result.is_err());
 
         match result.unwrap_err() {

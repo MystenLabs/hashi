@@ -2,7 +2,7 @@
 
 use crate::dkg::{
     ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendShareRequest, SendShareResponse,
+    SendMessageRequest, SendMessageResponse,
 };
 use async_trait::async_trait;
 use std::time::Duration;
@@ -32,11 +32,11 @@ pub enum ChannelError {
 // TODO: Implement authentication for receiver to verify caller
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
-    async fn send_share(
+    async fn send_message(
         &self,
         recipient: &Address,
-        request: &SendShareRequest,
-    ) -> ChannelResult<SendShareResponse>;
+        request: &SendMessageRequest,
+    ) -> ChannelResult<SendMessageResponse>;
 
     async fn retrieve_message(
         &self,

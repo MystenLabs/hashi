@@ -196,12 +196,12 @@ pub struct DkgOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendShareRequest {
+pub struct SendMessageRequest {
     pub message: avss::Message,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendShareResponse {
+pub struct SendMessageResponse {
     pub signature: ValidatorSignature,
 }
 
