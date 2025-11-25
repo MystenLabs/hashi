@@ -330,10 +330,7 @@ async fn init_enclave(
     let client = reqwest::Client::new();
     assert!(shares.len() >= THRESHOLD);
 
-    info!(
-        "Sending {} shares (threshold) to enclave...\n",
-        THRESHOLD
-    );
+    info!("Sending {} shares (threshold) to enclave...\n", THRESHOLD);
 
     for (i, share) in shares.iter().enumerate().take(THRESHOLD.min(shares.len())) {
         info!("Processing share {} of {}...", i + 1, THRESHOLD);
@@ -387,7 +384,7 @@ async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
     info!("Note: NOT FOR PRODUCTION!");
     let (shares, commitments) = test_utils::gen_dummy_share_data().unwrap();
     for d in &commitments {
-        info!("Share {} Digest {}", d.id, d.digest);
+        info!("Share {} Digest {:x?}", d.id, d.digest);
     }
 
     info!("Step 3: Configure S3");

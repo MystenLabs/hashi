@@ -37,10 +37,7 @@ pub async fn get_attestation(
     match response {
         NsmResponse::Attestation { document } => {
             driver::nsm_exit(fd);
-            info!(
-                "Attestation document generated ({} bytes)",
-                document.len()
-            );
+            info!("Attestation document generated ({} bytes)", document.len());
             info!("Sending attestation to client");
             Ok(Json(GetAttestationResponse {
                 attestation: hex::encode(document),

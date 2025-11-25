@@ -16,8 +16,9 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::TxOut;
-use blake2::{Blake2b, Digest};
 use blake2::digest::consts::U32;
+use blake2::Blake2b;
+use blake2::Digest;
 
 use hpke::Deserializable;
 use hpke::HpkeError;

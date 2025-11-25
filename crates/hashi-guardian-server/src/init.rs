@@ -3,8 +3,9 @@ use crate::Enclave;
 use crate::S3Logger;
 use axum::extract::State;
 use axum::Json;
-use blake2::{Blake2b, Digest};
 use blake2::digest::consts::U32;
+use blake2::Blake2b;
+use blake2::Digest;
 use hashi_guardian_shared::crypto::commit_share;
 use hashi_guardian_shared::crypto::decrypt_share;
 use hashi_guardian_shared::crypto::k256shares_to_secp_secret_key;
@@ -228,12 +229,9 @@ mod tests {
             // Re-encrypt the share for the enclave's encryption key
             let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();
             let state_digest = init_state.digest();
-            let new_encrypted_share = encrypt_share(
-                &share,
-                enclave.encryption_public_key(),
-                Some(&state_digest),
-            )
-            .unwrap();
+            let new_encrypted_share =
+                encrypt_share(&share, enclave.encryption_public_key(), Some(&state_digest))
+                    .unwrap();
 
             let request = InitExternalRequest {
                 encrypted_share: new_encrypted_share,
@@ -289,9 +287,6 @@ mod tests {
             }
         }
 
-        println!(
-            "Successfully initialized enclave with {} shares",
-            THRESHOLD
-        );
+        println!("Successfully initialized enclave with {} shares", THRESHOLD);
     }
 }

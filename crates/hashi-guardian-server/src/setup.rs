@@ -1,8 +1,8 @@
 use crate::GuardianError::GenericError;
 use crate::GuardianResult;
 use axum::Json;
-use blake2::{Blake2b, Digest}; // kept only for fingerprint logging
 use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest}; // kept only for fingerprint logging
 use hashi_guardian_shared::crypto::commit_share;
 use hashi_guardian_shared::crypto::encrypt_share;
 use hashi_guardian_shared::crypto::k256_secret_key_to_shares;
