@@ -1,4 +1,4 @@
-use crate::GuardianError::CryptoError;
+use crate::GuardianError::InternalError;
 use crate::GuardianResult;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
@@ -152,7 +152,7 @@ pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> Guardian
             aad.unwrap_or(&[0; 32]),
             &mut rand::thread_rng(),
         )
-        .map_err(|e| CryptoError(format!("Failed to encrypt: {}", e)))?;
+        .map_err(|e| InternalError(format!("Failed to encrypt: {}", e)))?;
     Ok((encapsulated_key, aes_ciphertext).into())
 }
 
@@ -161,9 +161,9 @@ pub fn decrypt(
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Vec<u8>> {
-    let (encapsulated_key, aes_ciphertext) = ciphertext
-        .try_into()
-        .map_err(|e: HpkeError| CryptoError(format!("Failed to deserialize ciphertext: {}", e)))?;
+    let (encapsulated_key, aes_ciphertext) = ciphertext.try_into().map_err(|e: HpkeError| {
+        InternalError(format!("Failed to deserialize ciphertext: {}", e))
+    })?;
     let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
         &hpke::OpModeR::Base,
         sk,
@@ -172,7 +172,7 @@ pub fn decrypt(
         aes_ciphertext,
         aad.unwrap_or(&[0; 32]),
     )
-    .map_err(|e| CryptoError(format!("Failed to decrypt: {}", e)))?;
+    .map_err(|e| InternalError(format!("Failed to decrypt: {}", e)))?;
     Ok(decrypted)
 }
 
@@ -186,7 +186,7 @@ pub fn split_secret(sk: &k256::SecretKey) -> GuardianResult<Vec<MyShare>> {
     let shared_secret = IdentifierPrimeField(*nzs.as_ref());
     let shares =
         shamir::split_secret::<MyShare>(THRESHOLD, LIMIT, &shared_secret, &mut rand::thread_rng())
-            .map_err(|e| CryptoError(format!("Failed to split secret: {}", e)))?;
+            .map_err(|e| InternalError(format!("Failed to split secret: {}", e)))?;
     Ok(shares)
 }
 
@@ -194,7 +194,7 @@ pub fn split_secret(sk: &k256::SecretKey) -> GuardianResult<Vec<MyShare>> {
 pub fn combine_shares(shares: &[MyShare]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
     let result = shares
         .combine()
-        .map_err(|e| CryptoError(format!("Failed to combine share: {}", e)))?;
+        .map_err(|e| InternalError(format!("Failed to combine share: {}", e)))?;
 
     // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
     //       use the same representation to store bytes (big-endian). We are juggling between two
@@ -202,7 +202,7 @@ pub fn combine_shares(shares: &[MyShare]) -> GuardianResult<bitcoin::secp256k1::
     //       that bitcoin lib does not implement.
     let sk = result.to_bytes();
     let secp_sk = bitcoin::secp256k1::SecretKey::from_slice(&sk)
-        .map_err(|e| CryptoError(format!("Failed to cast combined secret key: {}", e)))?;
+        .map_err(|e| InternalError(format!("Failed to cast combined secret key: {}", e)))?;
     Ok(secp_sk)
 }
 
@@ -211,7 +211,7 @@ pub fn commit_share(share: &MyShare) -> GuardianResult<ShareCommitment> {
     let share_id = share.identifier;
     let share_value = share.value;
     let bytes = bincode::serialize(&share_value)
-        .map_err(|e| CryptoError(format!("Failed to serialize share value: {}", e)))?;
+        .map_err(|e| InternalError(format!("Failed to serialize share value: {}", e)))?;
     Ok((share_id, Blake2b::<U32>::digest(&bytes).into()).into())
 }
 
@@ -224,7 +224,7 @@ pub fn encrypt_share(
     let share_id = share.identifier;
     let share_value = share.value;
     let bytes = bincode::serialize(&share_value)
-        .map_err(|e| CryptoError(format!("Failed to serialize share value: {}", e)))?;
+        .map_err(|e| InternalError(format!("Failed to serialize share value: {}", e)))?;
     let ciphertext = encrypt(&bytes, pk, aad)?;
     Ok((share_id, ciphertext).into())
 }
@@ -238,7 +238,7 @@ pub fn decrypt_share(
     let share_id = *encrypted_share.id();
     let serialized_share = decrypt(encrypted_share.ciphertext(), sk, aad)?;
     let share_value: ShareValue = bincode::deserialize(&serialized_share)
-        .map_err(|e| CryptoError(format!("Failed to deserialize share value: {}", e)))?;
+        .map_err(|e| InternalError(format!("Failed to deserialize share value: {}", e)))?;
     Ok(MyShare::with_identifier_and_value(share_id, share_value))
 }
 

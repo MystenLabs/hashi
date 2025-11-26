@@ -7,9 +7,8 @@ use tracing::error;
 
 #[derive(Debug, PartialEq)]
 pub enum GuardianError {
-    GenericError(String),
-    Forbidden(String),
-    CryptoError(String),
+    OpaqueError(String),
+    InternalError(String),
 }
 
 pub type GuardianResult<T> = Result<T, GuardianError>;
@@ -17,9 +16,8 @@ pub type GuardianResult<T> = Result<T, GuardianError>;
 impl std::fmt::Display for GuardianError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GuardianError::GenericError(e) => write!(f, "Error: {}", e),
-            GuardianError::Forbidden(e) => write!(f, "Forbidden: {}", e),
-            GuardianError::CryptoError(e) => write!(f, "CryptoError: {}", e),
+            GuardianError::OpaqueError(e) => write!(f, "GenericError: {}", e),
+            GuardianError::InternalError(e) => write!(f, "InternalError: {}", e),
         }
     }
 }
@@ -30,9 +28,8 @@ impl std::error::Error for GuardianError {}
 impl IntoResponse for GuardianError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            GuardianError::GenericError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            GuardianError::Forbidden(e) => (StatusCode::FORBIDDEN, e),
-            GuardianError::CryptoError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            GuardianError::OpaqueError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            GuardianError::InternalError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
         };
         error!("Status: {}, Message: {}", status, error_message);
         let body = Json(json!({
