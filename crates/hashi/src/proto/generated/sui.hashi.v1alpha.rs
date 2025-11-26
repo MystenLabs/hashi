@@ -339,9 +339,9 @@ pub mod bridge_service_server {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageRequest {
-    /// The BCS-serialized AVSS dealer message containing encrypted shares.
-    #[prost(bytes = "bytes", optional, tag = "1")]
-    pub message: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The AVSS dealer message containing encrypted shares.
+    #[prost(message, optional, tag = "1")]
+    pub message: ::core::option::Option<Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageResponse {
@@ -357,24 +357,24 @@ pub struct RetrieveMessageRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RetrieveMessageResponse {
-    /// The BCS-serialized AVSS dealer message.
-    #[prost(bytes = "bytes", optional, tag = "1")]
-    pub message: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The AVSS dealer message.
+    #[prost(message, optional, tag = "1")]
+    pub message: ::core::option::Option<Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainRequest {
     /// The hex-encoded Sui address of the dealer who sent invalid shares.
     #[prost(string, optional, tag = "1")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-    /// The BCS-serialized complaint containing proof of invalid shares.
-    #[prost(bytes = "bytes", optional, tag = "2")]
-    pub complaint: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The complaint containing proof of invalid shares.
+    #[prost(message, optional, tag = "2")]
+    pub complaint: ::core::option::Option<Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainResponse {
-    /// The BCS-serialized complaint response containing the correct shares.
-    #[prost(bytes = "bytes", optional, tag = "1")]
-    pub response: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The complaint response containing the correct shares.
+    #[prost(message, optional, tag = "1")]
+    pub response: ::core::option::Option<Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ValidatorSignature {
@@ -387,6 +387,16 @@ pub struct ValidatorSignature {
     /// The BLS12-381 signature.
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// A BCS-serialized value with its type name.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Bcs {
+    /// Name that identifies the type of the serialized value.
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    /// Bytes of a BCS serialized value.
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub value: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Generated client implementations.
 pub mod dkg_service_client {

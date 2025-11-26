@@ -14,8 +14,8 @@ service DkgService {
 }
 
 message SendMessageRequest {
-  // The BCS-serialized AVSS dealer message containing encrypted shares.
-  optional bytes message = 1;
+  // The AVSS dealer message containing encrypted shares.
+  optional Bcs message = 1;
 }
 
 message SendMessageResponse {
@@ -29,21 +29,21 @@ message RetrieveMessageRequest {
 }
 
 message RetrieveMessageResponse {
-  // The BCS-serialized AVSS dealer message.
-  optional bytes message = 1;
+  // The AVSS dealer message.
+  optional Bcs message = 1;
 }
 
 message ComplainRequest {
   // The hex-encoded Sui address of the dealer who sent invalid shares.
   optional string dealer = 1;
 
-  // The BCS-serialized complaint containing proof of invalid shares.
-  optional bytes complaint = 2;
+  // The complaint containing proof of invalid shares.
+  optional Bcs complaint = 2;
 }
 
 message ComplainResponse {
-  // The BCS-serialized complaint response containing the correct shares.
-  optional bytes response = 1;
+  // The complaint response containing the correct shares.
+  optional Bcs response = 1;
 }
 
 message ValidatorSignature {
@@ -55,4 +55,13 @@ message ValidatorSignature {
 
   // The BLS12-381 signature.
   optional bytes signature = 3;
+}
+
+// A BCS-serialized value with its type name.
+message Bcs {
+  // Name that identifies the type of the serialized value.
+  optional string name = 1;
+
+  // Bytes of a BCS serialized value.
+  optional bytes value = 2;
 }
