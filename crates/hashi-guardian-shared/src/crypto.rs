@@ -1,23 +1,17 @@
 use crate::GuardianError::InternalError;
 use crate::GuardianResult;
-use blake2::digest::consts::U32;
-use blake2::Blake2b;
-use blake2::Digest;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Deserializable;
-use hpke::HpkeError;
 use hpke::Kem;
 use hpke::Serializable;
-use k256::Scalar;
+use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::{Field, PrimeField};
+use k256::{FieldBytes, ProjectivePoint, Scalar};
+use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
 use serde::Serialize;
-use vsss_rs::shamir;
-use vsss_rs::DefaultShare;
-use vsss_rs::IdentifierPrimeField;
-use vsss_rs::ReadableShareSet;
-use vsss_rs::Share;
 
 // ---------------------------------
 //      Crypto Structs & Types
@@ -31,12 +25,16 @@ pub struct EncKeyPair {
 }
 pub type EncapsulatedKey = <X25519HkdfSha256 as Kem>::EncappedKey;
 
-pub type K256ShareBase = IdentifierPrimeField<Scalar>;
-pub type ShareID = K256ShareBase;
-pub type ShareValue = K256ShareBase;
-pub type MyShare = DefaultShare<ShareID, ShareValue>;
+pub type ShareID = u32; // Share IDs are assigned from 1, e.g., 1, 2, 3 and so on.
+
+#[derive(Clone)]
+pub struct Share {
+    identifier: ShareID,
+    value: Scalar,
+}
 
 // Secret sharing constants: threshold and total number of key provisioners
+// TODO: How to rotate committee / change the below config?
 pub const THRESHOLD: usize = 3;
 pub const LIMIT: usize = 5;
 
@@ -52,7 +50,7 @@ pub struct ShareCommitment {
     pub digest: DigestBytes,
 }
 
-pub type DigestBytes = [u8; 32];
+pub type DigestBytes = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Ciphertext {
@@ -65,8 +63,15 @@ pub struct Ciphertext {
 // ---------------------------------
 
 impl EncKeyPair {
-    pub fn random() -> Self {
-        let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rand::thread_rng());
+    pub fn new(enc_sk: EncSecKey, enc_pk: EncPubKey) -> Self {
+        Self {
+            sk: enc_sk,
+            pk: enc_pk,
+        }
+    }
+
+    pub fn random<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
+        let (sk, pk) = X25519HkdfSha256::gen_keypair(rng);
         Self { sk, pk }
     }
 
@@ -78,17 +83,8 @@ impl EncKeyPair {
     }
 }
 
-impl From<(EncSecKey, EncPubKey)> for EncKeyPair {
-    fn from((enc_sk, enc_pk): (EncSecKey, EncPubKey)) -> Self {
-        EncKeyPair {
-            sk: enc_sk,
-            pk: enc_pk,
-        }
-    }
-}
-
-impl From<(EncapsulatedKey, Vec<u8>)> for Ciphertext {
-    fn from((encapsulated_key, aes_ciphertext): (EncapsulatedKey, Vec<u8>)) -> Self {
+impl Ciphertext {
+    pub fn new(encapsulated_key: EncapsulatedKey, aes_ciphertext: Vec<u8>) -> Self {
         Ciphertext {
             encapsulated_key: encapsulated_key.to_bytes().to_vec(),
             aes_ciphertext,
@@ -96,29 +92,17 @@ impl From<(EncapsulatedKey, Vec<u8>)> for Ciphertext {
     }
 }
 
-impl<'a> TryFrom<&'a Ciphertext> for (EncapsulatedKey, &'a [u8]) {
-    type Error = HpkeError;
-    fn try_from(value: &'a Ciphertext) -> Result<Self, Self::Error> {
-        Ok((
-            EncapsulatedKey::from_bytes(&value.encapsulated_key)?,
-            &value.aes_ciphertext,
-        ))
-    }
-}
-
 impl ShareCommitment {
+    pub fn new(id: ShareID, digest: DigestBytes) -> Self {
+        Self { id, digest }
+    }
+
     pub fn id(&self) -> &ShareID {
         &self.id
     }
 
     pub fn digest(&self) -> &DigestBytes {
         &self.digest
-    }
-}
-
-impl From<(ShareID, DigestBytes)> for ShareCommitment {
-    fn from((id, digest): (ShareID, DigestBytes)) -> ShareCommitment {
-        ShareCommitment { id, digest }
     }
 }
 
@@ -138,6 +122,20 @@ impl From<(ShareID, Ciphertext)> for EncryptedShare {
     }
 }
 
+impl Share {
+    pub fn new(identifier: ShareID, value: Scalar) -> Self {
+        Self { identifier, value }
+    }
+
+    pub fn id(&self) -> ShareID {
+        self.identifier
+    }
+
+    pub fn value(&self) -> &Scalar {
+        &self.value
+    }
+}
+
 // ---------------------------------
 //    Encryption/Decryption utils
 // ---------------------------------
@@ -153,7 +151,7 @@ pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> Guardian
             &mut rand::thread_rng(),
         )
         .map_err(|e| InternalError(format!("Failed to encrypt: {}", e)))?;
-    Ok((encapsulated_key, aes_ciphertext).into())
+    Ok(Ciphertext::new(encapsulated_key, aes_ciphertext))
 }
 
 pub fn decrypt(
@@ -161,15 +159,14 @@ pub fn decrypt(
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Vec<u8>> {
-    let (encapsulated_key, aes_ciphertext) = ciphertext.try_into().map_err(|e: HpkeError| {
-        InternalError(format!("Failed to deserialize ciphertext: {}", e))
-    })?;
+    let encapsulated_key = EncapsulatedKey::from_bytes(&ciphertext.encapsulated_key)
+        .map_err(|e| InternalError(format!("Failed to deserialize encapsulated key: {}", e)))?;
     let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
         &hpke::OpModeR::Base,
         sk,
         &encapsulated_key,
         &[],
-        aes_ciphertext,
+        &ciphertext.aes_ciphertext,
         aad.unwrap_or(&[0; 32]),
     )
     .map_err(|e| InternalError(format!("Failed to decrypt: {}", e)))?;
@@ -181,50 +178,98 @@ pub fn decrypt(
 // ---------------------------------
 
 /// Split a k256 SecretKey into shares using Shamir's secret sharing
-pub fn split_secret(sk: &k256::SecretKey) -> GuardianResult<Vec<MyShare>> {
-    let nzs = sk.to_nonzero_scalar();
-    let shared_secret = IdentifierPrimeField(*nzs.as_ref());
-    let shares =
-        shamir::split_secret::<MyShare>(THRESHOLD, LIMIT, &shared_secret, &mut rand::thread_rng())
-            .map_err(|e| InternalError(format!("Failed to split secret: {}", e)))?;
-    Ok(shares)
+pub fn split_secret(sk: &k256::SecretKey) -> Vec<Share> {
+    let secret = *sk.to_nonzero_scalar().as_ref();
+    let mut coefficients = vec![secret];
+    for _ in 0..(THRESHOLD - 1) {
+        coefficients.push(Scalar::random(&mut rand::thread_rng()))
+    }
+
+    // Evaluate
+    (1..=LIMIT as u32)
+        .map(|i| Share {
+            identifier: i,
+            value: eval(i, &coefficients),
+        })
+        .collect()
 }
 
-/// Combine shares back into a bitcoin secp256k1 SecretKey
-pub fn combine_shares(shares: &[MyShare]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
-    let result = shares
-        .combine()
-        .map_err(|e| InternalError(format!("Failed to combine share: {}", e)))?;
+// Coefficients: [c0, c1, c2, c3]
+// Returns: c0 + c1 * x + c2 * x^2 + c3 * x^3
+pub fn eval(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
+    let x = Scalar::from(pos);
+    let mut out = Scalar::ZERO;
+    let mut xpow = Scalar::ONE;
+    for c in coefficients {
+        out = out.add(&c.mul(&xpow));
+        xpow = xpow.mul(&x);
+    }
+    out
+}
+
+pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
+    // Validation (check no duplicates)
+    let mut seen_ids = std::collections::HashSet::new();
+    for share in shares {
+        if !seen_ids.insert(share.identifier) {
+            return Err(InternalError("Duplicate share ID".into()));
+        }
+    }
+
+    let ids = shares
+        .iter()
+        .map(|s| Scalar::from(s.identifier))
+        .collect::<Vec<_>>();
+    let mut result = Scalar::ZERO;
+    for share in shares {
+        let cur_share_id = Scalar::from(share.identifier);
+        let numerator: Scalar = ids
+            .iter()
+            .filter(|&id| cur_share_id != *id)
+            .map(|id| id.negate())
+            .product();
+        let denominator: Scalar = ids
+            .iter()
+            .filter(|&id| cur_share_id != *id)
+            .map(|id| cur_share_id.sub(id))
+            .product();
+
+        // Lagrange basis polynomial evaluated at x=0
+        // L_i(0) = product_{j != i} (-x_j) / (x_i - x_j)
+        let lagrange_basis = numerator.mul(
+            &denominator
+                .invert()
+                .expect("Denominator is never zero because share IDs are unique"),
+        );
+        result = result.add(&share.value.mul(&lagrange_basis));
+    }
 
     // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
     //       use the same representation to store bytes (big-endian). We are juggling between two
     //       libraries because the secret-sharing lib expects RustCrypto traits
     //       that bitcoin lib does not implement.
-    let sk = result.to_bytes();
-    let secp_sk = bitcoin::secp256k1::SecretKey::from_slice(&sk)
-        .map_err(|e| InternalError(format!("Failed to cast combined secret key: {}", e)))?;
-    Ok(secp_sk)
+    bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
+        .map_err(|e| InternalError(format!("Failed to cast to secret key: {}", e)))
 }
 
 /// Create a commitment (hash) for a share
-pub fn commit_share(share: &MyShare) -> GuardianResult<ShareCommitment> {
-    let share_id = share.identifier;
-    let share_value = share.value;
-    let bytes = bincode::serialize(&share_value)
-        .map_err(|e| InternalError(format!("Failed to serialize share value: {}", e)))?;
-    Ok((share_id, Blake2b::<U32>::digest(&bytes).into()).into())
+pub fn commit_share(share: &Share) -> ShareCommitment {
+    let commitment = ProjectivePoint::GENERATOR * share.value;
+    ShareCommitment {
+        id: share.identifier,
+        digest: commitment.to_bytes().to_vec(),
+    }
 }
 
 /// Encrypt a share with optional AAD
 pub fn encrypt_share(
-    share: &MyShare,
+    share: &Share,
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<EncryptedShare> {
     let share_id = share.identifier;
     let share_value = share.value;
-    let bytes = bincode::serialize(&share_value)
-        .map_err(|e| InternalError(format!("Failed to serialize share value: {}", e)))?;
+    let bytes = share_value.to_bytes();
     let ciphertext = encrypt(&bytes, pk, aad)?;
     Ok((share_id, ciphertext).into())
 }
@@ -234,38 +279,33 @@ pub fn decrypt_share(
     encrypted_share: &EncryptedShare,
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
-) -> GuardianResult<MyShare> {
+) -> GuardianResult<Share> {
     let share_id = *encrypted_share.id();
     let serialized_share = decrypt(encrypted_share.ciphertext(), sk, aad)?;
-    let share_value: ShareValue = bincode::deserialize(&serialized_share)
-        .map_err(|e| InternalError(format!("Failed to deserialize share value: {}", e)))?;
-    Ok(MyShare::with_identifier_and_value(share_id, share_value))
+
+    let result: Option<Scalar> =
+        Scalar::from_repr(*FieldBytes::from_slice(&serialized_share)).into();
+    match result {
+        Some(x) => Ok(Share {
+            identifier: share_id,
+            value: x,
+        }),
+        None => Err(InternalError("Failed to deserialize share".into())),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use k256::SecretKey;
-    use vsss_rs::ReadableShareSet;
 
     #[test]
     fn test_encrypt_and_decrypt() {
         let bytes = b"Let's encrypt some stuff!";
-        let keypair = EncKeyPair::random();
+        let keypair = EncKeyPair::random(&mut rand::thread_rng());
         let ciphertext = encrypt(bytes, keypair.public(), None).unwrap();
         let decrypted_plaintext = decrypt(&ciphertext, keypair.secret(), None).unwrap();
         assert_eq!(bytes, &decrypted_plaintext[..]);
-    }
-
-    #[test]
-    fn basic_secret_sharing() {
-        let mut osrng = rand_core::OsRng;
-        let sk = SecretKey::random(&mut osrng);
-        let shares = split_secret(&sk).unwrap();
-        println!("{:?}", shares);
-        let res = shares.combine().unwrap();
-        let sk_dup = SecretKey::from_bytes(&res.to_bytes()).unwrap();
-        assert_eq!(sk_dup.to_bytes(), sk.to_bytes());
     }
 
     // Verify secret reconstruction with varying number of shares (0 to limit)
@@ -283,7 +323,7 @@ mod tests {
         let original_bytes = original_k256_sk.to_bytes();
 
         // Split the secret into shares
-        let shares = split_secret(&original_k256_sk).unwrap();
+        let shares = split_secret(&original_k256_sk);
 
         // Test reconstruction with varying numbers of shares from 0 to LIMIT
         for num_shares in 0..=LIMIT {
@@ -334,7 +374,7 @@ mod tests {
         let original_bytes = original_sk.to_bytes();
 
         // Generate all shares
-        let shares = split_secret(&original_sk).unwrap();
+        let shares = split_secret(&original_sk);
 
         // Test different combinations of THRESHOLD shares
         // Try shares [0,1,2], [1,2,3], [2,3,4], etc.
@@ -350,5 +390,45 @@ mod tests {
                 start_idx
             );
         }
+    }
+
+    // Test eval function with specific coefficients
+    #[test]
+    fn test_eval_polynomial() {
+        // Test with simple polynomial: f(x) = 1 + 2x + 3x^2
+        let coefficients = vec![Scalar::ONE, Scalar::from(2u32), Scalar::from(3u32)];
+
+        // f(1) = 1 + 2(1) + 3(1)^2 = 6
+        let result1 = eval(1, &coefficients);
+        assert_eq!(result1, Scalar::from(6u32));
+
+        // f(2) = 1 + 2(2) + 3(4) = 17
+        let result2 = eval(2, &coefficients);
+        assert_eq!(result2, Scalar::from(17u32));
+
+        // f(0) = 1 (constant term)
+        let result0 = eval(0, &coefficients);
+        assert_eq!(result0, Scalar::ONE);
+    }
+
+    // Test that combine_shares rejects shares with duplicate identifiers
+    #[test]
+    fn test_combine_shares_rejects_duplicate_ids() {
+        let mut osrng = rand_core::OsRng;
+        let sk = SecretKey::random(&mut osrng);
+        let shares = split_secret(&sk);
+
+        // Create a list with duplicate share IDs: [shares[0], shares[1], shares[0]]
+        let duplicate_shares = vec![shares[0].clone(), shares[1].clone(), shares[0].clone()];
+
+        let result = combine_shares(&duplicate_shares);
+        assert!(
+            result.is_err(),
+            "combine_shares should reject shares with duplicate IDs"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate share ID"));
     }
 }
