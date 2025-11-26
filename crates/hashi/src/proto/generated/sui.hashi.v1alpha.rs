@@ -388,16 +388,6 @@ pub struct ValidatorSignature {
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
-/// A BCS-serialized value with its type name.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Bcs {
-    /// Name that identifies the type of the serialized value.
-    #[prost(string, optional, tag = "1")]
-    pub name: ::core::option::Option<::prost::alloc::string::String>,
-    /// Bytes of a BCS serialized value.
-    #[prost(bytes = "bytes", optional, tag = "2")]
-    pub value: ::core::option::Option<::prost::bytes::Bytes>,
-}
 /// Generated client implementations.
 pub mod dkg_service_client {
     #![allow(
@@ -856,4 +846,14 @@ pub mod dkg_service_server {
     impl<T> tonic::server::NamedService for DkgServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
+}
+/// A BCS-serialized value with its type name.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Bcs {
+    /// Name that identifies the type of the serialized value.
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    /// Bytes of a BCS serialized value.
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub value: ::core::option::Option<::prost::bytes::Bytes>,
 }

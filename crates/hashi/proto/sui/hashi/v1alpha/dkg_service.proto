@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package sui.hashi.v1alpha;
 
+import "sui/hashi/v1alpha/types.proto";
+
 service DkgService {
   // Send a dealer message to a party and receive their signature.
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
@@ -55,13 +57,4 @@ message ValidatorSignature {
 
   // The BLS12-381 signature.
   optional bytes signature = 3;
-}
-
-// A BCS-serialized value with its type name.
-message Bcs {
-  // Name that identifies the type of the serialized value.
-  optional string name = 1;
-
-  // Bytes of a BCS serialized value.
-  optional bytes value = 2;
 }

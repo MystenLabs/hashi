@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+// A BCS-serialized value with its type name.
+message Bcs {
+  // Name that identifies the type of the serialized value.
+  optional string name = 1;
+
+  // Bytes of a BCS serialized value.
+  optional bytes value = 2;
+}
