@@ -32,7 +32,7 @@ pub enum ChannelError {
 // TODO: Implement authentication for receiver to verify caller
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
-    async fn send_message(
+    async fn send_dkg_message(
         &self,
         recipient: &Address,
         request: &SendMessageRequest,

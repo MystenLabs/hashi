@@ -200,7 +200,7 @@ impl DkgManager {
         for validator_address in self.dkg_config.address_to_party_id.keys() {
             if validator_address != &self.address {
                 let response = match p2p_channel
-                    .send_message(
+                    .send_dkg_message(
                         validator_address,
                         &SendMessageRequest {
                             message: dealer_message.clone(),
@@ -210,7 +210,7 @@ impl DkgManager {
                 {
                     Ok(resp) => resp,
                     Err(e) => {
-                        tracing::info!("Failed to send share to {:?}: {}", validator_address, e);
+                        tracing::info!("Failed to send message to {:?}: {}", validator_address, e);
                         continue;
                     }
                 };
@@ -753,7 +753,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for MockP2PChannel {
-        async fn send_message(
+        async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
@@ -964,7 +964,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for FailingP2PChannel {
-        async fn send_message(
+        async fn send_dkg_message(
             &self,
             _recipient: &Address,
             _request: &SendMessageRequest,
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for SucceedingP2PChannel {
-        async fn send_message(
+        async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
@@ -1072,7 +1072,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
-        async fn send_message(
+        async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
@@ -1137,12 +1137,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::P2PChannel for PreCollectedP2PChannel {
-        async fn send_message(
+        async fn send_dkg_message(
             &self,
             _: &Address,
             _: &SendMessageRequest,
         ) -> crate::communication::ChannelResult<SendMessageResponse> {
-            unimplemented!("PreCollectedP2PChannel does not implement send_share")
+            unimplemented!("PreCollectedP2PChannel does not implement send_dkg_message")
         }
 
         async fn retrieve_message(
@@ -2837,7 +2837,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(mock_tob.published_count(), 0);
-        assert!(logs_contain("Failed to send share"));
+        assert!(logs_contain("Failed to send message"));
         assert!(logs_contain("network error"));
     }
 
@@ -3094,7 +3094,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(mock_tob.published_count(), 0);
         // Verify logging occurred for the 3 failures
-        assert!(logs_contain("Failed to send share"));
+        assert!(logs_contain("Failed to send message"));
     }
     #[tokio::test]
     async fn test_run_as_dealer_includes_own_signature() {
@@ -3977,8 +3977,8 @@ mod tests {
 
     // TODO: Is this needed anywhere?
     #[allow(unused)]
-    async fn test_handle_send_share_request() {
-        // Test that handle_send_share_request works with the new request/response types
+    async fn test_handle_send_message_request() {
+        // Test that handle_send_message_request works with the new request/response types
         let mut rng = rand::thread_rng();
 
         // Create shared encryption keys
@@ -5701,7 +5701,7 @@ mod tests {
             .insert(*dealer_address, dealer_message.clone());
     }
 
-    fn create_handle_send_share_test_setup(
+    fn create_handle_send_message_test_setup(
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (Address, DkgManager, Address, DkgManager) {
         let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
@@ -5731,11 +5731,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_send_share_request_idempotent() {
+    async fn test_handle_send_message_request_idempotent() {
         // Test that same request returns cached response (idempotent)
         let mut rng = rand::thread_rng();
         let (dealer_address, dealer_manager, _receiver_address, mut receiver_manager) =
-            create_handle_send_share_test_setup(&mut rng);
+            create_handle_send_message_test_setup(&mut rng);
 
         let dealer_message = dealer_manager.create_dealer_message(&mut rng).unwrap();
         let request = SendMessageRequest {
@@ -5757,11 +5757,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_send_share_request_equivocation() {
+    async fn test_handle_send_message_request_equivocation() {
         // Test that different message from same dealer triggers error
         let mut rng = rand::thread_rng();
         let (dealer_address, dealer_manager, _receiver_address, mut receiver_manager) =
-            create_handle_send_share_test_setup(&mut rng);
+            create_handle_send_message_test_setup(&mut rng);
 
         // First message from dealer
         let dealer_message1 = dealer_manager.create_dealer_message(&mut rng).unwrap();
