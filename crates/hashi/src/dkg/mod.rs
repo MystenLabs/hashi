@@ -14,11 +14,10 @@ use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 pub use types::{
-    AddressToPartyId, Authenticated, ComplainRequest, ComplainResponse, DkgConfig, DkgError,
-    DkgOutput, DkgResult, EncryptionGroupElement, MessageApproval, MessageHash, MessageType,
-    OrderedBroadcastMessage, RetrieveMessageRequest, RetrieveMessageResponse, SendMessageRequest,
-    SendMessageResponse, SessionContext, SessionId, SighashType, SignatureBytes,
-    ValidatorSignature,
+    AddressToPartyId, ComplainRequest, ComplainResponse, DkgConfig, DkgError, DkgOutput, DkgResult,
+    EncryptionGroupElement, MessageHash, OrderedBroadcastMessage, RetrieveMessageRequest,
+    RetrieveMessageResponse, SendMessageRequest, SendMessageResponse, SessionContext, SessionId,
+    SighashType, SignatureBytes, ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";

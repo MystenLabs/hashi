@@ -1,7 +1,6 @@
 //! Core types for the DKG protocol
 
 use crate::bls::{Certificate, MemberSignature};
-use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
 use fastcrypto_tbls::nodes::Nodes;
@@ -226,12 +225,6 @@ pub struct ComplainResponse {
     pub response: complaint::ComplaintResponse<avss::SharesForNode>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Authenticated<T> {
-    pub sender: Address,
-    pub message: T,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum OrderedBroadcastMessage {
@@ -241,14 +234,6 @@ pub enum OrderedBroadcastMessage {
         session_context: SessionContext,
         data: Vec<u8>,
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageApproval {
-    pub message_hash: MessageHash,
-    pub approver: Address,
-    pub signature: BLS12381Signature,
-    pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -263,13 +248,6 @@ pub struct DkgMessage {
     pub dealer_address: Address,
     pub session_context: SessionContext,
     pub message_hash: MessageHash,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum MessageType {
-    DkgShare,
-    Complaint,
-    ComplaintResponse,
 }
 
 pub type DkgResult<T> = Result<T, DkgError>;
