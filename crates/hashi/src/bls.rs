@@ -341,6 +341,10 @@ impl<'a, T: Serialize + Clone, C: Serialize> BlsSignatureAggregator<'a, T, C> {
                     message: self.message.clone(),
                 };
 
+                // Double check that the aggregated sig still verifies
+                self.committee
+                    .verify_signature(&self.context, &aggregated_signature)?;
+
                 Ok(aggregated_signature)
             }
         }
