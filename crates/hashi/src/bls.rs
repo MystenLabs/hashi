@@ -39,13 +39,23 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign<T: Serialize>(&self, epoch: u64, address: Address, message: &T) -> MemberSignature {
+    pub fn sign(
+        &self,
+        epoch: u64,
+        address: Address,
+        message: &impl Serialize,
+        context: &impl Serialize,
+    ) -> MemberSignature {
         MemberSignature {
             epoch,
             address,
-            signature: self.0.sign(&bcs::to_bytes(message).unwrap()),
+            signature: self.0.sign(&message_to_sign(message, context)),
         }
     }
+}
+
+fn message_to_sign(message: &impl Serialize, context: &impl Serialize) -> Vec<u8> {
+    bcs::to_bytes(&(message, context)).unwrap()
 }
 
 #[derive(Debug)]
@@ -112,6 +122,7 @@ impl BlsCommittee {
     fn verify<T: Serialize>(
         &self,
         message: &T,
+        context: &impl Serialize,
         signature: &MemberSignature,
     ) -> Result<(), SignatureError> {
         if self.epoch != signature.epoch {
@@ -120,10 +131,9 @@ impl BlsCommittee {
                 signature.epoch, self.epoch,
             )));
         }
-        let message_bytes = bcs::to_bytes(message).map_err(SignatureError::from_source)?;
         self.member(&signature.address)?
             .public_key
-            .verify(&message_bytes, &signature.signature)
+            .verify(&message_to_sign(message, context), &signature.signature)
             .map_err(SignatureError::from_source)
     }
 
@@ -132,6 +142,7 @@ impl BlsCommittee {
     /// function.
     pub fn verify_signature<T: Serialize>(
         &self,
+        context: &impl Serialize,
         signature: &CommitteeSignature<T>,
     ) -> Result<(), SignatureError> {
         let pks = signature
@@ -140,17 +151,16 @@ impl BlsCommittee {
             .map(|index| self.members[index].public_key.clone())
             .collect::<Vec<_>>();
 
-        let message_bytes =
-            bcs::to_bytes(&signature.message).map_err(SignatureError::from_source)?;
         signature
             .signature
-            .verify(&pks, &message_bytes)
+            .verify(&pks, &message_to_sign(&signature.message, context))
             .map_err(SignatureError::from_source)
     }
 
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
     pub fn verify_signature_and_weight<T: Serialize>(
         &self,
+        context: &impl Serialize,
         signature: &CommitteeSignature<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
@@ -161,7 +171,7 @@ impl BlsCommittee {
                 signed_weight, required_weight,
             )));
         }
-        self.verify_signature(signature)
+        self.verify_signature(context, signature)
     }
 
     /// The number of members of this committee.
@@ -236,22 +246,24 @@ impl<T> CommitteeSignature<T> {
 }
 
 #[derive(Debug)]
-pub struct BlsSignatureAggregator<'a, T> {
+pub struct BlsSignatureAggregator<'a, T, C> {
     committee: &'a BlsCommittee,
     aggregate_signature: Option<BLS12381AggregateSignature>,
     bitmap: BitMap,
     signed_weight: u64,
     message: T,
+    context: C,
 }
 
-impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
-    pub fn new(committee: &'a BlsCommittee, message: T) -> Self {
+impl<'a, T: Serialize + Clone, C: Serialize> BlsSignatureAggregator<'a, T, C> {
+    pub fn new(committee: &'a BlsCommittee, message: T, context: C) -> Self {
         Self {
             bitmap: BitMap::new(committee.size()),
             committee,
             aggregate_signature: None,
             signed_weight: 0,
             message,
+            context,
         }
     }
 
@@ -262,7 +274,8 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
     ///  * if the signer is not a member of the committee,
     ///  * if the signature is not valid.
     pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
-        self.committee.verify(&self.message, &signature)?;
+        self.committee
+            .verify(&self.message, &self.context, &signature)?;
 
         let index = self
             .committee
@@ -327,9 +340,6 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
                     signers_bitmap: self.bitmap.clone(),
                     message: self.message.clone(),
                 };
-
-                // Double check that the aggregated sig still verifies
-                self.committee.verify_signature(&aggregated_signature)?;
 
                 Ok(aggregated_signature)
             }
@@ -453,60 +463,68 @@ mod test {
             .collect();
         let committee = BlsCommittee::new(members, epoch);
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        let context = b"my context";
+        let mut aggregator =
+            BlsSignatureAggregator::new(&committee, message.clone(), context.clone());
 
         // Aggregating with no sigs fails
         aggregator.finish().unwrap_err();
 
         // Adding a signature with the wrong index fails
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[0].sign(epoch, addresses[1], &message, &context))
             .unwrap_err();
 
         // Adding a signature with the wrong epoch fails
         aggregator
-            .add_signature(private_keys[0].sign(4, addresses[0], &message))
+            .add_signature(private_keys[0].sign(4, addresses[0], &message, &context))
             .unwrap_err();
 
         // This works
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message, &context))
             .unwrap();
 
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 1);
 
         // Aggregating with a sig from the same committee member more than once fails
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message, &context))
             .unwrap_err();
 
         aggregator
-            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[1].sign(epoch, addresses[1], &message, &context))
             .unwrap();
         aggregator
-            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .add_signature(private_keys[2].sign(epoch, addresses[2], &message, &context))
             .unwrap();
 
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 3);
 
         // Aggregating with sufficient weight succeeds and verifies
         let signature = aggregator.finish().unwrap();
-        aggregator.committee.verify_signature(&signature).unwrap();
+        aggregator
+            .committee
+            .verify_signature(&context, &signature)
+            .unwrap();
 
         committee
-            .verify_signature_and_weight(&signature, 3)
+            .verify_signature_and_weight(&context, &signature, 3)
             .unwrap();
         committee
-            .verify_signature_and_weight(&signature, 4)
+            .verify_signature_and_weight(&context, &signature, 4)
             .unwrap_err();
 
         // We can add the last sig and still be successful
         aggregator
-            .add_signature(private_keys[3].sign(epoch, addresses[3], &message))
+            .add_signature(private_keys[3].sign(epoch, addresses[3], &message, &context))
             .unwrap();
 
         let signature = aggregator.finish().unwrap();
-        aggregator.committee.verify_signature(&signature).unwrap();
+        aggregator
+            .committee
+            .verify_signature(&context, &signature)
+            .unwrap();
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
     }
 
@@ -542,17 +560,19 @@ mod test {
             .collect();
         let committee = BlsCommittee::new(members, epoch);
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        let context = b"my context";
+        let mut aggregator =
+            BlsSignatureAggregator::new(&committee, message.clone(), context.clone());
 
         // Add signatures from validators 0, 1, and 2 (but not 3)
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message, &context))
             .unwrap();
         aggregator
-            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[1].sign(epoch, addresses[1], &message, &context))
             .unwrap();
         aggregator
-            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .add_signature(private_keys[2].sign(epoch, addresses[2], &message, &context))
             .unwrap();
 
         let certificate = aggregator.finish().unwrap();

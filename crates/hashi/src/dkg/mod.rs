@@ -184,9 +184,9 @@ impl DkgManager {
             &self.bls_committee,
             Dkg(DkgMessage {
                 dealer_address: self.address,
-                session_context: self.session_context.clone(),
                 message_hash,
             }),
+            self.session_context.clone(),
         );
         aggregator
             .add_signature(my_signature.signature)
@@ -354,9 +354,9 @@ impl DkgManager {
             self.address,
             &Dkg(DkgMessage {
                 dealer_address,
-                session_context: self.session_context.clone(),
                 message_hash,
             }),
+            &self.session_context,
         );
         Ok(ValidatorSignature {
             validator: self.address,
@@ -548,7 +548,7 @@ impl DkgManager {
         }
 
         self.bls_committee
-            .verify_signature(cert)
+            .verify_signature(&self.session_context, cert)
             .map_err(|e| DkgError::CryptoError(format!("Failed to verify certificate: {}", e)))
     }
 }
@@ -689,7 +689,6 @@ mod tests {
         // Create DkgMessage
         let dkg_message = Dkg(DkgMessage {
             dealer_address,
-            session_context: session_context.clone(),
             message_hash,
         });
 
@@ -697,7 +696,11 @@ mod tests {
         let bls_committee = create_bls_committee(config, bls_public_keys);
 
         // Create aggregator
-        let mut aggregator = crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message);
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(
+            &bls_committee,
+            dkg_message,
+            session_context.clone(),
+        );
 
         // Add all signatures
         for validator_sig in validator_signatures {
@@ -2375,7 +2378,6 @@ mod tests {
             compute_message_hash(&session_context, &dealer_0_addr, &dealer_0_message).unwrap();
         let dealer_0_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_0_addr,
-            session_context: session_context.clone(),
             message_hash: dealer_0_message_hash,
         });
 
@@ -2399,7 +2401,6 @@ mod tests {
             compute_message_hash(&session_context, &dealer_1_addr, &dealer_1_message).unwrap();
         let dealer_1_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_1_addr,
-            session_context: session_context.clone(),
             message_hash: dealer_1_message_hash,
         });
 
@@ -2455,7 +2456,12 @@ mod tests {
             .iter()
             .map(|(i, a)| ValidatorSignature {
                 validator: *a,
-                signature: bls_keys[*i].sign(config.epoch, *a, &dealer_0_dkg_message),
+                signature: bls_keys[*i].sign(
+                    config.epoch,
+                    *a,
+                    &dealer_0_dkg_message,
+                    &session_context,
+                ),
             })
             .collect(),
         )
@@ -2475,7 +2481,12 @@ mod tests {
             .iter()
             .map(|(i, a)| ValidatorSignature {
                 validator: *a,
-                signature: bls_keys[*i].sign(config.epoch, *a, &dealer_1_dkg_message),
+                signature: bls_keys[*i].sign(
+                    config.epoch,
+                    *a,
+                    &dealer_1_dkg_message,
+                    &session_context,
+                ),
             })
             .collect(),
         )
@@ -3338,14 +3349,16 @@ mod tests {
         let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address: *dealer_addr,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Create BLS committee
         let bls_committee = create_bls_committee(config, bls_public_keys);
-        let mut aggregator =
-            crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message.clone());
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(
+            &bls_committee,
+            dkg_message.clone(),
+            session_context.clone(),
+        );
 
         // Add signatures from validators until we meet the required weight
         let dkg_required = config.threshold;
@@ -3353,7 +3366,8 @@ mod tests {
 
         for (i, w) in weights.iter().enumerate() {
             let signer_addr = Address::new([i as u8; 32]);
-            let signature = bls_keys[i].sign(config.epoch, signer_addr, &dkg_message);
+            let signature =
+                bls_keys[i].sign(config.epoch, signer_addr, &dkg_message, &session_context);
             aggregator.add_signature(signature).unwrap();
             weight_sum += w;
 
@@ -3585,10 +3599,10 @@ mod tests {
                     compute_message_hash(&session_context, &dealer1_addr, &msg1).unwrap();
                 let dkg_message = Dkg(DkgMessage {
                     dealer_address: dealer1_addr,
-                    session_context: session_context.clone(),
                     message_hash,
                 });
-                let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
+                let signature =
+                    bls_keys[i].sign(config.epoch, addr, &dkg_message, &session_context);
                 ValidatorSignature {
                     validator: addr,
                     signature,
@@ -3603,10 +3617,10 @@ mod tests {
                     compute_message_hash(&session_context, &dealer2_addr, &msg2).unwrap();
                 let dkg_message = Dkg(DkgMessage {
                     dealer_address: dealer2_addr,
-                    session_context: session_context.clone(),
                     message_hash,
                 });
-                let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
+                let signature =
+                    bls_keys[i].sign(config.epoch, addr, &dkg_message, &session_context);
                 ValidatorSignature {
                     validator: addr,
                     signature,
@@ -3729,10 +3743,10 @@ mod tests {
                         compute_message_hash(&session_context, &dealer_addr, msg).unwrap();
                     let dkg_message = Dkg(DkgMessage {
                         dealer_address: dealer_addr,
-                        session_context: session_context.clone(),
                         message_hash,
                     });
-                    let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
+                    let signature =
+                        bls_keys[i].sign(config.epoch, addr, &dkg_message, &session_context);
                     ValidatorSignature {
                         validator: addr,
                         signature,
@@ -3821,7 +3835,6 @@ mod tests {
             compute_message_hash(&session_context, &dealer0_addr, &dealer0_message).unwrap();
         let dealer0_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer0_addr,
-            session_context: session_context.clone(),
             message_hash: dealer0_message_hash,
         });
 
@@ -3844,7 +3857,6 @@ mod tests {
             compute_message_hash(&session_context, &dealer1_addr, &dealer1_message).unwrap();
         let dealer1_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer1_addr,
-            session_context: session_context.clone(),
             message_hash: dealer1_message_hash,
         });
 
@@ -3889,7 +3901,12 @@ mod tests {
             .iter()
             .map(|(i, a)| ValidatorSignature {
                 validator: *a,
-                signature: bls_keys[*i].sign(config.epoch, *a, &dealer0_dkg_message),
+                signature: bls_keys[*i].sign(
+                    config.epoch,
+                    *a,
+                    &dealer0_dkg_message,
+                    &session_context,
+                ),
             })
             .collect(),
         )
@@ -3908,7 +3925,12 @@ mod tests {
             .iter()
             .map(|(i, a)| ValidatorSignature {
                 validator: *a,
-                signature: bls_keys[*i].sign(config.epoch, *a, &dealer1_dkg_message),
+                signature: bls_keys[*i].sign(
+                    config.epoch,
+                    *a,
+                    &dealer1_dkg_message,
+                    &session_context,
+                ),
             })
             .collect(),
         )
@@ -4473,7 +4495,6 @@ mod tests {
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
-            session_context: session_context.clone(),
             message_hash,
         });
 
@@ -4488,7 +4509,7 @@ mod tests {
                 .iter()
                 .map(|(i, a)| ValidatorSignature {
                     validator: *a,
-                    signature: bls_keys[*i].sign(config.epoch, *a, &dkg_message),
+                    signature: bls_keys[*i].sign(config.epoch, *a, &dkg_message, &session_context),
                 })
                 .collect(),
         )
@@ -4915,13 +4936,16 @@ mod tests {
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Dealer signs its own message
-        let dealer_signature =
-            bls_keys[0].sign(session_context.epoch, dealer_address, &dkg_message);
+        let dealer_signature = bls_keys[0].sign(
+            session_context.epoch,
+            dealer_address,
+            &dkg_message,
+            &session_context,
+        );
         let validator_signatures = vec![ValidatorSignature {
             validator: dealer_address,
             signature: dealer_signature,
@@ -4994,13 +5018,16 @@ mod tests {
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Dealer signs its own message using config_1 BLS keys
-        let dealer_signature =
-            bls_keys_1[0].sign(session_context.epoch, dealer_address, &dkg_message);
+        let dealer_signature = bls_keys_1[0].sign(
+            session_context.epoch,
+            dealer_address,
+            &dkg_message,
+            &session_context,
+        );
         let validator_signatures = vec![ValidatorSignature {
             validator: dealer_address,
             signature: dealer_signature,
@@ -5071,16 +5098,24 @@ mod tests {
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Create certificate with two signers: validator 1 (not in P2P) and dealer (validator 0)
         // Validator 1 signs first, then validator 0
         let validator_1_addr = Address::new([1; 32]);
-        let validator_1_signature =
-            bls_keys[1].sign(session_context.epoch, validator_1_addr, &dkg_message);
-        let dealer_signature = bls_keys[0].sign(session_context.epoch, dealer_addr, &dkg_message);
+        let validator_1_signature = bls_keys[1].sign(
+            session_context.epoch,
+            validator_1_addr,
+            &dkg_message,
+            &session_context,
+        );
+        let dealer_signature = bls_keys[0].sign(
+            session_context.epoch,
+            dealer_addr,
+            &dkg_message,
+            &session_context,
+        );
 
         let validator_signatures = vec![
             ValidatorSignature {
@@ -5154,14 +5189,23 @@ mod tests {
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Create certificate with signers including the requesting party
         // This is an invalid state - party shouldn't be retrieving a message it signed for
-        let party_signature = bls_keys[1].sign(session_context.epoch, party_addr, &dkg_message);
-        let dealer_signature = bls_keys[0].sign(session_context.epoch, dealer_addr, &dkg_message);
+        let party_signature = bls_keys[1].sign(
+            session_context.epoch,
+            party_addr,
+            &dkg_message,
+            &session_context,
+        );
+        let dealer_signature = bls_keys[0].sign(
+            session_context.epoch,
+            dealer_addr,
+            &dkg_message,
+            &session_context,
+        );
 
         let validator_signatures = vec![
             ValidatorSignature {
@@ -5239,17 +5283,24 @@ mod tests {
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Create certificate with signers 2 and 3 (both will be offline in P2P)
         let signer_2_addr = Address::new([2; 32]);
         let signer_3_addr = Address::new([3; 32]);
-        let signer_2_signature =
-            bls_keys[2].sign(session_context.epoch, signer_2_addr, &dkg_message);
-        let signer_3_signature =
-            bls_keys[3].sign(session_context.epoch, signer_3_addr, &dkg_message);
+        let signer_2_signature = bls_keys[2].sign(
+            session_context.epoch,
+            signer_2_addr,
+            &dkg_message,
+            &session_context,
+        );
+        let signer_3_signature = bls_keys[3].sign(
+            session_context.epoch,
+            signer_3_addr,
+            &dkg_message,
+            &session_context,
+        );
 
         let validator_signatures = vec![
             ValidatorSignature {
@@ -5359,15 +5410,22 @@ mod tests {
             compute_message_hash(&session_context, &dealer_a_addr, &message_a).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_a_addr,
-            session_context: session_context.clone(),
             message_hash: message_hash_a,
         });
 
         // Create valid certificate for dealer A with correct hash, signed by Byzantine signer and dealer A
-        let byzantine_signature =
-            bls_keys[3].sign(session_context.epoch, byzantine_signer_addr, &dkg_message);
-        let dealer_a_signature =
-            bls_keys[0].sign(session_context.epoch, dealer_a_addr, &dkg_message);
+        let byzantine_signature = bls_keys[3].sign(
+            session_context.epoch,
+            byzantine_signer_addr,
+            &dkg_message,
+            &session_context,
+        );
+        let dealer_a_signature = bls_keys[0].sign(
+            session_context.epoch,
+            dealer_a_addr,
+            &dkg_message,
+            &session_context,
+        );
 
         let validator_signatures = vec![
             ValidatorSignature {
@@ -5526,12 +5584,15 @@ mod tests {
         let message_hash = compute_message_hash(session_context, dealer_address, message)?;
         let dkg_message = Dkg(DkgMessage {
             dealer_address: *dealer_address,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         let bls_committee = create_bls_committee(config, bls_public_keys);
-        let mut aggregator = crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message);
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(
+            &bls_committee,
+            dkg_message,
+            session_context.clone(),
+        );
 
         for validator_sig in signer_signatures {
             aggregator
@@ -5876,18 +5937,25 @@ mod tests {
             compute_message_hash(&session_context, &dealer_address, &dealer_message).unwrap();
         let dkg_message = Dkg(DkgMessage {
             dealer_address,
-            session_context: session_context.clone(),
             message_hash,
         });
 
         // Create certificate using validator 0's committee
         let bls_committee0 = create_bls_committee(&config0, &bls_public_keys0);
-        let mut aggregator =
-            crate::bls::BlsSignatureAggregator::new(&bls_committee0, dkg_message.clone());
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(
+            &bls_committee0,
+            dkg_message.clone(),
+            session_context.clone(),
+        );
 
         // Add signatures from validators 0, 1, 2 (threshold is 2, so this is enough)
         for (i, key) in bls_keys.iter().enumerate().take(3) {
-            let sig = key.sign(epoch, Address::new([i as u8; 32]), &dkg_message);
+            let sig = key.sign(
+                epoch,
+                Address::new([i as u8; 32]),
+                &dkg_message,
+                &session_context,
+            );
             aggregator.add_signature(sig).unwrap();
         }
 

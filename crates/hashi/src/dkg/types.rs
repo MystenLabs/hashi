@@ -234,7 +234,6 @@ pub struct ValidatorSignature {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgMessage {
     pub dealer_address: Address,
-    pub session_context: SessionContext,
     pub message_hash: MessageHash,
 }
 
