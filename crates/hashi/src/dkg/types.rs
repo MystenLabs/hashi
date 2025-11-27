@@ -241,17 +241,17 @@ pub enum OrderedBroadcastMessage {
     },
 }
 
-#[allow (clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MpcMessageV1 {
-    Dkg(DkgMessage),
+    DKG(DkgMessage),
     KeyRotation,
 }
 
 impl MpcMessageV1 {
     pub fn try_as_dkg_message(&self) -> DkgResult<&DkgMessage> {
         match self {
-            MpcMessageV1::Dkg(msg) => Ok(msg),
+            MpcMessageV1::DKG(msg) => Ok(msg),
             _ => Err(DkgError::InvalidMessageType(format!(
                 "{:?} is not a DKG message",
                 self
@@ -262,7 +262,7 @@ impl MpcMessageV1 {
     #[cfg(test)]
     pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
         match self {
-            MpcMessageV1::Dkg(msg) => msg,
+            MpcMessageV1::DKG(msg) => msg,
             _ => panic!(),
         }
     }

@@ -3,7 +3,7 @@
 pub mod types;
 
 use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
-use crate::dkg::types::MpcMessageV1::Dkg;
+use crate::dkg::types::MpcMessageV1::DKG;
 use crate::dkg::types::{Certificate, DkgMessage, SignedMessage};
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
@@ -188,7 +188,7 @@ impl DkgManager {
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
         let mut aggregator = BlsSignatureAggregator::new(
             &self.bls_committee,
-            Dkg(DkgMessage {
+            DKG(DkgMessage {
                 dealer_address: self.address,
                 session_context: self.session_context.clone(),
                 message_hash,
@@ -360,7 +360,7 @@ impl DkgManager {
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
             self.address,
-            &Dkg(DkgMessage {
+            &DKG(DkgMessage {
                 dealer_address,
                 session_context: self.session_context.clone(),
                 message_hash,
@@ -700,7 +700,7 @@ mod tests {
         let message_hash = compute_message_hash(session_context, &dealer_address, dealer_message)?;
 
         // Create DkgMessage
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
@@ -2402,7 +2402,7 @@ mod tests {
             .clone();
         let dealer_0_message_hash =
             compute_message_hash(&session_context, &dealer_0_addr, &dealer_0_message).unwrap();
-        let dealer_0_dkg_message = Dkg(DkgMessage {
+        let dealer_0_dkg_message = DKG(DkgMessage {
             dealer_address: dealer_0_addr,
             session_context: session_context.clone(),
             message_hash: dealer_0_message_hash,
@@ -2426,7 +2426,7 @@ mod tests {
         );
         let dealer_1_message_hash =
             compute_message_hash(&session_context, &dealer_1_addr, &dealer_1_message).unwrap();
-        let dealer_1_dkg_message = Dkg(DkgMessage {
+        let dealer_1_dkg_message = DKG(DkgMessage {
             dealer_address: dealer_1_addr,
             session_context: session_context.clone(),
             message_hash: dealer_1_message_hash,
@@ -3368,7 +3368,7 @@ mod tests {
         bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
     ) -> Certificate {
         let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: *dealer_addr,
             session_context: session_context.clone(),
             message_hash,
@@ -3615,7 +3615,7 @@ mod tests {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
                     compute_message_hash(&session_context, &dealer1_addr, &msg1).unwrap();
-                let dkg_message = Dkg(DkgMessage {
+                let dkg_message = DKG(DkgMessage {
                     dealer_address: dealer1_addr,
                     session_context: session_context.clone(),
                     message_hash,
@@ -3635,7 +3635,7 @@ mod tests {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
                     compute_message_hash(&session_context, &dealer2_addr, &msg2).unwrap();
-                let dkg_message = Dkg(DkgMessage {
+                let dkg_message = DKG(DkgMessage {
                     dealer_address: dealer2_addr,
                     session_context: session_context.clone(),
                     message_hash,
@@ -3763,7 +3763,7 @@ mod tests {
                     let addr = Address::new([i as u8; 32]);
                     let message_hash =
                         compute_message_hash(&session_context, &dealer_addr, msg).unwrap();
-                    let dkg_message = Dkg(DkgMessage {
+                    let dkg_message = DKG(DkgMessage {
                         dealer_address: dealer_addr,
                         session_context: session_context.clone(),
                         message_hash,
@@ -3857,7 +3857,7 @@ mod tests {
             .clone();
         let dealer0_message_hash =
             compute_message_hash(&session_context, &dealer0_addr, &dealer0_message).unwrap();
-        let dealer0_dkg_message = Dkg(DkgMessage {
+        let dealer0_dkg_message = DKG(DkgMessage {
             dealer_address: dealer0_addr,
             session_context: session_context.clone(),
             message_hash: dealer0_message_hash,
@@ -3880,7 +3880,7 @@ mod tests {
             .clone();
         let dealer1_message_hash =
             compute_message_hash(&session_context, &dealer1_addr, &dealer1_message).unwrap();
-        let dealer1_dkg_message = Dkg(DkgMessage {
+        let dealer1_dkg_message = DKG(DkgMessage {
             dealer_address: dealer1_addr,
             session_context: session_context.clone(),
             message_hash: dealer1_message_hash,
@@ -4509,7 +4509,7 @@ mod tests {
         let dealer_message = dealer_manager.dealer_messages.get(&dealer_addr).unwrap();
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
@@ -4951,7 +4951,7 @@ mod tests {
         // Create DkgMessage and validator signatures
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
@@ -5030,7 +5030,7 @@ mod tests {
         // Create DkgMessage and validator signatures
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
@@ -5107,7 +5107,7 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
@@ -5190,7 +5190,7 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
@@ -5275,7 +5275,7 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
@@ -5395,7 +5395,7 @@ mod tests {
         // Create DkgMessage for dealer A
         let message_hash_a =
             compute_message_hash(&session_context, &dealer_a_addr, &message_a).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: dealer_a_addr,
             session_context: session_context.clone(),
             message_hash: message_hash_a,
@@ -5562,7 +5562,7 @@ mod tests {
         signer_signatures: Vec<ValidatorSignature<MpcMessageV1>>,
     ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(session_context, dealer_address, message)?;
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address: *dealer_address,
             session_context: session_context.clone(),
             message_hash,
@@ -5912,7 +5912,7 @@ mod tests {
         // Collect signatures from all validators
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, &dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = DKG(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
