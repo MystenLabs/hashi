@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{Certificate, MemberSignature};
+use crate::bls::{CommitteeSignature, MemberSignature};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
 use fastcrypto_tbls::nodes::Nodes;
@@ -200,8 +200,13 @@ pub struct SendMessageRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignedMessage {
+    pub signature: ValidatorSignature<MpcMessageV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageResponse {
-    pub signature: ValidatorSignature,
+    pub signature: ValidatorSignature<MpcMessageV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -228,7 +233,7 @@ pub struct ComplainResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum OrderedBroadcastMessage {
-    AvssCertificateV1(Certificate<DkgMessage>),
+    AvssCertificateV1(Certificate),
     PresignatureV1 {
         sender: Address,
         session_context: SessionContext,
@@ -236,10 +241,39 @@ pub enum OrderedBroadcastMessage {
     },
 }
 
+#[allow (clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ValidatorSignature {
+pub enum MpcMessageV1 {
+    Dkg(DkgMessage),
+    KeyRotation,
+}
+
+impl MpcMessageV1 {
+    pub fn try_as_dkg_message(&self) -> DkgResult<&DkgMessage> {
+        match self {
+            MpcMessageV1::Dkg(msg) => Ok(msg),
+            _ => Err(DkgError::InvalidMessageType(format!(
+                "{:?} is not a DKG message",
+                self
+            ))),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
+        match self {
+            MpcMessageV1::Dkg(msg) => msg,
+            _ => panic!(),
+        }
+    }
+}
+
+pub type Certificate = CommitteeSignature<MpcMessageV1>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorSignature<T> {
     pub validator: Address,
-    pub signature: MemberSignature,
+    pub signature: MemberSignature<T>,
 }
 
 // TODO: Change this to an enum for dealer messages for other flows
@@ -262,6 +296,9 @@ pub enum DkgError {
 
     #[error("Invalid message from {sender}: {reason}")]
     InvalidMessage { sender: Address, reason: String },
+
+    #[error("Invalid message type: {0}")]
+    InvalidMessageType(String),
 
     #[error("Protocol timeout after {seconds} seconds")]
     Timeout { seconds: u64 },

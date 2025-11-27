@@ -2,8 +2,9 @@
 
 pub mod types;
 
-use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator, Certificate};
-use crate::dkg::types::DkgMessage;
+use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
+use crate::dkg::types::MpcMessageV1::Dkg;
+use crate::dkg::types::{Certificate, DkgMessage, SignedMessage};
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::error::FastCryptoError;
@@ -96,7 +97,9 @@ impl DkgManager {
                 })
             };
         }
-        let signature = self.receive_dealer_message(&request.message, sender)?;
+        let signature = self
+            .receive_dealer_message(&request.message, sender)?
+            .signature;
         let response = SendMessageResponse { signature };
         self.message_responses.insert(sender, response.clone());
         Ok(response)
@@ -185,14 +188,14 @@ impl DkgManager {
             compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
         let mut aggregator = BlsSignatureAggregator::new(
             &self.bls_committee,
-            DkgMessage {
+            Dkg(DkgMessage {
                 dealer_address: self.address,
                 session_context: self.session_context.clone(),
                 message_hash,
-            },
+            }),
         );
         aggregator
-            .add_signature(my_signature.signature)
+            .add_signature(my_signature.signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
@@ -253,7 +256,8 @@ impl DkgManager {
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
             if let OrderedBroadcastMessage::AvssCertificateV1(cert) = tob_msg {
-                let dealer = cert.message.dealer_address;
+                let message = cert.message.try_as_dkg_message()?;
+                let dealer = message.dealer_address;
                 if certified_dealers.contains_key(&dealer) {
                     continue;
                 }
@@ -275,9 +279,9 @@ impl DkgManager {
                 }
                 match self.validate_certificate(&cert) {
                     Ok(()) => {
-                        if self.complaints.contains_key(&cert.message.dealer_address) {
+                        if self.complaints.contains_key(&message.dealer_address) {
                             self.recover_shares_via_complaint(
-                                &cert.message.dealer_address,
+                                &message.dealer_address,
                                 cert.signers(&self.bls_committee).map_err(|_| {
                                     DkgError::InvalidCertificate(
                                         "Invalid certificate for committee".parse().unwrap(),
@@ -324,7 +328,7 @@ impl DkgManager {
         &mut self,
         message: &avss::Message,
         dealer_address: Address,
-    ) -> DkgResult<ValidatorSignature> {
+    ) -> DkgResult<SignedMessage> {
         self.dealer_messages.insert(dealer_address, message.clone());
         self.public_messages_store
             .store_dealer_message(&dealer_address, message)
@@ -356,21 +360,23 @@ impl DkgManager {
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
             self.address,
-            &DkgMessage {
+            &Dkg(DkgMessage {
                 dealer_address,
                 session_context: self.session_context.clone(),
                 message_hash,
-            },
+            }),
         );
-        Ok(ValidatorSignature {
-            validator: self.address,
-            signature,
+        Ok(SignedMessage {
+            signature: ValidatorSignature {
+                validator: self.address,
+                signature,
+            },
         })
     }
 
     fn process_certificates(
         &self,
-        certified_dealers: &HashMap<Address, Certificate<DkgMessage>>,
+        certified_dealers: &HashMap<Address, Certificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         // TODO: Handle missing messages and invalid shares
@@ -411,7 +417,7 @@ impl DkgManager {
     async fn retrieve_dealer_message(
         &mut self,
         dealer_address: Address,
-        certificate: &Certificate<DkgMessage>,
+        certificate: &Certificate,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
@@ -433,6 +439,9 @@ impl DkgManager {
                 "Self in certificate signers but message not available".to_string(),
             ));
         }
+
+        let message = certificate.message.try_as_dkg_message()?;
+
         let signers = certificate.signers(&self.bls_committee).map_err(|_| {
             DkgError::ProtocolFailed(
                 "Certificate does not match the current epoch or committee".to_string(),
@@ -459,7 +468,7 @@ impl DkgManager {
                         &dealer_address,
                         &response.message,
                     )?;
-                    if message_hash != certificate.message.message_hash {
+                    if message_hash != message.message_hash {
                         tracing::info!(
                             "Signer {:?} returned message with wrong hash",
                             signer_address
@@ -534,8 +543,9 @@ impl DkgManager {
         )))
     }
 
-    fn validate_certificate(&self, cert: &Certificate<DkgMessage>) -> DkgResult<()> {
-        let dealer = cert.message.dealer_address;
+    fn validate_certificate(&self, cert: &Certificate) -> DkgResult<()> {
+        let dkg_message = cert.message.try_as_dkg_message()?;
+        let dealer = dkg_message.dealer_address;
         let message = self.dealer_messages.get(&dealer).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
                 "Dealer message not yet received from {:?}",
@@ -543,7 +553,7 @@ impl DkgManager {
             ))
         })?;
         let expected_hash = compute_message_hash(&self.session_context, &dealer, message)?;
-        if cert.message.message_hash != expected_hash {
+        if dkg_message.message_hash != expected_hash {
             return Err(DkgError::InvalidCertificate(format!(
                 "Message hash mismatch for dealer {:?}",
                 dealer
@@ -597,7 +607,7 @@ fn compute_message_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::types::ProtocolType;
+    use crate::dkg::types::{MpcMessageV1, ProtocolType};
     use fastcrypto::encoding::{Encoding, Hex};
     use fastcrypto::groups::Scalar;
     use fastcrypto_tbls::ecies_v1::{MultiRecipientEncryption, PublicKey};
@@ -684,17 +694,17 @@ mod tests {
         dealer_message: &avss::Message,
         dealer_address: Address,
         session_context: &SessionContext,
-        validator_signatures: Vec<ValidatorSignature>,
-    ) -> DkgResult<Certificate<DkgMessage>> {
-        // Compute message hash
+        validator_signatures: Vec<SignedMessage>,
+    ) -> DkgResult<Certificate> {
+        // Compute message hashg
         let message_hash = compute_message_hash(session_context, &dealer_address, dealer_message)?;
 
         // Create DkgMessage
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create BLS committee
         let bls_committee = create_bls_committee(config, bls_public_keys);
@@ -705,7 +715,7 @@ mod tests {
         // Add all signatures
         for validator_sig in validator_signatures {
             aggregator
-                .add_signature(validator_sig.signature)
+                .add_signature(validator_sig.signature.signature)
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
 
@@ -812,7 +822,7 @@ mod tests {
     }
 
     struct MockOrderedBroadcastChannel {
-        certificates: std::sync::Mutex<std::collections::VecDeque<Certificate<DkgMessage>>>,
+        certificates: std::sync::Mutex<std::collections::VecDeque<Certificate>>,
         published: std::sync::Mutex<Vec<OrderedBroadcastMessage>>,
         /// Override for existing_certificate_weight().
         /// If set, returns this value instead of the pending message count.
@@ -822,7 +832,7 @@ mod tests {
     }
 
     impl MockOrderedBroadcastChannel {
-        fn new(certificates: Vec<Certificate<DkgMessage>>) -> Self {
+        fn new(certificates: Vec<Certificate>) -> Self {
             Self {
                 certificates: std::sync::Mutex::new(certificates.into()),
                 published: std::sync::Mutex::new(Vec::new()),
@@ -1363,7 +1373,7 @@ mod tests {
             .unwrap();
 
         // Verify signature format
-        assert_eq!(signature.validator, receiver_manager.address);
+        assert_eq!(signature.signature.validator, receiver_manager.address);
 
         // Verify receiver output was stored in memory
         assert!(
@@ -1951,7 +1961,7 @@ mod tests {
     struct RunTestSetup {
         test_manager: DkgManager,
         mock_p2p: MockP2PChannel,
-        certificates: Vec<Certificate<DkgMessage>>,
+        certificates: Vec<Certificate>,
     }
 
     fn setup_run_test() -> RunTestSetup {
@@ -2392,11 +2402,11 @@ mod tests {
             .clone();
         let dealer_0_message_hash =
             compute_message_hash(&session_context, &dealer_0_addr, &dealer_0_message).unwrap();
-        let dealer_0_dkg_message = DkgMessage {
+        let dealer_0_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_0_addr,
             session_context: session_context.clone(),
             message_hash: dealer_0_message_hash,
-        };
+        });
 
         // Create dealer 1 with cheating message (corrupts party 2's shares)
         let (dealer_1_addr, _) = create_manager_at_index(
@@ -2416,11 +2426,11 @@ mod tests {
         );
         let dealer_1_message_hash =
             compute_message_hash(&session_context, &dealer_1_addr, &dealer_1_message).unwrap();
-        let dealer_1_dkg_message = DkgMessage {
+        let dealer_1_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_1_addr,
             session_context: session_context.clone(),
             message_hash: dealer_1_message_hash,
-        };
+        });
 
         // Create party 2 manager (will have complaint for dealer 1)
         let (party_addr, mut party_manager) = create_manager_at_index(
@@ -2646,7 +2656,7 @@ mod tests {
         )
         .unwrap();
         // Make it invalid by corrupting the message hash in the DkgMessage
-        invalid_cert.message.message_hash = [99; 32]; // Wrong hash
+        invalid_cert.message.as_mut_dkg_message().message_hash = [99; 32]; // Wrong hash
 
         // Mix valid and invalid certificates in TOB
         // Order: valid[0], invalid, valid[1], valid[2]
@@ -3234,7 +3244,7 @@ mod tests {
         config: DkgConfig,
         session_context: SessionContext,
         dealer_messages: Vec<(Address, avss::Message)>,
-        certificates: Vec<Certificate<DkgMessage>>,
+        certificates: Vec<Certificate>,
         encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
         bls_keys: Vec<crate::bls::Bls12381PrivateKey>,
         bls_public_keys: HashMap<Address, BLS12381PublicKey>,
@@ -3356,13 +3366,13 @@ mod tests {
         weights: &[u16],
         bls_keys: &[crate::bls::Bls12381PrivateKey],
         bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
-    ) -> Certificate<DkgMessage> {
+    ) -> Certificate {
         let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: *dealer_addr,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create BLS committee
         let bls_committee = create_bls_committee(config, bls_public_keys);
@@ -3600,38 +3610,42 @@ mod tests {
             .clone();
 
         // Create validator signatures for certificates
-        let validator_signatures_1: Vec<ValidatorSignature> = (0..3)
+        let validator_signatures_1: Vec<SignedMessage> = (0..3)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
                     compute_message_hash(&session_context, &dealer1_addr, &msg1).unwrap();
-                let dkg_message = DkgMessage {
+                let dkg_message = Dkg(DkgMessage {
                     dealer_address: dealer1_addr,
                     session_context: session_context.clone(),
                     message_hash,
-                };
+                });
                 let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
-                ValidatorSignature {
-                    validator: addr,
-                    signature,
+                SignedMessage {
+                    signature: ValidatorSignature {
+                        validator: addr,
+                        signature,
+                    },
                 }
             })
             .collect();
 
-        let validator_signatures_2: Vec<ValidatorSignature> = (0..3)
+        let validator_signatures_2: Vec<SignedMessage> = (0..3)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
                     compute_message_hash(&session_context, &dealer2_addr, &msg2).unwrap();
-                let dkg_message = DkgMessage {
+                let dkg_message = Dkg(DkgMessage {
                     dealer_address: dealer2_addr,
                     session_context: session_context.clone(),
                     message_hash,
-                };
+                });
                 let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
-                ValidatorSignature {
-                    validator: addr,
-                    signature,
+                SignedMessage {
+                    signature: ValidatorSignature {
+                        validator: addr,
+                        signature,
+                    },
                 }
             })
             .collect();
@@ -3743,21 +3757,23 @@ mod tests {
             .clone();
 
         // Helper to create validator signatures
-        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<ValidatorSignature> {
+        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<SignedMessage> {
             (0..3)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
                     let message_hash =
                         compute_message_hash(&session_context, &dealer_addr, msg).unwrap();
-                    let dkg_message = DkgMessage {
+                    let dkg_message = Dkg(DkgMessage {
                         dealer_address: dealer_addr,
                         session_context: session_context.clone(),
                         message_hash,
-                    };
+                    });
                     let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
-                    ValidatorSignature {
-                        validator: addr,
-                        signature,
+                    SignedMessage {
+                        signature: ValidatorSignature {
+                            validator: addr,
+                            signature,
+                        },
                     }
                 })
                 .collect()
@@ -3841,11 +3857,11 @@ mod tests {
             .clone();
         let dealer0_message_hash =
             compute_message_hash(&session_context, &dealer0_addr, &dealer0_message).unwrap();
-        let dealer0_dkg_message = DkgMessage {
+        let dealer0_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer0_addr,
             session_context: session_context.clone(),
             message_hash: dealer0_message_hash,
-        };
+        });
 
         // Create dealer 1 - would be processed if we continued
         let (dealer1_addr, dealer1_mgr) = create_dealer_with_message(
@@ -3864,11 +3880,11 @@ mod tests {
             .clone();
         let dealer1_message_hash =
             compute_message_hash(&session_context, &dealer1_addr, &dealer1_message).unwrap();
-        let dealer1_dkg_message = DkgMessage {
+        let dealer1_dkg_message = Dkg(DkgMessage {
             dealer_address: dealer1_addr,
             session_context: session_context.clone(),
             message_hash: dealer1_message_hash,
-        };
+        });
 
         // Create party manager (validator 4)
         let (party_addr, mut party_manager) = create_manager_at_index(
@@ -4493,11 +4509,11 @@ mod tests {
         let dealer_message = dealer_manager.dealer_messages.get(&dealer_addr).unwrap();
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create a minimal certificate
         let cert = create_certificate_with_signers(
@@ -4935,11 +4951,11 @@ mod tests {
         // Create DkgMessage and validator signatures
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Dealer signs its own message
         let dealer_signature =
@@ -5014,11 +5030,11 @@ mod tests {
         // Create DkgMessage and validator signatures
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Dealer signs its own message using config_1 BLS keys
         let dealer_signature =
@@ -5091,11 +5107,11 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create certificate with two signers: validator 1 (not in P2P) and dealer (validator 0)
         // Validator 1 signs first, then validator 0
@@ -5174,11 +5190,11 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create certificate with signers including the requesting party
         // This is an invalid state - party shouldn't be retrieving a message it signed for
@@ -5259,11 +5275,11 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_addr,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create certificate with signers 2 and 3 (both will be offline in P2P)
         let signer_2_addr = Address::new([2; 32]);
@@ -5379,11 +5395,11 @@ mod tests {
         // Create DkgMessage for dealer A
         let message_hash_a =
             compute_message_hash(&session_context, &dealer_a_addr, &message_a).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: dealer_a_addr,
             session_context: session_context.clone(),
             message_hash: message_hash_a,
-        };
+        });
 
         // Create valid certificate for dealer A with correct hash, signed by Byzantine signer and dealer A
         let byzantine_signature =
@@ -5543,14 +5559,14 @@ mod tests {
         dealer_address: &Address,
         message: &avss::Message,
         session_context: &SessionContext,
-        signer_signatures: Vec<ValidatorSignature>,
-    ) -> DkgResult<Certificate<DkgMessage>> {
+        signer_signatures: Vec<ValidatorSignature<MpcMessageV1>>,
+    ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(session_context, dealer_address, message)?;
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address: *dealer_address,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         let bls_committee = create_bls_committee(config, bls_public_keys);
         let mut aggregator = crate::bls::BlsSignatureAggregator::new(&bls_committee, dkg_message);
@@ -5896,11 +5912,11 @@ mod tests {
         // Collect signatures from all validators
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, &dealer_message).unwrap();
-        let dkg_message = DkgMessage {
+        let dkg_message = Dkg(DkgMessage {
             dealer_address,
             session_context: session_context.clone(),
             message_hash,
-        };
+        });
 
         // Create certificate using validator 0's committee
         let bls_committee0 = create_bls_committee(&config0, &bls_public_keys0);

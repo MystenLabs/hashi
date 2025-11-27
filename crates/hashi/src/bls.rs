@@ -7,6 +7,7 @@ use fastcrypto::traits::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -39,11 +40,17 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign<T: Serialize>(&self, epoch: u64, address: Address, message: &T) -> MemberSignature {
+    pub fn sign<T: Serialize>(
+        &self,
+        epoch: u64,
+        address: Address,
+        message: &T,
+    ) -> MemberSignature<T> {
         MemberSignature {
             epoch,
             address,
             signature: self.0.sign(&bcs::to_bytes(message).unwrap()),
+            message_type: PhantomData,
         }
     }
 }
@@ -65,10 +72,11 @@ pub struct BlsCommitteeMember {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberSignature {
+pub struct MemberSignature<T> {
     epoch: u64,
     address: Address,
     signature: BLS12381Signature,
+    message_type: PhantomData<T>,
 }
 
 impl BlsCommittee {
@@ -112,7 +120,7 @@ impl BlsCommittee {
     fn verify<T: Serialize>(
         &self,
         message: &T,
-        signature: &MemberSignature,
+        signature: &MemberSignature<T>,
     ) -> Result<(), SignatureError> {
         if self.epoch != signature.epoch {
             return Err(SignatureError::from_source(format!(
@@ -127,12 +135,12 @@ impl BlsCommittee {
             .map_err(SignatureError::from_source)
     }
 
-    /// Verify an [Certificate]. If you also need to verify the weight, you can either
-    /// get the weight of the signature with [Certificate::weight] or use the [Self::verify_signature_and_weight]
+    /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
+    /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
     /// function.
     pub fn verify_signature<T: Serialize>(
         &self,
-        signature: &Certificate<T>,
+        signature: &CommitteeSignature<T>,
     ) -> Result<(), SignatureError> {
         let pks = signature
             .signers_bitmap
@@ -151,7 +159,7 @@ impl BlsCommittee {
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
     pub fn verify_signature_and_weight<T: Serialize>(
         &self,
-        signature: &Certificate<T>,
+        signature: &CommitteeSignature<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
         let signed_weight = signature.weight(self)?;
@@ -181,14 +189,14 @@ impl BlsCommitteeMember {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Certificate<T> {
+pub struct CommitteeSignature<T> {
     epoch: u64,
     signature: BLS12381AggregateSignature,
     signers_bitmap: BitMap,
     pub(crate) message: T,
 }
 
-impl<T> Certificate<T> {
+impl<T> CommitteeSignature<T> {
     /// Verify that the committee could be used to verify this certificate, e.g., that the epoch and
     /// the number of signers match.
     fn verify_committee(&self, committee: &BlsCommittee) -> Result<(), SignatureError> {
@@ -261,7 +269,7 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
     ///  * a signature from the same member has already been added,
     ///  * if the signer is not a member of the committee,
     ///  * if the signature is not valid.
-    pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
+    pub fn add_signature(&mut self, signature: MemberSignature<T>) -> Result<(), SignatureError> {
         self.committee.verify(&self.message, &signature)?;
 
         let index = self
@@ -304,6 +312,7 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
             epoch: self.committee.epoch,
             address: signer,
             signature,
+            message_type: PhantomData,
         };
         self.add_signature(member_signature)
     }
@@ -315,13 +324,13 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
 
     /// Return the aggregated signature from the signatures aggregated so far.
     /// Returns an error if no signatures have been added yet.
-    pub fn finish(&self) -> Result<Certificate<T>, SignatureError> {
+    pub fn finish(&self) -> Result<CommitteeSignature<T>, SignatureError> {
         match &self.aggregate_signature {
             None => Err(SignatureError::from_source(
                 "signature map must have at least one entry",
             )),
             Some(signature) => {
-                let aggregated_signature = Certificate {
+                let aggregated_signature = CommitteeSignature {
                     epoch: self.committee.epoch,
                     signature: signature.clone(),
                     signers_bitmap: self.bitmap.clone(),
