@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{Certificate, MemberSignature};
+use crate::bls::{CommitteeSignature, MemberSignature};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Digest;
 use fastcrypto_tbls::nodes::Nodes;
@@ -226,29 +226,25 @@ pub struct ComplainResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum OrderedBroadcastMessage {
-    AvssCertificateV1(Certificate<DkgMessage>),
-    PresignatureV1 {
-        sender: Address,
-        session_context: SessionContext,
-        data: Vec<u8>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator: Address,
     pub signature: MemberSignature,
 }
 
-// TODO: Change this to an enum for dealer messages for other flows
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgMessage {
     pub dealer_address: Address,
     pub session_context: SessionContext,
     pub message_hash: MessageHash,
 }
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MpcMessageV1 {
+    Dkg(DkgMessage),
+}
+
+pub type Certificate = CommitteeSignature<MpcMessageV1>;
 
 pub type DkgResult<T> = Result<T, DkgError>;
 
@@ -262,6 +258,9 @@ pub enum DkgError {
 
     #[error("Invalid message from {sender}: {reason}")]
     InvalidMessage { sender: Address, reason: String },
+
+    #[error("Invalid message type: {0}")]
+    InvalidMessageType(String),
 
     #[error("Protocol timeout after {seconds} seconds")]
     Timeout { seconds: u64 },
@@ -306,6 +305,20 @@ mod tests {
     use fastcrypto::groups::ristretto255::RistrettoPoint;
     use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
     use fastcrypto_tbls::nodes::Node;
+
+    impl MpcMessageV1 {
+        pub fn as_dkg_message(&self) -> &DkgMessage {
+            match self {
+                MpcMessageV1::Dkg(msg) => msg,
+            }
+        }
+
+        pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
+            match self {
+                MpcMessageV1::Dkg(msg) => msg,
+            }
+        }
+    }
 
     fn create_test_validator(
         party_id: u16,
