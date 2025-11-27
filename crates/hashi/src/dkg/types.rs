@@ -200,13 +200,8 @@ pub struct SendMessageRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SignedMessage {
-    pub signature: ValidatorSignature<MpcMessageV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageResponse {
-    pub signature: ValidatorSignature<MpcMessageV1>,
+    pub signature: ValidatorSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,9 +237,9 @@ pub enum OrderedBroadcastMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ValidatorSignature<T> {
+pub struct ValidatorSignature {
     pub validator: Address,
-    pub signature: MemberSignature<T>,
+    pub signature: MemberSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -266,6 +261,7 @@ impl MpcMessageV1 {
     pub fn try_as_dkg_message(&self) -> DkgResult<&DkgMessage> {
         match self {
             MpcMessageV1::DKG(msg) => Ok(msg),
+            #[allow(unreachable_patterns)] // Will be reachable once more MPCMessages are added
             _ => Err(DkgError::InvalidMessageType(format!(
                 "{:?} is not a DKG message",
                 self
@@ -277,6 +273,7 @@ impl MpcMessageV1 {
     pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
         match self {
             MpcMessageV1::DKG(msg) => msg,
+            #[allow(unreachable_patterns)] // Will be reachable once more MPCMessages are added
             _ => panic!(),
         }
     }

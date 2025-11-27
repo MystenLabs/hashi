@@ -7,7 +7,6 @@ use fastcrypto::traits::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -40,17 +39,11 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign<T: Serialize>(
-        &self,
-        epoch: u64,
-        address: Address,
-        message: &T,
-    ) -> MemberSignature<T> {
+    pub fn sign<T: Serialize>(&self, epoch: u64, address: Address, message: &T) -> MemberSignature {
         MemberSignature {
             epoch,
             address,
             signature: self.0.sign(&bcs::to_bytes(message).unwrap()),
-            message_type: PhantomData,
         }
     }
 }
@@ -72,11 +65,10 @@ pub struct BlsCommitteeMember {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberSignature<T> {
+pub struct MemberSignature {
     epoch: u64,
     address: Address,
     signature: BLS12381Signature,
-    message_type: PhantomData<T>,
 }
 
 impl BlsCommittee {
@@ -120,7 +112,7 @@ impl BlsCommittee {
     fn verify<T: Serialize>(
         &self,
         message: &T,
-        signature: &MemberSignature<T>,
+        signature: &MemberSignature,
     ) -> Result<(), SignatureError> {
         if self.epoch != signature.epoch {
             return Err(SignatureError::from_source(format!(
@@ -269,7 +261,7 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
     ///  * a signature from the same member has already been added,
     ///  * if the signer is not a member of the committee,
     ///  * if the signature is not valid.
-    pub fn add_signature(&mut self, signature: MemberSignature<T>) -> Result<(), SignatureError> {
+    pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
         self.committee.verify(&self.message, &signature)?;
 
         let index = self
@@ -312,7 +304,6 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
             epoch: self.committee.epoch,
             address: signer,
             signature,
-            message_type: PhantomData,
         };
         self.add_signature(member_signature)
     }

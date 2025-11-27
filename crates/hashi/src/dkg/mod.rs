@@ -4,7 +4,7 @@ pub mod types;
 
 use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
 use crate::dkg::types::MpcMessageV1::DKG;
-use crate::dkg::types::{Certificate, DkgMessage, SignedMessage};
+use crate::dkg::types::{Certificate, DkgMessage};
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::error::FastCryptoError;
@@ -97,9 +97,7 @@ impl DkgManager {
                 })
             };
         }
-        let signature = self
-            .receive_dealer_message(&request.message, sender)?
-            .signature;
+        let signature = self.receive_dealer_message(&request.message, sender)?;
         let response = SendMessageResponse { signature };
         self.message_responses.insert(sender, response.clone());
         Ok(response)
@@ -195,7 +193,7 @@ impl DkgManager {
             }),
         );
         aggregator
-            .add_signature(my_signature.signature.signature)
+            .add_signature(my_signature.signature)
             .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
         // TODO: Consider sending RPC's in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
@@ -328,7 +326,7 @@ impl DkgManager {
         &mut self,
         message: &avss::Message,
         dealer_address: Address,
-    ) -> DkgResult<SignedMessage> {
+    ) -> DkgResult<ValidatorSignature> {
         self.dealer_messages.insert(dealer_address, message.clone());
         self.public_messages_store
             .store_dealer_message(&dealer_address, message)
@@ -366,11 +364,9 @@ impl DkgManager {
                 message_hash,
             }),
         );
-        Ok(SignedMessage {
-            signature: ValidatorSignature {
-                validator: self.address,
-                signature,
-            },
+        Ok(ValidatorSignature {
+            validator: self.address,
+            signature,
         })
     }
 
@@ -607,7 +603,7 @@ fn compute_message_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::types::{MpcMessageV1, ProtocolType};
+    use crate::dkg::types::ProtocolType;
     use fastcrypto::encoding::{Encoding, Hex};
     use fastcrypto::groups::Scalar;
     use fastcrypto_tbls::ecies_v1::{MultiRecipientEncryption, PublicKey};
@@ -694,7 +690,7 @@ mod tests {
         dealer_message: &avss::Message,
         dealer_address: Address,
         session_context: &SessionContext,
-        validator_signatures: Vec<SignedMessage>,
+        validator_signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<Certificate> {
         // Compute message hashg
         let message_hash = compute_message_hash(session_context, &dealer_address, dealer_message)?;
@@ -715,7 +711,7 @@ mod tests {
         // Add all signatures
         for validator_sig in validator_signatures {
             aggregator
-                .add_signature(validator_sig.signature.signature)
+                .add_signature(validator_sig.signature)
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
 
@@ -1373,7 +1369,7 @@ mod tests {
             .unwrap();
 
         // Verify signature format
-        assert_eq!(signature.signature.validator, receiver_manager.address);
+        assert_eq!(signature.validator, receiver_manager.address);
 
         // Verify receiver output was stored in memory
         assert!(
@@ -3610,7 +3606,7 @@ mod tests {
             .clone();
 
         // Create validator signatures for certificates
-        let validator_signatures_1: Vec<SignedMessage> = (0..3)
+        let validator_signatures_1: Vec<ValidatorSignature> = (0..3)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
@@ -3621,16 +3617,14 @@ mod tests {
                     message_hash,
                 });
                 let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
-                SignedMessage {
-                    signature: ValidatorSignature {
-                        validator: addr,
-                        signature,
-                    },
+                ValidatorSignature {
+                    validator: addr,
+                    signature,
                 }
             })
             .collect();
 
-        let validator_signatures_2: Vec<SignedMessage> = (0..3)
+        let validator_signatures_2: Vec<ValidatorSignature> = (0..3)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
@@ -3641,11 +3635,9 @@ mod tests {
                     message_hash,
                 });
                 let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
-                SignedMessage {
-                    signature: ValidatorSignature {
-                        validator: addr,
-                        signature,
-                    },
+                ValidatorSignature {
+                    validator: addr,
+                    signature,
                 }
             })
             .collect();
@@ -3757,7 +3749,7 @@ mod tests {
             .clone();
 
         // Helper to create validator signatures
-        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<SignedMessage> {
+        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<ValidatorSignature> {
             (0..3)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
@@ -3769,11 +3761,9 @@ mod tests {
                         message_hash,
                     });
                     let signature = bls_keys[i].sign(config.epoch, addr, &dkg_message);
-                    SignedMessage {
-                        signature: ValidatorSignature {
-                            validator: addr,
-                            signature,
-                        },
+                    ValidatorSignature {
+                        validator: addr,
+                        signature,
                     }
                 })
                 .collect()
@@ -5559,7 +5549,7 @@ mod tests {
         dealer_address: &Address,
         message: &avss::Message,
         session_context: &SessionContext,
-        signer_signatures: Vec<ValidatorSignature<MpcMessageV1>>,
+        signer_signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(session_context, dealer_address, message)?;
         let dkg_message = DKG(DkgMessage {
