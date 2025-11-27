@@ -226,17 +226,6 @@ pub struct ComplainResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum OrderedBroadcastMessage {
-    AvssCertificateV1(Certificate),
-    PresignatureV1 {
-        sender: Address,
-        session_context: SessionContext,
-        data: Vec<u8>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator: Address,
     pub signature: MemberSignature,
@@ -252,7 +241,7 @@ pub struct DkgMessage {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MpcMessageV1 {
-    DKG(DkgMessage),
+    Dkg(DkgMessage),
 }
 
 pub type Certificate = CommitteeSignature<MpcMessageV1>;
@@ -260,7 +249,7 @@ pub type Certificate = CommitteeSignature<MpcMessageV1>;
 impl MpcMessageV1 {
     pub fn try_as_dkg_message(&self) -> DkgResult<&DkgMessage> {
         match self {
-            MpcMessageV1::DKG(msg) => Ok(msg),
+            MpcMessageV1::Dkg(msg) => Ok(msg),
             #[allow(unreachable_patterns)] // Will be reachable once more MPCMessages are added
             _ => Err(DkgError::InvalidMessageType(format!(
                 "{:?} is not a DKG message",
@@ -272,7 +261,7 @@ impl MpcMessageV1 {
     #[cfg(test)]
     pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
         match self {
-            MpcMessageV1::DKG(msg) => msg,
+            MpcMessageV1::Dkg(msg) => msg,
             #[allow(unreachable_patterns)] // Will be reachable once more MPCMessages are added
             _ => panic!(),
         }
