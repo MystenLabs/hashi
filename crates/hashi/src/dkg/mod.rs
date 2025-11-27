@@ -255,7 +255,7 @@ impl DkgManager {
                             "Certificate from dealer {:?} received but message missing, retrieving from signers",
                             &dealer
                         );
-                        self.retrieve_dealer_message(dealer, &cert, p2p_channel)
+                        self.retrieve_dealer_message(dealer, &cert, message, p2p_channel)
                             .await
                             .map_err(|e| {
                                 tracing::error!(
@@ -266,7 +266,7 @@ impl DkgManager {
                                 e
                             })?;
                     }
-                    match self.validate_certificate(&cert) {
+                    match self.validate_certificate(message, &cert) {
                         Ok(()) => {
                             if self.complaints.contains_key(&message.dealer_address) {
                                 self.recover_shares_via_complaint(
@@ -408,6 +408,7 @@ impl DkgManager {
         &mut self,
         dealer_address: Address,
         certificate: &Certificate,
+        message: &DkgMessage,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
@@ -429,8 +430,6 @@ impl DkgManager {
                 "Self in certificate signers but message not available".to_string(),
             ));
         }
-
-        let message = certificate.message.try_as_dkg_message()?;
 
         let signers = certificate.signers(&self.bls_committee).map_err(|_| {
             DkgError::ProtocolFailed(
@@ -533,8 +532,7 @@ impl DkgManager {
         )))
     }
 
-    fn validate_certificate(&self, cert: &Certificate) -> DkgResult<()> {
-        let dkg_message = cert.message.try_as_dkg_message()?;
+    fn validate_certificate(&self, dkg_message: &DkgMessage, cert: &Certificate) -> DkgResult<()> {
         let dealer = dkg_message.dealer_address;
         let message = self.dealer_messages.get(&dealer).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
@@ -4948,7 +4946,12 @@ mod tests {
 
         // Party requests dealer's share from certificate signers
         let result = party_manager
-            .retrieve_dealer_message(dealer_address, &cert, &mock_p2p)
+            .retrieve_dealer_message(
+                dealer_address,
+                &cert,
+                dkg_message.as_dkg_message(),
+                &mock_p2p,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -5028,7 +5031,12 @@ mod tests {
         // Party requests dealer's share - should fail during certificate validation or message processing
         // (incompatible keys - config mismatch)
         let result = party_manager
-            .retrieve_dealer_message(dealer_address, &cert, &mock_p2p)
+            .retrieve_dealer_message(
+                dealer_address,
+                &cert,
+                dkg_message.as_dkg_message(),
+                &mock_p2p,
+            )
             .await;
 
         // Should fail - either during certificate validation (CryptoError) or message processing (ProtocolFailed)
@@ -5113,7 +5121,7 @@ mod tests {
 
         // Should succeed by trying validator 1 (fails), then dealer (succeeds)
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr, &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr, &cert, dkg_message.as_dkg_message(), &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -5194,7 +5202,7 @@ mod tests {
 
         // Should abort with ProtocolFailed error due to invariant violation
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr, &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr, &cert, dkg_message.as_dkg_message(), &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -5281,7 +5289,7 @@ mod tests {
 
         // Should fail because all signers are offline
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr, &cert, &mock_p2p)
+            .retrieve_dealer_message(dealer_addr, &cert, dkg_message.as_dkg_message(), &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -5404,7 +5412,12 @@ mod tests {
         // 2. Computes hash(message B) != hash(message A) -> rejects, continues
         // 3. Tries real dealer A -> returns message A -> hash matches -> success
         let result = party_mgr
-            .retrieve_dealer_message(dealer_a_addr, &cert, &mock_p2p)
+            .retrieve_dealer_message(
+                dealer_a_addr,
+                &cert,
+                dkg_message.as_dkg_message(),
+                &mock_p2p,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -5901,7 +5914,7 @@ mod tests {
             .receive_dealer_message(&dealer_message, dealer_address)
             .unwrap();
 
-        let result = manager1.validate_certificate(&certificate);
+        let result = manager1.validate_certificate(dkg_message.as_dkg_message(), &certificate);
         assert!(
             result.is_ok(),
             "Validator with independently constructed config should verify certificate. \

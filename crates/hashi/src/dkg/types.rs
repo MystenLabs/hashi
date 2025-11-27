@@ -246,28 +246,6 @@ pub enum MpcMessageV1 {
 
 pub type Certificate = CommitteeSignature<MpcMessageV1>;
 
-impl MpcMessageV1 {
-    pub fn try_as_dkg_message(&self) -> DkgResult<&DkgMessage> {
-        match self {
-            MpcMessageV1::Dkg(msg) => Ok(msg),
-            #[allow(unreachable_patterns)] // Will be reachable once more MPCMessages are added
-            _ => Err(DkgError::InvalidMessageType(format!(
-                "{:?} is not a DKG message",
-                self
-            ))),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
-        match self {
-            MpcMessageV1::Dkg(msg) => msg,
-            #[allow(unreachable_patterns)] // Will be reachable once more MPCMessages are added
-            _ => panic!(),
-        }
-    }
-}
-
 pub type DkgResult<T> = Result<T, DkgError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -327,6 +305,20 @@ mod tests {
     use fastcrypto::groups::ristretto255::RistrettoPoint;
     use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
     use fastcrypto_tbls::nodes::Node;
+
+    impl MpcMessageV1 {
+        pub fn as_dkg_message(&self) -> &DkgMessage {
+            match self {
+                MpcMessageV1::Dkg(msg) => msg,
+            }
+        }
+
+        pub fn as_mut_dkg_message(&mut self) -> &mut DkgMessage {
+            match self {
+                MpcMessageV1::Dkg(msg) => msg,
+            }
+        }
+    }
 
     fn create_test_validator(
         party_id: u16,
