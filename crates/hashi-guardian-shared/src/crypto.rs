@@ -29,8 +29,8 @@ pub type ShareID = u32; // Share IDs are assigned from 1, e.g., 1, 2, 3 and so o
 
 #[derive(Clone)]
 pub struct Share {
-    identifier: ShareID,
-    value: Scalar,
+    pub id: ShareID,
+    pub value: Scalar,
 }
 
 // Secret sharing constants: threshold and total number of key provisioners
@@ -63,13 +63,6 @@ pub struct Ciphertext {
 // ---------------------------------
 
 impl EncKeyPair {
-    pub fn new(enc_sk: EncSecKey, enc_pk: EncPubKey) -> Self {
-        Self {
-            sk: enc_sk,
-            pk: enc_pk,
-        }
-    }
-
     pub fn random<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
         let (sk, pk) = X25519HkdfSha256::gen_keypair(rng);
         Self { sk, pk }
@@ -89,50 +82,6 @@ impl Ciphertext {
             encapsulated_key: encapsulated_key.to_bytes().to_vec(),
             aes_ciphertext,
         }
-    }
-}
-
-impl ShareCommitment {
-    pub fn new(id: ShareID, digest: DigestBytes) -> Self {
-        Self { id, digest }
-    }
-
-    pub fn id(&self) -> &ShareID {
-        &self.id
-    }
-
-    pub fn digest(&self) -> &DigestBytes {
-        &self.digest
-    }
-}
-
-impl EncryptedShare {
-    pub fn id(&self) -> &ShareID {
-        &self.id
-    }
-
-    pub fn ciphertext(&self) -> &Ciphertext {
-        &self.ciphertext
-    }
-}
-
-impl From<(ShareID, Ciphertext)> for EncryptedShare {
-    fn from((id, ciphertext): (ShareID, Ciphertext)) -> EncryptedShare {
-        EncryptedShare { id, ciphertext }
-    }
-}
-
-impl Share {
-    pub fn new(identifier: ShareID, value: Scalar) -> Self {
-        Self { identifier, value }
-    }
-
-    pub fn id(&self) -> ShareID {
-        self.identifier
-    }
-
-    pub fn value(&self) -> &Scalar {
-        &self.value
     }
 }
 
@@ -188,15 +137,15 @@ pub fn split_secret(sk: &k256::SecretKey) -> Vec<Share> {
     // Evaluate
     (1..=LIMIT as u32)
         .map(|i| Share {
-            identifier: i,
-            value: eval(i, &coefficients),
+            id: i,
+            value: eval_poly(i, &coefficients),
         })
         .collect()
 }
 
 // Coefficients: [c0, c1, c2, c3]
 // Returns: c0 + c1 * x + c2 * x^2 + c3 * x^3
-pub fn eval(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
+pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
     let x = Scalar::from(pos);
     let mut out = Scalar::ZERO;
     let mut xpow = Scalar::ONE;
@@ -208,21 +157,21 @@ pub fn eval(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
 }
 
 pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
-    // Validation (check no duplicates)
+    // Validation: ensure no duplicates
     let mut seen_ids = std::collections::HashSet::new();
     for share in shares {
-        if !seen_ids.insert(share.identifier) {
+        if !seen_ids.insert(share.id) {
             return Err(InternalError("Duplicate share ID".into()));
         }
     }
 
     let ids = shares
         .iter()
-        .map(|s| Scalar::from(s.identifier))
+        .map(|s| Scalar::from(s.id))
         .collect::<Vec<_>>();
     let mut result = Scalar::ZERO;
     for share in shares {
-        let cur_share_id = Scalar::from(share.identifier);
+        let cur_share_id = Scalar::from(share.id);
         let numerator: Scalar = ids
             .iter()
             .filter(|&id| cur_share_id != *id)
@@ -256,7 +205,7 @@ pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Se
 pub fn commit_share(share: &Share) -> ShareCommitment {
     let commitment = ProjectivePoint::GENERATOR * share.value;
     ShareCommitment {
-        id: share.identifier,
+        id: share.id,
         digest: commitment.to_bytes().to_vec(),
     }
 }
@@ -267,11 +216,10 @@ pub fn encrypt_share(
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<EncryptedShare> {
-    let share_id = share.identifier;
-    let share_value = share.value;
-    let bytes = share_value.to_bytes();
-    let ciphertext = encrypt(&bytes, pk, aad)?;
-    Ok((share_id, ciphertext).into())
+    Ok(EncryptedShare {
+        id: share.id,
+        ciphertext: encrypt(&share.value.to_bytes(), pk, aad)?,
+    })
 }
 
 /// Decrypt an encrypted share with optional AAD
@@ -280,14 +228,12 @@ pub fn decrypt_share(
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Share> {
-    let share_id = *encrypted_share.id();
-    let serialized_share = decrypt(encrypted_share.ciphertext(), sk, aad)?;
-
+    let serialized_share = decrypt(&encrypted_share.ciphertext, sk, aad)?;
     let result: Option<Scalar> =
         Scalar::from_repr(*FieldBytes::from_slice(&serialized_share)).into();
     match result {
         Some(x) => Ok(Share {
-            identifier: share_id,
+            id: encrypted_share.id,
             value: x,
         }),
         None => Err(InternalError("Failed to deserialize share".into())),
@@ -399,15 +345,15 @@ mod tests {
         let coefficients = vec![Scalar::ONE, Scalar::from(2u32), Scalar::from(3u32)];
 
         // f(1) = 1 + 2(1) + 3(1)^2 = 6
-        let result1 = eval(1, &coefficients);
+        let result1 = eval_poly(1, &coefficients);
         assert_eq!(result1, Scalar::from(6u32));
 
         // f(2) = 1 + 2(2) + 3(4) = 17
-        let result2 = eval(2, &coefficients);
+        let result2 = eval_poly(2, &coefficients);
         assert_eq!(result2, Scalar::from(17u32));
 
         // f(0) = 1 (constant term)
-        let result0 = eval(0, &coefficients);
+        let result0 = eval_poly(0, &coefficients);
         assert_eq!(result0, Scalar::ONE);
     }
 
