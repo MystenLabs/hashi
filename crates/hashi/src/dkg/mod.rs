@@ -255,7 +255,7 @@ impl DkgManager {
                             "Certificate from dealer {:?} received but message missing, retrieving from signers",
                             &dealer
                         );
-                        self.retrieve_dealer_message(dealer, &cert, message, p2p_channel)
+                        self.retrieve_dealer_message(message, &cert, p2p_channel)
                             .await
                             .map_err(|e| {
                                 tracing::error!(
@@ -406,13 +406,12 @@ impl DkgManager {
 
     async fn retrieve_dealer_message(
         &mut self,
-        dealer_address: Address,
-        certificate: &Certificate,
         message: &DkgMessage,
+        certificate: &Certificate,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
-            dealer: dealer_address,
+            dealer: message.dealer_address,
         };
         // TODO: Implement gradual escalation strategy for better network efficiency:
         // - Round 1: Call 1-2 random signers, wait ~2s
@@ -424,7 +423,7 @@ impl DkgManager {
         {
             tracing::error!(
                 "Self in certificate signers but message not available for dealer {:?}.",
-                dealer_address
+                message.dealer_address
             );
             return Err(DkgError::ProtocolFailed(
                 "Self in certificate signers but message not available".to_string(),
@@ -440,7 +439,7 @@ impl DkgManager {
             if signer_address == self.address {
                 tracing::error!(
                     "Self in certificate signers but message not available for dealer {:?}.",
-                    dealer_address
+                    message.dealer_address
                 );
                 return Err(DkgError::ProtocolFailed(
                     "Self in certificate signers but message not available".to_string(),
@@ -454,7 +453,7 @@ impl DkgManager {
                 Ok(response) => {
                     let message_hash = compute_message_hash(
                         &self.session_context,
-                        &dealer_address,
+                        &message.dealer_address,
                         &response.message,
                     )?;
                     if message_hash != message.message_hash {
@@ -464,7 +463,7 @@ impl DkgManager {
                         );
                         continue;
                     }
-                    self.receive_dealer_message(&response.message, dealer_address)?;
+                    self.receive_dealer_message(&response.message, message.dealer_address)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -4946,12 +4945,7 @@ mod tests {
 
         // Party requests dealer's share from certificate signers
         let result = party_manager
-            .retrieve_dealer_message(
-                dealer_address,
-                &cert,
-                dkg_message.as_dkg_message(),
-                &mock_p2p,
-            )
+            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -5031,12 +5025,7 @@ mod tests {
         // Party requests dealer's share - should fail during certificate validation or message processing
         // (incompatible keys - config mismatch)
         let result = party_manager
-            .retrieve_dealer_message(
-                dealer_address,
-                &cert,
-                dkg_message.as_dkg_message(),
-                &mock_p2p,
-            )
+            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
             .await;
 
         // Should fail - either during certificate validation (CryptoError) or message processing (ProtocolFailed)
@@ -5121,7 +5110,7 @@ mod tests {
 
         // Should succeed by trying validator 1 (fails), then dealer (succeeds)
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr, &cert, dkg_message.as_dkg_message(), &mock_p2p)
+            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
@@ -5202,7 +5191,7 @@ mod tests {
 
         // Should abort with ProtocolFailed error due to invariant violation
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr, &cert, dkg_message.as_dkg_message(), &mock_p2p)
+            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -5289,7 +5278,7 @@ mod tests {
 
         // Should fail because all signers are offline
         let result = party_mgr
-            .retrieve_dealer_message(dealer_addr, &cert, dkg_message.as_dkg_message(), &mock_p2p)
+            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_err());
@@ -5412,12 +5401,7 @@ mod tests {
         // 2. Computes hash(message B) != hash(message A) -> rejects, continues
         // 3. Tries real dealer A -> returns message A -> hash matches -> success
         let result = party_mgr
-            .retrieve_dealer_message(
-                dealer_a_addr,
-                &cert,
-                dkg_message.as_dkg_message(),
-                &mock_p2p,
-            )
+            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
             .await;
 
         assert!(result.is_ok());
