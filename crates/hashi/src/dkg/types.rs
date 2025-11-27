@@ -241,12 +241,26 @@ pub enum OrderedBroadcastMessage {
     },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorSignature<T> {
+    pub validator: Address,
+    pub signature: MemberSignature<T>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DkgMessage {
+    pub dealer_address: Address,
+    pub session_context: SessionContext,
+    pub message_hash: MessageHash,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MpcMessageV1 {
     DKG(DkgMessage),
-    KeyRotation,
 }
+
+pub type Certificate = CommitteeSignature<MpcMessageV1>;
 
 impl MpcMessageV1 {
     pub fn try_as_dkg_message(&self) -> DkgResult<&DkgMessage> {
@@ -266,22 +280,6 @@ impl MpcMessageV1 {
             _ => panic!(),
         }
     }
-}
-
-pub type Certificate = CommitteeSignature<MpcMessageV1>;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ValidatorSignature<T> {
-    pub validator: Address,
-    pub signature: MemberSignature<T>,
-}
-
-// TODO: Change this to an enum for dealer messages for other flows
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgMessage {
-    pub dealer_address: Address,
-    pub session_context: SessionContext,
-    pub message_hash: MessageHash,
 }
 
 pub type DkgResult<T> = Result<T, DkgError>;
