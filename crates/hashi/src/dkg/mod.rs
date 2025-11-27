@@ -684,7 +684,7 @@ mod tests {
         session_context: &SessionContext,
         validator_signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<Certificate> {
-        // Compute message hashg
+        // Compute message hash
         let message_hash = compute_message_hash(session_context, &dealer_address, dealer_message)?;
 
         // Create DkgMessage
