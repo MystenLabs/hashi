@@ -1,4 +1,4 @@
-use crate::GuardianError::{InternalError, InvalidInputs};
+use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -137,7 +137,7 @@ pub fn construct_signing_messages(
                     leaf_hash,
                     sighash_type,
                 )
-                .map_err(|e| InternalError(format!("sighash error: {}", e)))?;
+                .expect("sighash failed unexpectedly");
             Ok(Message::from_digest(*sighash.as_byte_array()))
         })
         .collect::<GuardianResult<Vec<Message>>>()
