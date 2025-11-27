@@ -9,6 +9,7 @@ use tracing::error;
 pub enum GuardianError {
     OpaqueError(String),
     InternalError(String),
+    InvalidInputs(String),
 }
 
 pub type GuardianResult<T> = Result<T, GuardianError>;
@@ -18,6 +19,7 @@ impl std::fmt::Display for GuardianError {
         match self {
             GuardianError::OpaqueError(e) => write!(f, "GenericError: {}", e),
             GuardianError::InternalError(e) => write!(f, "InternalError: {}", e),
+            GuardianError::InvalidInputs(e) => write!(f, "InvalidInputs: {}", e),
         }
     }
 }
@@ -30,6 +32,7 @@ impl IntoResponse for GuardianError {
         let (status, error_message) = match self {
             GuardianError::OpaqueError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             GuardianError::InternalError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            GuardianError::InvalidInputs(e) => (StatusCode::BAD_REQUEST, e),
         };
         error!("Status: {}, Message: {}", status, error_message);
         let body = Json(json!({

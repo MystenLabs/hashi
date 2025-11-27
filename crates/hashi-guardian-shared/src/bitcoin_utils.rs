@@ -1,4 +1,4 @@
-use crate::GuardianError::InternalError;
+use crate::GuardianError::{InternalError, InvalidInputs};
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -35,10 +35,10 @@ impl TaprootUTXO {
         leaf_script: ScriptBuf,
     ) -> GuardianResult<Self> {
         if !script_pubkey.is_p2tr() {
-            return Err(InternalError("script is not P2TR".into()));
+            return Err(InvalidInputs("script is not P2TR".into()));
         }
         if leaf_script.is_empty() {
-            return Err(InternalError("leaf script must not be empty".into()));
+            return Err(InvalidInputs("leaf script must not be empty".into()));
         }
         Ok(Self {
             txid,
@@ -100,16 +100,16 @@ pub fn construct_signing_messages(
 ) -> GuardianResult<Vec<Message>> {
     // Input Validation
     if input_utxos.is_empty() {
-        return Err(InternalError("input utxos must not be empty".into()));
+        return Err(InvalidInputs("input utxos must not be empty".into()));
     }
     if output_utxos.is_empty() {
-        return Err(InternalError("output utxos must not be empty".into()));
+        return Err(InvalidInputs("output utxos must not be empty".into()));
     }
     let in_amount = input_utxos.iter().map(|utxo| utxo.amount).sum::<Amount>();
     let out_amount = output_utxos.iter().map(|utxo| utxo.value).sum::<Amount>();
     let change_amount = change_utxo.value;
     if in_amount < out_amount + change_amount {
-        return Err(InternalError("Amount mismatch".into()));
+        return Err(InvalidInputs("Amount mismatch".into()));
     }
 
     // Construct tx

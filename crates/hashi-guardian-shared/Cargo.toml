@@ -10,12 +10,11 @@ tracing = "0.1.41"
 serde_json = "1.0.143"
 
 # Crypto dependencies
-hpke = "0.12.0"# Not using hpke 0.13.0 because it uses rand 0.9 which breaks vsss-rs
+# Note: bitcoin v0.32.7 and k256 v0.13 both require rand_core 0.6.4
+# hpke 0.13.0 uses rand 0.9 which conflicts - must use hpke 0.12.0
+hpke = "0.12.0"
 rand = "0.8.5"
 rand_core = "0.6.4"
 k256 = "0.13"
 bitcoin = { version =  "0.32.7", features = ["serde", "rand-std"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-
-[dev-dependencies]
-rand_core = "0.6"
