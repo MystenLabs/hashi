@@ -39,12 +39,12 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign(
+    pub fn sign<T: Serialize, C: Serialize>(
         &self,
         epoch: u64,
         address: Address,
-        message: &impl Serialize,
-        context: &impl Serialize,
+        message: &T,
+        context: &C,
     ) -> MemberSignature {
         MemberSignature {
             epoch,
@@ -54,7 +54,7 @@ impl Bls12381PrivateKey {
     }
 }
 
-fn message_to_sign(message: &impl Serialize, context: &impl Serialize) -> Vec<u8> {
+fn message_to_sign<T: Serialize, C: Serialize>(message: &T, context: &C) -> Vec<u8> {
     bcs::to_bytes(&(message, context)).unwrap()
 }
 
@@ -119,10 +119,10 @@ impl BlsCommittee {
     }
 
     /// Verify a single signature provided by a [BlsCommitteeMember].
-    fn verify<T: Serialize>(
+    fn verify<T: Serialize, C: Serialize>(
         &self,
         message: &T,
-        context: &impl Serialize,
+        context: &C,
         signature: &MemberSignature,
     ) -> Result<(), SignatureError> {
         if self.epoch != signature.epoch {
@@ -140,9 +140,9 @@ impl BlsCommittee {
     /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
     /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
     /// function.
-    pub fn verify_signature<T: Serialize>(
+    pub fn verify_signature<T: Serialize, C: Serialize>(
         &self,
-        context: &impl Serialize,
+        context: &C,
         signature: &CommitteeSignature<T>,
     ) -> Result<(), SignatureError> {
         let pks = signature
@@ -158,9 +158,9 @@ impl BlsCommittee {
     }
 
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
-    pub fn verify_signature_and_weight<T: Serialize>(
+    pub fn verify_signature_and_weight<T: Serialize, C: Serialize>(
         &self,
-        context: &impl Serialize,
+        context: &C,
         signature: &CommitteeSignature<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
