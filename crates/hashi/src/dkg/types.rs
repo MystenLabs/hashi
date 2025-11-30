@@ -396,15 +396,15 @@ mod tests {
     fn test_session_id_different_chains() {
         let epoch = 100;
         let protocol_type = ProtocolType::DkgKeyGeneration;
-        let mainnet_id = SessionId::new(&"mainnet".to_string(), epoch, &protocol_type);
-        let testnet_id = SessionId::new(&"testnet".to_string(), epoch, &protocol_type);
+        let mainnet_id = SessionId::new("mainnet", epoch, &protocol_type);
+        let testnet_id = SessionId::new("testnet", epoch, &protocol_type);
 
         assert_ne!(testnet_id, mainnet_id);
     }
 
     #[test]
     fn test_dealer_session_serialization() {
-        let sid = SessionId::new(&"testnet".to_string(), 100, &ProtocolType::DkgKeyGeneration);
+        let sid = SessionId::new("testnet", 100, &ProtocolType::DkgKeyGeneration);
         let dealer1 = Address::new([1; 32]);
         let dealer2 = Address::new([2; 32]);
         let dealer1_session = sid.dealer_session_id(&dealer1);

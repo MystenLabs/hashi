@@ -701,7 +701,7 @@ mod tests {
     fn create_test_manager(validator_index: u16, dkg_config: DkgConfig) -> DkgManager {
         let address = Address::new([validator_index as u8; 32]);
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             dkg_config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -907,7 +907,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -1292,7 +1292,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -1384,7 +1384,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 1, 0).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -1464,7 +1464,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -1592,7 +1592,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -1735,7 +1735,7 @@ mod tests {
         // Total weight = 7, threshold = 3, max_faulty = 1
         let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -1909,7 +1909,7 @@ mod tests {
         // threshold = 2, max_faulty = 1
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2100,7 +2100,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2207,7 +2207,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2492,7 +2492,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2650,7 +2650,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2799,7 +2799,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2891,7 +2891,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 4, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -2978,7 +2978,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -3065,7 +3065,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             100,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -3216,7 +3216,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -3928,7 +3928,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -4016,7 +4016,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -4094,7 +4094,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -5367,7 +5367,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             config.epoch,
             &ProtocolType::DkgKeyGeneration,
         );
@@ -5722,7 +5722,7 @@ mod tests {
         let threshold = 2;
         let max_faulty = 1;
         let session_id = SessionId::new(
-            &"testchain".to_string(),
+            "testchain",
             epoch,
             &ProtocolType::DkgKeyGeneration,
         );
