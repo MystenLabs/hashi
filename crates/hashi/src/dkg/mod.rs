@@ -906,11 +906,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -1291,11 +1287,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Create dealer (party 0) with its encryption key
         let dealer_address = Address::new([0; 32]);
@@ -1383,11 +1375,7 @@ mod tests {
             .collect();
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 1, 0).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         let bls_public_keys = create_test_bls_keys(&config);
 
@@ -1463,11 +1451,7 @@ mod tests {
         // Constraint: t + 2f = 3 + 2 = 5 <= 12 ✓
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Generate BLS key pairs for all validators (indexed by validator index 0-4)
         let bls_keys: Vec<_> = (0..5)
@@ -1591,11 +1575,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Generate BLS keys
         let bls_keys: Vec<_> = (0..5)
@@ -1734,11 +1714,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         // Total weight = 7, threshold = 3, max_faulty = 1
         let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -1908,11 +1884,7 @@ mod tests {
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         // threshold = 2, max_faulty = 1
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
@@ -2099,11 +2071,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -2206,11 +2174,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -2491,11 +2455,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -2649,11 +2609,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -2798,11 +2754,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
@@ -2890,11 +2842,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 4, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
@@ -2977,11 +2925,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
             .map(|i| {
@@ -3064,11 +3008,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            100,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", 100, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -3215,11 +3155,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, threshold, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..num_validators)
@@ -3927,11 +3863,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..5)
@@ -4015,11 +3947,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..5)
@@ -4093,11 +4021,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..5)
@@ -5366,11 +5290,7 @@ mod tests {
 
         let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
         let config = DkgConfig::new(100, nodes, address_to_party_id, 2, 1).unwrap();
-        let session_id = SessionId::new(
-            "testchain",
-            config.epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", config.epoch, &ProtocolType::DkgKeyGeneration);
 
         // Create BLS public keys map with deterministic ordering
         let bls_public_keys: HashMap<_, _> = (0..5)
@@ -5721,11 +5641,7 @@ mod tests {
         let epoch = 100;
         let threshold = 2;
         let max_faulty = 1;
-        let session_id = SessionId::new(
-            "testchain",
-            epoch,
-            &ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = SessionId::new("testchain", epoch, &ProtocolType::DkgKeyGeneration);
 
         let construct_config = |data: &[(
             Address,
