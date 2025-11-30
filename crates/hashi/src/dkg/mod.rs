@@ -4,7 +4,7 @@ pub mod types;
 
 use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
 use crate::dkg::types::MpcMessageV1::Dkg;
-use crate::dkg::types::{Certificate, DkgMessage};
+use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::error::FastCryptoError;
@@ -18,7 +18,7 @@ pub use types::{
     AddressToPartyId, ComplainRequest, ComplainResponse, DkgConfig, DkgError, DkgOutput, DkgResult,
     EncryptionGroupElement, MessageHash, RetrieveMessageRequest, RetrieveMessageResponse,
     SendMessageRequest, SendMessageResponse, SessionContext, SessionId, SighashType,
-    SignatureBytes, ValidatorSignature,
+    ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -28,19 +28,20 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 // 2) Each party verifies the message and returns a signature. Once sufficient valid signatures are received from the parties, the dealer sends a certificate to Sui (TOB).
 // 3) Once sufficient valid certificates are received, a party completes the protocol locally by aggregating the shares from the dealers.
 pub struct DkgManager {
-    // Immutable during a given session
+    // Immutable during the epoch
     pub party_id: PartyId,
     pub address: Address,
     pub dkg_config: DkgConfig,
-    pub session_context: SessionContext,
+    pub session_id: SessionId,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub bls_signing_key: crate::bls::Bls12381PrivateKey,
     pub bls_committee: BlsCommittee,
-    // Mutable during a given session
+
+    // Mutable during the epoch
     pub dealer_outputs: HashMap<Address, avss::PartialOutput>,
     pub dealer_messages: HashMap<Address, avss::Message>,
     pub message_responses: HashMap<Address, SendMessageResponse>,
-    pub complaints: HashMap<Address, complaint::Complaint>,
+    pub complaints_to_process: HashMap<Address, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
 }
@@ -49,7 +50,7 @@ impl DkgManager {
     pub fn new(
         address: Address,
         dkg_config: DkgConfig,
-        session_context: SessionContext,
+        session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         bls_signing_key: crate::bls::Bls12381PrivateKey,
         bls_public_keys: HashMap<Address, BLS12381PublicKey>,
@@ -64,14 +65,14 @@ impl DkgManager {
             party_id,
             address,
             dkg_config,
-            session_context,
+            session_id,
             encryption_key,
             bls_signing_key,
             bls_committee,
             dealer_outputs: HashMap::new(),
             dealer_messages: HashMap::new(),
             message_responses: HashMap::new(),
-            complaints: HashMap::new(),
+            complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
         }
@@ -84,10 +85,8 @@ impl DkgManager {
         request: &SendMessageRequest,
     ) -> DkgResult<SendMessageResponse> {
         if let Some(existing_message) = self.dealer_messages.get(&sender) {
-            let existing_hash =
-                compute_message_hash(&self.session_context, &sender, existing_message)?;
-            let incoming_hash =
-                compute_message_hash(&self.session_context, &sender, &request.message)?;
+            let existing_hash = compute_message_hash(existing_message);
+            let incoming_hash = compute_message_hash(&request.message);
             return if existing_hash == incoming_hash {
                 Ok(self.message_responses.get(&sender).unwrap().clone())
             } else {
@@ -137,7 +136,7 @@ impl DkgManager {
             .dealer_outputs
             .get(&request.dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No shares for dealer".into()))?;
-        let dealer_session_id = self.session_context.dealer_session_id(&request.dealer);
+        let dealer_session_id = self.session_id.dealer_session_id(&request.dealer);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -176,21 +175,20 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
-        let dealer_message = self.create_dealer_message(rng)?;
+        let dealer_message = self.create_dealer_message(rng);
         let my_signature = self.receive_dealer_message(&dealer_message, self.address)?;
-        let message_hash =
-            compute_message_hash(&self.session_context, &self.address, &dealer_message)?;
+        let message_hash = compute_message_hash(&dealer_message);
         let mut aggregator = BlsSignatureAggregator::new(
             &self.bls_committee,
-            Dkg(DkgMessage {
+            Dkg(DkgDealerMessageHash {
                 dealer_address: self.address,
                 message_hash,
             }),
         );
         aggregator
             .add_signature(my_signature.signature)
-            .map_err(|e| DkgError::CryptoError(format!("Failed to add signature: {}", e)))?;
-        // TODO: Consider sending RPC's in parallel
+            .expect("first signature should always be valid");
+        // TODO: Send RPCs in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
         for validator_address in self.dkg_config.address_to_party_id.keys() {
             if validator_address != &self.address {
@@ -217,10 +215,11 @@ impl DkgManager {
         }
         let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
-            let cert = aggregator.finish().map_err(|e| {
-                DkgError::CryptoError(format!("Failed to aggregate signatures: {}", e))
-            })?;
+            let cert = aggregator
+                .finish()
+                .expect("signatures should always be valid");
             // TODO: Add timeout and retries handling when adding RPC layer
+            // TODO: do not fail in case my certificate is already published
             ordered_broadcast_channel.publish(cert).await.map_err(|e| {
                 DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
             })?;
@@ -267,14 +266,14 @@ impl DkgManager {
                     }
                     match self.validate_certificate(message, &cert) {
                         Ok(()) => {
-                            if self.complaints.contains_key(&message.dealer_address) {
+                            if self
+                                .complaints_to_process
+                                .contains_key(&message.dealer_address)
+                            {
                                 self.recover_shares_via_complaint(
                                     &message.dealer_address,
-                                    cert.signers(&self.bls_committee).map_err(|_| {
-                                        DkgError::InvalidCertificate(
-                                            "Invalid certificate for committee".parse().unwrap(),
-                                        )
-                                    })?,
+                                    cert.signers(&self.bls_committee)
+                                        .expect("verified signature above"),
                                     p2p_channel,
                                 )
                                 .await?;
@@ -302,29 +301,30 @@ impl DkgManager {
     fn create_dealer_message(
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<avss::Message> {
-        let dealer_session_id = self.session_context.dealer_session_id(&self.address);
+    ) -> avss::Message {
+        let dealer_session_id = self.session_id.dealer_session_id(&self.address);
         let dealer = avss::Dealer::new(
             None,
             self.dkg_config.nodes.clone(),
             self.dkg_config.threshold,
             self.dkg_config.max_faulty,
             dealer_session_id.to_vec(),
-        )?;
-        let message = dealer.create_message(rng)?;
-        Ok(message)
+        )
+        .expect("checked threshold above");
+        dealer.create_message(rng).expect("checked threshold above")
     }
 
     fn receive_dealer_message(
         &mut self,
         message: &avss::Message,
-        dealer_address: Address,
+        dealer: Address,
     ) -> DkgResult<ValidatorSignature> {
-        self.dealer_messages.insert(dealer_address, message.clone());
+        self.dealer_messages.insert(dealer, message.clone());
         self.public_messages_store
-            .store_dealer_message(&dealer_address, message)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        let dealer_session_id = self.session_context.dealer_session_id(&dealer_address);
+            .store_dealer_message(&dealer, message)
+            .expect("storage should always succeed");
+
+        let dealer_session_id = self.session_id.dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -336,23 +336,21 @@ impl DkgManager {
         let partial_output = match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => output,
             avss::ProcessedMessage::Complaint(complaint) => {
-                self.complaints.insert(dealer_address, complaint);
+                self.complaints_to_process.insert(dealer, complaint);
                 return Err(DkgError::ProtocolFailed(
                     "Invalid message from dealer".into(),
                 ));
             }
         };
-        self.dealer_outputs.insert(dealer_address, partial_output);
-        self.dealer_messages.insert(dealer_address, message.clone());
-        self.public_messages_store
-            .store_dealer_message(&dealer_address, message)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        let message_hash = compute_message_hash(&self.session_context, &dealer_address, message)?;
+        
+        self.dealer_outputs.insert(dealer, partial_output);
+        
+        let message_hash = compute_message_hash(&message);
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
             self.address,
-            &Dkg(DkgMessage {
-                dealer_address,
+            &Dkg(DkgDealerMessageHash {
+                dealer_address: dealer,
                 message_hash,
             }),
         );
@@ -371,6 +369,7 @@ impl DkgManager {
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
             .keys()
             .map(|dealer| {
+                // TODO: aren't the next two lookup must succeed?
                 let dealer_party_id =
                     self.dkg_config
                         .address_to_party_id
@@ -393,7 +392,7 @@ impl DkgManager {
             .collect::<Result<_, DkgError>>()?;
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
-                .map_err(|e| DkgError::CryptoError(format!("Failed to complete DKG: {}", e)))?;
+                .expect("checked that threshold is met");
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
@@ -404,7 +403,7 @@ impl DkgManager {
 
     async fn retrieve_dealer_message(
         &mut self,
-        message: &DkgMessage,
+        message: &DkgDealerMessageHash,
         certificate: &Certificate,
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
@@ -449,11 +448,7 @@ impl DkgManager {
                 .await
             {
                 Ok(response) => {
-                    let message_hash = compute_message_hash(
-                        &self.session_context,
-                        &message.dealer_address,
-                        &response.message,
-                    )?;
+                    let message_hash = compute_message_hash(&response.message)?;
                     if message_hash != message.message_hash {
                         tracing::info!(
                             "Signer {:?} returned message with wrong hash",
@@ -482,7 +477,7 @@ impl DkgManager {
         p2p_channel: &impl crate::communication::P2PChannel,
     ) -> DkgResult<()> {
         let complaint = self
-            .complaints
+            .complaints_to_process
             .get(dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No complaint for dealer".into()))?
             .clone();
@@ -490,7 +485,7 @@ impl DkgManager {
             dealer: *dealer,
             complaint: complaint.clone(),
         };
-        let dealer_session_id = self.session_context.dealer_session_id(dealer);
+        let dealer_session_id = self.session_id.dealer_session_id(dealer);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -499,18 +494,20 @@ impl DkgManager {
             None,
             self.encryption_key.clone(),
         );
-        let message = self.dealer_messages.get(dealer).ok_or_else(|| {
-            DkgError::ProtocolFailed(format!("No dealer message found for dealer {:?}", dealer))
-        })?;
+        let message = self
+            .dealer_messages
+            .get(dealer)
+            .expect("cannot have complaint without message");
         let mut responses = Vec::new();
         for signer in signers {
             // TODO: Add timeout and retries handling when adding RPC layer
+            // TODO: skip signer if no response / error instead of failing the entire function
             let response = p2p_channel.complain(&signer, &complaint_request).await?;
             responses.push(response.response);
             match receiver.recover(message, responses.clone()) {
                 Ok(partial_output) => {
                     self.dealer_outputs.insert(*dealer, partial_output);
-                    self.complaints.remove(dealer);
+                    self.complaints_to_process.remove(dealer);
                     return Ok(());
                 }
                 Err(FastCryptoError::InputTooShort(_)) => {
@@ -529,7 +526,11 @@ impl DkgManager {
         )))
     }
 
-    fn validate_certificate(&self, dkg_message: &DkgMessage, cert: &Certificate) -> DkgResult<()> {
+    fn validate_certificate(
+        &self,
+        dkg_message: &DkgDealerMessageHash,
+        cert: &Certificate,
+    ) -> DkgResult<()> {
         let dealer = dkg_message.dealer_address;
         let message = self.dealer_messages.get(&dealer).ok_or_else(|| {
             DkgError::InvalidCertificate(format!(
@@ -537,7 +538,7 @@ impl DkgManager {
                 dealer
             ))
         })?;
-        let expected_hash = compute_message_hash(&self.session_context, &dealer, message)?;
+        let expected_hash = compute_message_hash(message)?;
         if dkg_message.message_hash != expected_hash {
             return Err(DkgError::InvalidCertificate(format!(
                 "Message hash mismatch for dealer {:?}",
@@ -573,20 +574,11 @@ fn create_bls_committee(
     BlsCommittee::new(committee, dkg_config.epoch)
 }
 
-fn compute_message_hash(
-    session: &SessionContext,
-    dealer_address: &Address,
-    message: &avss::Message,
-) -> DkgResult<MessageHash> {
-    let message_bytes = bcs::to_bytes(message)
-        .map_err(|e| DkgError::CryptoError(format!("Failed to serialize message: {}", e)))?;
+fn compute_message_hash(message: &avss::Message) -> MessageHash {
+    let message_bytes = bcs::to_bytes(message).expect("serialization should always succeed");
     let mut hasher = Blake2b256::default();
-    let dealer_session_id = session.dealer_session_id(dealer_address);
-    hasher.update(dealer_session_id.as_ref());
-    // No length prefix is needed for message_bytes because it's the only variable-length
-    // input.
     hasher.update(&message_bytes);
-    Ok(hasher.finalize().into())
+    hasher.finalize().into()
 }
 
 #[cfg(test)]
@@ -685,7 +677,7 @@ mod tests {
         let message_hash = compute_message_hash(session_context, &dealer_address, dealer_message)?;
 
         // Create DkgMessage
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address,
             message_hash,
         });
@@ -2370,7 +2362,7 @@ mod tests {
             .clone();
         let dealer_0_message_hash =
             compute_message_hash(&session_context, &dealer_0_addr, &dealer_0_message).unwrap();
-        let dealer_0_dkg_message = Dkg(DkgMessage {
+        let dealer_0_dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_0_addr,
             message_hash: dealer_0_message_hash,
         });
@@ -2393,7 +2385,7 @@ mod tests {
         );
         let dealer_1_message_hash =
             compute_message_hash(&session_context, &dealer_1_addr, &dealer_1_message).unwrap();
-        let dealer_1_dkg_message = Dkg(DkgMessage {
+        let dealer_1_dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_1_addr,
             message_hash: dealer_1_message_hash,
         });
@@ -2416,7 +2408,11 @@ mod tests {
         // Party 2 fails on dealer 1's cheating message and creates complaint
         let result = party_manager.receive_dealer_message(&dealer_1_message, dealer_1_addr);
         assert!(result.is_err());
-        assert!(party_manager.complaints.contains_key(&dealer_1_addr));
+        assert!(
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_1_addr)
+        );
 
         // Create other parties who can successfully process dealer 1's message
         let mut other_managers = HashMap::new();
@@ -2481,7 +2477,11 @@ mod tests {
         let mock_p2p = MockP2PChannel::new(other_managers, party_addr);
 
         // Verify complaint exists before run_as_party
-        assert!(party_manager.complaints.contains_key(&dealer_1_addr));
+        assert!(
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_1_addr)
+        );
 
         // Run as party - should recover shares via complaint
         let output = party_manager
@@ -2491,7 +2491,9 @@ mod tests {
 
         // Verify complaint was resolved
         assert!(
-            !party_manager.complaints.contains_key(&dealer_1_addr),
+            !party_manager
+                .complaints_to_process
+                .contains_key(&dealer_1_addr),
             "Complaint should be cleared after successful recovery"
         );
         assert!(
@@ -3331,7 +3333,7 @@ mod tests {
         bls_public_keys: &HashMap<Address, BLS12381PublicKey>,
     ) -> Certificate {
         let message_hash = compute_message_hash(session_context, dealer_addr, message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: *dealer_addr,
             message_hash,
         });
@@ -3577,7 +3579,7 @@ mod tests {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
                     compute_message_hash(&session_context, &dealer1_addr, &msg1).unwrap();
-                let dkg_message = Dkg(DkgMessage {
+                let dkg_message = Dkg(DkgDealerMessageHash {
                     dealer_address: dealer1_addr,
                     message_hash,
                 });
@@ -3594,7 +3596,7 @@ mod tests {
                 let addr = Address::new([i as u8; 32]);
                 let message_hash =
                     compute_message_hash(&session_context, &dealer2_addr, &msg2).unwrap();
-                let dkg_message = Dkg(DkgMessage {
+                let dkg_message = Dkg(DkgDealerMessageHash {
                     dealer_address: dealer2_addr,
                     message_hash,
                 });
@@ -3719,7 +3721,7 @@ mod tests {
                     let addr = Address::new([i as u8; 32]);
                     let message_hash =
                         compute_message_hash(&session_context, &dealer_addr, msg).unwrap();
-                    let dkg_message = Dkg(DkgMessage {
+                    let dkg_message = Dkg(DkgDealerMessageHash {
                         dealer_address: dealer_addr,
                         message_hash,
                     });
@@ -3810,7 +3812,7 @@ mod tests {
             .clone();
         let dealer0_message_hash =
             compute_message_hash(&session_context, &dealer0_addr, &dealer0_message).unwrap();
-        let dealer0_dkg_message = Dkg(DkgMessage {
+        let dealer0_dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer0_addr,
             message_hash: dealer0_message_hash,
         });
@@ -3832,7 +3834,7 @@ mod tests {
             .clone();
         let dealer1_message_hash =
             compute_message_hash(&session_context, &dealer1_addr, &dealer1_message).unwrap();
-        let dealer1_dkg_message = Dkg(DkgMessage {
+        let dealer1_dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer1_addr,
             message_hash: dealer1_message_hash,
         });
@@ -3936,7 +3938,9 @@ mod tests {
 
         // Complaint for dealer0 should still be present (wasn't removed due to failure)
         assert!(
-            party_manager.complaints.contains_key(&dealer0_addr),
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer0_addr),
             "Complaint should remain after recovery failure"
         );
     }
@@ -4388,7 +4392,11 @@ mod tests {
         );
         let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
-        assert!(party_manager.complaints.contains_key(&dealer_addr));
+        assert!(
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr)
+        );
 
         // Create exactly threshold (2) parties that can respond
         let mut other_managers = vec![];
@@ -4425,7 +4433,9 @@ mod tests {
         );
         assert!(party_manager.dealer_outputs.contains_key(&dealer_addr));
         assert!(
-            !party_manager.complaints.contains_key(&dealer_addr),
+            !party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr),
             "Complaint should be cleared after successful recovery"
         );
     }
@@ -4460,7 +4470,7 @@ mod tests {
         let dealer_message = dealer_manager.dealer_messages.get(&dealer_addr).unwrap();
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
         });
@@ -4598,7 +4608,11 @@ mod tests {
         );
         let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
-        assert!(party_manager.complaints.contains_key(&dealer_addr));
+        assert!(
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr)
+        );
 
         // Create only 1 other party that can respond (threshold is 2, so insufficient)
         let mut other_managers = vec![];
@@ -4675,7 +4689,11 @@ mod tests {
         );
         let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
         assert!(result.is_err());
-        assert!(party_manager.complaints.contains_key(&dealer_addr));
+        assert!(
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr)
+        );
 
         // Remove the dealer message to simulate the edge case
         party_manager.dealer_messages.remove(&dealer_addr);
@@ -4769,7 +4787,11 @@ mod tests {
             .insert(dealer_addr, dealer_message);
 
         // Pre-collect complaint responses from parties 3 and 4
-        let complaint = party_manager.complaints.get(&dealer_addr).unwrap().clone();
+        let complaint = party_manager
+            .complaints_to_process
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
         let request = ComplainRequest {
             dealer: dealer_addr,
             complaint,
@@ -4859,7 +4881,9 @@ mod tests {
             "Dealer message should be stored even when complaint is created"
         );
         assert!(
-            party_manager.complaints.contains_key(&dealer_addr),
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr),
             "Complaint should be stored"
         );
         assert!(
@@ -4901,7 +4925,7 @@ mod tests {
         // Create DkgMessage and validator signatures
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address,
             message_hash,
         });
@@ -4979,7 +5003,7 @@ mod tests {
         // Create DkgMessage and validator signatures
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address,
             message_hash,
         });
@@ -5055,7 +5079,7 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
         });
@@ -5137,7 +5161,7 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
         });
@@ -5221,7 +5245,7 @@ mod tests {
         // Create DkgMessage
         let message_hash =
             compute_message_hash(&session_context, &dealer_addr, dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
         });
@@ -5340,7 +5364,7 @@ mod tests {
         // Create DkgMessage for dealer A
         let message_hash_a =
             compute_message_hash(&session_context, &dealer_a_addr, &message_a).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_a_addr,
             message_hash: message_hash_a,
         });
@@ -5506,7 +5530,7 @@ mod tests {
         signer_signatures: Vec<ValidatorSignature>,
     ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(session_context, dealer_address, message)?;
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: *dealer_address,
             message_hash,
         });
@@ -5653,7 +5677,9 @@ mod tests {
         dealer_message: &avss::Message,
         complaint: complaint::Complaint,
     ) {
-        party_manager.complaints.insert(*dealer_address, complaint);
+        party_manager
+            .complaints_to_process
+            .insert(*dealer_address, complaint);
         party_manager
             .dealer_messages
             .insert(*dealer_address, dealer_message.clone());
@@ -5855,7 +5881,7 @@ mod tests {
         // Collect signatures from all validators
         let message_hash =
             compute_message_hash(&session_context, &dealer_address, &dealer_message).unwrap();
-        let dkg_message = Dkg(DkgMessage {
+        let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address,
             message_hash,
         });
