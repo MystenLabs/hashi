@@ -344,7 +344,7 @@ impl DkgManager {
 
         self.dealer_outputs.insert(dealer, partial_output);
 
-        let message_hash = compute_message_hash(&message);
+        let message_hash = compute_message_hash(message);
         let signature = self.bls_signing_key.sign(
             self.dkg_config.epoch,
             self.address,
