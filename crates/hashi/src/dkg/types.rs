@@ -2,7 +2,6 @@
 
 use crate::bls::{CommitteeSignature, MemberSignature};
 use fastcrypto::error::FastCryptoError;
-use fastcrypto::hash::Digest;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::{
     nodes::PartyId,
@@ -18,16 +17,9 @@ pub type Secp256k1Point = fastcrypto::groups::secp256k1::ProjectivePoint;
 pub type MessageHash = [u8; 32];
 pub type AddressToPartyId = std::collections::HashMap<Address, PartyId>;
 
-pub struct SessionId([u8; 64]);
-
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
     "754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959::hashi";
-const DOMAIN_DKG: &str = "dkg";
-const DOMAIN_ROTATION: &str = "rotation";
-const DOMAIN_NONCE: &str = "nonce";
-const DOMAIN_SIGNING: &str = "signing";
-const DOMAIN_DEALER: &str = "dealer";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgConfig {
@@ -75,55 +67,11 @@ impl DkgConfig {
     }
 }
 
-/// Helper struct for unique serialization.
-#[derive(Serialize)]
-struct SessionIdInputs {
-    epoch: u64,
-    nonce_id: Option<u32>,
-    message_hash: Option<[u8; 32]>,
-}
+// Unique identifier for a session of MPC protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionId([u8; 64]);
 
-impl SessionId {
-    pub fn new(epoch: u64, protocol_type: &ProtocolType, chain_id: &str) -> Self {
-        let oracle = base_oracle(protocol_type);
-        let input = match protocol_type {
-            ProtocolType::DkgKeyGeneration | ProtocolType::KeyRotation => SessionIdInputs {
-                epoch,
-                nonce_id: None,
-                message_hash: None,
-            },
-            ProtocolType::NonceGeneration(nonce_id) => SessionIdInputs {
-                epoch,
-                nonce_id: Some(*nonce_id),
-                message_hash: None,
-            },
-            ProtocolType::Signing { message_hash } => SessionIdInputs {
-                epoch,
-                nonce_id: None,
-                message_hash: Some(*message_hash),
-            },
-        };
-        oracle.evaluate(&input)
-    }
-
-    /// Sub-session ID for a specific dealer, derived from the session ID
-    pub fn dealer_session_id(&self, dealer: &Address) -> SessionId {
-        let oracle = RandomOracle::new(self.0.to_vec());
-        oracle.evaluate(&dealer)
-    }
-
-    fn base_oracle(protocol_type: &ProtocolType) -> RandomOracle {
-        let oracle = RandomOracle::new(DOMAIN_HASHI);
-        match protocol_type {
-            ProtocolType::DkgKeyGeneration => oracle.extend(DOMAIN_DKG),
-            ProtocolType::KeyRotation => oracle.extend(DOMAIN_ROTATION),
-            ProtocolType::NonceGeneration(_) => oracle.extend(DOMAIN_NONCE),
-            ProtocolType::Signing { .. } => oracle.extend(DOMAIN_SIGNING),
-        }
-    }
-}
-
-// Unique MPC protocol instance identifier (per epoch).
+// Unique MPC protocol instance identifier (per epoch & chain).
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ProtocolType {
     DkgKeyGeneration,
@@ -132,12 +80,27 @@ pub enum ProtocolType {
     Signing { message_hash: MessageHash },
 }
 
+impl SessionId {
+    pub fn new(chain_id: &str, epoch: u64, protocol_identifer: &ProtocolType) -> Self {
+        let oracle = RandomOracle::new(DOMAIN_HASHI);
+        SessionId(oracle.evaluate(&(chain_id, epoch, protocol_identifer)))
+    }
+
+    pub fn dealer_session_id(&self, dealer: &Address) -> SessionId {
+        let oracle = RandomOracle::new(&hex::encode(self.0));
+        SessionId(oracle.evaluate(&dealer))
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgOutput {
     pub public_key: Secp256k1Point,
     pub key_shares: avss::SharesForNode,
     pub commitments: Vec<Eval<G>>,
-    pub session_context: SessionContext,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -405,10 +368,10 @@ mod tests {
         let protocol_type = ProtocolType::DkgKeyGeneration;
         let chain_id = "testnet".to_string();
 
-        let ctx1 = SessionContext::new(epoch, protocol_type.clone(), chain_id.clone());
-        let ctx2 = SessionContext::new(epoch, protocol_type, chain_id);
+        let sid1 = SessionId::new(&chain_id, epoch, &protocol_type);
+        let sid2 = SessionId::new(&chain_id, epoch, &protocol_type);
 
-        assert_eq!(ctx1.session_id, ctx2.session_id);
+        assert_eq!(sid1, sid2);
     }
 
     #[test]
@@ -416,39 +379,42 @@ mod tests {
         let epoch = 100;
         let chain_id = "testnet".to_string();
 
-        let dkg_ctx = SessionContext::new(epoch, ProtocolType::DkgKeyGeneration, chain_id.clone());
-        let rotation_ctx = SessionContext::new(epoch, ProtocolType::KeyRotation, chain_id.clone());
-        let nonce_ctx =
-            SessionContext::new(epoch, ProtocolType::NonceGeneration(1), chain_id.clone());
+        let dkg_sid = SessionId::new(&chain_id, epoch, &ProtocolType::DkgKeyGeneration);
+        let rotation_sid = SessionId::new(&chain_id, epoch, &ProtocolType::KeyRotation);
+        let nonce_sid = SessionId::new(
+            &chain_id,
+            epoch,
+            &ProtocolType::NonceGeneration { batch_index: 1 },
+        );
 
-        assert_ne!(dkg_ctx.session_id, rotation_ctx.session_id);
-        assert_ne!(dkg_ctx.session_id, nonce_ctx.session_id);
-        assert_ne!(rotation_ctx.session_id, nonce_ctx.session_id);
+        assert_ne!(dkg_sid, rotation_sid);
+        assert_ne!(dkg_sid, nonce_sid);
+        assert_ne!(rotation_sid, nonce_sid);
     }
 
     #[test]
     fn test_session_id_different_chains() {
         let epoch = 100;
         let protocol_type = ProtocolType::DkgKeyGeneration;
-        let mainnet_ctx = SessionContext::new(epoch, protocol_type.clone(), "mainnet".to_string());
-        let testnet_ctx = SessionContext::new(epoch, protocol_type, "testnet".to_string());
+        let mainnet_id = SessionId::new(&"mainnet".to_string(), epoch, &protocol_type);
+        let testnet_id = SessionId::new(&"testnet".to_string(), epoch, &protocol_type);
 
-        assert_ne!(mainnet_ctx.session_id, testnet_ctx.session_id);
+        assert_ne!(testnet_id, mainnet_id);
     }
 
     #[test]
     fn test_dealer_session_serialization() {
-        let ctx = SessionContext::new(100, ProtocolType::DkgKeyGeneration, "testnet".to_string());
+        let sid = SessionId::new(&"testnet".to_string(), 100, &ProtocolType::DkgKeyGeneration);
         let dealer1 = Address::new([1; 32]);
         let dealer2 = Address::new([2; 32]);
-        let dealer1_session = ctx.dealer_session_id(&dealer1);
-        let dealer2_session = ctx.dealer_session_id(&dealer2);
+        let dealer1_session = sid.dealer_session_id(&dealer1);
+        let dealer2_session = sid.dealer_session_id(&dealer2);
 
         // Different dealers should have different sub-session IDs
         assert_ne!(dealer1_session, dealer2_session);
 
         // Same dealer should produce same session ID
-        let dealer1_session2 = ctx.dealer_session_id(&dealer1);
+        let dealer1_session2 = sid.dealer_session_id(&dealer1);
         assert_eq!(dealer1_session, dealer1_session2);
     }
 }
