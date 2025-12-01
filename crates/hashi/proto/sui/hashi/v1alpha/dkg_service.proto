@@ -16,8 +16,11 @@ service DkgService {
 }
 
 message SendMessageRequest {
+  // The epoch for this DKG instance.
+  optional uint64 epoch = 1;
+
   // The AVSS dealer message containing encrypted shares.
-  optional Bcs message = 1;
+  optional Bcs message = 2;
 }
 
 message SendMessageResponse {
@@ -26,8 +29,11 @@ message SendMessageResponse {
 }
 
 message RetrieveMessageRequest {
+  // The epoch for this DKG instance.
+  optional uint64 epoch = 1;
+
   // The hex-encoded Sui address of the dealer whose message is requested.
-  optional string dealer = 1;
+  optional string dealer = 2;
 }
 
 message RetrieveMessageResponse {
@@ -36,11 +42,14 @@ message RetrieveMessageResponse {
 }
 
 message ComplainRequest {
+  // The epoch for this DKG instance.
+  optional uint64 epoch = 1;
+
   // The hex-encoded Sui address of the dealer who sent invalid shares.
-  optional string dealer = 1;
+  optional string dealer = 2;
 
   // The complaint containing proof of invalid shares.
-  optional Bcs complaint = 2;
+  optional Bcs complaint = 3;
 }
 
 message ComplainResponse {
