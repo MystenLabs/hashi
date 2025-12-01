@@ -10,6 +10,7 @@ modules:
         - RPC_NO_CLIENT_STREAMING
       ignore:
         - proto/google
+        - proto/sui/rpc
 
       enum_zero_value_suffix: _UNKNOWN
       rpc_allow_same_request_response: false
