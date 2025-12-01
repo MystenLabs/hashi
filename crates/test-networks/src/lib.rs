@@ -1,3 +1,15 @@
+//! Test infrastructure to stand up a Sui localnet, a bitcoin regtest, and hashi nodes.
+//!
+//! The general bootstrapping process is as follows:
+//! 1. Stand up a Bitcoin regtest
+//! 2. Stand up a Sui Network leveraging `sui start`.
+//! 3. Ensure that the SuiSystemState object has been upgraded from v1 to v2.
+//! 4. Ensure that each sui validator address is properly funded.
+//! 5. Publish the Hashi package.
+//! 6. Build configs for each Hashi node (one for each validator).
+//! 7. Register each validator with the Hashi system object
+//! 8. Initialize the first hashi committee once all validators have been registered.
+
 use std::path::Path;
 use std::process::Command;
 
@@ -100,12 +112,13 @@ impl TestNetworksBuilder {
 
         println!("test env: {}", dir.path().display());
 
+        let bitcoin_node = self.bitcoin_builder.dir(dir.as_ref()).build().await?;
+
         let mut sui_network = self
             .sui_builder
             .dir(&dir.path().join("sui"))
             .build()
             .await?;
-        let bitcoin_node = self.bitcoin_builder.dir(dir.as_ref()).build().await?;
         Self::cp_packages(dir.as_ref())?;
 
         let hashi_ids = publish(

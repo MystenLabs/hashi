@@ -5,6 +5,24 @@ use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use sui_crypto::SuiSigner;
+use sui_rpc::field::FieldMask;
+use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::BatchGetObjectsRequest;
+use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
+use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+use sui_sdk_types::Address;
+use sui_sdk_types::Argument;
+use sui_sdk_types::GasPayment;
+use sui_sdk_types::Identifier;
+use sui_sdk_types::Input;
+use sui_sdk_types::MoveCall;
+use sui_sdk_types::ProgrammableTransaction;
+use sui_sdk_types::StructTag;
+use sui_sdk_types::Transaction;
+use sui_sdk_types::TransactionExpiration;
+use sui_sdk_types::TransactionKind;
+use sui_sdk_types::bcs::ToBcs;
 use tracing::info;
 
 use crate::BitcoinNodeHandle;
@@ -104,6 +122,9 @@ impl HashiNetworkBuilder {
             register_onchain(client, config).await?;
         }
 
+        // Init the initial committee
+        bootstrap(sui, hashi_ids).await?;
+
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
             let validator_address = config.validator_address()?;
@@ -129,7 +150,211 @@ impl Default for HashiNetworkBuilder {
     }
 }
 
-async fn register_onchain(_client: sui_rpc::Client, _config: &HashiConfig) -> Result<()> {
-    // TODO flesh out onchain register flow
+async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+    let ids = config.hashi_ids();
+    let private_key = config.operator_private_key()?;
+    let protocol_private_key = config.protocol_private_key().unwrap();
+    let protocol_public_key = protocol_private_key.public_key();
+    let sender = private_key.public_key().derive_address();
+    let validator_address = config.validator_address()?;
+    let price = client.get_reference_gas_price().await?;
+
+    let gas_objects = client
+        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
+        .await?;
+
+    let system_objects = client
+        .ledger_client()
+        .batch_get_objects(
+            BatchGetObjectsRequest::default()
+                .with_requests(vec![
+                    GetObjectRequest::new(&Address::from_static("0x5")),
+                    GetObjectRequest::new(&ids.hashi_object_id),
+                ])
+                .with_read_mask(FieldMask::from_str("*")),
+        )
+        .await?
+        .into_inner();
+    let sui_system = system_objects.objects[0].object();
+    let hashi_system = system_objects.objects[1].object();
+
+    let public_key_input = Input::Pure {
+        value: protocol_public_key.as_ref().to_vec().to_bcs()?,
+    };
+    let proof_of_possession = Input::Pure {
+        value: protocol_private_key
+            .proof_of_possession(0, validator_address)
+            .signature()
+            .as_ref()
+            .to_bcs()?,
+    };
+    let https_address = Input::Pure {
+        value: format!("https://{}", config.https_address()).to_bcs()?,
+    };
+    let tls_public_key = Input::Pure {
+        value: config.tls_public_key()?.as_bytes().to_vec().to_bcs()?,
+    };
+
+    let pt = ProgrammableTransaction {
+        inputs: vec![
+            Input::Shared {
+                object_id: sui_system.object_id().parse()?,
+                initial_shared_version: sui_system.owner().version(),
+                mutable: false,
+            },
+            Input::Shared {
+                object_id: hashi_system.object_id().parse()?,
+                initial_shared_version: hashi_system.owner().version(),
+                mutable: true,
+            },
+            public_key_input,
+            proof_of_possession,
+            https_address,
+            tls_public_key,
+        ],
+        commands: vec![
+            sui_sdk_types::Command::MoveCall(MoveCall {
+                package: ids.package_id,
+                module: Identifier::from_static("hashi"),
+                function: Identifier::from_static("register_validator"),
+                type_arguments: vec![],
+                arguments: vec![
+                    Argument::Input(1),
+                    Argument::Input(0),
+                    Argument::Input(2),
+                    Argument::Input(3),
+                ],
+            }),
+            sui_sdk_types::Command::MoveCall(MoveCall {
+                package: ids.package_id,
+                module: Identifier::from_static("hashi"),
+                function: Identifier::from_static("update_https_address"),
+                type_arguments: vec![],
+                arguments: vec![Argument::Input(1), Argument::Input(4)],
+            }),
+            sui_sdk_types::Command::MoveCall(MoveCall {
+                package: ids.package_id,
+                module: Identifier::from_static("hashi"),
+                function: Identifier::from_static("update_tls_public_key"),
+                type_arguments: vec![],
+                arguments: vec![Argument::Input(1), Argument::Input(5)],
+            }),
+        ],
+    };
+
+    let transaction = Transaction {
+        kind: TransactionKind::ProgrammableTransaction(pt),
+        sender,
+        gas_payment: GasPayment {
+            objects: gas_objects
+                .iter()
+                .map(|o| (&o.object_reference()).try_into())
+                .collect::<Result<_, _>>()?,
+            owner: sender,
+            price,
+            budget: 1_000_000_000,
+        },
+        expiration: TransactionExpiration::None,
+    };
+
+    let signature = private_key.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    assert!(
+        response.transaction().effects().status().success(),
+        "register failed"
+    );
+
+    Ok(())
+}
+
+async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
+    let mut client = sui.client.clone();
+    let private_key = sui.user_keys.first().unwrap();
+    let sender = private_key.public_key().derive_address();
+    let price = client.get_reference_gas_price().await?;
+
+    let gas_objects = client
+        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
+        .await?;
+
+    let system_objects = client
+        .ledger_client()
+        .batch_get_objects(
+            BatchGetObjectsRequest::default()
+                .with_requests(vec![
+                    GetObjectRequest::new(&Address::from_static("0x5")),
+                    GetObjectRequest::new(&hashi_ids.hashi_object_id),
+                ])
+                .with_read_mask(FieldMask::from_str("*")),
+        )
+        .await?
+        .into_inner();
+    let sui_system = system_objects.objects[0].object();
+    let hashi_system = system_objects.objects[1].object();
+
+    let pt = ProgrammableTransaction {
+        inputs: vec![
+            Input::Shared {
+                object_id: sui_system.object_id().parse()?,
+                initial_shared_version: sui_system.owner().version(),
+                mutable: false,
+            },
+            Input::Shared {
+                object_id: hashi_system.object_id().parse()?,
+                initial_shared_version: hashi_system.owner().version(),
+                mutable: true,
+            },
+        ],
+        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
+            package: hashi_ids.package_id,
+            module: Identifier::from_static("hashi"),
+            function: Identifier::from_static("bootstrap"),
+            type_arguments: vec![],
+            arguments: vec![Argument::Input(1), Argument::Input(0)],
+        })],
+    };
+
+    let transaction = Transaction {
+        kind: TransactionKind::ProgrammableTransaction(pt),
+        sender,
+        gas_payment: GasPayment {
+            objects: gas_objects
+                .iter()
+                .map(|o| (&o.object_reference()).try_into())
+                .collect::<Result<_, _>>()?,
+            owner: sender,
+            price,
+            budget: 1_000_000_000,
+        },
+        expiration: TransactionExpiration::None,
+    };
+
+    let signature = private_key.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    assert!(
+        response.transaction().effects().status().success(),
+        "bootstrap failed"
+    );
+
     Ok(())
 }

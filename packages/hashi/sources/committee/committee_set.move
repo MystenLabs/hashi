@@ -49,6 +49,14 @@ fun committee(self: &CommitteeSet, epoch: u64): &Committee {
     &self.committees[epoch]
 }
 
+public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
+    self.committees.contains_with_type<u64, Committee>(epoch)
+}
+
+fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
+    self.committees.add(committee.epoch(), committee)
+}
+
 public(package) fun current_committee(self: &CommitteeSet): &Committee {
     &self.committees[self.epoch()]
 }
@@ -87,7 +95,7 @@ public struct MemberInfo has store {
 ///
 /// Only BLS key is required at registration time, other info can be set in
 /// other PTB commands or at some point in the future.
-public fun new_member(
+public(package) fun new_member(
     committee_set: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
     public_key: vector<u8>,
@@ -143,7 +151,7 @@ fun set_next_epoch_public_key(
 }
 
 /// Set the https_address of the member.
-fun set_https_address(
+public(package) fun set_https_address(
     self: &mut CommitteeSet,
     validator_address: address,
     https_address: String,
@@ -156,7 +164,7 @@ fun set_https_address(
 }
 
 /// Set the tls_public_key of the member.
-fun set_tls_public_key(
+public(package) fun set_tls_public_key(
     self: &mut CommitteeSet,
     validator_address: address,
     tls_public_key: vector<u8>,
@@ -202,7 +210,7 @@ fun tls_public_key(self: &MemberInfo): &vector<u8> {
 }
 
 /// Return the current epoch.
-fun epoch(self: &CommitteeSet): u64 {
+public(package) fun epoch(self: &CommitteeSet): u64 {
     self.epoch
 }
 
@@ -278,4 +286,28 @@ fun new_committee_from_validator_set(
     // XXX do we sort by address or weight?
 
     committee::new_committee(epoch, committee_members)
+}
+
+public(package) fun bootstrap(
+    self: &mut CommitteeSet,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    ctx: &TxContext,
+) {
+    assert!(self.epoch() == 0);
+    assert!(!self.has_committee(ctx.epoch()));
+
+    let committee = self.new_committee_from_validator_set(sui_system, ctx);
+
+    // assert voting weight
+    let mut sui_system_weight = 0;
+    let (_, weights) = sui_system.active_validator_voting_powers().into_keys_values();
+    weights.do!(|weight| {
+        sui_system_weight = sui_system_weight + weight;
+    });
+
+    // Ensure 95% of stake has registered
+    assert!(committee.total_weight() as u64 >= ((9500 * sui_system_weight) / 10000));
+
+    self.epoch = committee.epoch();
+    self.insert_committee(committee)
 }

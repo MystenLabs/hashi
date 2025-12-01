@@ -101,3 +101,44 @@ entry fun register_upgrade_cap(
 
     sui::dynamic_object_field::add(&mut self.id, b"TODO figure out key", upgrade_cap);
 }
+
+// TODO move most/all of these functions to their own module for better orginization
+public fun register_validator(
+    self: &mut Hashi,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    public_key: vector<u8>,
+    proof_of_possession_signature: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    self.config.assert_version();
+    self.committees.new_member(sui_system, public_key, proof_of_possession_signature, ctx);
+}
+
+public fun update_https_address(self: &mut Hashi, https_address: String, ctx: &mut TxContext) {
+    self.config.assert_version();
+
+    self.committees.set_https_address(ctx.sender(), https_address, ctx);
+}
+
+public fun update_tls_public_key(
+    self: &mut Hashi,
+    tls_public_key: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    self.config.assert_version();
+
+    self.committees.set_tls_public_key(ctx.sender(), tls_public_key, ctx);
+}
+
+entry fun bootstrap(
+    self: &mut Hashi,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    ctx: &TxContext,
+) {
+    self.config.assert_version();
+
+    assert!(self.committees.epoch() == 0);
+    assert!(!self.committees.has_committee(ctx.epoch()));
+
+    self.committees.bootstrap(sui_system, ctx);
+}

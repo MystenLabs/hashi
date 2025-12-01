@@ -46,6 +46,11 @@ impl Bls12381PrivateKey {
             signature: self.0.sign(&bcs::to_bytes(message).unwrap()),
         }
     }
+
+    pub fn proof_of_possession(&self, epoch: u64, address: Address) -> MemberSignature {
+        let public_key = self.public_key();
+        self.sign(epoch, address, &(epoch, address, public_key))
+    }
 }
 
 #[derive(Debug)]
@@ -69,6 +74,20 @@ pub struct MemberSignature {
     epoch: u64,
     address: Address,
     signature: BLS12381Signature,
+}
+
+impl MemberSignature {
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn address(&self) -> &Address {
+        &self.address
+    }
+
+    pub fn signature(&self) -> &BLS12381Signature {
+        &self.signature
+    }
 }
 
 impl BlsCommittee {
