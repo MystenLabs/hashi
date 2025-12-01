@@ -1,6 +1,6 @@
-use crate::proto::GetServiceInfoRequest;
-use crate::proto::GetServiceInfoResponse;
-use crate::proto::bridge_service_server::BridgeService;
+use crate::proto::sui::hashi::v1alpha::GetServiceInfoRequest;
+use crate::proto::sui::hashi::v1alpha::GetServiceInfoResponse;
+use crate::proto::sui::hashi::v1alpha::bridge_service_server::BridgeService;
 
 use super::HttpService;
 

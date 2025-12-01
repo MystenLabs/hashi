@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package sui.hashi.v1alpha;
 
-import "sui/hashi/v1alpha/types.proto";
+import "sui/rpc/v2/bcs.proto";
 
 service DkgService {
   // Send a dealer message to a party and receive their signature.
@@ -20,7 +20,7 @@ message SendMessageRequest {
   optional uint64 epoch = 1;
 
   // The AVSS dealer message containing encrypted shares.
-  optional Bcs message = 2;
+  optional sui.rpc.v2.Bcs message = 2;
 }
 
 message SendMessageResponse {
@@ -38,7 +38,7 @@ message RetrieveMessageRequest {
 
 message RetrieveMessageResponse {
   // The AVSS dealer message.
-  optional Bcs message = 1;
+  optional sui.rpc.v2.Bcs message = 1;
 }
 
 message ComplainRequest {
@@ -49,12 +49,12 @@ message ComplainRequest {
   optional string dealer = 2;
 
   // The complaint containing proof of invalid shares.
-  optional Bcs complaint = 3;
+  optional sui.rpc.v2.Bcs complaint = 3;
 }
 
 message ComplainResponse {
   // The complaint response containing the correct shares.
-  optional Bcs response = 1;
+  optional sui.rpc.v2.Bcs response = 1;
 }
 
 message ValidatorSignature {

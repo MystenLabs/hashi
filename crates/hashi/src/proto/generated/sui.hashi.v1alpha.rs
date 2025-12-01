@@ -339,9 +339,12 @@ pub mod bridge_service_server {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageRequest {
+    /// The epoch for this DKG instance.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
     /// The AVSS dealer message containing encrypted shares.
-    #[prost(message, optional, tag = "1")]
-    pub message: ::core::option::Option<Bcs>,
+    #[prost(message, optional, tag = "2")]
+    pub message: ::core::option::Option<super::super::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageResponse {
@@ -351,30 +354,36 @@ pub struct SendMessageResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RetrieveMessageRequest {
+    /// The epoch for this DKG instance.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
     /// The hex-encoded Sui address of the dealer whose message is requested.
-    #[prost(string, optional, tag = "1")]
+    #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RetrieveMessageResponse {
     /// The AVSS dealer message.
     #[prost(message, optional, tag = "1")]
-    pub message: ::core::option::Option<Bcs>,
+    pub message: ::core::option::Option<super::super::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainRequest {
+    /// The epoch for this DKG instance.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
     /// The hex-encoded Sui address of the dealer who sent invalid shares.
-    #[prost(string, optional, tag = "1")]
+    #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
     /// The complaint containing proof of invalid shares.
-    #[prost(message, optional, tag = "2")]
-    pub complaint: ::core::option::Option<Bcs>,
+    #[prost(message, optional, tag = "3")]
+    pub complaint: ::core::option::Option<super::super::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainResponse {
     /// The complaint response containing the correct shares.
     #[prost(message, optional, tag = "1")]
-    pub response: ::core::option::Option<Bcs>,
+    pub response: ::core::option::Option<super::super::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ValidatorSignature {
@@ -846,14 +855,4 @@ pub mod dkg_service_server {
     impl<T> tonic::server::NamedService for DkgServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
-}
-/// A BCS-serialized value with its type name.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Bcs {
-    /// Name that identifies the type of the serialized value.
-    #[prost(string, optional, tag = "1")]
-    pub name: ::core::option::Option<::prost::alloc::string::String>,
-    /// Bytes of a BCS serialized value.
-    #[prost(bytes = "bytes", optional, tag = "2")]
-    pub value: ::core::option::Option<::prost::bytes::Bytes>,
 }
