@@ -1,17 +1,5 @@
 // Include the generated proto definitions
-
-pub mod sui {
-    pub mod rpc {
-        pub mod v2 {
-            include!("generated/sui.rpc.v2.rs");
-        }
-    }
-    pub mod hashi {
-        pub mod v1alpha {
-            include!("generated/sui.hashi.v1alpha.rs");
-        }
-    }
-}
+include!("generated/sui.hashi.v1alpha.rs");
 
 /// Byte encoded FILE_DESCRIPTOR_SET.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/sui.hashi.v1alpha.fds.bin");

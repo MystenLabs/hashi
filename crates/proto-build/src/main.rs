@@ -48,6 +48,7 @@ fn main() {
         .build_server(true)
         .bytes(".")
         .extern_path(".google.rpc", "::sui_rpc::proto::google::rpc")
+        .extern_path(".sui.rpc", "::sui_rpc::proto::sui::rpc")
         .out_dir(&out_dir)
         .compile_fds(fds.clone())
     {

@@ -17,9 +17,7 @@ impl HttpService {
     pub async fn start(self) -> sui_http::ServerHandle {
         let router = {
             let bridge_service =
-                crate::proto::sui::hashi::v1alpha::bridge_service_server::BridgeServiceServer::new(
-                    self.clone(),
-                );
+                crate::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 

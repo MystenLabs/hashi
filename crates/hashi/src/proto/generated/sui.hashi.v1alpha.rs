@@ -344,7 +344,7 @@ pub struct SendMessageRequest {
     pub epoch: ::core::option::Option<u64>,
     /// The AVSS dealer message containing encrypted shares.
     #[prost(message, optional, tag = "2")]
-    pub message: ::core::option::Option<super::super::rpc::v2::Bcs>,
+    pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageResponse {
@@ -365,7 +365,7 @@ pub struct RetrieveMessageRequest {
 pub struct RetrieveMessageResponse {
     /// The AVSS dealer message.
     #[prost(message, optional, tag = "1")]
-    pub message: ::core::option::Option<super::super::rpc::v2::Bcs>,
+    pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainRequest {
@@ -377,13 +377,13 @@ pub struct ComplainRequest {
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
     /// The complaint containing proof of invalid shares.
     #[prost(message, optional, tag = "3")]
-    pub complaint: ::core::option::Option<super::super::rpc::v2::Bcs>,
+    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainResponse {
     /// The complaint response containing the correct shares.
     #[prost(message, optional, tag = "1")]
-    pub response: ::core::option::Option<super::super::rpc::v2::Bcs>,
+    pub response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ValidatorSignature {
