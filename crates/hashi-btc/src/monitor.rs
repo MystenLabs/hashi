@@ -154,14 +154,25 @@ impl Monitor {
     }
 
     fn confirm_deposit(&mut self, pending_deposit: PendingDeposit) {
+        debug!(
+            "Processing deposit confirmation for {}",
+            pending_deposit.outpoint.txid
+        );
+
         let Some(tip) = &self.tip else {
-            // Can't confirm a deposit if we don't yet know the tip of the chain.
+            debug!(
+                "Transaction {} confirmation on hold, pending chain tip update.",
+                pending_deposit.outpoint.txid
+            );
             self.pending_deposits.push(pending_deposit);
             return;
         };
 
         if pending_deposit.checked_at_height >= tip.height {
-            // Deposit not yet confirmed. Wait for more blocks.
+            debug!(
+                "Transaction {} already checked at height {}. Waiting for more blocks.",
+                pending_deposit.outpoint.txid, pending_deposit.checked_at_height
+            );
             self.pending_deposits.push(pending_deposit);
             return;
         }
@@ -202,6 +213,10 @@ impl Monitor {
             return;
         };
 
+        info!(
+            "Reprocessing {} pending deposits",
+            self.pending_deposits.len()
+        );
         for pending_deposit in std::mem::take(&mut self.pending_deposits) {
             tokio::spawn(Monitor::process_pending_deposit(
                 tip.to_owned(),
@@ -234,6 +249,10 @@ impl Monitor {
         let block_info = match pending_deposit.block_info {
             Some(block_info) => block_info,
             None => {
+                debug!(
+                    "Looking up block for transaction {}",
+                    pending_deposit.outpoint.txid
+                );
                 let tx_info = match bitcoind_rpc
                     .get_raw_transaction_info(&pending_deposit.outpoint.txid, None)
                 {
@@ -290,7 +309,11 @@ impl Monitor {
         };
 
         // Check if the deposit has enough confirmations yet.
-        if block_info.height < tip.height - confirmation_threshold {
+        if block_info.height > tip.height - confirmation_threshold - 1 {
+            debug!(
+                "Transaction {} is not yet confirmed. Block height is {}, tip is {}. Waiting for more blocks.",
+                pending_deposit.outpoint.txid, block_info.height, tip.height
+            );
             return;
         }
 
@@ -396,6 +419,7 @@ impl Drop for PendingDepositGuard {
     }
 }
 
+#[derive(Clone)]
 pub struct MonitorClient {
     tx: tokio::sync::mpsc::Sender<MonitorMessage>,
 }
