@@ -24,8 +24,8 @@ message SendMessageRequest {
 }
 
 message SendMessageResponse {
-  // The signature from the receiving validator.
-  optional ValidatorSignature signature = 1;
+  // The BLS12-381 signature from the receiving validator.
+  optional bytes signature = 1;
 }
 
 message RetrieveMessageRequest {
@@ -55,15 +55,4 @@ message ComplainRequest {
 message ComplainResponse {
   // The complaint response containing the correct shares.
   optional sui.rpc.v2.Bcs response = 1;
-}
-
-message ValidatorSignature {
-  // The hex-encoded Sui address of the validator who created this signature.
-  optional string validator = 1;
-
-  // The epoch in which this signature was created.
-  optional uint64 epoch = 2;
-
-  // The BLS12-381 signature.
-  optional bytes signature = 3;
 }
