@@ -16,5 +16,5 @@ hpke = "0.12.0"
 rand = "0.8.5"
 rand_core = "0.6.4"
 k256 = "0.13"
-bitcoin = { version =  "0.32.7", features = ["serde", "rand-std"] }
+bitcoin = { version =  "0.32.7", features = ["serde"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

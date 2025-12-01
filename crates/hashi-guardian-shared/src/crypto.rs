@@ -3,9 +3,9 @@ use crate::GuardianResult;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
-use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
+use hpke::{Deserializable, HpkeError};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::{Field, PrimeField};
 use k256::{FieldBytes, ProjectivePoint, Scalar};
@@ -55,8 +55,8 @@ pub type DigestBytes = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Ciphertext {
-    pub encapsulated_key: Vec<u8>,
-    pub aes_ciphertext: Vec<u8>,
+    encapsulated_key: Vec<u8>,
+    aes_ciphertext: Vec<u8>,
 }
 
 // ---------------------------------
@@ -69,10 +69,11 @@ impl EncKeyPair {
         Self { sk, pk }
     }
 
-    pub fn secret(&self) -> &EncSecKey {
+    pub fn secret_key(&self) -> &EncSecKey {
         &self.sk
     }
-    pub fn public(&self) -> &EncPubKey {
+
+    pub fn public_key(&self) -> &EncPubKey {
         &self.pk
     }
 }
@@ -120,17 +121,18 @@ pub fn decrypt(
 ) -> GuardianResult<Vec<u8>> {
     let encapsulated_key = EncapsulatedKey::from_bytes(&ciphertext.encapsulated_key)
         .map_err(|e| InvalidInputs(format!("Failed to deserialize encapsulated key: {}", e)))?;
-    Ok(
-        hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
-            &hpke::OpModeR::Base,
-            sk,
-            &encapsulated_key,
-            &[],
-            &ciphertext.aes_ciphertext,
-            aad.unwrap_or(&[0; 32]),
-        )
-        .expect("Failed to decrypt"),
+    hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
+        &hpke::OpModeR::Base,
+        sk,
+        &encapsulated_key,
+        &[],
+        &ciphertext.aes_ciphertext,
+        aad.unwrap_or(&[0; 32]),
     )
+    .map_err(|e| match e {
+        HpkeError::OpenError => InvalidInputs("Invalid tag".into()),
+        e => panic!("Unexpected decryption error: {}", e),
+    })
 }
 
 // ---------------------------------
@@ -138,11 +140,11 @@ pub fn decrypt(
 // ---------------------------------
 
 /// Split a k256 SecretKey into shares using Shamir's secret sharing
-pub fn split_secret(sk: &k256::SecretKey, mut rng: impl RngCore) -> Vec<Share> {
+pub fn split_secret<R: CryptoRng + RngCore>(sk: &k256::SecretKey, rng: &mut R) -> Vec<Share> {
     let secret = *sk.to_nonzero_scalar().as_ref();
     let mut coefficients = vec![secret];
     for _ in 0..(THRESHOLD - 1) {
-        coefficients.push(Scalar::random(&mut rng))
+        coefficients.push(Scalar::random(&mut *rng))
     }
 
     // Evaluate
@@ -266,9 +268,13 @@ mod tests {
     fn test_encrypt_and_decrypt() {
         let bytes = b"Let's encrypt some stuff!";
         let keypair = EncKeyPair::random(&mut rand::thread_rng());
-        let ciphertext = encrypt(bytes, keypair.public(), None, &mut rand::thread_rng());
-        let decrypted_plaintext = decrypt(&ciphertext, keypair.secret(), None).unwrap();
-        assert_eq!(bytes, &decrypted_plaintext[..]);
+        let aad = Some(&[0; 32]);
+        let ciphertext = encrypt(bytes, keypair.public_key(), aad, &mut rand::thread_rng());
+        assert!(decrypt(&ciphertext, keypair.secret_key(), aad).is_ok_and(|x| x == bytes));
+
+        let wrong_aad = Some(&[10; 32]);
+        assert!(decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
+            .is_err_and(|x| matches!(x, InvalidInputs(_))));
     }
 
     // Verify secret reconstruction with varying number of shares (0 to limit)

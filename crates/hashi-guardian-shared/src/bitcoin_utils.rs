@@ -65,7 +65,6 @@ impl TaprootUTXO {
             // No script sig needed for taproot
             script_sig: ScriptBuf::default(),
             // Enables RBF, disables relative lock time, allows absolute lock time
-            // TODO: Is that what we want?
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             // Witness will be set later
             witness: Witness::default(),
@@ -74,18 +73,12 @@ impl TaprootUTXO {
 }
 
 /// BTC tx signing w/ taproot and script spend path
-pub fn sign_btc_tx(
-    input_utxos: &[TaprootUTXO],
-    output_utxos: &[TxOut],
-    change_utxo: &TxOut,
-    sk: &SecretKey,
-) -> GuardianResult<Vec<Signature>> {
-    let messages = construct_signing_messages(input_utxos, output_utxos, change_utxo)?;
+pub fn sign_btc_tx(messages: &[Message], sk: &SecretKey) -> GuardianResult<Vec<Signature>> {
     let keypair = Keypair::from_secret_key(&BTC_LIB, sk);
     Ok(messages
         .iter()
-        // TODO: Discuss if we want to use auxiliary randomness in the signing process
-        .map(|m| BTC_LIB.sign_schnorr(m, &keypair))
+        // Not using aux randomness which only provides side-channel protection
+        .map(|m| BTC_LIB.sign_schnorr_no_aux_rand(m, &keypair))
         .map(|s| Signature {
             signature: s,
             sighash_type: TapSighashType::Default,
@@ -225,7 +218,7 @@ mod bitcoin_tests {
 
         // Use a nothing-up-my-sleeve (NUMS) point as the internal key
         // Copied from BIP-341 doc.
-        // TODO: Confirm ourselves that it is indeed secure
+        // Note: Confirm ourselves that it is indeed secure if this code is being used in prod.
         let nums_key = UntweakedPublicKey::from_slice(&[
             0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
             0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
@@ -355,22 +348,16 @@ mod bitcoin_tests {
         };
 
         // C) Enclave signs the transaction.
-        let enclave_signatures = sign_btc_tx(
+        let messages = construct_signing_messages(
             std::slice::from_ref(&input_utxo),
             std::slice::from_ref(&spend_out),
             &change_out,
-            &enclave_keypair.secret_key(),
         )
         .unwrap();
+        let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair.secret_key()).unwrap();
 
         // D) Hashi signs the transaction.
-        let hashi_signatures = sign_btc_tx(
-            std::slice::from_ref(&input_utxo),
-            std::slice::from_ref(&spend_out),
-            &change_out,
-            &hashi_keypair.secret_key(),
-        )
-        .unwrap();
+        let hashi_signatures = sign_btc_tx(&messages, &hashi_keypair.secret_key()).unwrap();
 
         // E) Relayer combines the signatures and finalizes the transaction.
         // Note: If there are multiple inputs, we need to construct the witness for each input.
