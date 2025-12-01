@@ -6,6 +6,10 @@ use std::path::PathBuf;
 fn main() {
     let root_dir = PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
     let proto_dir = root_dir.join("../hashi/proto").canonicalize().unwrap();
+    let vendored_dir = root_dir
+        .join("../hashi/proto/vendored")
+        .canonicalize()
+        .unwrap();
     let out_dir = root_dir
         .join("../hashi/src/proto/generated")
         .canonicalize()
@@ -26,6 +30,11 @@ fn main() {
                     return Ok(None);
                 }
 
+                // Skip vendored files - they are only used as imports
+                if path.starts_with(&vendored_dir) {
+                    return Ok(None);
+                }
+
                 Ok(Some(path))
             })()
             .transpose()
@@ -33,7 +42,8 @@ fn main() {
         .collect::<Result<Vec<_>, walkdir::Error>>()
         .unwrap();
 
-    let mut fds = protox::Compiler::new(std::slice::from_ref(&proto_dir))
+    let include_dirs = [proto_dir.clone(), vendored_dir];
+    let mut fds = protox::Compiler::new(&include_dirs)
         .unwrap()
         .include_source_info(true)
         .include_imports(true)
