@@ -282,7 +282,7 @@ impl DkgManager {
                     if !self.dealer_outputs.contains_key(&dealer)
                         && !self.complaints_to_process.contains_key(&dealer)
                     {
-                        self.process_dealer_message(&dealer)?;
+                        self.resolve_dealer_message(&dealer)?;
                     }
                     match self.validate_certificate(message, &cert) {
                         Ok(()) => {
@@ -374,7 +374,7 @@ impl DkgManager {
         }
     }
 
-    fn process_dealer_message(&mut self, dealer: &Address) -> DkgResult<()> {
+    fn resolve_dealer_message(&mut self, dealer: &Address) -> DkgResult<()> {
         let message = self
             .dealer_messages
             .get(dealer)
@@ -2361,7 +2361,7 @@ mod tests {
             .store_message(dealer_1_addr, &dealer_1_message)
             .unwrap();
         party_manager
-            .process_dealer_message(&dealer_1_addr)
+            .resolve_dealer_message(&dealer_1_addr)
             .unwrap();
         assert!(
             party_manager
@@ -4310,7 +4310,7 @@ mod tests {
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
-        party_manager.process_dealer_message(&dealer_addr).unwrap();
+        party_manager.resolve_dealer_message(&dealer_addr).unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -4525,7 +4525,7 @@ mod tests {
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
-        party_manager.process_dealer_message(&dealer_addr).unwrap();
+        party_manager.resolve_dealer_message(&dealer_addr).unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -4608,7 +4608,7 @@ mod tests {
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
-        party_manager.process_dealer_message(&dealer_addr).unwrap();
+        party_manager.resolve_dealer_message(&dealer_addr).unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -4687,7 +4687,7 @@ mod tests {
         party_manager
             .store_message(dealer_addr, &dealer_message)
             .unwrap();
-        party_manager.process_dealer_message(&dealer_addr).unwrap();
+        party_manager.resolve_dealer_message(&dealer_addr).unwrap();
 
         // Pre-collect complaint responses from parties 3 and 4
         let complaint = party_manager
@@ -4804,7 +4804,7 @@ mod tests {
 
         // Process the message to verify it's valid
         party_manager
-            .process_dealer_message(&dealer_address)
+            .resolve_dealer_message(&dealer_address)
             .unwrap();
         assert!(party_manager.dealer_outputs.contains_key(&dealer_address));
     }
@@ -5701,7 +5701,7 @@ mod tests {
 
         // Now process the message - should create a complaint
         receiver_manager
-            .process_dealer_message(&dealer_addr)
+            .resolve_dealer_message(&dealer_addr)
             .unwrap();
 
         assert!(
