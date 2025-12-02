@@ -69,15 +69,16 @@ pub fn gen_dummy_share_data() -> (Vec<Share>, Vec<ShareCommitment>) {
 /// Helper to create a test TaprootUTXO
 pub fn create_test_utxo(amount_sats: u64) -> crate::bitcoin_utils::TaprootUTXO {
     use bitcoin::hashes::Hash;
+    use bitcoin::opcodes::all::OP_PUSHNUM_2;
+    use bitcoin::script::Builder;
     use bitcoin::Amount;
     use bitcoin::ScriptBuf;
     use bitcoin::Txid;
-    use bitcoin::opcodes::all::OP_PUSHNUM_2;
-    use bitcoin::script::Builder;
 
     // Create a minimal valid P2TR script and leaf script
     let internal_key = bitcoin::XOnlyPublicKey::from_slice(&[2u8; 32]).expect("valid pubkey");
-    let script_pubkey = ScriptBuf::new_p2tr(&bitcoin::secp256k1::Secp256k1::new(), internal_key, None);
+    let script_pubkey =
+        ScriptBuf::new_p2tr(&bitcoin::secp256k1::Secp256k1::new(), internal_key, None);
     let leaf_script = Builder::new().push_opcode(OP_PUSHNUM_2).into_script();
 
     crate::bitcoin_utils::TaprootUTXO::new(

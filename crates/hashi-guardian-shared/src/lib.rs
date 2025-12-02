@@ -9,8 +9,8 @@ pub use errors::GuardianResult;
 use std::collections::HashMap;
 
 use crate::bitcoin_utils::TaprootUTXO;
-use crate::GuardianError::InternalError;
 use crate::crypto::Share;
+use crate::GuardianError::InternalError;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::taproot::Signature;
 use bitcoin::Address;
@@ -162,9 +162,9 @@ pub struct WithdrawOutput {
 pub struct HashiCert {} // TODO: Placeholder
 
 // Re-export crypto types for backwards compatibility
+pub use crypto::Ciphertext;
 pub use crypto::EncryptedShare;
 pub use crypto::ShareCommitment;
-pub use crypto::Ciphertext;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct S3Config {
