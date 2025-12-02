@@ -2,8 +2,6 @@ use crate::Enclave;
 use crate::MyRateLimiter;
 use axum::extract::State;
 use axum::Json;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::Signature;
 use bitcoin::Address;
