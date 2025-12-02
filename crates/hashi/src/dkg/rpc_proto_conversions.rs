@@ -9,17 +9,20 @@ use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
 
 /// Get a required field from a proto message.
+#[allow(clippy::result_large_err)]
 fn required<T>(field: Option<T>, name: &str) -> Result<T, TryFromProtoError> {
     field.ok_or_else(|| TryFromProtoError::missing(name))
 }
 
 /// Parse an address from a hex string.
+#[allow(clippy::result_large_err)]
 fn parse_address(s: &str, field: &str) -> Result<Address, TryFromProtoError> {
     s.parse::<Address>()
         .map_err(|e| TryFromProtoError::invalid(field, e))
 }
 
 /// Deserialize a BCS-encoded proto field.
+#[allow(clippy::result_large_err)]
 fn deserialize_bcs<'de, T: Deserialize<'de>>(
     bcs: &'de Bcs,
     field: &str,
