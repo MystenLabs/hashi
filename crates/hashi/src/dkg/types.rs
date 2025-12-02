@@ -110,7 +110,7 @@ pub struct SendMessageRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageResponse {
-    pub signature: ValidatorSignature,
+    pub signature: Option<ValidatorSignature>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -86,18 +86,23 @@ impl DkgManager {
         if let Some(existing_message) = self.dealer_messages.get(&sender) {
             let existing_hash = compute_message_hash(existing_message);
             let incoming_hash = compute_message_hash(&request.message);
-            return if existing_hash == incoming_hash {
-                Ok(self.message_responses.get(&sender).unwrap().clone())
-            } else {
-                Err(DkgError::InvalidMessage {
+            if existing_hash != incoming_hash {
+                return Err(DkgError::InvalidMessage {
                     sender,
                     reason: "Dealer sent different messages".to_string(),
-                })
-            };
+                });
+            }
+            if let Some(response) = self.message_responses.get(&sender) {
+                return Ok(response.clone());
+            }
+            return Ok(SendMessageResponse { signature: None });
         }
-        let signature = self.receive_dealer_message(&request.message, sender)?;
+        self.store_message(sender, &request.message)?;
+        let signature = self.try_sign_message(sender, &request.message)?;
         let response = SendMessageResponse { signature };
-        self.message_responses.insert(sender, response.clone());
+        if response.signature.is_some() {
+            self.message_responses.insert(sender, response.clone());
+        }
         Ok(response)
     }
 
@@ -175,7 +180,10 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
         let dealer_message = self.create_dealer_message(rng);
-        let my_signature = self.receive_dealer_message(&dealer_message, self.address)?;
+        self.store_message(self.address, &dealer_message)?;
+        let my_signature = self
+            .try_sign_message(self.address, &dealer_message)?
+            .expect("own message should always be valid");
         let message_hash = compute_message_hash(&dealer_message);
         let mut aggregator = BlsSignatureAggregator::new(
             &self.bls_committee,
@@ -207,7 +215,9 @@ impl DkgManager {
                     }
                 };
                 // The signature is verified in the call to `add_signature`
-                if let Err(e) = aggregator.add_signature(response.signature.signature) {
+                if let Some(sig) = response.signature
+                    && let Err(e) = aggregator.add_signature(sig.signature)
+                {
                     tracing::info!("Invalid signature from {:?}: {}", validator_address, e)
                 }
             }
@@ -247,9 +257,15 @@ impl DkgManager {
                     if certified_dealers.contains_key(&dealer) {
                         continue;
                     }
-                    if !self.dealer_messages.contains_key(&dealer) {
+                    let needs_retrieval = match self.dealer_messages.get(&dealer) {
+                        None => true,
+                        Some(stored_msg) => {
+                            compute_message_hash(stored_msg) != message.message_hash
+                        }
+                    };
+                    if needs_retrieval {
                         tracing::info!(
-                            "Certificate from dealer {:?} received but message missing, retrieving from signers",
+                            "Certificate from dealer {:?} received but message missing or hash mismatch, retrieving from signers",
                             &dealer
                         );
                         self.retrieve_dealer_message(message, &cert, p2p_channel)
@@ -263,14 +279,16 @@ impl DkgManager {
                                 e
                             })?;
                     }
+                    if !self.dealer_outputs.contains_key(&dealer)
+                        && !self.complaints_to_process.contains_key(&dealer)
+                    {
+                        self.process_dealer_message(&dealer)?;
+                    }
                     match self.validate_certificate(message, &cert) {
                         Ok(()) => {
-                            if self
-                                .complaints_to_process
-                                .contains_key(&message.dealer_address)
-                            {
+                            if self.complaints_to_process.contains_key(&dealer) {
                                 self.recover_shares_via_complaint(
-                                    &message.dealer_address,
+                                    &dealer,
                                     cert.signers(&self.bls_committee)
                                         .expect("verified signature above"),
                                     p2p_channel,
@@ -313,16 +331,19 @@ impl DkgManager {
         dealer.create_message(rng).expect("checked threshold above")
     }
 
-    fn receive_dealer_message(
-        &mut self,
-        message: &avss::Message,
-        dealer: Address,
-    ) -> DkgResult<ValidatorSignature> {
+    fn store_message(&mut self, dealer: Address, message: &avss::Message) -> DkgResult<()> {
         self.dealer_messages.insert(dealer, message.clone());
         self.public_messages_store
             .store_dealer_message(&dealer, message)
             .map_err(|e| DkgError::StorageError(e.to_string()))?;
+        Ok(())
+    }
 
+    fn try_sign_message(
+        &mut self,
+        dealer: Address,
+        message: &avss::Message,
+    ) -> DkgResult<Option<ValidatorSignature>> {
         let dealer_session_id = self.session_id.dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
@@ -332,31 +353,50 @@ impl DkgManager {
             None, // commitment: None for initial DKG
             self.encryption_key.clone(),
         );
-        let partial_output = match receiver.process_message(message)? {
-            avss::ProcessedMessage::Valid(output) => output,
-            avss::ProcessedMessage::Complaint(complaint) => {
-                self.complaints_to_process.insert(dealer, complaint);
-                return Err(DkgError::ProtocolFailed(
-                    "Invalid message from dealer".into(),
-                ));
+        match receiver.process_message(message)? {
+            avss::ProcessedMessage::Valid(output) => {
+                self.dealer_outputs.insert(dealer, output);
+                let message_hash = compute_message_hash(message);
+                let signature = self.bls_signing_key.sign(
+                    self.dkg_config.epoch,
+                    self.address,
+                    &Dkg(DkgDealerMessageHash {
+                        dealer_address: dealer,
+                        message_hash,
+                    }),
+                );
+                Ok(Some(ValidatorSignature {
+                    validator: self.address,
+                    signature,
+                }))
             }
-        };
+            avss::ProcessedMessage::Complaint(_) => Ok(None),
+        }
+    }
 
-        self.dealer_outputs.insert(dealer, partial_output);
-
-        let message_hash = compute_message_hash(message);
-        let signature = self.bls_signing_key.sign(
-            self.dkg_config.epoch,
-            self.address,
-            &Dkg(DkgDealerMessageHash {
-                dealer_address: dealer,
-                message_hash,
-            }),
+    fn process_dealer_message(&mut self, dealer: &Address) -> DkgResult<()> {
+        let message = self
+            .dealer_messages
+            .get(dealer)
+            .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?;
+        let dealer_session_id = self.session_id.dealer_session_id(dealer);
+        let receiver = avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            dealer_session_id.to_vec(),
+            None,
+            self.encryption_key.clone(),
         );
-        Ok(ValidatorSignature {
-            validator: self.address,
-            signature,
-        })
+        match receiver.process_message(message)? {
+            avss::ProcessedMessage::Valid(output) => {
+                self.dealer_outputs.insert(*dealer, output);
+            }
+            avss::ProcessedMessage::Complaint(complaint) => {
+                self.complaints_to_process.insert(*dealer, complaint);
+            }
+        }
+        Ok(())
     }
 
     fn process_certificates(
@@ -424,7 +464,6 @@ impl DkgManager {
                 "Self in certificate signers but message not available".to_string(),
             ));
         }
-
         let signers = certificate.signers(&self.bls_committee).map_err(|_| {
             DkgError::ProtocolFailed(
                 "Certificate does not match the current epoch or committee".to_string(),
@@ -454,7 +493,7 @@ impl DkgManager {
                         );
                         continue;
                     }
-                    self.receive_dealer_message(&response.message, message.dealer_address)?;
+                    self.store_message(message.dealer_address, &response.message)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -610,6 +649,20 @@ mod tests {
         fn clear(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    fn receive_dealer_message(
+        manager: &mut DkgManager,
+        message: &avss::Message,
+        dealer: Address,
+    ) -> DkgResult<ValidatorSignature> {
+        manager.store_message(dealer, message)?;
+        manager
+            .try_sign_message(dealer, message)?
+            .ok_or_else(|| DkgError::InvalidMessage {
+                sender: dealer,
+                reason: "Invalid shares".into(),
+            })
     }
 
     fn create_test_validator(party_id: u16) -> (Address, Node<EncryptionGroupElement>) {
@@ -1318,9 +1371,8 @@ mod tests {
         );
 
         // Receiver processes the dealer's message
-        let signature = receiver_manager
-            .receive_dealer_message(&message, dealer_address)
-            .unwrap();
+        let signature =
+            receive_dealer_message(&mut receiver_manager, &message, dealer_address).unwrap();
 
         // Verify signature format
         assert_eq!(signature.validator, receiver_manager.address);
@@ -1405,7 +1457,7 @@ mod tests {
         );
 
         // Receiver processes the dealer's message - should fail due to storage error
-        let result = receiver_manager.receive_dealer_message(&message, dealer_address);
+        let result = receive_dealer_message(&mut receiver_manager, &message, dealer_address);
 
         // Verify operation fails with storage error
         assert!(result.is_err(), "Should fail when storage fails");
@@ -1509,20 +1561,16 @@ mod tests {
             let dealer_address = dealer_managers[i].address;
 
             // Receiver processes the message
-            let _sig = receiver_manager.receive_dealer_message(message, dealer_address);
+            let _sig = receive_dealer_message(&mut receiver_manager, message, dealer_address);
 
             // Create a certificate by collecting signatures from other validators
             // Need threshold + max_faulty = 3 + 1 = 4 weighted signatures
             // Using validators 0 and 1 with weights 3 and 2 respectively (total = 5 > 4)
             let validator_signatures = vec![
                 // Validator 0 (weight=3) signs
-                dealer_managers[0]
-                    .receive_dealer_message(message, dealer_address)
-                    .unwrap(),
+                receive_dealer_message(&mut dealer_managers[0], message, dealer_address).unwrap(),
                 // Validator 1 (weight=2) signs
-                dealer_managers[1]
-                    .receive_dealer_message(message, dealer_address)
-                    .unwrap(),
+                receive_dealer_message(&mut dealer_managers[1], message, dealer_address).unwrap(),
             ];
 
             // Create certificate using helper
@@ -1640,9 +1688,7 @@ mod tests {
         );
 
         // Create certificates (using actual BLS signatures from validator)
-        let sig0 = validator
-            .receive_dealer_message(&message0, dealer_addr0)
-            .unwrap();
+        let sig0 = receive_dealer_message(&mut validator, &message0, dealer_addr0).unwrap();
         let cert0 = create_test_certificate(
             &config,
             &bls_public_keys,
@@ -1652,9 +1698,7 @@ mod tests {
         )
         .unwrap();
 
-        let sig1 = validator
-            .receive_dealer_message(&message1, dealer_addr1)
-            .unwrap();
+        let sig1 = receive_dealer_message(&mut validator, &message1, dealer_addr1).unwrap();
         let cert1 = create_test_certificate(
             &config,
             &bls_public_keys,
@@ -1754,9 +1798,7 @@ mod tests {
             // Collect signatures from all validators
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
-                let sig = manager
-                    .receive_dealer_message(message, dealer_addr)
-                    .unwrap();
+                let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
 
@@ -1786,8 +1828,7 @@ mod tests {
 
         // Pre-populate validator 0's manager with dealer outputs from all validators (including itself)
         for (j, message) in dealer_messages.iter().enumerate() {
-            test_manager
-                .receive_dealer_message(message, Address::new([j as u8; 32]))
+            receive_dealer_message(&mut test_manager, message, Address::new([j as u8; 32]))
                 .unwrap();
         }
 
@@ -1925,9 +1966,7 @@ mod tests {
 
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
-                let sig = manager
-                    .receive_dealer_message(message, dealer_addr)
-                    .unwrap();
+                let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
 
@@ -2214,9 +2253,7 @@ mod tests {
             // All validators process dealer messages
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
-                let sig = manager
-                    .receive_dealer_message(message, dealer_addr)
-                    .unwrap();
+                let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
 
@@ -2317,13 +2354,15 @@ mod tests {
         );
 
         // Party 2 successfully processes dealer 0's message
-        party_manager
-            .receive_dealer_message(&dealer_0_message, dealer_0_addr)
-            .unwrap();
+        receive_dealer_message(&mut party_manager, &dealer_0_message, dealer_0_addr).unwrap();
 
-        // Party 2 fails on dealer 1's cheating message and creates complaint
-        let result = party_manager.receive_dealer_message(&dealer_1_message, dealer_1_addr);
-        assert!(result.is_err());
+        // Party 2 stores dealer 1's cheating message and creates complaint during processing
+        party_manager
+            .store_message(dealer_1_addr, &dealer_1_message)
+            .unwrap();
+        party_manager
+            .process_dealer_message(&dealer_1_addr)
+            .unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -2342,8 +2381,7 @@ mod tests {
                 &bls_public_keys,
             );
             // They successfully process dealer 1's cheating message
-            mgr.receive_dealer_message(&dealer_1_message, dealer_1_addr)
-                .unwrap();
+            receive_dealer_message(&mut mgr, &dealer_1_message, dealer_1_addr).unwrap();
             other_managers.insert(addr, mgr);
         }
 
@@ -2421,8 +2459,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_as_party_skips_invalid_certificates() {
-        // Test that run_as_party() skips invalid certificates and continues collecting valid ones
+    async fn test_run_as_party_recovers_from_hash_mismatch() {
+        // Test that run_as_party() recovers when stored message hash doesn't match certificate hash
+        // by retrieving the correct message from certificate signers
         let mut rng = rand::thread_rng();
         let num_validators = 5;
         let threshold = 3;
@@ -2495,9 +2534,7 @@ mod tests {
             // All validators process dealer messages
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
-                let sig = manager
-                    .receive_dealer_message(message, dealer_addr)
-                    .unwrap();
+                let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
 
@@ -2513,20 +2550,39 @@ mod tests {
             valid_certificates.push(cert);
         }
 
-        // Create invalid certificate with wrong message hash
+        // Create certificate that will fail validation due to hash mismatch
+        // (test_manager processes a DIFFERENT message than what's in the cert)
         let invalid_dealer_msg = managers[3].create_dealer_message(&mut rng);
+        let different_dealer_msg = managers[3].create_dealer_message(&mut rng);
         let dealer_addr_3 = Address::new([3; 32]);
 
-        let mut invalid_signatures = Vec::new();
-        for manager in managers.iter_mut() {
-            let sig = manager
-                .receive_dealer_message(&invalid_dealer_msg, dealer_addr_3)
-                .unwrap();
-            invalid_signatures.push(sig);
+        // test_manager processes the DIFFERENT message
+        receive_dealer_message(&mut managers[0], &different_dealer_msg, dealer_addr_3).unwrap();
+        // Other managers process the actual message (for cert creation)
+        for manager in managers.iter_mut().skip(1) {
+            receive_dealer_message(manager, &invalid_dealer_msg, dealer_addr_3).unwrap();
         }
 
-        // Create a valid certificate but with corrupted message hash
-        let mut invalid_cert = create_test_certificate(
+        // Create certificate for invalid_dealer_msg (but test_manager has different_dealer_msg stored)
+        let invalid_signatures: Vec<_> = managers
+            .iter()
+            .skip(1) // Skip test_manager who has wrong message
+            .map(|mgr| {
+                let message_hash = compute_message_hash(&invalid_dealer_msg);
+                let dkg_message = Dkg(DkgDealerMessageHash {
+                    dealer_address: dealer_addr_3,
+                    message_hash,
+                });
+                let signature =
+                    bls_keys[mgr.party_id as usize].sign(config.epoch, mgr.address, &dkg_message);
+                ValidatorSignature {
+                    validator: mgr.address,
+                    signature,
+                }
+            })
+            .collect();
+
+        let invalid_cert = create_test_certificate(
             &config,
             &bls_public_keys,
             &invalid_dealer_msg,
@@ -2534,8 +2590,6 @@ mod tests {
             invalid_signatures,
         )
         .unwrap();
-        // Make it invalid by corrupting the message hash in the DkgMessage
-        invalid_cert.message.as_mut_dkg_message().message_hash = [99; 32]; // Wrong hash
 
         // Mix valid and invalid certificates in TOB
         // Order: valid[0], invalid, valid[1], valid[2]
@@ -2561,16 +2615,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify it succeeded by collecting the 3 valid certificates
+        // Verify success: the mismatched certificate's message was retrieved and processed
+        // All 4 certificates (3 valid + 1 recovered) should be processed
         assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
         assert_eq!(output.commitments.len(), num_validators); // total weight = 5
 
-        // Verify TOB consumed all certificates (3 valid + 1 invalid)
+        // TOB stops after reaching threshold (3)
         use crate::communication::OrderedBroadcastChannel;
-        assert_eq!(
-            mock_tob.pending_messages(),
-            Some(0),
-            "TOB should have consumed all certificates"
+        assert!(
+            mock_tob.pending_messages().unwrap() <= 1,
+            "TOB should have consumed at least 3 certificates"
         );
     }
 
@@ -2650,9 +2704,7 @@ mod tests {
             // All validators process dealer messages
             let mut signatures = Vec::new();
             for manager in managers.iter_mut() {
-                let sig = manager
-                    .receive_dealer_message(message, dealer_addr)
-                    .unwrap();
+                let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
 
@@ -3275,7 +3327,7 @@ mod tests {
 
         // Pre-process the dealer messages so validation passes
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            let _ = party_manager.receive_dealer_message(message, *dealer_addr);
+            let _ = receive_dealer_message(&mut party_manager, message, *dealer_addr);
         }
 
         // Create mock TOB with certificates
@@ -3392,7 +3444,7 @@ mod tests {
 
         // Pre-process the dealer messages
         for (dealer_addr, message) in &test_setup.dealer_messages {
-            let _ = party_manager.receive_dealer_message(message, *dealer_addr);
+            let _ = receive_dealer_message(&mut party_manager, message, *dealer_addr);
         }
 
         // Create mock TOB with the modified certificates (including duplicates)
@@ -3911,7 +3963,7 @@ mod tests {
             .unwrap();
 
         // Verify we got a valid BLS signature from the receiver
-        assert_eq!(response.signature.validator, receiver_address);
+        assert_eq!(response.signature.unwrap().validator, receiver_address);
     }
 
     #[tokio::test]
@@ -3971,9 +4023,7 @@ mod tests {
 
         // Dealer creates and processes its own message (stores in dealer_messages)
         let dealer_message = dealer_manager.create_dealer_message(&mut rng);
-        dealer_manager
-            .receive_dealer_message(&dealer_message, dealer_address)
-            .unwrap();
+        receive_dealer_message(&mut dealer_manager, &dealer_message, dealer_address).unwrap();
 
         // Party requests the dealer's message
         let request = RetrieveMessageRequest {
@@ -4193,9 +4243,7 @@ mod tests {
         );
 
         // Set up party 2 with the cheating message
-        party2_manager
-            .receive_dealer_message(&cheating_message, dealer_addr)
-            .unwrap();
+        receive_dealer_message(&mut party2_manager, &cheating_message, dealer_addr).unwrap();
 
         let request = ComplainRequest {
             dealer: dealer_addr,
@@ -4259,8 +4307,10 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
-        assert!(result.is_err());
+        party_manager
+            .store_message(dealer_addr, &cheating_message)
+            .unwrap();
+        party_manager.process_dealer_message(&dealer_addr).unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -4278,8 +4328,7 @@ mod tests {
                 &bls_keys,
                 &bls_public_keys,
             );
-            mgr.receive_dealer_message(&cheating_message, dealer_addr)
-                .unwrap();
+            receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
             other_managers.push((addr, mgr));
         }
 
@@ -4473,8 +4522,10 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
-        assert!(result.is_err());
+        party_manager
+            .store_message(dealer_addr, &cheating_message)
+            .unwrap();
+        party_manager.process_dealer_message(&dealer_addr).unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -4492,8 +4543,7 @@ mod tests {
                 &bls_keys,
                 &bls_public_keys,
             );
-            mgr.receive_dealer_message(&cheating_message, dealer_addr)
-                .unwrap();
+            receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
             other_managers.push((addr, mgr));
         }
 
@@ -4555,8 +4605,10 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        let result = party_manager.receive_dealer_message(&cheating_message, dealer_addr);
-        assert!(result.is_err());
+        party_manager
+            .store_message(dealer_addr, &cheating_message)
+            .unwrap();
+        party_manager.process_dealer_message(&dealer_addr).unwrap();
         assert!(
             party_manager
                 .complaints_to_process
@@ -4611,8 +4663,7 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        mgr3.receive_dealer_message(&dealer_message, dealer_addr)
-            .unwrap();
+        receive_dealer_message(&mut mgr3, &dealer_message, dealer_addr).unwrap();
 
         let (addr4, mut mgr4) = create_manager_at_index(
             4,
@@ -4622,8 +4673,7 @@ mod tests {
             &bls_keys,
             &bls_public_keys,
         );
-        mgr4.receive_dealer_message(&dealer_message, dealer_addr)
-            .unwrap();
+        receive_dealer_message(&mut mgr4, &dealer_message, dealer_addr).unwrap();
 
         // Party 1 complains
         let (_party_addr, mut party_manager) = create_manager_at_index(
@@ -4635,11 +4685,9 @@ mod tests {
             &bls_public_keys,
         );
         party_manager
-            .receive_dealer_message(&dealer_message, dealer_addr)
-            .unwrap_err();
-        party_manager
-            .dealer_messages
-            .insert(dealer_addr, dealer_message);
+            .store_message(dealer_addr, &dealer_message)
+            .unwrap();
+        party_manager.process_dealer_message(&dealer_addr).unwrap();
 
         // Pre-collect complaint responses from parties 3 and 4
         let complaint = party_manager
@@ -4685,68 +4733,6 @@ mod tests {
             err
         );
     }
-
-    #[test]
-    fn test_receive_dealer_message_stores_message_even_on_complaint() {
-        let mut rng = rand::thread_rng();
-        let (config, session_context, encryption_keys, bls_keys, bls_public_keys) =
-            create_test_config_and_encrption_keys(&mut rng);
-
-        // Create dealer message
-        let (dealer_addr, dealer_mgr) = create_dealer_with_message(
-            0,
-            &config,
-            &session_context,
-            &encryption_keys,
-            &bls_keys,
-            &bls_public_keys,
-            &mut rng,
-        );
-        let dealer_message = dealer_mgr
-            .dealer_messages
-            .get(&dealer_addr)
-            .unwrap()
-            .clone();
-
-        // Create party that will create a complaint (using wrong encryption key)
-        let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
-        let mut party_manager = DkgManager::new(
-            Address::new([1; 32]),
-            config.clone(),
-            session_context.clone(),
-            wrong_key, // Wrong key causes complaint
-            bls_keys[0].clone(),
-            bls_public_keys.clone(),
-            Box::new(MockPublicMessagesStore),
-        );
-
-        // Process dealer message - should create complaint and return error
-        let result = party_manager.receive_dealer_message(&dealer_message, dealer_addr);
-
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid message from dealer")
-        );
-
-        assert!(
-            party_manager.dealer_messages.contains_key(&dealer_addr),
-            "Dealer message should be stored even when complaint is created"
-        );
-        assert!(
-            party_manager
-                .complaints_to_process
-                .contains_key(&dealer_addr),
-            "Complaint should be stored"
-        );
-        assert!(
-            !party_manager.dealer_outputs.contains_key(&dealer_addr),
-            "Dealer output should NOT be stored when complaint is created"
-        );
-    }
-
     #[tokio::test]
     async fn test_retrieve_dealer_message_success() {
         let mut rng = rand::thread_rng();
@@ -4813,85 +4799,14 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(party_manager.dealer_messages.contains_key(&dealer_address));
+        // Message is stored but not yet processed (that happens during run_as_party)
+        assert!(!party_manager.dealer_outputs.contains_key(&dealer_address));
+
+        // Process the message to verify it's valid
+        party_manager
+            .process_dealer_message(&dealer_address)
+            .unwrap();
         assert!(party_manager.dealer_outputs.contains_key(&dealer_address));
-    }
-
-    #[tokio::test]
-    async fn test_retrieve_dealer_message_propagates_processing_error() {
-        // Tests that errors from receive_dealer_message() are properly propagated
-        let mut rng = rand::thread_rng();
-
-        // Create two separate configs with different encryption keys
-        // Dealer will create message for config1, party will try to process with config2
-        let (config_1, session_context, encryption_keys_1, bls_keys_1, bls_public_keys_1) =
-            create_test_config_and_encrption_keys(&mut rng);
-        let (config_2, _, encryption_keys_2, bls_keys_2, bls_public_keys_2) =
-            create_test_config_and_encrption_keys(&mut rng);
-
-        // Create dealer with config_1
-        let (dealer_address, dealer_manager) = create_dealer_with_message(
-            0,
-            &config_1,
-            &session_context,
-            &encryption_keys_1,
-            &bls_keys_1,
-            &bls_public_keys_1,
-            &mut rng,
-        );
-
-        // Create party with config_2 (incompatible encryption key)
-        let (party_address, mut party_manager) = create_manager_at_index(
-            1,
-            &config_2,
-            &session_context,
-            &encryption_keys_2,
-            &bls_keys_2,
-            &bls_public_keys_2,
-        );
-
-        // Get dealer's message for certificate creation
-        let dealer_message = dealer_manager.dealer_messages.get(&dealer_address).unwrap();
-
-        // Create DkgMessage and validator signatures
-        let message_hash = compute_message_hash(dealer_message);
-        let dkg_message = Dkg(DkgDealerMessageHash {
-            dealer_address,
-            message_hash,
-        });
-
-        // Dealer signs its own message using config_1 BLS keys
-        let dealer_signature = bls_keys_1[0].sign(config_1.epoch, dealer_address, &dkg_message);
-        let validator_signatures = vec![ValidatorSignature {
-            validator: dealer_address,
-            signature: dealer_signature,
-        }];
-
-        // Create certificate with dealer's signature using config_1
-        let cert = create_certificate_with_signers(
-            &config_1,
-            &bls_public_keys_1,
-            &dealer_address,
-            dealer_message,
-            validator_signatures,
-        )
-        .unwrap();
-
-        // Create mock P2P channel
-        let mut dealers = HashMap::new();
-        dealers.insert(dealer_address, dealer_manager);
-        let mock_p2p = MockP2PChannel::new(dealers, party_address);
-
-        // Party requests dealer's share - should fail during certificate validation or message processing
-        // (incompatible keys - config mismatch)
-        let result = party_manager
-            .retrieve_dealer_message(dkg_message.as_dkg_message(), &cert, &mock_p2p)
-            .await;
-
-        // Should fail - either during certificate validation (CryptoError) or message processing (ProtocolFailed)
-        assert!(
-            result.is_err(),
-            "Expected error due to incompatible configs"
-        );
     }
 
     #[tokio::test]
@@ -5348,9 +5263,7 @@ mod tests {
             bls_public_keys,
         );
         let dealer_message = manager.create_dealer_message(rng);
-        manager
-            .receive_dealer_message(&dealer_message, address)
-            .unwrap();
+        receive_dealer_message(&mut manager, &dealer_message, address).unwrap();
         (address, manager)
     }
 
@@ -5569,7 +5482,10 @@ mod tests {
             .unwrap();
 
         // Responses should be identical (same validator)
-        assert_eq!(response1.signature.validator, response2.signature.validator);
+        assert_eq!(
+            response1.signature.unwrap().validator,
+            response2.signature.unwrap().validator
+        );
     }
 
     #[tokio::test]
@@ -5589,7 +5505,10 @@ mod tests {
         let response1 = receiver_manager
             .handle_send_message_request(dealer_address, &request1)
             .unwrap();
-        assert_eq!(response1.signature.validator, receiver_manager.address);
+        assert_eq!(
+            response1.signature.unwrap().validator,
+            receiver_manager.address
+        );
 
         // Second DIFFERENT message from same dealer (equivocation)
         let dealer_message2 = dealer_manager.create_dealer_message(&mut rng);
@@ -5608,6 +5527,193 @@ mod tests {
             }
             _ => panic!("Expected InvalidMessage error"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_send_message_request_invalid_shares_no_panic_on_retry() {
+        // Second RPC call with invalid shares should not panic.
+
+        let mut rng = rand::thread_rng();
+
+        let (config, session_id, _encryption_keys, bls_keys, bls_public_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer (party 1)
+        let dealer_addr = Address::new([1; 32]);
+
+        // Create a cheating message with corrupted shares for party 0
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_id,
+            0, // Corrupt shares for party 0 (receiver)
+            &mut rng,
+        );
+
+        // Create receiver (party 0)
+        let (_receiver_addr, mut receiver_manager) = create_manager_at_index(
+            0,
+            &config,
+            &session_id,
+            &_encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+
+        let request = SendMessageRequest {
+            message: cheating_message.clone(),
+        };
+
+        // First call: message is invalid, should return None signature (not store response)
+        let response1 = receiver_manager
+            .handle_send_message_request(dealer_addr, &request)
+            .unwrap();
+        assert!(
+            response1.signature.is_none(),
+            "Invalid shares should return None signature"
+        );
+
+        // Second call: same message - should NOT panic, should return None again
+        let response2 = receiver_manager
+            .handle_send_message_request(dealer_addr, &request)
+            .unwrap();
+        assert!(
+            response2.signature.is_none(),
+            "Second call with same invalid message should also return None, not panic"
+        );
+
+        // Verify message was stored (for later retrieval)
+        assert!(
+            receiver_manager.dealer_messages.contains_key(&dealer_addr),
+            "Message should be stored even if invalid"
+        );
+
+        // Verify no response was cached (since signature was None)
+        assert!(
+            !receiver_manager
+                .message_responses
+                .contains_key(&dealer_addr),
+            "Response should not be cached when signature is None"
+        );
+
+        // Verify receiver can still serve the message via RetrieveMessageRequest
+        let retrieve_request = RetrieveMessageRequest {
+            dealer: dealer_addr,
+        };
+        let retrieve_response = receiver_manager
+            .handle_retrieve_message_request(&retrieve_request)
+            .unwrap();
+        assert_eq!(
+            compute_message_hash(&retrieve_response.message),
+            compute_message_hash(&cheating_message),
+            "Stored message should be retrievable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_stores_invalid_message_for_later_complaint() {
+        // retrieve_dealer_message should store without validation
+
+        let mut rng = rand::thread_rng();
+
+        let (config, session_id, encryption_keys, bls_keys, bls_public_keys) =
+            create_test_config_and_encrption_keys(&mut rng);
+
+        // Create dealer (party 1)
+        let dealer_addr = Address::new([1; 32]);
+
+        // Create a cheating message with corrupted shares for party 0
+        let cheating_message = create_cheating_message(
+            &dealer_addr,
+            &config,
+            &session_id,
+            0, // Corrupt shares for party 0 (receiver)
+            &mut rng,
+        );
+
+        // Parties 2, 3, 4 can validate this message (shares are valid for them)
+        // and will sign the certificate
+        let mut signers = Vec::new();
+        for i in 2..5usize {
+            let (addr, mut mgr) = create_manager_at_index(
+                i as u8,
+                &config,
+                &session_id,
+                &encryption_keys,
+                &bls_keys,
+                &bls_public_keys,
+            );
+            let sig = receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
+            signers.push((addr, mgr, sig));
+        }
+
+        // Create certificate signed by parties 2, 3, 4
+        let message_hash = compute_message_hash(&cheating_message);
+        let dkg_message = Dkg(DkgDealerMessageHash {
+            dealer_address: dealer_addr,
+            message_hash,
+        });
+        let committee = create_bls_committee(&config, &bls_public_keys);
+        let mut aggregator = crate::bls::BlsSignatureAggregator::new(&committee, dkg_message);
+        for (_, _, sig) in &signers {
+            aggregator.add_signature(sig.signature.clone()).unwrap();
+        }
+        let certificate = aggregator.finish().unwrap();
+
+        // Party 0 doesn't have the message yet (simulating it wasn't received via SendMessage)
+        let (receiver_addr, mut receiver_manager) = create_manager_at_index(
+            0,
+            &config,
+            &session_id,
+            &encryption_keys,
+            &bls_keys,
+            &bls_public_keys,
+        );
+
+        // Create P2P channel with signers who have the message
+        let other_managers: HashMap<Address, DkgManager> = signers
+            .into_iter()
+            .map(|(addr, mgr, _)| (addr, mgr))
+            .collect();
+
+        let mock_p2p = MockP2PChannel::new(other_managers, receiver_addr);
+
+        // Retrieve message - should succeed even though shares are invalid for party 0
+        let dkg_dealer_hash = DkgDealerMessageHash {
+            dealer_address: dealer_addr,
+            message_hash,
+        };
+        let result = receiver_manager
+            .retrieve_dealer_message(&dkg_dealer_hash, &certificate, &mock_p2p)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "retrieve_dealer_message should succeed for invalid shares. Error: {:?}",
+            result.err()
+        );
+
+        // Verify message was stored
+        assert!(
+            receiver_manager.dealer_messages.contains_key(&dealer_addr),
+            "Invalid message should be stored for later complaint processing"
+        );
+
+        // Now process the message - should create a complaint
+        receiver_manager
+            .process_dealer_message(&dealer_addr)
+            .unwrap();
+
+        assert!(
+            receiver_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr),
+            "Processing invalid message should create complaint"
+        );
+        assert!(
+            !receiver_manager.dealer_outputs.contains_key(&dealer_addr),
+            "Invalid message should not create dealer output"
+        );
     }
 
     #[tokio::test]
@@ -5727,9 +5833,7 @@ mod tests {
         let certificate = aggregator.finish().unwrap();
 
         // Validator 1 needs to receive the dealer message first
-        manager1
-            .receive_dealer_message(&dealer_message, dealer_address)
-            .unwrap();
+        receive_dealer_message(&mut manager1, &dealer_message, dealer_address).unwrap();
 
         let result = manager1.validate_certificate(dkg_message.as_dkg_message(), &certificate);
         assert!(
