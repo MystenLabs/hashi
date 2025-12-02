@@ -110,7 +110,7 @@ pub struct SendMessageRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageResponse {
-    pub signature: Option<ValidatorSignature>,
+    pub signature: ValidatorSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,9 +167,6 @@ pub enum DkgError {
 
     #[error("Invalid message from {sender}: {reason}")]
     InvalidMessage { sender: Address, reason: String },
-
-    #[error("Invalid message type: {0}")]
-    InvalidMessageType(String),
 
     #[error("Protocol timeout after {seconds} seconds")]
     Timeout { seconds: u64 },
