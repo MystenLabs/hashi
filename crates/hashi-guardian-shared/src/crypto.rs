@@ -3,9 +3,9 @@ use crate::GuardianResult;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
+use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
-use hpke::{Deserializable, HpkeError};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::{Field, PrimeField};
 use k256::{FieldBytes, ProjectivePoint, Scalar};
@@ -95,12 +95,13 @@ pub fn to_scalar(id: ShareID) -> Scalar {
 //    Encryption/Decryption utils
 // ---------------------------------
 
+/// Encrypts plaintext. Returns InvalidInputs if plaintext / aad is extraordinarily long (~2^36).
 pub fn encrypt<R: CryptoRng + RngCore>(
     bytes: &[u8],
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
     rng: &mut R,
-) -> Ciphertext {
+) -> GuardianResult<Ciphertext> {
     let (encapsulated_key, aes_ciphertext) =
         hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
             &hpke::OpModeS::Base,
@@ -110,10 +111,11 @@ pub fn encrypt<R: CryptoRng + RngCore>(
             aad.unwrap_or(&[0; 32]),
             rng,
         )
-        .expect("Failed to encrypt");
-    Ciphertext::new(encapsulated_key, aes_ciphertext)
+        .map_err(|e| InvalidInputs(format!("Encryption failed: {}", e)))?;
+    Ok(Ciphertext::new(encapsulated_key, aes_ciphertext))
 }
 
+/// Decrypts ciphertext. Returns InvalidInputs if aad is invalid.
 pub fn decrypt(
     ciphertext: &Ciphertext,
     sk: &EncSecKey,
@@ -129,10 +131,7 @@ pub fn decrypt(
         &ciphertext.aes_ciphertext,
         aad.unwrap_or(&[0; 32]),
     )
-    .map_err(|e| match e {
-        HpkeError::OpenError => InvalidInputs("Invalid tag".into()),
-        e => panic!("Unexpected decryption error: {}", e),
-    })
+    .map_err(|e| InvalidInputs(format!("Decryption failed: {}", e)))
 }
 
 // ---------------------------------
@@ -234,11 +233,11 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
     rng: &mut R,
-) -> EncryptedShare {
-    EncryptedShare {
+) -> GuardianResult<EncryptedShare> {
+    Ok(EncryptedShare {
         id: share.id,
-        ciphertext: encrypt(&share.value.to_bytes(), pk, aad, rng),
-    }
+        ciphertext: encrypt(&share.value.to_bytes(), pk, aad, rng)?,
+    })
 }
 
 /// Decrypt an encrypted share with optional AAD
@@ -269,7 +268,8 @@ mod tests {
         let bytes = b"Let's encrypt some stuff!";
         let keypair = EncKeyPair::random(&mut rand::thread_rng());
         let aad = Some(&[0; 32]);
-        let ciphertext = encrypt(bytes, keypair.public_key(), aad, &mut rand::thread_rng());
+        let ciphertext =
+            encrypt(bytes, keypair.public_key(), aad, &mut rand::thread_rng()).unwrap();
         assert!(decrypt(&ciphertext, keypair.secret_key(), aad).is_ok_and(|x| x == bytes));
 
         let wrong_aad = Some(&[10; 32]);
