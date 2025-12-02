@@ -28,7 +28,7 @@ pub type EncapsulatedKey = <X25519HkdfSha256 as Kem>::EncappedKey;
 
 pub type ShareID = NonZeroU16; // Share IDs are assigned from 1, e.g., 1, 2, 3 and so on.
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Share {
     pub id: ShareID,
     pub value: Scalar,
