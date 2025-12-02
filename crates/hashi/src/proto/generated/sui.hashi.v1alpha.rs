@@ -348,7 +348,7 @@ pub struct SendMessageRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageResponse {
-    /// The BLS12-381 signature from the receiving validator.
+    /// The signature from the receiving validator.
     #[prost(message, optional, tag = "1")]
     pub signature: ::core::option::Option<MemberSignature>,
 }
