@@ -12,6 +12,7 @@ use governor::state::NotKeyed;
 use governor::Quota;
 use governor::RateLimiter;
 use hashi_guardian_shared::crypto::Share;
+use hashi_guardian_shared::crypto::ShareID;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
@@ -84,8 +85,10 @@ pub struct EnclaveState {
 /// Scratchpad used only during initialization
 #[derive(Default)]
 pub struct Scratchpad {
-    /// The received shares
-    pub decrypted_shares: Mutex<HashSet<Share>>,
+    /// The received shares (stored as a Vec, with IDs tracked in a HashSet for deduplication)
+    pub decrypted_shares: Mutex<Vec<Share>>,
+    /// Track which share IDs we've received to detect duplicates
+    pub received_share_ids: Mutex<HashSet<ShareID>>,
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in InitExternalRequest
@@ -199,7 +202,12 @@ impl Enclave {
                 hashi_committee_info: HashiCommittee::default(),
                 withdraw_state: WithdrawalState::default(),
             }),
-            scratchpad: Scratchpad::default(),
+            scratchpad: Scratchpad {
+                decrypted_shares: Mutex::new(Vec::new()),
+                received_share_ids: Mutex::new(HashSet::new()),
+                share_commitments: OnceLock::new(),
+                state_hash: OnceLock::new(),
+            },
         }
     }
 
@@ -344,7 +352,7 @@ impl Enclave {
     // Scratchpad (Initialization-only data)
     // ========================================================================
 
-    pub fn decrypted_shares(&self) -> &Mutex<HashSet<Share>> {
+    pub fn decrypted_shares(&self) -> &Mutex<Vec<Share>> {
         &self.scratchpad.decrypted_shares
     }
 

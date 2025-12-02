@@ -34,12 +34,6 @@ pub struct Share {
     pub value: Scalar,
 }
 
-impl std::hash::Hash for Share {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
 // Secret sharing constants: threshold and total number of key provisioners
 // TODO: How to rotate committee / change the below config?
 pub const THRESHOLD: usize = 3;

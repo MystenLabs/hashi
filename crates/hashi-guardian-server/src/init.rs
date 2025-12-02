@@ -112,10 +112,12 @@ pub async fn init_enclave_external(
 
     // 4) Persist share
     info!("Persisting share...");
-    let mut received_shares = enclave.decrypted_shares().lock().await;
-    if !received_shares.insert(share) {
+    let mut received_share_ids = enclave.scratchpad.received_share_ids.lock().await;
+    if !received_share_ids.insert(share.id) {
         return Err(InternalError("Duplicate shares!".into()));
     }
+    let mut received_shares = enclave.decrypted_shares().lock().await;
+    received_shares.push(share);
     let current_share_count = received_shares.len();
     info!(
         "   Total shares received: {}/{}",
