@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use crate::bitcoin_utils::TaprootUTXO;
 use crate::GuardianError::InternalError;
+use crate::crypto::Share;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::taproot::Signature;
 use bitcoin::Address;
@@ -160,23 +161,10 @@ pub struct WithdrawOutput {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HashiCert {} // TODO: Placeholder
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EncryptedShare {
-    pub id: ShareID,
-    pub ciphertext: Ciphertext,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ShareCommitment {
-    pub id: ShareID,
-    pub digest: DigestBytes,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Ciphertext {
-    pub encapsulated_key: Vec<u8>,
-    pub aes_ciphertext: Vec<u8>,
-}
+// Re-export crypto types for backwards compatibility
+pub use crypto::EncryptedShare;
+pub use crypto::ShareCommitment;
+pub use crypto::Ciphertext;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct S3Config {
@@ -215,56 +203,7 @@ pub struct WithdrawalState {
 //          Helper impl's
 // ---------------------------------
 
-impl From<(EncapsulatedKey, Vec<u8>)> for Ciphertext {
-    fn from((encapsulated_key, aes_ciphertext): (EncapsulatedKey, Vec<u8>)) -> Self {
-        Ciphertext {
-            encapsulated_key: encapsulated_key.to_bytes().to_vec(),
-            aes_ciphertext,
-        }
-    }
-}
-
-impl<'a> TryFrom<&'a Ciphertext> for (EncapsulatedKey, &'a [u8]) {
-    type Error = HpkeError;
-    fn try_from(value: &'a Ciphertext) -> Result<Self, Self::Error> {
-        Ok((
-            EncapsulatedKey::from_bytes(&value.encapsulated_key)?,
-            &value.aes_ciphertext,
-        ))
-    }
-}
-
-impl ShareCommitment {
-    pub fn id(&self) -> &ShareID {
-        &self.id
-    }
-
-    pub fn digest(&self) -> &DigestBytes {
-        &self.digest
-    }
-}
-
-impl From<(ShareID, DigestBytes)> for ShareCommitment {
-    fn from((id, digest): (ShareID, DigestBytes)) -> ShareCommitment {
-        ShareCommitment { id, digest }
-    }
-}
-
-impl EncryptedShare {
-    pub fn id(&self) -> &ShareID {
-        &self.id
-    }
-
-    pub fn ciphertext(&self) -> &Ciphertext {
-        &self.ciphertext
-    }
-}
-
-impl From<(ShareID, Ciphertext)> for EncryptedShare {
-    fn from((id, ciphertext): (ShareID, Ciphertext)) -> EncryptedShare {
-        EncryptedShare { id, ciphertext }
-    }
-}
+// Ciphertext, ShareCommitment, and EncryptedShare impls are now in crypto.rs
 
 impl AsRef<[u8]> for InitExternalRequestState {
     fn as_ref(&self) -> &[u8] {
@@ -295,12 +234,13 @@ impl InitExternalRequestState {
 impl InitExternalRequest {
     /// Create a new InitExternalRequest by encrypting the share with the enclave's public key
     pub fn new(
-        share: &MyShare,
+        share: &Share,
         enclave_pub_key: &EncPubKey,
         state: InitExternalRequestState,
     ) -> Result<Self, GuardianError> {
         let state_hash = state.digest();
-        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash))?;
+        let mut rng = rand::thread_rng();
+        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), &mut rng)?;
         Ok(InitExternalRequest {
             encrypted_share,
             state,
@@ -315,7 +255,7 @@ impl FullWithdrawInfo {
     }
 
     pub fn change_amount(&self) -> GuardianResult<Amount> {
-        let input_sum: Amount = self.input_utxos.iter().map(|utxo| utxo.amount).sum();
+        let input_sum: Amount = self.input_utxos.iter().map(|utxo| utxo.amount()).sum();
         let output_sum: Amount = self.withdraw_amount();
         if input_sum < output_sum {
             return Err(InternalError(

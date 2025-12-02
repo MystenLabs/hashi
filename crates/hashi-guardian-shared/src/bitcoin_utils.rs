@@ -49,6 +49,10 @@ impl TaprootUTXO {
         })
     }
 
+    pub fn amount(&self) -> Amount {
+        self.amount
+    }
+
     pub fn txout(&self) -> TxOut {
         TxOut {
             value: self.amount,

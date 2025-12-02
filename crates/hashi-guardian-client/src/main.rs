@@ -1,11 +1,14 @@
 use anyhow::Context;
 use anyhow::Result;
 use hashi_guardian_shared::crypto::decrypt_share;
+use hashi_guardian_shared::crypto::Share;
+use hashi_guardian_shared::crypto::NUM_OF_SHARES;
 use hashi_guardian_shared::test_utils::gen_dummy_share_data;
 use hashi_guardian_shared::test_utils::mock_init_external_state;
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
+use hpke::Serializable;
 use std::env;
 use tracing::info;
 use tracing::warn;
@@ -79,7 +82,7 @@ async fn configure_s3(
     share_commitments: Option<Vec<ShareCommitment>>,
 ) -> Result<()> {
     info!("Configuring S3...");
-    let share_commitments = share_commitments.unwrap_or(gen_dummy_share_data()?.1);
+    let share_commitments = share_commitments.unwrap_or_else(|| gen_dummy_share_data().1);
 
     let s3_config_request = InitInternalRequest {
         config: S3Config {
@@ -117,7 +120,7 @@ async fn configure_s3(
 }
 
 /// Setup a new Bitcoin key by generating key provisioner keys and requesting key shares
-async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitment>)> {
+async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitment>)> {
     info!("Setting up new key...");
 
     // Generate key provisioner encryption keys
@@ -125,14 +128,14 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitm
     let mut kp_private_keys = vec![];
     let mut kp_public_keys = vec![];
 
-    for i in 0..LIMIT {
+    for i in 0..NUM_OF_SHARES {
         let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
         kp_private_keys.push(sk);
         kp_public_keys.push(pk);
-        info!("   Generated key pair {} of {}", i + 1, LIMIT);
+        info!("   Generated key pair {} of {}", i + 1, NUM_OF_SHARES);
     }
 
-    let request: SetupNewKeyRequest = kp_public_keys.into();
+    let request: Vec<Vec<u8>> = kp_public_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
 
     info!("Sending setup request to server...");
     let client = reqwest::Client::new();
@@ -144,25 +147,26 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitm
         .context("Failed to send setup_new_key request")?;
 
     if response.status().is_success() {
-        let setup_response: SetupNewKeyResponse = response
+        let setup_response: (Vec<EncryptedShare>, Vec<ShareCommitment>) = response
             .json()
             .await
             .context("Failed to parse setup response")?;
+        let (encrypted_shares, share_commitments) = setup_response;
 
         info!(
             "Received {} encrypted shares",
-            setup_response.encrypted_shares.len()
+            encrypted_shares.len()
         );
         info!(
             "Received {} share commitments",
-            setup_response.share_commitments.len()
+            share_commitments.len()
         );
 
         // Decrypt the shares with the KP private keys
         info!("Decrypting shares...");
         let mut decrypted_shares = vec![];
 
-        for (i, encrypted_share) in setup_response.encrypted_shares.iter().enumerate() {
+        for (i, encrypted_share) in encrypted_shares.iter().enumerate() {
             let kp_sk = &kp_private_keys[i];
             let share = decrypt_share(encrypted_share, kp_sk, None)
                 .context(format!("Failed to decrypt share {}", i))?;
@@ -174,7 +178,7 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<MyShare>, Vec<ShareCommitm
         info!("   - Each key provisioner stores their share securely");
         info!("   - Share commitments are used to configure the enclave");
 
-        Ok((decrypted_shares, setup_response.share_commitments))
+        Ok((decrypted_shares, share_commitments))
     } else {
         let status = response.status();
         let error_body = response.text().await?;
@@ -318,7 +322,7 @@ async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
 async fn init_enclave(
     base_url: &str,
     enclave_pub_key: &EncPubKey,
-    shares: Vec<MyShare>,
+    shares: Vec<Share>,
 ) -> Result<()> {
     info!("Initializing enclave with {} shares...", shares.len());
 
@@ -382,7 +386,7 @@ async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
     info!("{}\n", "=".repeat(50));
     info!("Creating dummy shares from test secret [1u8; 32]...");
     info!("Note: NOT FOR PRODUCTION!");
-    let (shares, commitments) = test_utils::gen_dummy_share_data().unwrap();
+    let (shares, commitments) = test_utils::gen_dummy_share_data();
     for d in &commitments {
         info!("Share {} Digest {:x?}", d.id, d.digest);
     }
