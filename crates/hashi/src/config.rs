@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
-use sui_crypto::simple::SimpleKeypair;
+use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_sdk_types::Address;
 
 use crate::bls::Bls12381PrivateKey;
 
@@ -15,6 +16,9 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operator_private_key: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_address: Option<Address>,
 
     /// Configure the address to listen on for https
     ///
@@ -39,6 +43,15 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_chain_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hashi_ids: Option<HashiIds>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sui_rpc: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_rpc: Option<String>,
 }
 
 impl Config {
@@ -82,31 +95,37 @@ impl Config {
         Ok(ed25519_dalek::VerifyingKey::from(&tls_private_key))
     }
 
-    pub fn operator_private_key(&self) -> Result<SimpleKeypair, anyhow::Error> {
+    //TODO support more than just Ed25519
+    pub fn operator_private_key(&self) -> Result<Ed25519PrivateKey, anyhow::Error> {
         let raw = self
             .operator_private_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no operator_private_key configured"))?;
 
         if let Ok(private_key) = std::fs::read(raw) {
-            if let Ok(pk) = SimpleKeypair::from_der(&private_key) {
+            if let Ok(pk) = Ed25519PrivateKey::from_der(&private_key) {
                 return Ok(pk);
             }
 
             if let Some(pk) = std::str::from_utf8(&private_key)
                 .ok()
-                .and_then(|pk| SimpleKeypair::from_pem(pk).ok())
+                .and_then(|pk| Ed25519PrivateKey::from_pem(pk).ok())
             {
                 return Ok(pk);
             }
         }
 
-        if let Ok(private_key) = SimpleKeypair::from_pem(raw) {
+        if let Ok(private_key) = Ed25519PrivateKey::from_pem(raw) {
             return Ok(private_key);
         }
 
         // maybe some other format?
         Err(anyhow::anyhow!("unable to load operator_private_key"))
+    }
+
+    pub fn validator_address(&self) -> Result<Address, anyhow::Error> {
+        self.validator_address
+            .ok_or_else(|| anyhow::anyhow!("no validator address configured"))
     }
 
     pub fn https_address(&self) -> SocketAddr {
@@ -136,6 +155,14 @@ impl Config {
             .unwrap_or("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
     }
 
+    pub fn hashi_ids(&self) -> HashiIds {
+        // TODO fill in mainnet values once published
+        self.hashi_ids.unwrap_or(HashiIds {
+            package_id: Address::ZERO,
+            hashi_object_id: Address::ZERO,
+        })
+    }
+
     // Creates a new config suitable for testing. In particular this config will:
     // - have randomly generated private key material
     // - localhost only listen addresses using available ports
@@ -155,6 +182,8 @@ impl Config {
                 .to_owned(),
         );
 
+        config.protocol_private_key = Some(Bls12381PrivateKey::generate(&mut rand::thread_rng()));
+
         config.https_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
         config.http_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
         config.metrics_http_address =
@@ -162,6 +191,15 @@ impl Config {
 
         config
     }
+}
+
+/// Relevant Onchain Ids for the hashi protocol.
+#[derive(Debug, Clone, Copy, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct HashiIds {
+    /// The original package id of the `hashi` package.
+    pub package_id: Address,
+    /// Id of the main `Hashi` shared object.
+    pub hashi_object_id: Address,
 }
 
 /// Return an ephemeral, available port. On unix systems, the port returned will be in the

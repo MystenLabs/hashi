@@ -1,30 +1,21 @@
-use crate::errors::GuardianError;
-use crate::errors::GuardianResult;
-use crate::Ciphertext;
-use crate::EncryptedShare;
-use crate::SetupNewKeyRequest;
-use crate::ShareCommitment;
-use blake2::digest::consts::U32;
-use blake2::Blake2b;
-use blake2::Digest;
+use crate::GuardianError::{InternalError, InvalidInputs};
+use crate::GuardianResult;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Deserializable;
-use hpke::HpkeError;
 use hpke::Kem;
 use hpke::Serializable;
-use k256::elliptic_curve::PrimeField;
-use k256::Scalar;
-use k256::SecretKey;
-use vsss_rs::shamir;
-use vsss_rs::DefaultShare;
-use vsss_rs::IdentifierPrimeField;
-use vsss_rs::ReadableShareSet;
-use vsss_rs::Share;
+use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::{Field, PrimeField};
+use k256::{FieldBytes, ProjectivePoint, Scalar};
+use rand_core::{CryptoRng, RngCore};
+use serde::Deserialize;
+use serde::Serialize;
+use std::num::NonZeroU16;
 
 // ---------------------------------
-//      Crypto Types
+//      Crypto Structs & Types
 // ---------------------------------
 
 pub type EncSecKey = <X25519HkdfSha256 as Kem>::PrivateKey;
@@ -35,62 +26,82 @@ pub struct EncKeyPair {
 }
 pub type EncapsulatedKey = <X25519HkdfSha256 as Kem>::EncappedKey;
 
-pub type K256ShareBase = IdentifierPrimeField<Scalar>;
-pub type ShareID = K256ShareBase;
-pub type ShareValue = K256ShareBase;
-pub type MyShare = DefaultShare<ShareID, ShareValue>;
+pub type ShareID = NonZeroU16; // Share IDs are assigned from 1, e.g., 1, 2, 3 and so on.
+
+#[derive(Clone)]
+pub struct Share {
+    pub id: ShareID,
+    pub value: Scalar,
+}
 
 // Secret sharing constants: threshold and total number of key provisioners
+// TODO: How to rotate committee / change the below config?
 pub const THRESHOLD: usize = 3;
-pub const LIMIT: usize = 5;
+pub const NUM_OF_SHARES: usize = 5;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EncryptedShare {
+    pub id: ShareID,
+    pub ciphertext: Ciphertext,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShareCommitment {
+    pub id: ShareID,
+    pub digest: DigestBytes,
+}
+
+pub type DigestBytes = Vec<u8>;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Ciphertext {
+    encapsulated_key: Vec<u8>,
+    aes_ciphertext: Vec<u8>,
+}
 
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
 
 impl EncKeyPair {
-    pub fn secret(&self) -> &EncSecKey {
+    pub fn random<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
+        let (sk, pk) = X25519HkdfSha256::gen_keypair(rng);
+        Self { sk, pk }
+    }
+
+    pub fn secret_key(&self) -> &EncSecKey {
         &self.sk
     }
-    pub fn public(&self) -> &EncPubKey {
+
+    pub fn public_key(&self) -> &EncPubKey {
         &self.pk
     }
 }
 
-impl From<(EncSecKey, EncPubKey)> for EncKeyPair {
-    fn from((enc_sk, enc_pk): (EncSecKey, EncPubKey)) -> Self {
-        EncKeyPair {
-            sk: enc_sk,
-            pk: enc_pk,
+impl Ciphertext {
+    pub fn new(encapsulated_key: EncapsulatedKey, aes_ciphertext: Vec<u8>) -> Self {
+        Ciphertext {
+            encapsulated_key: encapsulated_key.to_bytes().to_vec(),
+            aes_ciphertext,
         }
     }
 }
 
-impl From<Vec<EncPubKey>> for SetupNewKeyRequest {
-    fn from(keys: Vec<EncPubKey>) -> Self {
-        SetupNewKeyRequest {
-            key_provisioner_public_keys: keys.iter().map(|k| k.to_bytes().to_vec()).collect(),
-        }
-    }
-}
-
-impl TryFrom<SetupNewKeyRequest> for Vec<EncPubKey> {
-    type Error = HpkeError;
-    fn try_from(value: SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        value
-            .key_provisioner_public_keys
-            .into_iter()
-            .map(|k| EncPubKey::from_bytes(&k))
-            .collect()
-    }
+pub fn to_scalar(id: ShareID) -> Scalar {
+    Scalar::from(id.get() as u32)
 }
 
 // ---------------------------------
 //    Encryption/Decryption utils
 // ---------------------------------
 
-pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> GuardianResult<Ciphertext> {
-    let mut rng = rand::thread_rng();
+/// Encrypts plaintext. Returns InvalidInputs if plaintext / aad is extraordinarily long (~2^36).
+pub fn encrypt<R: CryptoRng + RngCore>(
+    bytes: &[u8],
+    pk: &EncPubKey,
+    aad: Option<&[u8; 32]>,
+    rng: &mut R,
+) -> GuardianResult<Ciphertext> {
     let (encapsulated_key, aes_ciphertext) =
         hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
             &hpke::OpModeS::Base,
@@ -98,33 +109,29 @@ pub fn encrypt(bytes: &[u8], pk: &EncPubKey, aad: Option<&[u8; 32]>) -> Guardian
             &[],
             bytes,
             aad.unwrap_or(&[0; 32]),
-            &mut rng,
+            rng,
         )
-        .map_err(|e| GuardianError::GenericError(format!("Failed to encrypt: {}", e)))?;
-
-    Ok((encapsulated_key, aes_ciphertext).into())
+        .map_err(|e| InvalidInputs(format!("Encryption failed: {}", e)))?;
+    Ok(Ciphertext::new(encapsulated_key, aes_ciphertext))
 }
 
+/// Decrypts ciphertext. Returns InvalidInputs if aad is invalid.
 pub fn decrypt(
     ciphertext: &Ciphertext,
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Vec<u8>> {
-    let (encapsulated_key, aes_ciphertext) = ciphertext.try_into().map_err(|e: HpkeError| {
-        GuardianError::GenericError(format!("Failed to deserialize ciphertext: {}", e))
-    })?;
-
-    let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
+    let encapsulated_key = EncapsulatedKey::from_bytes(&ciphertext.encapsulated_key)
+        .map_err(|e| InvalidInputs(format!("Failed to deserialize encapsulated key: {}", e)))?;
+    hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
         &hpke::OpModeR::Base,
         sk,
         &encapsulated_key,
         &[],
-        aes_ciphertext,
+        &ciphertext.aes_ciphertext,
         aad.unwrap_or(&[0; 32]),
     )
-    .map_err(|e| GuardianError::GenericError(format!("Failed to decrypt: {}", e)))?;
-
-    Ok(decrypted)
+    .map_err(|e| InvalidInputs(format!("Decryption failed: {}", e)))
 }
 
 // ---------------------------------
@@ -132,38 +139,105 @@ pub fn decrypt(
 // ---------------------------------
 
 /// Split a k256 SecretKey into shares using Shamir's secret sharing
-pub fn k256_secret_key_to_shares(sk: SecretKey) -> GuardianResult<Vec<MyShare>> {
-    let nzs = sk.to_nonzero_scalar();
-    let shared_secret = IdentifierPrimeField(*nzs.as_ref());
-    let shares =
-        shamir::split_secret::<MyShare>(THRESHOLD, LIMIT, &shared_secret, &mut rand::thread_rng())
-            .map_err(|e| GuardianError::GenericError(format!("Failed to split secret: {}", e)))?;
-    Ok(shares)
+pub fn split_secret<R: CryptoRng + RngCore>(sk: &k256::SecretKey, rng: &mut R) -> Vec<Share> {
+    let secret = *sk.to_nonzero_scalar().as_ref();
+    let mut coefficients = vec![secret];
+    for _ in 0..(THRESHOLD - 1) {
+        coefficients.push(Scalar::random(&mut *rng))
+    }
+
+    // Evaluate
+    (1..=NUM_OF_SHARES)
+        .map(|i| NonZeroU16::new(i as u16).expect("Not zeroes!"))
+        .map(|i| Share {
+            id: i,
+            value: eval_poly(i, &coefficients),
+        })
+        .collect()
+}
+
+// Coefficients: [c0, c1, c2, c3]
+// Returns: c0 + c1 * x + c2 * x^2 + c3 * x^3
+pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
+    let x = to_scalar(pos);
+    let mut out = Scalar::ZERO;
+    let mut xpow = Scalar::ONE;
+    for c in coefficients {
+        out = out.add(&c.mul(&xpow));
+        xpow = xpow.mul(&x);
+    }
+    out
+}
+
+/// Combine secret shares to a secp256k1 secret key
+pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
+    // Validation: ensure no duplicates
+    let mut seen_ids = std::collections::HashSet::new();
+    for share in shares {
+        if !seen_ids.insert(share.id) {
+            return Err(InvalidInputs("Duplicate share ID".into()));
+        }
+    }
+    if seen_ids.len() < THRESHOLD {
+        return Err(InvalidInputs(format!(
+            "Received only {} out of {} shares",
+            seen_ids.len(),
+            THRESHOLD
+        )));
+    }
+
+    let ids = shares.iter().map(|s| to_scalar(s.id)).collect::<Vec<_>>();
+    let mut result = Scalar::ZERO;
+    for share in shares {
+        let cur_share_id = to_scalar(share.id);
+        let numerator: Scalar = ids
+            .iter()
+            .filter(|&id| cur_share_id != *id)
+            .map(|id| id.negate())
+            .product();
+        let denominator: Scalar = ids
+            .iter()
+            .filter(|&id| cur_share_id != *id)
+            .map(|id| cur_share_id.sub(id))
+            .product();
+
+        // Lagrange basis polynomial evaluated at x=0
+        // L_i(0) = product_{j != i} (-x_j) / (x_i - x_j)
+        let lagrange_basis = numerator.mul(
+            &denominator
+                .invert()
+                .expect("Denominator is never zero because share IDs are unique"),
+        );
+        result = result.add(&share.value.mul(&lagrange_basis));
+    }
+
+    // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
+    //       use big-endian representation. We are juggling between two libraries because secp256k1
+    //       does not expose the arithmetic tools needed to implement secret-sharing.
+    bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
+        .map_err(|e| InternalError(format!("Failed to cast to secret key: {}", e)))
 }
 
 /// Create a commitment (hash) for a share
-pub fn commit_share(share: &MyShare) -> GuardianResult<ShareCommitment> {
-    let share_id = share.identifier;
-    let share_value = share.value;
-    let bytes = bincode::serialize(&share_value).map_err(|e| {
-        GuardianError::GenericError(format!("Failed to serialize share value: {}", e))
-    })?;
-    Ok((share_id, Blake2b::<U32>::digest(&bytes).into()).into())
+pub fn commit_share(share: &Share) -> ShareCommitment {
+    let commitment = ProjectivePoint::GENERATOR * share.value;
+    ShareCommitment {
+        id: share.id,
+        digest: commitment.to_bytes().to_vec(),
+    }
 }
 
-/// Encrypt a share for a given public key with optional AAD
-pub fn encrypt_share(
-    share: &MyShare,
+/// Encrypt a share with optional AAD
+pub fn encrypt_share<R: CryptoRng + RngCore>(
+    share: &Share,
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
+    rng: &mut R,
 ) -> GuardianResult<EncryptedShare> {
-    let share_id = share.identifier;
-    let share_value = share.value;
-    let bytes = bincode::serialize(&share_value).map_err(|e| {
-        GuardianError::GenericError(format!("Failed to serialize share value: {}", e))
-    })?;
-    let ciphertext = encrypt(&bytes, pk, aad)?;
-    Ok((share_id, ciphertext).into())
+    Ok(EncryptedShare {
+        id: share.id,
+        ciphertext: encrypt(&share.value.to_bytes(), pk, aad, rng)?,
+    })
 }
 
 /// Decrypt an encrypted share with optional AAD
@@ -171,172 +245,36 @@ pub fn decrypt_share(
     encrypted_share: &EncryptedShare,
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
-) -> GuardianResult<MyShare> {
-    let share_id = *encrypted_share.id();
-    let serialized_share = decrypt(encrypted_share.ciphertext(), sk, aad)?;
-    let share_value: ShareValue = bincode::deserialize(&serialized_share).map_err(|e| {
-        GuardianError::GenericError(format!("Failed to deserialize share value: {}", e))
-    })?;
-    Ok(MyShare::with_identifier_and_value(share_id, share_value))
-}
-
-/// Combine shares back into a bitcoin secp256k1 SecretKey
-pub fn k256shares_to_secp_secret_key(
-    shares: &[MyShare],
-) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
-    let result = shares
-        .combine()
-        .map_err(|e| GuardianError::GenericError(format!("Failed to combine share: {}", e)))?;
-
-    // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
-    //       use the same representation to store bytes (big-endian). We are juggling between two
-    //       libraries because the secret-sharing lib expects RustCrypto traits
-    //       that bitcoin lib does not implement.
-    // TODO: Check if using k256 lib in the sign_btc_tx fn works
-    let sk = result.0.to_repr();
-    let secp_sk = bitcoin::secp256k1::SecretKey::from_slice(&sk).map_err(|e| {
-        GuardianError::GenericError(format!("Failed to cast combined secret key: {}", e))
-    })?;
-    Ok(secp_sk)
+) -> GuardianResult<Share> {
+    let serialized_share = decrypt(&encrypted_share.ciphertext, sk, aad)?;
+    let result: Option<Scalar> =
+        Scalar::from_repr(*FieldBytes::from_slice(&serialized_share)).into();
+    match result {
+        Some(x) => Ok(Share {
+            id: encrypted_share.id,
+            value: x,
+        }),
+        None => Err(InvalidInputs("Failed to deserialize share".into())),
+    }
 }
 
 #[cfg(test)]
-mod encryption_tests {
-    // https://github.com/rozbb/rust-hpke/tree/main
-    // Note: using hpke
-    use super::decrypt;
-    use super::encrypt;
-    use hpke::aead::AesGcm256;
-    use hpke::kdf::HkdfSha384;
-    use hpke::kem::X25519HkdfSha256;
-    use hpke::Kem;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
-
-    #[test]
-    fn test_hpke() {
-        let plaintext = b"Hello, world!";
-        let aad = b"aad";
-
-        let mut rng = StdRng::from_entropy();
-        let keys = X25519HkdfSha256::gen_keypair(&mut rng);
-
-        let (encapped_key, ciphertext) =
-            hpke::single_shot_seal::<AesGcm256, HkdfSha384, X25519HkdfSha256, _>(
-                &hpke::OpModeS::Base,
-                &keys.1,
-                &[],
-                plaintext,
-                aad,
-                &mut rng,
-            )
-            .unwrap();
-        let decrypted = hpke::single_shot_open::<AesGcm256, HkdfSha384, X25519HkdfSha256>(
-            &hpke::OpModeR::Base,
-            &keys.0,
-            &encapped_key,
-            &[],
-            &ciphertext,
-            aad,
-        )
-        .unwrap();
-        println!("decrypted: {:?}", decrypted);
-        assert_eq!(plaintext, decrypted.as_slice());
-    }
+mod tests {
+    use super::*;
+    use k256::SecretKey;
 
     #[test]
     fn test_encrypt_and_decrypt() {
         let bytes = b"Let's encrypt some stuff!";
-        let mut rng = rand::thread_rng();
-        let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-        let ciphertext = encrypt(bytes, &pk, None).unwrap();
-        let decrypted_plaintext = decrypt(&ciphertext, &sk, None).unwrap();
-        assert_eq!(bytes, &decrypted_plaintext[..]);
-    }
-}
+        let keypair = EncKeyPair::random(&mut rand::thread_rng());
+        let aad = Some(&[0; 32]);
+        let ciphertext =
+            encrypt(bytes, keypair.public_key(), aad, &mut rand::thread_rng()).unwrap();
+        assert!(decrypt(&ciphertext, keypair.secret_key(), aad).is_ok_and(|x| x == bytes));
 
-#[cfg(test)]
-mod secret_sharing_tests {
-    use super::*;
-    use bitcoin::secp256k1::Message;
-    use bitcoin::secp256k1::Secp256k1;
-    use k256::elliptic_curve::PrimeField;
-    use vsss_rs::shamir;
-    use vsss_rs::IdentifierPrimeField;
-    use vsss_rs::ReadableShareSet;
-
-    #[test]
-    fn basic_secret_sharing() {
-        let mut osrng = rand_core::OsRng;
-        let sk = SecretKey::random(&mut osrng);
-        let nzs = sk.to_nonzero_scalar();
-        let shared_secret = IdentifierPrimeField(*nzs.as_ref());
-        let res = shamir::split_secret::<MyShare>(2, 3, &shared_secret, &mut osrng);
-        assert!(res.is_ok());
-        let shares = res.unwrap();
-        println!("{:?}", shares);
-        let res = shares.combine();
-        assert!(res.is_ok());
-        let scalar = res.unwrap();
-        let sk_dup = SecretKey::from_bytes(&scalar.0.to_repr()).unwrap();
-        assert_eq!(sk_dup.to_bytes(), sk.to_bytes());
-    }
-
-    #[test]
-    fn test_libs_signing_compat() {
-        let msg = [7u8; 32];
-        let mut osrng = rand_core::OsRng;
-        let sk1 = k256::SecretKey::random(&mut osrng);
-        let sk1_bytes = sk1.to_bytes();
-
-        let secp = Secp256k1::new();
-        let sk2 = bitcoin::secp256k1::SecretKey::from_slice(&sk1_bytes).unwrap();
-
-        // secp signing
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk2);
-        let bytes = [2u8; 32];
-        let msg_dup = Message::from_digest(msg);
-        let signature = secp.sign_schnorr_with_aux_rand(&msg_dup, &keypair, &bytes);
-        let xonly_pubkey = bitcoin::XOnlyPublicKey::from_keypair(&keypair).0;
-        secp.verify_schnorr(&signature, &msg_dup, &xonly_pubkey)
-            .unwrap();
-
-        // k256 Schnorr signing
-        let k256_schnorr_key = k256::schnorr::SigningKey::from_bytes(&sk1_bytes).unwrap();
-        let k256_schnorr_sig = k256_schnorr_key.sign_raw(&msg, &bytes).unwrap();
-        assert_eq!(signature.serialize(), k256_schnorr_sig.to_bytes());
-
-        // Verify with k256 Schnorr
-        let k256_schnorr_vkey = k256_schnorr_key.verifying_key();
-        k256_schnorr_vkey
-            .verify_raw(&msg, &k256_schnorr_sig)
-            .unwrap();
-    }
-
-    // Verify that k256_secret_key_to_shares generates the correct number of shares
-    #[test]
-    fn test_k256_secret_key_to_shares_generates_correct_number() {
-        let mut osrng = rand_core::OsRng;
-        let sk = SecretKey::random(&mut osrng);
-
-        let shares = k256_secret_key_to_shares(sk).unwrap();
-
-        // Should generate LIMIT (5) shares
-        assert_eq!(
-            shares.len(),
-            LIMIT,
-            "Should generate exactly {} shares",
-            LIMIT
-        );
-
-        // Verify all shares have unique identifiers
-        let mut identifiers = std::collections::HashSet::new();
-        for share in &shares {
-            assert!(
-                identifiers.insert(share.identifier),
-                "Share identifiers should be unique"
-            );
-        }
+        let wrong_aad = Some(&[10; 32]);
+        assert!(decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
+            .is_err_and(|x| matches!(x, InvalidInputs(_))));
     }
 
     // Verify secret reconstruction with varying number of shares (0 to limit)
@@ -346,20 +284,18 @@ mod secret_sharing_tests {
     // - Correct conversion to bitcoin::secp256k1::SecretKey
     // - Full round-trip produces equivalent keys
     #[test]
-    fn test_roundtrip_reconstruction_varying_shares() {
-        let mut osrng = rand_core::OsRng;
-
+    fn test_varying_share_count() {
         // Start with a k256::SecretKey
-        let original_k256_sk = SecretKey::random(&mut osrng);
+        let original_k256_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_k256_sk.to_bytes();
 
         // Split the secret into shares
-        let shares = k256_secret_key_to_shares(original_k256_sk).unwrap();
+        let shares = split_secret(&original_k256_sk, &mut rand::thread_rng());
 
         // Test reconstruction with varying numbers of shares from 0 to LIMIT
-        for num_shares in 0..=LIMIT {
+        for num_shares in 0..=NUM_OF_SHARES {
             let shares_subset = &shares[0..num_shares];
-            let result = k256shares_to_secp_secret_key(shares_subset);
+            let result = combine_shares(shares_subset);
 
             if num_shares < THRESHOLD {
                 // With insufficient shares, either:
@@ -399,19 +335,18 @@ mod secret_sharing_tests {
 
     // Verify any subset of THRESHOLD shares works
     #[test]
-    fn test_any_threshold_subset_reconstructs_secret() {
-        let mut osrng = rand_core::OsRng;
-        let original_sk = SecretKey::random(&mut osrng);
+    fn test_varying_subsets() {
+        let original_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_sk.to_bytes();
 
         // Generate all shares
-        let shares = k256_secret_key_to_shares(original_sk).unwrap();
+        let shares = split_secret(&original_sk, &mut rand::thread_rng());
 
         // Test different combinations of THRESHOLD shares
         // Try shares [0,1,2], [1,2,3], [2,3,4], etc.
-        for start_idx in 0..=(LIMIT - THRESHOLD) {
+        for start_idx in 0..=(NUM_OF_SHARES - THRESHOLD) {
             let subset = &shares[start_idx..(start_idx + THRESHOLD)];
-            let reconstructed = k256shares_to_secp_secret_key(subset).unwrap();
+            let reconstructed = combine_shares(subset).unwrap();
 
             assert_eq!(
                 original_bytes.as_slice(),
@@ -421,5 +356,40 @@ mod secret_sharing_tests {
                 start_idx
             );
         }
+    }
+
+    // Test eval function with specific coefficients
+    #[test]
+    fn test_eval_polynomial() {
+        // Test with simple polynomial: f(x) = 1 + 2x + 3x^2
+        let coefficients = vec![Scalar::ONE, Scalar::from(2u32), Scalar::from(3u32)];
+
+        // f(1) = 1 + 2(1) + 3(1)^2 = 6
+        let result1 = eval_poly(NonZeroU16::new(1).unwrap(), &coefficients);
+        assert_eq!(result1, Scalar::from(6u32));
+
+        // f(2) = 1 + 2(2) + 3(4) = 17
+        let result2 = eval_poly(NonZeroU16::new(2).unwrap(), &coefficients);
+        assert_eq!(result2, Scalar::from(17u32));
+    }
+
+    // Test that combine_shares rejects shares with duplicate identifiers
+    #[test]
+    fn test_combine_shares_rejects_duplicate_ids() {
+        let sk = SecretKey::random(&mut rand::thread_rng());
+        let shares = split_secret(&sk, &mut rand::thread_rng());
+
+        // Create a list with duplicate share IDs: [shares[0], shares[1], shares[0]]
+        let duplicate_shares = vec![shares[0].clone(), shares[1].clone(), shares[0].clone()];
+
+        let result = combine_shares(&duplicate_shares);
+        assert!(
+            result.is_err(),
+            "combine_shares should reject shares with duplicate IDs"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate share ID"));
     }
 }

@@ -9,7 +9,7 @@ pub use errors::GuardianResult;
 use std::collections::HashMap;
 
 use crate::bitcoin_utils::TaprootUTXO;
-use crate::GuardianError::GenericError;
+use crate::GuardianError::InternalError;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::taproot::Signature;
 use bitcoin::Address;
@@ -318,7 +318,7 @@ impl FullWithdrawInfo {
         let input_sum: Amount = self.input_utxos.iter().map(|utxo| utxo.amount).sum();
         let output_sum: Amount = self.withdraw_amount();
         if input_sum < output_sum {
-            return Err(GenericError(
+            return Err(InternalError(
                 "Input sum is smaller than output sum.".to_string(),
             ));
         }
@@ -333,7 +333,7 @@ impl WithdrawOutput {
         self.address
             .clone()
             .require_network(expected_network)
-            .map_err(|e| GenericError(format!("Invalid address network: {:?}", e)))
+            .map_err(|e| InternalError(format!("Invalid address network: {:?}", e)))
     }
 }
 

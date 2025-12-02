@@ -1,9 +1,18 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::bail;
 use hashi::config::get_available_port;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use tokio::time::{Duration, sleep};
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
+use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_rpc::Client;
+use sui_sdk_types::Address;
+use sui_sdk_types::SignatureScheme;
+use tokio::time::Duration;
+use tokio::time::sleep;
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 60_000;
@@ -31,10 +40,7 @@ pub fn sui_binary() -> &'static Path {
         .as_path()
 }
 
-async fn wait_for_ready(port: u16) -> Result<()> {
-    let http_url = format!("http://127.0.0.1:{port}");
-    let mut client = sui_rpc::Client::new(http_url)?;
-
+async fn wait_for_ready(client: &mut Client) -> Result<()> {
     // Wait till the network has started up and at least one checkpoint has been produced
     for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
         if let Ok(resp) = client
@@ -48,9 +54,8 @@ async fn wait_for_ready(port: u16) -> Result<()> {
         sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
     }
     anyhow::bail!(
-        "Network failed to start within {}s timeout on port {}",
+        "Network failed to start within {}s timeout",
         NETWORK_STARTUP_TIMEOUT_SECS,
-        port
     )
 }
 
@@ -64,11 +69,14 @@ pub struct SuiNetworkHandle {
 
     /// Network endpoints
     pub rpc_url: String,
-    pub faucet_url: String,
+    pub client: Client,
 
     /// Network configuration
     pub num_validators: usize,
     pub epoch_duration_ms: u64,
+
+    pub validator_keys: BTreeMap<Address, Ed25519PrivateKey>,
+    pub user_keys: Vec<Ed25519PrivateKey>,
 }
 
 impl Drop for SuiNetworkHandle {
@@ -122,19 +130,25 @@ impl SuiNetworkBuilder {
             .clone()
             .ok_or_else(|| anyhow!("no directory configured"))?;
         self.generate_genesis(&dir)?;
+        let (validator_keys, user_keys) = load_keys(&dir)?;
+
         let rpc_port = get_available_port();
-        let faucet_port = get_available_port();
-        let process = self.start_network(&dir, rpc_port, faucet_port)?;
+        let process = self.start_network(&dir, rpc_port)?;
+
         let rpc_url = format!("http://127.0.0.1:{rpc_port}");
-        let faucet_url = format!("http://127.0.0.1:{faucet_port}");
-        wait_for_ready(rpc_port).await?;
+
+        let mut client = sui_rpc::Client::new(&rpc_url)?;
+        wait_for_ready(&mut client).await?;
+
         Ok(SuiNetworkHandle {
             process,
             dir,
             rpc_url,
-            faucet_url,
+            client,
             num_validators: self.num_validators,
             epoch_duration_ms: self.epoch_duration_ms,
+            validator_keys,
+            user_keys,
         })
     }
 
@@ -156,7 +170,7 @@ impl SuiNetworkBuilder {
         Ok(())
     }
 
-    fn start_network(&self, dir: &Path, rpc_port: u16, _faucet_port: u16) -> Result<Child> {
+    fn start_network(&self, dir: &Path, rpc_port: u16) -> Result<Child> {
         let stdout_name = dir.join("out.stdout");
         let stdout = std::fs::File::create(stdout_name)?;
         let stderr_name = dir.join("out.stderr");
@@ -169,13 +183,75 @@ impl SuiNetworkBuilder {
             .arg(dir)
             .arg("--fullnode-rpc-port")
             .arg(rpc_port.to_string())
-            //XXX uncomment once 1.62 release is cut
-            // .arg(format!("--with-faucet=127.0.0.1:{faucet_port}"))
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
             .map_err(|e| anyhow!("Failed to run `sui start`: {e}"))
     }
+}
+
+fn keypair_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
+    let bytes = <base64ct::Base64 as base64ct::Encoding>::decode_vec(b64)?;
+
+    let keypair =
+        match SignatureScheme::from_byte(*bytes.first().ok_or_else(|| anyhow!("Invalid key"))?)
+            .map_err(|e| anyhow!("{e}"))?
+        {
+            SignatureScheme::Ed25519 => Ed25519PrivateKey::new(
+                bytes
+                    .get(1..)
+                    .ok_or_else(|| anyhow!("Invalid key"))?
+                    .try_into()?,
+            ),
+            SignatureScheme::Secp256k1 => bail!("invalid key"),
+            SignatureScheme::Secp256r1 => bail!("invalid key"),
+            _ => bail!("invalid key"),
+        };
+
+    Ok(keypair)
+}
+
+fn ed25519_private_key_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
+    let bytes = <base64ct::Base64 as base64ct::Encoding>::decode_vec(b64)?;
+    Ok(Ed25519PrivateKey::new((&bytes[..]).try_into()?))
+}
+
+fn load_keys(dir: &Path) -> Result<(BTreeMap<Address, Ed25519PrivateKey>, Vec<Ed25519PrivateKey>)> {
+    #[derive(serde::Deserialize)]
+    struct Config {
+        validator_configs: Vec<NodeConfig>,
+        account_keys: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    struct NodeConfig {
+        account_key_pair: RawKey,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RawKey {
+        value: String,
+    }
+
+    let raw = std::fs::read(dir.join("network.yaml"))?;
+    let network_config: Config = serde_yaml::from_slice(&raw)?;
+
+    let mut validator_keys = BTreeMap::new();
+
+    for validator in network_config.validator_configs {
+        let keypair = keypair_from_base64(&validator.account_key_pair.value)?;
+        let address = keypair.public_key().derive_address();
+        validator_keys.insert(address, keypair);
+    }
+
+    let mut user_keys = vec![];
+
+    for raw_key in network_config.account_keys {
+        user_keys.push(ed25519_private_key_from_base64(&raw_key)?);
+    }
+
+    Ok((validator_keys, user_keys))
 }
 
 #[cfg(test)]
@@ -216,7 +292,6 @@ mod tests {
         // Verify all networks started successfully with unique ports
         let mut networks = Vec::new();
         let mut rpc_ports = HashSet::new();
-        let mut faucet_ports = HashSet::new();
 
         for (i, result) in results {
             match result {
@@ -227,12 +302,6 @@ mod tests {
                         .next_back()
                         .and_then(|p| p.parse().ok())
                         .expect("Failed to parse RPC port");
-                    let faucet_port: u16 = network
-                        .faucet_url
-                        .split(':')
-                        .next_back()
-                        .and_then(|p| p.parse().ok())
-                        .expect("Failed to parse faucet port");
 
                     // Verify ports are unique
                     assert!(
@@ -240,12 +309,6 @@ mod tests {
                         "Network {} has duplicate RPC port {}",
                         i,
                         rpc_port
-                    );
-                    assert!(
-                        faucet_ports.insert(faucet_port),
-                        "Network {} has duplicate faucet port {}",
-                        i,
-                        faucet_port
                     );
 
                     // Verify network configuration

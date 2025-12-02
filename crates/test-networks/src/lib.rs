@@ -1,16 +1,23 @@
-use std::{path::Path, process::Command};
+use std::path::Path;
+use std::process::Command;
 
 use anyhow::Result;
 
 pub mod bitcoin_node;
 pub mod hashi_network;
+mod publish;
 pub mod sui_network;
 
-pub use bitcoin_node::{BitcoinNodeBuilder, BitcoinNodeHandle};
-pub use hashi_network::{HashiNetwork, HashiNetworkBuilder, HashiNodeHandle};
-pub use sui_network::{SuiNetworkBuilder, SuiNetworkHandle};
+pub use bitcoin_node::BitcoinNodeBuilder;
+pub use bitcoin_node::BitcoinNodeHandle;
+pub use hashi_network::HashiNetwork;
+pub use hashi_network::HashiNetworkBuilder;
+pub use hashi_network::HashiNodeHandle;
+pub use sui_network::SuiNetworkBuilder;
+pub use sui_network::SuiNetworkHandle;
 use tempfile::TempDir;
 
+use crate::publish::publish;
 use crate::sui_network::sui_binary;
 
 pub struct TestNetworks {
@@ -91,20 +98,36 @@ impl TestNetworksBuilder {
             .prefix("hashi-test-env-")
             .tempdir()?;
 
-        let sui_network = self
+        println!("test env: {}", dir.path().display());
+
+        let mut sui_network = self
             .sui_builder
             .dir(&dir.path().join("sui"))
             .build()
             .await?;
         let bitcoin_node = self.bitcoin_builder.dir(dir.as_ref()).build().await?;
-        let hashi_network = self.hashi_builder.build().await?;
         Self::cp_packages(dir.as_ref())?;
+
+        let hashi_ids = publish(
+            dir.as_ref(),
+            &mut sui_network.client,
+            sui_network.user_keys.first().unwrap(),
+        )
+        .await?;
+
+        let hashi_network = self
+            .hashi_builder
+            .build(&sui_network, &bitcoin_node, hashi_ids)
+            .await?;
+
         let test_networks = TestNetworks {
             dir,
             sui_network,
             hashi_network,
             bitcoin_node,
         };
+
+        println!("rpc url: {}", test_networks.sui_network().rpc_url);
 
         Ok(test_networks)
     }
@@ -148,6 +171,10 @@ mod tests {
         assert_eq!(test_networks.hashi_network().nodes().len(), TEST_NUM_NODES);
         assert_eq!(test_networks.sui_network().num_validators, TEST_NUM_NODES);
         assert!(!test_networks.bitcoin_node().rpc_url().is_empty());
+
+        // loop {
+        //     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        // }
 
         Ok(())
     }
