@@ -133,7 +133,7 @@ fn sign(
 
     // Construct signing messages
     let messages = construct_signing_messages(&request.input_utxos, &output_txouts, &change_utxo)?;
-    
+
     // Sign with the secret key
     sign_btc_tx(&messages, sk)
 }
@@ -192,7 +192,10 @@ pub async fn delayed_withdraw(
         .pending_delayed_withdrawals
         .insert(request.info.withdraw_id.clone(), request.info)
     {
-        return Err(InternalError(format!("Withdraw ID already exists: {:?}", x)));
+        return Err(InternalError(format!(
+            "Withdraw ID already exists: {:?}",
+            x
+        )));
     }
     Ok(())
 }

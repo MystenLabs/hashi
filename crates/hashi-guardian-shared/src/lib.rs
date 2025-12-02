@@ -9,7 +9,6 @@ pub use errors::GuardianResult;
 use std::collections::HashMap;
 
 use crate::bitcoin_utils::TaprootUTXO;
-use crate::crypto::Share;
 use crate::GuardianError::InternalError;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::taproot::Signature;
@@ -21,9 +20,6 @@ use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 
-use hpke::Deserializable;
-use hpke::HpkeError;
-use hpke::Serializable;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
@@ -203,8 +199,6 @@ pub struct WithdrawalState {
 //          Helper impl's
 // ---------------------------------
 
-// Ciphertext, ShareCommitment, and EncryptedShare impls are now in crypto.rs
-
 impl AsRef<[u8]> for InitExternalRequestState {
     fn as_ref(&self) -> &[u8] {
         self.cached_bytes.get_or_init(|| {
@@ -294,7 +288,7 @@ impl From<&WithdrawOutput> for TxOut {
 
 /// Initialize tracing subscriber with optional file/line number logging
 pub fn init_tracing_subscriber(with_file_line: bool) {
-    let mut builder = ::tracing_subscriber::FmtSubscriber::builder().with_env_filter(
+    let mut builder = tracing_subscriber::FmtSubscriber::builder().with_env_filter(
         tracing_subscriber::EnvFilter::builder()
             .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
             .from_env_lossy(),
@@ -305,6 +299,6 @@ pub fn init_tracing_subscriber(with_file_line: bool) {
     }
 
     let subscriber = builder.finish();
-    ::tracing::subscriber::set_global_default(subscriber)
+    tracing::subscriber::set_global_default(subscriber)
         .expect("unable to initialize tracing subscriber");
 }

@@ -15,12 +15,13 @@ use tracing::info;
 
 // Stateless request
 pub async fn setup_new_key(
-    Json(request): Json<Vec<Vec<u8>>>,
-) -> GuardianResult<Json<(Vec<EncryptedShare>, Vec<ShareCommitment>)>> {
+    Json(request): Json<SetupNewKeyRequest>,
+) -> GuardianResult<Json<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request");
 
     info!("Validating key provisioner public keys...");
     let key_provisioner_pks: Vec<EncPubKey> = request
+        .key_provisioner_public_keys
         .into_iter()
         .map(|bytes| EncPubKey::from_bytes(&bytes))
         .collect::<Result<Vec<_>, _>>()
@@ -65,5 +66,8 @@ pub async fn setup_new_key(
     info!("All {} shares encrypted", NUM_OF_SHARES);
     info!("Sending encrypted shares and commitments to client");
 
-    Ok(Json((encrypted_shares, share_commitments)))
+    Ok(Json(SetupNewKeyResponse {
+        encrypted_shares,
+        share_commitments,
+    }))
 }

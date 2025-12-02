@@ -6,8 +6,8 @@ use axum::Json;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
-use hashi_guardian_shared::crypto::commit_share;
 use hashi_guardian_shared::crypto::combine_shares;
+use hashi_guardian_shared::crypto::commit_share;
 use hashi_guardian_shared::crypto::decrypt_share;
 use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::*;
@@ -185,25 +185,26 @@ mod tests {
     #[tokio::test]
     async fn test_setup_new_key() {
         let (pub_keys, priv_keys) = mock_setup_new_key_request();
-        let request: Vec<Vec<u8>> = pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+        let key_provisioner_public_keys: Vec<Vec<u8>> =
+            pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+        let request = hashi_guardian_shared::SetupNewKeyRequest {
+            key_provisioner_public_keys,
+        };
         let Json(resp) = setup_new_key(Json(request)).await.unwrap();
-        assert_eq!(resp.0.len(), NUM_OF_SHARES);
+        assert_eq!(resp.encrypted_shares.len(), NUM_OF_SHARES);
 
         for (i, (enc_share, sk)) in resp
-            .0
+            .encrypted_shares
             .iter()
             .zip(priv_keys.iter())
             .enumerate()
             .take(NUM_OF_SHARES)
         {
             let share = decrypt_share(enc_share, sk, None).unwrap();
-            let commitment = &resp.1[i];
+            let commitment = &resp.share_commitments[i];
             assert_eq!(enc_share.id, commitment.id);
             assert_eq!(commit_share(&share), *commitment);
-            println!(
-                "Received share: (id) {:?}",
-                enc_share.id
-            );
+            println!("Received share: (id) {:?}", enc_share.id);
         }
     }
 
@@ -214,10 +215,14 @@ mod tests {
 
         // Step 1: Generate KP encryption keys and setup new key
         let (pub_keys, kp_private_keys) = mock_setup_new_key_request();
-        let request: Vec<Vec<u8>> = pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+        let key_provisioner_public_keys: Vec<Vec<u8>> =
+            pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+        let request = hashi_guardian_shared::SetupNewKeyRequest {
+            key_provisioner_public_keys,
+        };
         let Json(resp) = setup_new_key(Json(request)).await.unwrap();
-        let encrypted_shares = resp.0;
-        let share_commitments = resp.1;
+        let encrypted_shares = resp.encrypted_shares;
+        let share_commitments = resp.share_commitments;
 
         // Step 2: Create bare enclave (only S3, no bitcoin key/config since we're testing initialization)
         let enclave = Enclave::create_bare_for_test().await;
@@ -236,9 +241,13 @@ mod tests {
             let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();
             let state_digest = init_state.digest();
             let mut rng = rand::thread_rng();
-            let new_encrypted_share =
-                encrypt_share(&share, enclave.encryption_public_key(), Some(&state_digest), &mut rng)
-                    .unwrap();
+            let new_encrypted_share = encrypt_share(
+                &share,
+                enclave.encryption_public_key(),
+                Some(&state_digest),
+                &mut rng,
+            )
+            .unwrap();
 
             let request = InitExternalRequest {
                 encrypted_share: new_encrypted_share,
