@@ -37,6 +37,18 @@ pub struct SetupNewKeyRequest {
     pub key_provisioner_public_keys: Vec<Vec<u8>>,
 }
 
+impl SetupNewKeyRequest {
+    /// Create a new SetupNewKeyRequest from public keys
+    pub fn new<T: AsRef<[u8]>>(public_keys: Vec<T>) -> Self {
+        Self {
+            key_provisioner_public_keys: public_keys
+                .into_iter()
+                .map(|pk| pk.as_ref().to_vec())
+                .collect(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: Vec<EncryptedShare>,

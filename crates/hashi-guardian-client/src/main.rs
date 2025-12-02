@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         "health_check" => {
             _ = health_check(base_url).await?;
         }
-        "configure_s3" => configure_s3(base_url, None).await?,
+        "configure_s3" => init_internal(base_url, None).await?,
         "get_attestation" => {
             _ = get_attestation(base_url).await?;
         }
@@ -77,7 +77,7 @@ fn print_help() {
 }
 
 /// Configure S3 credentials and bucket info
-async fn configure_s3(
+async fn init_internal(
     base_url: &str,
     share_commitments: Option<Vec<ShareCommitment>>,
 ) -> Result<()> {
@@ -100,7 +100,7 @@ async fn configure_s3(
 
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("{}/configure_s3", base_url))
+        .post(format!("{}/init_internal", base_url))
         .json(&s3_config_request)
         .send()
         .await
@@ -135,7 +135,8 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitmen
         info!("   Generated key pair {} of {}", i + 1, NUM_OF_SHARES);
     }
 
-    let request: Vec<Vec<u8>> = kp_public_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+    let kp_public_key_bytes: Vec<Vec<u8>> = kp_public_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+    let request = SetupNewKeyRequest::new(kp_public_key_bytes);
 
     info!("Sending setup request to server...");
     let client = reqwest::Client::new();
@@ -147,11 +148,12 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitmen
         .context("Failed to send setup_new_key request")?;
 
     if response.status().is_success() {
-        let setup_response: (Vec<EncryptedShare>, Vec<ShareCommitment>) = response
+        let setup_response: SetupNewKeyResponse = response
             .json()
             .await
             .context("Failed to parse setup response")?;
-        let (encrypted_shares, share_commitments) = setup_response;
+        let encrypted_shares = setup_response.encrypted_shares;
+        let share_commitments = setup_response.share_commitments;
 
         info!(
             "Received {} encrypted shares",
@@ -346,7 +348,7 @@ async fn init_enclave(
 
         info!("   Sending to server...");
         let response = client
-            .post(format!("{}/init", base_url))
+            .post(format!("{}/init_external", base_url))
             .json(&request)
             .send()
             .await
@@ -391,9 +393,9 @@ async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
         info!("Share {} Digest {:x?}", d.id, d.digest);
     }
 
-    info!("Step 3: Configure S3");
+    info!("Step 3: Configure S3 and other things");
     info!("{}\n", "=".repeat(50));
-    configure_s3(base_url, Some(commitments)).await?;
+    init_internal(base_url, Some(commitments)).await?;
 
     // Step 3: Initialize enclave
     info!("Step 4: Initialize enclave");
@@ -417,9 +419,9 @@ async fn init_with_new_key(base_url: &str, strict: bool) -> Result<()> {
     info!("{}\n", "=".repeat(50));
     let enclave_pub_key = get_enclave_key(base_url, strict).await?;
 
-    info!("\nStep 3: Configure S3");
+    info!("\nStep 3: Configure S3 and other things");
     info!("{}\n", "=".repeat(50));
-    configure_s3(base_url, Some(share_commitments)).await?;
+    init_internal(base_url, Some(share_commitments)).await?;
 
     info!("\nStep 4: Initialize enclave");
     info!("{}\n", "=".repeat(50));
