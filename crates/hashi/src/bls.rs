@@ -77,6 +77,14 @@ pub struct MemberSignature {
 }
 
 impl MemberSignature {
+    pub fn new(epoch: u64, address: Address, signature: BLS12381Signature) -> Self {
+        Self {
+            epoch,
+            address,
+            signature,
+        }
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

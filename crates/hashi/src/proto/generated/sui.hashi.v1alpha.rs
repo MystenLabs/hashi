@@ -349,7 +349,19 @@ pub struct SendMessageRequest {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageResponse {
     /// The BLS12-381 signature from the receiving validator.
-    #[prost(bytes = "bytes", optional, tag = "1")]
+    #[prost(message, optional, tag = "1")]
+    pub signature: ::core::option::Option<MemberSignature>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MemberSignature {
+    /// The epoch this signature is for.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
+    /// The hex-encoded Sui address of the signer.
+    #[prost(string, optional, tag = "2")]
+    pub address: ::core::option::Option<::prost::alloc::string::String>,
+    /// The BLS12-381 signature bytes.
+    #[prost(bytes = "bytes", optional, tag = "3")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

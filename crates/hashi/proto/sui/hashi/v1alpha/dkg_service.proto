@@ -24,8 +24,19 @@ message SendMessageRequest {
 }
 
 message SendMessageResponse {
-  // The BLS12-381 signature from the receiving validator.
-  optional bytes signature = 1;
+  // The signature from the receiving validator.
+  optional MemberSignature signature = 1;
+}
+
+message MemberSignature {
+  // The epoch this signature is for.
+  optional uint64 epoch = 1;
+
+  // The hex-encoded Sui address of the signer.
+  optional string address = 2;
+
+  // The BLS12-381 signature bytes.
+  optional bytes signature = 3;
 }
 
 message RetrieveMessageRequest {
