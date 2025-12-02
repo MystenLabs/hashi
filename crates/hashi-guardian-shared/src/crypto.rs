@@ -28,10 +28,16 @@ pub type EncapsulatedKey = <X25519HkdfSha256 as Kem>::EncappedKey;
 
 pub type ShareID = NonZeroU16; // Share IDs are assigned from 1, e.g., 1, 2, 3 and so on.
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Share {
     pub id: ShareID,
     pub value: Scalar,
+}
+
+impl std::hash::Hash for Share {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
 }
 
 // Secret sharing constants: threshold and total number of key provisioners

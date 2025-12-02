@@ -226,7 +226,7 @@ impl Clone for InitExternalRequestState {
 }
 
 impl InitExternalRequestState {
-    pub fn digest(&self) -> DigestBytes {
+    pub fn digest(&self) -> [u8; 32] {
         Blake2b::<U32>::digest(self).into()
     }
 }

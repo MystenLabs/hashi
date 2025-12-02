@@ -46,7 +46,7 @@ pub async fn get_attestation(
         _ => {
             driver::nsm_exit(fd);
             error!("Unexpected response from NSM");
-            Err(GuardianError::GenericError(
+            Err(GuardianError::OpaqueError(
                 "unexpected response".to_string(),
             ))
         }

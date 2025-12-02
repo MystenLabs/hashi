@@ -7,8 +7,9 @@ use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 use hashi_guardian_shared::crypto::commit_share;
+use hashi_guardian_shared::crypto::combine_shares;
 use hashi_guardian_shared::crypto::decrypt_share;
-use hashi_guardian_shared::crypto::k256shares_to_secp_secret_key;
+use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::*;
 use std::sync::Arc;
 use tracing::error;
@@ -25,7 +26,7 @@ pub async fn init_enclave_internal(
     info!("/init_internal - Received request");
     // If the configuration has already been set, return an error
     if enclave.s3_logger().is_ok() {
-        return Err(Forbidden("S3 configuration previously set".into()));
+        return Err(OpaqueError("S3 configuration previously set".into()));
     }
 
     let logger = S3Logger::new(request.config).await?;
@@ -64,18 +65,18 @@ pub async fn init_enclave_external(
 ) -> GuardianResult<()> {
     info!("/init_external - Received encrypted share");
     if !enclave.is_init_internal() {
-        return Err(GenericError(
+        return Err(InternalError(
             "Internal initialization hasn't completed!".into(),
         ));
     }
     if enclave.is_init_external() {
-        return Err(GenericError(
+        return Err(InternalError(
             "External (KP) initialization already complete!".into(),
         ));
     }
 
     let sk = enclave.encryption_secret_key();
-    let share_id = request.encrypted_share.id();
+    let share_id = request.encrypted_share.id;
     let state_hash = request.state.digest();
     info!("   Share ID: {:?}", share_id);
 
@@ -113,7 +114,7 @@ pub async fn init_enclave_external(
     info!("Persisting share...");
     let mut received_shares = enclave.decrypted_shares().lock().await;
     if !received_shares.insert(share) {
-        return Err(GenericError("Duplicate shares!".into()));
+        return Err(InternalError("Duplicate shares!".into()));
     }
     let current_share_count = received_shares.len();
     info!(
@@ -123,7 +124,7 @@ pub async fn init_enclave_external(
 
     // 5) If we have enough shares, finish initialization: combine shares & set config.
     if current_share_count >= THRESHOLD {
-        let vec: Vec<MyShare> = received_shares.iter().cloned().collect::<Vec<_>>();
+        let vec: Vec<Share> = received_shares.iter().cloned().collect::<Vec<_>>();
         finalize_init(&vec, &enclave, request.state).await?;
     }
 
@@ -131,12 +132,12 @@ pub async fn init_enclave_external(
 }
 
 async fn finalize_init(
-    shares: &[MyShare],
+    shares: &[Share],
     enclave: &Arc<Enclave>,
     incoming_state: InitExternalRequestState,
 ) -> GuardianResult<()> {
     info!("Threshold reached! Combining shares...");
-    let secp_sk = k256shares_to_secp_secret_key(shares)?;
+    let secp_sk = combine_shares(shares)?;
 
     // TODO: Discuss. Find a better solution for prod?
     let sk_hash = Blake2b::<U32>::digest(secp_sk.secret_bytes());
@@ -160,12 +161,12 @@ async fn finalize_init(
     Ok(())
 }
 
-fn verify_share(share: &MyShare, commitments: &[ShareCommitment]) -> GuardianResult<()> {
-    let commitment = commit_share(share)?;
+fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResult<()> {
+    let commitment = commit_share(share);
     if commitments.contains(&commitment) {
         Ok(())
     } else {
-        Err(GenericError("No matching share found".to_string()))
+        Err(InternalError("No matching share found".to_string()))
     }
 }
 
@@ -175,29 +176,31 @@ mod tests {
     use crate::setup::setup_new_key;
     use hashi_guardian_shared::crypto::commit_share;
     use hashi_guardian_shared::crypto::encrypt_share;
+    use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use hashi_guardian_shared::test_utils::*;
+    use hpke::Serializable;
 
     #[tokio::test]
     async fn test_setup_new_key() {
-        let (request, priv_keys) = mock_setup_new_key_request();
+        let (pub_keys, priv_keys) = mock_setup_new_key_request();
+        let request: Vec<Vec<u8>> = pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
         let Json(resp) = setup_new_key(Json(request)).await.unwrap();
-        assert_eq!(resp.encrypted_shares.len(), LIMIT);
+        assert_eq!(resp.0.len(), NUM_OF_SHARES);
 
         for (i, (enc_share, sk)) in resp
-            .encrypted_shares
+            .0
             .iter()
             .zip(priv_keys.iter())
             .enumerate()
-            .take(LIMIT)
+            .take(NUM_OF_SHARES)
         {
             let share = decrypt_share(enc_share, sk, None).unwrap();
-            let commitment = &resp.share_commitments[i];
-            assert_eq!(*enc_share.id(), *commitment.id());
-            assert_eq!(commit_share(&share).unwrap(), *commitment);
+            let commitment = &resp.1[i];
+            assert_eq!(enc_share.id, commitment.id);
+            assert_eq!(commit_share(&share), *commitment);
             println!(
-                "Received share: (id) {:?} (val) {:?}",
-                enc_share.id(),
-                share
+                "Received share: (id) {:?}",
+                enc_share.id
             );
         }
     }
@@ -208,10 +211,11 @@ mod tests {
         use axum::extract::State;
 
         // Step 1: Generate KP encryption keys and setup new key
-        let (request, kp_private_keys) = mock_setup_new_key_request();
+        let (pub_keys, kp_private_keys) = mock_setup_new_key_request();
+        let request: Vec<Vec<u8>> = pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
         let Json(resp) = setup_new_key(Json(request)).await.unwrap();
-        let encrypted_shares = resp.encrypted_shares;
-        let share_commitments = resp.share_commitments;
+        let encrypted_shares = resp.0;
+        let share_commitments = resp.1;
 
         // Step 2: Create bare enclave (only S3, no bitcoin key/config since we're testing initialization)
         let enclave = Enclave::create_bare_for_test().await;
@@ -225,12 +229,13 @@ mod tests {
         let init_state = mock_init_external_state();
 
         // Step 6: Simulate THRESHOLD KPs calling init_enclave_external
-        for i in 0..LIMIT {
+        for i in 0..NUM_OF_SHARES {
             // Re-encrypt the share for the enclave's encryption key
             let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();
             let state_digest = init_state.digest();
+            let mut rng = rand::thread_rng();
             let new_encrypted_share =
-                encrypt_share(&share, enclave.encryption_public_key(), Some(&state_digest))
+                encrypt_share(&share, enclave.encryption_public_key(), Some(&state_digest), &mut rng)
                     .unwrap();
 
             let request = InitExternalRequest {

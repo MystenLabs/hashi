@@ -89,14 +89,14 @@ pub async fn test_s3_connectivity(s3logger: &S3Logger) -> GuardianResult<()> {
                     info!("Bucket {} has Object Lock enabled", s3_config.bucket_name);
                 }
                 _ => {
-                    return Err(GuardianError::GenericError(
+                    return Err(GuardianError::InternalError(
                         "Unknown config in object lock".into(),
                     ))
                 }
             }
         }
         Err(e) => {
-            return Err(GuardianError::GenericError(format!(
+            return Err(GuardianError::InternalError(format!(
                 "Failed to verify Object Lock configuration: {}",
                 e
             )));

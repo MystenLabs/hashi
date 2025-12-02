@@ -8,8 +8,9 @@ use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::Signature;
 use bitcoin::Address;
 use bitcoin::TxOut;
+use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
 use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
-use hashi_guardian_shared::GuardianError::GenericError;
+use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -88,7 +89,7 @@ pub async fn instant_withdraw(
         enclave_state
             .pending_withdrawals_mut()
             .remove(&request.info.withdraw_id)
-            .ok_or(GenericError(
+            .ok_or(InternalError(
                 "Could not find an earlier delayed withdrawal record".into(),
             ))?;
     }
@@ -103,14 +104,14 @@ fn rate_limit(satoshis: u64, rate_limiter: &MyRateLimiter) -> GuardianResult<()>
     let cost = (satoshis / UNIT_SIZE).max(1);
     if cost > u32::MAX as u64 {
         // Rejects amounts greater than about 400k BTC
-        return Err(GenericError("Amount too high".into()));
+        return Err(InternalError("Amount too high".into()));
     }
     let x = NonZeroU32::new(cost as u32)
-        .ok_or(GenericError("Zero amount? This shouldn't happen.".into()))?;
+        .ok_or(InternalError("Zero amount? This shouldn't happen.".into()))?;
     rate_limiter
         .check_n(x)
-        .map_err(|_| GenericError("Withdrawing more than the burst limit".into()))?
-        .map_err(|_| GenericError("Withdraw after some time".into()))
+        .map_err(|_| InternalError("Withdrawing more than the burst limit".into()))?
+        .map_err(|_| InternalError("Withdraw after some time".into()))
     // TODO: Improve the second error message indicating when this call can be next made.
 }
 
@@ -121,9 +122,6 @@ fn sign(
     request: &FullWithdrawInfo,
     change_address: Address,
 ) -> GuardianResult<Vec<Signature>> {
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, sk);
-
     // Derive change amount
     let change_utxo = TxOut {
         value: request.change_amount()?,
@@ -133,13 +131,11 @@ fn sign(
     // Convert output WithdrawOutputs to TxOuts
     let output_txouts: Vec<TxOut> = request.external_dest.iter().map(|wo| wo.into()).collect();
 
-    sign_btc_tx(
-        &secp,
-        &request.input_utxos,
-        &output_txouts,
-        change_utxo,
-        &keypair,
-    )
+    // Construct signing messages
+    let messages = construct_signing_messages(&request.input_utxos, &output_txouts, &change_utxo)?;
+    
+    // Sign with the secret key
+    sign_btc_tx(&messages, sk)
 }
 
 fn validate_instant_withdraw(_request: &InstantWithdrawRequest) -> GuardianResult<()> {
@@ -151,9 +147,9 @@ fn validate_time(request_time: SystemTime) -> GuardianResult<()> {
     let cur_time = SystemTime::now();
     let duration = cur_time
         .duration_since(request_time)
-        .map_err(|_| GenericError("Time is earlier".into()))?;
+        .map_err(|_| InternalError("Time is earlier".into()))?;
     if duration > HASHI_GUARDIAN_DELTA {
-        Err(GenericError("Request too old".into()))
+        Err(InternalError("Request too old".into()))
     } else {
         Ok(())
     }
@@ -196,7 +192,7 @@ pub async fn delayed_withdraw(
         .pending_delayed_withdrawals
         .insert(request.info.withdraw_id.clone(), request.info)
     {
-        return Err(GenericError(format!("Withdraw ID already exists: {:?}", x)));
+        return Err(InternalError(format!("Withdraw ID already exists: {:?}", x)));
     }
     Ok(())
 }
@@ -216,7 +212,7 @@ fn approve_delayed_withdrawal(
     let pending = match pending_withdrawals.get(&withdrawal.withdraw_id) {
         Some(x) => x,
         None => {
-            return Err(GenericError(
+            return Err(InternalError(
                 "Could not find an earlier delayed withdrawal record".into(),
             ))
         }
@@ -224,7 +220,7 @@ fn approve_delayed_withdrawal(
 
     // Check the dest (both address and amount)
     if pending.external_dest != withdrawal.external_dest {
-        return Err(GenericError(format!(
+        return Err(InternalError(format!(
             "WithdrawID matches but external destination \
                                          does not match {:?} {:?}",
             pending.external_dest, withdrawal.external_dest
@@ -235,9 +231,9 @@ fn approve_delayed_withdrawal(
     let gap = withdrawal
         .timestamp
         .duration_since(pending.timestamp)
-        .map_err(|_| GenericError("Time is earlier".into()))?;
+        .map_err(|_| InternalError("Time is earlier".into()))?;
     if gap < min_delay {
-        Err(GenericError(format!(
+        Err(InternalError(format!(
             "Withdrawal timestamp {:?} is not sufficiently delayed ({:?} + {:?})",
             withdrawal.timestamp, pending.timestamp, min_delay
         )))

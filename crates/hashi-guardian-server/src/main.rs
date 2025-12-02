@@ -11,7 +11,8 @@ use governor::state::InMemoryState;
 use governor::state::NotKeyed;
 use governor::Quota;
 use governor::RateLimiter;
-use hashi_guardian_shared::GuardianError::GenericError;
+use hashi_guardian_shared::crypto::Share;
+use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
@@ -84,7 +85,7 @@ pub struct EnclaveState {
 #[derive(Default)]
 pub struct Scratchpad {
     /// The received shares
-    pub decrypted_shares: Mutex<HashSet<MyShare>>,
+    pub decrypted_shares: Mutex<HashSet<Share>>,
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in InitExternalRequest
@@ -114,7 +115,7 @@ async fn main() -> Result<()> {
     info!("Max spend per hour: {:?} satoshi's", max_per_hour);
 
     let signing_keys = SigningKey::new(rand::thread_rng());
-    let encryption_keys = X25519HkdfSha256::gen_keypair(&mut rand::thread_rng()).into();
+    let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
     let enclave = Arc::new(Enclave::new(
         signing_keys,
         encryption_keys,
@@ -226,12 +227,12 @@ impl Enclave {
 
     /// Get the enclave's encryption secret key
     pub fn encryption_secret_key(&self) -> &hashi_guardian_shared::EncSecKey {
-        self.config.eph_keys.encryption_keys.secret()
+        self.config.eph_keys.encryption_keys.secret_key()
     }
 
     /// Get the enclave's encryption public key
     pub fn encryption_public_key(&self) -> &hashi_guardian_shared::EncPubKey {
-        self.config.eph_keys.encryption_keys.public()
+        self.config.eph_keys.encryption_keys.public_key()
     }
 
     /// Get the enclave's signing keypair
@@ -251,14 +252,14 @@ impl Enclave {
         self.config
             .bitcoin_key
             .get()
-            .ok_or(GenericError("Bitcoin key is not initialized".into()))
+            .ok_or(InternalError("Bitcoin key is not initialized".into()))
     }
 
     pub fn set_bitcoin_key(&self, key: SecretKey) -> GuardianResult<()> {
         self.config
             .bitcoin_key
             .set(key)
-            .map_err(|_| GenericError("Bitcoin key already set".into()))
+            .map_err(|_| InternalError("Bitcoin key already set".into()))
     }
 
     pub fn change_address(&self) -> GuardianResult<Address> {
@@ -266,7 +267,7 @@ impl Enclave {
             .config
             .change_address
             .get()
-            .ok_or(GenericError("Change address is not initialized".into()))?
+            .ok_or(InternalError("Change address is not initialized".into()))?
             .clone())
     }
 
@@ -274,14 +275,14 @@ impl Enclave {
         let network = self.bitcoin_network();
         let address = addr_str
             .parse::<Address<_>>()
-            .map_err(|e| GenericError(format!("Invalid change address: {}", e)))?
+            .map_err(|e| InternalError(format!("Invalid change address: {}", e)))?
             .require_network(network)
-            .map_err(|e| GenericError(format!("Change address network mismatch: {:?}", e)))?;
+            .map_err(|e| InternalError(format!("Change address network mismatch: {:?}", e)))?;
 
         self.config
             .change_address
             .set(address)
-            .map_err(|e| GenericError(format!("change_address already set: {}", e)))
+            .map_err(|e| InternalError(format!("change_address already set: {}", e)))
     }
 
     // ========================================================================
@@ -296,7 +297,7 @@ impl Enclave {
         self.config
             .withdraw_controls_config
             .get()
-            .ok_or(GenericError(
+            .ok_or(InternalError(
                 "WithdrawControlsConfig is not initialized".into(),
             ))
     }
@@ -305,7 +306,7 @@ impl Enclave {
         self.config
             .withdraw_controls_config
             .set(config)
-            .map_err(|_| GenericError("WithdrawControlsConfig already set".into()))
+            .map_err(|_| InternalError("WithdrawControlsConfig already set".into()))
     }
 
     pub fn min_and_max_delay(&self) -> GuardianResult<(Duration, Duration)> {
@@ -321,14 +322,14 @@ impl Enclave {
         self.config
             .s3_logger
             .get()
-            .ok_or(GenericError("S3 logger is not initialized".into()))
+            .ok_or(InternalError("S3 logger is not initialized".into()))
     }
 
     pub fn set_s3_logger(&self, logger: S3Logger) -> GuardianResult<()> {
         self.config
             .s3_logger
             .set(logger)
-            .map_err(|_| GenericError("S3 logger already set".into()))
+            .map_err(|_| InternalError("S3 logger already set".into()))
     }
 
     // ========================================================================
@@ -343,7 +344,7 @@ impl Enclave {
     // Scratchpad (Initialization-only data)
     // ========================================================================
 
-    pub fn decrypted_shares(&self) -> &Mutex<HashSet<MyShare>> {
+    pub fn decrypted_shares(&self) -> &Mutex<HashSet<Share>> {
         &self.scratchpad.decrypted_shares
     }
 
@@ -351,14 +352,14 @@ impl Enclave {
         self.scratchpad
             .share_commitments
             .get()
-            .ok_or(GenericError("Share commitments not set".into()))
+            .ok_or(InternalError("Share commitments not set".into()))
     }
 
     pub fn set_share_commitments(&self, commitments: Vec<ShareCommitment>) -> GuardianResult<()> {
         self.scratchpad
             .share_commitments
             .set(commitments)
-            .map_err(|_| GenericError("Share commitments already set".into()))
+            .map_err(|_| InternalError("Share commitments already set".into()))
     }
 
     pub fn state_hash(&self) -> Option<&DigestBytes> {
@@ -369,7 +370,7 @@ impl Enclave {
         self.scratchpad
             .state_hash
             .set(hash)
-            .map_err(|_| GenericError("State hash already set".into()))
+            .map_err(|_| InternalError("State hash already set".into()))
     }
 }
 
@@ -392,8 +393,7 @@ impl Enclave {
     pub async fn create_for_test_with_min_delay(min_delay: Option<Duration>) -> Arc<Self> {
         let mut rng = rand::thread_rng();
         let signing_keys = SigningKey::new(rand::thread_rng());
-        let (enc_sk, enc_pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-        let encryption_keys = (enc_sk, enc_pk).into();
+        let encryption_keys = EncKeyPair::random(&mut rng);
         let enclave = Arc::new(Enclave::new(
             signing_keys,
             encryption_keys,
@@ -436,8 +436,7 @@ impl Enclave {
     pub async fn create_bare_for_test() -> Arc<Self> {
         let mut rng = rand::thread_rng();
         let signing_keys = SigningKey::new(rand::thread_rng());
-        let (enc_sk, enc_pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-        let encryption_keys = (enc_sk, enc_pk).into();
+        let encryption_keys = EncKeyPair::random(&mut rng);
         let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, None, None));
 
         // Initialize S3 logger only (required for is_init_internal() to pass)
