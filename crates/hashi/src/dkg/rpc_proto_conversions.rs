@@ -55,11 +55,9 @@ impl TryFrom<&proto::MemberSignature> for MemberSignature {
     fn try_from(value: &proto::MemberSignature) -> Result<Self, Self::Error> {
         let epoch = required(value.epoch, "epoch")?;
         let address = parse_address(required(value.address.as_ref(), "address")?, "address")?;
-        let signature = BLS12381Signature::from_bytes(required(
-            value.signature.as_ref(),
-            "signature",
-        )?)
-        .map_err(|e| TryFromProtoError::invalid("signature", e))?;
+        let signature =
+            BLS12381Signature::from_bytes(required(value.signature.as_ref(), "signature")?)
+                .map_err(|e| TryFromProtoError::invalid("signature", e))?;
         Ok(MemberSignature::new(epoch, address, signature))
     }
 }
@@ -186,8 +184,10 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
 
     fn try_from(value: &proto::ComplainRequest) -> Result<Self, Self::Error> {
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
-        let complaint: complaint::Complaint =
-            deserialize_bcs(required(value.complaint.as_ref(), "complaint")?, "complaint")?;
+        let complaint: complaint::Complaint = deserialize_bcs(
+            required(value.complaint.as_ref(), "complaint")?,
+            "complaint",
+        )?;
         Ok(Self { dealer, complaint })
     }
 }
