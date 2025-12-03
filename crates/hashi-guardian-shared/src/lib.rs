@@ -227,7 +227,8 @@ impl InitInternalRequest {
             return Err(InvalidInputs("provide enough share commitments".into()));
         }
         Ok(Self {
-            config, share_commitments,
+            config,
+            share_commitments,
         })
     }
 }
