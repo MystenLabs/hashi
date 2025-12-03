@@ -4,7 +4,6 @@ pub mod rpc_proto_conversions;
 pub mod types;
 
 use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
-
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::storage::PublicMessagesStore;
