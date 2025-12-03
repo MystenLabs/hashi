@@ -62,7 +62,7 @@ fn send_message(
     service: &HttpService,
     request: tonic::Request<SendMessageRequest>,
 ) -> Result<SendMessageResponse> {
-    let sender = authenticate_caller_address(service, &request)?;
+    let sender = authenticate_caller(service, &request)?;
     let external_request = request.into_inner();
     let internal_request = types::SendMessageRequest::try_from(&external_request)?;
     let mut dkg_manager = service.dkg_manager().lock().unwrap();
@@ -76,7 +76,7 @@ fn retrieve_message(
     service: &HttpService,
     request: tonic::Request<RetrieveMessageRequest>,
 ) -> Result<RetrieveMessageResponse> {
-    authenticate_caller_address(service, &request)?;
+    authenticate_caller(service, &request)?;
     let external_request = request.into_inner();
     let internal_request = types::RetrieveMessageRequest::try_from(&external_request)?;
     let dkg_manager = service.dkg_manager().lock().unwrap();
@@ -90,7 +90,7 @@ fn complain(
     service: &HttpService,
     request: tonic::Request<ComplainRequest>,
 ) -> Result<ComplainResponse> {
-    authenticate_caller_address(service, &request)?;
+    authenticate_caller(service, &request)?;
     let external_request = request.into_inner();
     let internal_request = types::ComplainRequest::try_from(&external_request)?;
     let mut dkg_manager = service.dkg_manager().lock().unwrap();
@@ -99,10 +99,7 @@ fn complain(
     Ok(ComplainResponse::from(&response))
 }
 
-fn authenticate_caller_address<T>(
-    service: &HttpService,
-    request: &tonic::Request<T>,
-) -> Result<Address> {
+fn authenticate_caller<T>(service: &HttpService, request: &tonic::Request<T>) -> Result<Address> {
     let peer_certs = request
         .extensions()
         .get::<sui_http::PeerCertificates>()
