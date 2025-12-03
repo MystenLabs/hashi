@@ -76,7 +76,7 @@ fn retrieve_message(
     service: &HttpService,
     request: tonic::Request<RetrieveMessageRequest>,
 ) -> Result<RetrieveMessageResponse> {
-    let _caller = authenticate_caller_address(service, &request)?;
+    authenticate_caller_address(service, &request)?;
     let external_request = request.into_inner();
     let internal_request = types::RetrieveMessageRequest::try_from(&external_request)?;
     let dkg_manager = service.dkg_manager().lock().unwrap();
@@ -90,7 +90,7 @@ fn complain(
     service: &HttpService,
     request: tonic::Request<ComplainRequest>,
 ) -> Result<ComplainResponse> {
-    let _caller = authenticate_caller_address(service, &request)?;
+    authenticate_caller_address(service, &request)?;
     let external_request = request.into_inner();
     let internal_request = types::ComplainRequest::try_from(&external_request)?;
     let mut dkg_manager = service.dkg_manager().lock().unwrap();
