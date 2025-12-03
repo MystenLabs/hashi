@@ -32,10 +32,10 @@ fn deserialize_bcs<'de, T: Deserialize<'de>>(
 }
 
 /// Serialize a value to BCS with a type name.
-fn serialize_bcs<T: Serialize>(value: &T, name: &str) -> Bcs {
-    let mut bcs = Bcs::serialize(value).expect("serialization should succeed");
-    bcs.name = Some(name.to_owned());
-    bcs
+fn serialize_bcs<T: Serialize>(value: &T) -> Bcs {
+    Bcs::serialize(value)
+        .expect("serialization should succeed")
+        .with_name(std::any::type_name::<T>())
 }
 
 //
@@ -46,10 +46,7 @@ impl types::SendMessageRequest {
     pub fn to_proto(&self, epoch: u64) -> proto::SendMessageRequest {
         proto::SendMessageRequest {
             epoch: Some(epoch),
-            message: Some(serialize_bcs(
-                &self.message,
-                "fastcrypto_tbls::threshold_schnorr::avss::Message",
-            )),
+            message: Some(serialize_bcs(&self.message)),
         }
     }
 }
@@ -116,10 +113,7 @@ impl TryFrom<&proto::RetrieveMessageRequest> for types::RetrieveMessageRequest {
 impl From<&types::RetrieveMessageResponse> for proto::RetrieveMessageResponse {
     fn from(value: &types::RetrieveMessageResponse) -> Self {
         Self {
-            message: Some(serialize_bcs(
-                &value.message,
-                "fastcrypto_tbls::threshold_schnorr::avss::Message",
-            )),
+            message: Some(serialize_bcs(&value.message)),
         }
     }
 }
@@ -143,10 +137,7 @@ impl types::ComplainRequest {
         proto::ComplainRequest {
             epoch: Some(epoch),
             dealer: Some(self.dealer.to_string()),
-            complaint: Some(serialize_bcs(
-                &self.complaint,
-                "fastcrypto_tbls::threshold_schnorr::complaint::Complaint",
-            )),
+            complaint: Some(serialize_bcs(&self.complaint)),
         }
     }
 }
@@ -171,10 +162,7 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
 impl From<&types::ComplainResponse> for proto::ComplainResponse {
     fn from(value: &types::ComplainResponse) -> Self {
         Self {
-            response: Some(serialize_bcs(
-                &value.response,
-                "fastcrypto_tbls::threshold_schnorr::complaint::ComplaintResponse<avss::SharesForNode>",
-            )),
+            response: Some(serialize_bcs(&value.response)),
         }
     }
 }
