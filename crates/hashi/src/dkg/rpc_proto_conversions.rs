@@ -1,4 +1,4 @@
-use crate::bls::{BLS12381Signature, MemberSignature};
+use crate::bls::BLS12381Signature;
 use crate::dkg::types;
 use crate::proto;
 use fastcrypto::traits::ToFromBytes;
@@ -39,33 +39,6 @@ fn serialize_bcs<T: Serialize>(value: &T, name: &str) -> Bcs {
 }
 
 //
-// MemberSignature
-//
-
-impl From<&MemberSignature> for proto::MemberSignature {
-    fn from(value: &MemberSignature) -> Self {
-        Self {
-            epoch: Some(value.epoch()),
-            address: Some(value.address().to_string()),
-            signature: Some(value.signature().as_ref().to_vec().into()),
-        }
-    }
-}
-
-impl TryFrom<&proto::MemberSignature> for MemberSignature {
-    type Error = TryFromProtoError;
-
-    fn try_from(value: &proto::MemberSignature) -> Result<Self, Self::Error> {
-        let epoch = required(value.epoch, "epoch")?;
-        let address = parse_address(required(value.address.as_ref(), "address")?, "address")?;
-        let signature =
-            BLS12381Signature::from_bytes(required(value.signature.as_ref(), "signature")?)
-                .map_err(|e| TryFromProtoError::invalid("signature", e))?;
-        Ok(MemberSignature::new(epoch, address, signature))
-    }
-}
-
-//
 // SendMessageRequest
 //
 
@@ -98,7 +71,7 @@ impl TryFrom<&proto::SendMessageRequest> for types::SendMessageRequest {
 impl From<&types::SendMessageResponse> for proto::SendMessageResponse {
     fn from(value: &types::SendMessageResponse) -> Self {
         Self {
-            signature: Some(proto::MemberSignature::from(&value.signature.signature)),
+            signature: Some(value.signature.as_ref().to_vec().into()),
         }
     }
 }
@@ -107,14 +80,10 @@ impl TryFrom<&proto::SendMessageResponse> for types::SendMessageResponse {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::SendMessageResponse) -> Result<Self, Self::Error> {
-        let member_sig =
-            MemberSignature::try_from(required(value.signature.as_ref(), "signature")?)?;
-        Ok(Self {
-            signature: types::ValidatorSignature {
-                validator: *member_sig.address(),
-                signature: member_sig,
-            },
-        })
+        let signature =
+            BLS12381Signature::from_bytes(required(value.signature.as_ref(), "signature")?)
+                .map_err(|e| TryFromProtoError::invalid("signature", e))?;
+        Ok(Self { signature })
     }
 }
 
