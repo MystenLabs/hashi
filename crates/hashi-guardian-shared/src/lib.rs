@@ -42,16 +42,16 @@ pub struct SetupNewKeyResponse {
 /// To be called by us.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitInternalRequest {
-    pub config: S3Config,
-    pub share_commitments: Vec<ShareCommitment>,
+    config: S3Config,
+    share_commitments: Vec<ShareCommitment>,
 }
 
 /// Provides key shares and all other necessary state values to the enclaves.
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitExternalRequest {
-    pub encrypted_share: EncryptedShare,
-    pub state: InitExternalRequestState,
+    encrypted_share: EncryptedShare,
+    state: InitExternalRequestState,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -93,19 +93,19 @@ pub struct DelayedWithdrawalRequest {
     pub cert: HashiCert,
 }
 
-/// An "instant withdrawal" request
+/// An "immediate withdrawal" request
 #[derive(Serialize, Deserialize, Debug)]
-pub struct InstantWithdrawalRequest {
+pub struct ImmediateWithdrawalRequest {
     /// Withdrawal details
-    pub info: InstantWithdrawalInfo,
-    /// Is it a delayed withdrawal?
+    pub info: ImmediateWithdrawalInfo,
+    /// Is it spending a delayed withdrawal?
     pub delayed: bool,
     /// Hashi cert over the request
     pub cert: HashiCert,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct InstantWithdrawalResponse {
+pub struct ImmediateWithdrawalResponse {
     pub enclave_sign: Vec<Signature>,
 }
 
@@ -116,27 +116,27 @@ pub struct InstantWithdrawalResponse {
 pub type WithdrawalID = String; // TODO: Placeholder
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InstantWithdrawalInfo {
+pub struct ImmediateWithdrawalInfo {
     /// Unique withdrawal ID assigned by Hashi
-    pub withdrawal_id: WithdrawalID,
+    withdrawal_id: WithdrawalID,
     /// External addresses and corresponding amounts
-    pub external_dest: Vec<WithdrawalOutput>,
+    external_dest: Vec<WithdrawalOutput>,
     /// Hashi-assigned timestamp
-    pub timestamp: SystemTime,
+    timestamp: SystemTime,
     /// The input UTXOs owned by hashi + guardian
-    pub input_utxos: Vec<TaprootUTXO>,
+    input_utxos: Vec<TaprootUTXO>,
     /// Transaction fee in Satoshi's
-    pub fee_sats: u64,
+    fee_sats: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DelayedWithdrawalInfo {
     /// Unique withdrawal ID assigned by Hashi
-    pub withdrawal_id: WithdrawalID,
+    withdrawal_id: WithdrawalID,
     /// External addresses and corresponding amounts
-    pub external_dest: Vec<WithdrawalOutput>,
+    external_dest: Vec<WithdrawalOutput>,
     /// Hashi-assigned timestamp
-    pub timestamp: SystemTime,
+    timestamp: SystemTime,
 }
 
 /// Transaction output for withdrawal (external parties only)
@@ -188,7 +188,7 @@ pub struct WithdrawalState {
     pub counter: u64,
     /// Pending delayed withdrawals. We do three types of operations with it:
     /// 1. Insertion (when "delayed_withdraw()" is called)
-    /// 2. Lookup (when "instant_withdraw()" is called later)
+    /// 2. Lookup (when "immediate_withdraw()" is called later)
     /// 3. Prune old records (once in a while)
     pub pending_delayed_withdrawals: HashMap<WithdrawalID, DelayedWithdrawalInfo>,
 }
@@ -199,13 +199,16 @@ pub struct WithdrawalState {
 
 impl SetupNewKeyRequest {
     /// Serialize and return a SetupNewKeyRequest
-    pub fn new(public_keys: Vec<EncPubKey>) -> Self {
-        Self {
+    pub fn new(public_keys: Vec<EncPubKey>) -> GuardianResult<Self> {
+        if public_keys.len() != NUM_OF_SHARES {
+            return Err(InvalidInputs("provide enough public keys".into()));
+        }
+        Ok(Self {
             key_provisioner_public_keys: public_keys
                 .into_iter()
                 .map(|pk| pk.to_bytes().to_vec())
                 .collect(),
-        }
+        })
     }
 
     /// Deserialize and return public keys
@@ -218,16 +221,28 @@ impl SetupNewKeyRequest {
     }
 }
 
+impl InitInternalRequest {
+    pub fn new(config: S3Config, share_commitments: Vec<ShareCommitment>) -> GuardianResult<Self> {
+        if share_commitments.len() != NUM_OF_SHARES {
+            return Err(InvalidInputs("provide enough share commitments".into()));
+        }
+        Ok(Self {
+            config, share_commitments,
+        })
+    }
+}
+
 impl InitExternalRequestState {
     pub fn digest(&self) -> [u8; 32] {
-        let bytes = bincode::serialize(self).expect("Failed to serialize into bincode");
+        let bytes = bcs::to_bytes(self).expect("Failed to serialize");
         Blake2b::<U32>::digest(bytes).into()
     }
 }
 
 impl InitExternalRequest {
-    /// Create a new InitExternalRequest by encrypting the share with the enclave's public key
-    /// Authenticates the state along with the encryption.
+    /// Create a new InitExternalRequest by encrypting the share to the enclave's public key.
+    /// In addition, it sets the state hash as AAD for the encryption effectively
+    /// allowing the enclave to trust that state is indeed coming from the KP.
     pub fn new<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
@@ -243,7 +258,37 @@ impl InitExternalRequest {
     }
 }
 
-impl InstantWithdrawalInfo {
+impl ImmediateWithdrawalInfo {
+    pub fn new(
+        withdrawal_id: WithdrawalID,
+        external_dest: Vec<WithdrawalOutput>,
+        timestamp: SystemTime,
+        input_utxos: Vec<TaprootUTXO>,
+        fee_sats: u64,
+    ) -> GuardianResult<Self> {
+        // Input Validation
+        if input_utxos.is_empty() {
+            return Err(InvalidInputs(
+                "input utxos must not be empty for immediate withdrawal".into(),
+            ));
+        }
+        if external_dest.is_empty() {
+            return Err(InvalidInputs(
+                "output utxos must not be empty for immediate withdrawal".into(),
+            ));
+        }
+        let out = Self {
+            withdrawal_id,
+            external_dest,
+            timestamp,
+            input_utxos,
+            fee_sats,
+        };
+        let _ = out.change_amount()?; // checks change amount is non negative
+                                      // TODO: fee validation? withdrawal ID validation?
+        Ok(out)
+    }
+
     /// The total amount of money available in the input UTXO's
     pub fn in_amount(&self) -> Amount {
         self.input_utxos.iter().map(|utxo| utxo.amount()).sum()
@@ -256,12 +301,30 @@ impl InstantWithdrawalInfo {
 
     pub fn change_amount(&self) -> GuardianResult<Amount> {
         let input_sum = self.in_amount();
-        let output_sum = self.out_amount();
+        let output_sum = self.out_amount() + Amount::from_sat(self.fee_sats);
         if input_sum < output_sum {
             return Err(InvalidInputs("Input sum is smaller than output sum".into()));
         }
-        // TODO: Also add an error for input_sum - output_sum < threshold?
         Ok(input_sum - output_sum)
+    }
+}
+
+impl DelayedWithdrawalInfo {
+    pub fn new(
+        withdrawal_id: WithdrawalID,
+        external_dest: Vec<WithdrawalOutput>,
+        timestamp: SystemTime,
+    ) -> GuardianResult<Self> {
+        if external_dest.is_empty() {
+            return Err(InvalidInputs(
+                "output utxo must not be empty for delayed withdrawal".into(),
+            ));
+        }
+        Ok(Self {
+            withdrawal_id,
+            external_dest,
+            timestamp,
+        })
     }
 }
 
