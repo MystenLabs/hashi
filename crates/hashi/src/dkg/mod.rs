@@ -1,5 +1,6 @@
 //! Distributed Key Generation (DKG) module
 
+pub mod rpc_client;
 pub mod rpc_proto_conversions;
 pub mod types;
 
