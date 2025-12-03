@@ -8,7 +8,6 @@ use hashi_guardian_shared::crypto::split_secret;
 use hashi_guardian_shared::crypto::NUM_OF_SHARES;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
-use hpke::Deserializable;
 use k256::SecretKey;
 use tracing::error;
 use tracing::info;
@@ -20,12 +19,7 @@ pub async fn setup_new_key(
     info!("/setup_new_key - Received request");
 
     info!("Validating key provisioner public keys...");
-    let key_provisioner_pks: Vec<EncPubKey> = request
-        .key_provisioner_public_keys
-        .into_iter()
-        .map(|bytes| EncPubKey::from_bytes(&bytes))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| InvalidInputs(format!("Failed to deserialize public key: {}", e)))?;
+    let key_provisioner_pks = request.public_keys()?;
     if key_provisioner_pks.len() != NUM_OF_SHARES {
         error!(
             "Wrong number of public keys: {} (expected {})",

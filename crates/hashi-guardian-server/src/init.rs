@@ -148,16 +148,19 @@ async fn finalize_init(
     info!("Setting private key...");
     enclave.set_bitcoin_key(secp_sk)?;
 
+    info!("Setting rate limiter...");
+    enclave.set_rate_limiter(incoming_state.withdrawal_config.hourly_rate_limit)?;
+
     info!("Setting withdrawal controls...");
-    enclave.set_withdraw_controls_config(incoming_state.withdraw_config)?;
+    enclave.set_withdraw_controls_config(incoming_state.withdrawal_config)?;
 
     info!("Setting change address...");
-    enclave.set_change_address(&incoming_state.change_address)?;
+    enclave.set_change_address(incoming_state.change_address)?;
 
     info!("Setting enclave state...");
     let mut state = enclave.state().await;
     state.hashi_committee_info = incoming_state.hashi_committee_info;
-    state.withdraw_state = incoming_state.withdraw_state;
+    state.withdraw_state = incoming_state.withdrawal_state;
 
     info!("ENCLAVE INITIALIZATION COMPLETE!");
     Ok(())
@@ -180,16 +183,10 @@ mod tests {
     use hashi_guardian_shared::crypto::encrypt_share;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use hashi_guardian_shared::test_utils::*;
-    use hpke::Serializable;
 
     #[tokio::test]
     async fn test_setup_new_key() {
-        let (pub_keys, priv_keys) = mock_setup_new_key_request();
-        let key_provisioner_public_keys: Vec<Vec<u8>> =
-            pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
-        let request = hashi_guardian_shared::SetupNewKeyRequest {
-            key_provisioner_public_keys,
-        };
+        let (request, priv_keys) = mock_setup_new_key_request();
         let Json(resp) = setup_new_key(Json(request)).await.unwrap();
         assert_eq!(resp.encrypted_shares.len(), NUM_OF_SHARES);
 
@@ -214,12 +211,7 @@ mod tests {
         use axum::extract::State;
 
         // Step 1: Generate KP encryption keys and setup new key
-        let (pub_keys, kp_private_keys) = mock_setup_new_key_request();
-        let key_provisioner_public_keys: Vec<Vec<u8>> =
-            pub_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
-        let request = hashi_guardian_shared::SetupNewKeyRequest {
-            key_provisioner_public_keys,
-        };
+        let (request, kp_private_keys) = mock_setup_new_key_request();
         let Json(resp) = setup_new_key(Json(request)).await.unwrap();
         let encrypted_shares = resp.encrypted_shares;
         let share_commitments = resp.share_commitments;

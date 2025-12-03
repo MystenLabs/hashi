@@ -8,7 +8,6 @@ use hashi_guardian_shared::test_utils::mock_init_external_state;
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
-use hpke::Serializable;
 use std::env;
 use tracing::info;
 use tracing::warn;
@@ -135,8 +134,8 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitmen
         info!("   Generated key pair {} of {}", i + 1, NUM_OF_SHARES);
     }
 
-    let kp_public_key_bytes: Vec<Vec<u8>> = kp_public_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
-    let request = SetupNewKeyRequest::new(kp_public_key_bytes);
+    // let kp_public_key_bytes: Vec<Vec<u8>> = kp_public_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
+    let request = SetupNewKeyRequest::new(kp_public_keys);
 
     info!("Sending setup request to server...");
     let client = reqwest::Client::new();
@@ -155,14 +154,8 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitmen
         let encrypted_shares = setup_response.encrypted_shares;
         let share_commitments = setup_response.share_commitments;
 
-        info!(
-            "Received {} encrypted shares",
-            encrypted_shares.len()
-        );
-        info!(
-            "Received {} share commitments",
-            share_commitments.len()
-        );
+        info!("Received {} encrypted shares", encrypted_shares.len());
+        info!("Received {} share commitments", share_commitments.len());
 
         // Decrypt the shares with the KP private keys
         info!("Decrypting shares...");
@@ -343,8 +336,13 @@ async fn init_enclave(
 
         // Encrypt with the enclave's public key
         info!("   Encrypting share for enclave...");
-        let request = InitExternalRequest::new(share, enclave_pub_key, init_state.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to create init request: {}", e))?;
+        let request = InitExternalRequest::new(
+            share,
+            enclave_pub_key,
+            init_state.clone(),
+            &mut rand::thread_rng(),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create init request: {}", e))?;
 
         info!("   Sending to server...");
         let response = client

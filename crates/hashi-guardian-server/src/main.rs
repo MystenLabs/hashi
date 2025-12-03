@@ -2,6 +2,7 @@ use anyhow::Result;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
 use bitcoin::Network;
@@ -12,9 +13,8 @@ use governor::state::NotKeyed;
 use governor::Quota;
 use governor::RateLimiter;
 use hashi_guardian_shared::crypto::Share;
-use hashi_guardian_shared::GuardianError::InternalError;
+use hashi_guardian_shared::GuardianError::{InternalError, InvalidInputs};
 use hashi_guardian_shared::*;
-use nonzero_ext::nonzero;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -59,13 +59,13 @@ pub struct EnclaveConfig {
     /// Bitcoin private key
     pub bitcoin_key: OnceLock<SecretKey>,
     /// Rate limiter for withdrawals
-    pub withdraw_controls_config: OnceLock<WithdrawConfig>,
+    pub withdraw_controls_config: OnceLock<WithdrawalConfig>,
     /// Bitcoin network (mainnet, testnet, regtest, etc.)
     pub bitcoin_network: Network,
     /// Bitcoin change address for withdrawals
     pub change_address: OnceLock<Address>,
     /// Rate limiter
-    pub rate_limiter: MyRateLimiter,
+    pub rate_limiter: OnceLock<MyRateLimiter>,
 }
 
 pub type MyRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -73,7 +73,7 @@ pub type MyRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 /// Mutable state that changes during operation
 pub struct EnclaveState {
     /// Hashi info, e.g., btc pk, bls pk's, etc.
-    pub hashi_committee_info: HashiCommittee,
+    pub hashi_committee_info: HashiCommitteeInfo,
     /// Withdrawal-related state
     pub withdraw_state: WithdrawalState,
 }
@@ -86,16 +86,13 @@ pub struct Scratchpad {
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in InitExternalRequest
-    pub state_hash: OnceLock<DigestBytes>,
+    pub state_hash: OnceLock<[u8; 32]>,
 }
 
 pub struct EphemeralKeyPairs {
     pub signing_keys: SigningKey,
     pub encryption_keys: EncKeyPair,
 }
-
-// 0.1 BTC per hour
-const DEFAULT_HOURLY_RATE_LIMIT: u32 = 10_000_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -106,19 +103,10 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse::<Network>().ok());
     info!("Bitcoin network: {:?}", bitcoin_network);
-    let max_per_hour = std::env::var("MAX_SPEND_PER_HOUR")
-        .ok()
-        .and_then(|s| s.parse::<NonZeroU32>().ok());
-    info!("Max spend per hour: {:?} satoshi's", max_per_hour);
 
     let signing_keys = SigningKey::new(rand::thread_rng());
     let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
-    let enclave = Arc::new(Enclave::new(
-        signing_keys,
-        encryption_keys,
-        bitcoin_network,
-        max_per_hour,
-    ));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, bitcoin_network));
 
     let app = Router::new()
         .route("/health_check", get(health_check))
@@ -154,7 +142,6 @@ impl EnclaveConfig {
         signing_keys: SigningKey,
         encryption_keys: EncKeyPair,
         bitcoin_network: Option<Network>,
-        max_per_hour: Option<NonZeroU32>,
     ) -> Self {
         EnclaveConfig {
             eph_keys: EphemeralKeyPairs {
@@ -166,9 +153,7 @@ impl EnclaveConfig {
             withdraw_controls_config: OnceLock::new(),
             bitcoin_network: bitcoin_network.unwrap_or(Network::Regtest),
             change_address: OnceLock::new(),
-            rate_limiter: RateLimiter::direct(Quota::per_hour(
-                max_per_hour.unwrap_or(nonzero!(DEFAULT_HOURLY_RATE_LIMIT)),
-            )),
+            rate_limiter: OnceLock::new(),
         }
     }
 }
@@ -183,17 +168,11 @@ impl Enclave {
         signing_keys: SigningKey,
         encryption_keys: EncKeyPair,
         bitcoin_network: Option<Network>,
-        max_per_hour: Option<NonZeroU32>,
     ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(
-                signing_keys,
-                encryption_keys,
-                bitcoin_network,
-                max_per_hour,
-            ),
+            config: EnclaveConfig::new(signing_keys, encryption_keys, bitcoin_network),
             state: Mutex::new(EnclaveState {
-                hashi_committee_info: HashiCommittee::default(),
+                hashi_committee_info: HashiCommitteeInfo::default(),
                 withdraw_state: WithdrawalState::default(),
             }),
             scratchpad: Scratchpad::default(),
@@ -223,12 +202,12 @@ impl Enclave {
     // ========================================================================
 
     /// Get the enclave's encryption secret key
-    pub fn encryption_secret_key(&self) -> &hashi_guardian_shared::EncSecKey {
+    pub fn encryption_secret_key(&self) -> &EncSecKey {
         self.config.eph_keys.encryption_keys.secret_key()
     }
 
     /// Get the enclave's encryption public key
-    pub fn encryption_public_key(&self) -> &hashi_guardian_shared::EncPubKey {
+    pub fn encryption_public_key(&self) -> &EncPubKey {
         self.config.eph_keys.encryption_keys.public_key()
     }
 
@@ -268,29 +247,29 @@ impl Enclave {
             .clone())
     }
 
-    pub fn set_change_address(&self, addr_str: &str) -> GuardianResult<()> {
+    pub fn set_change_address(&self, addr: Address<NetworkUnchecked>) -> GuardianResult<()> {
         let network = self.bitcoin_network();
-        let address = addr_str
-            .parse::<Address<_>>()
-            .map_err(|e| InternalError(format!("Invalid change address: {}", e)))?
+        let address = addr
             .require_network(network)
-            .map_err(|e| InternalError(format!("Change address network mismatch: {:?}", e)))?;
-
+            .map_err(|e| InvalidInputs(format!("Change address network mismatch: {:?}", e)))?;
         self.config
             .change_address
             .set(address)
-            .map_err(|e| InternalError(format!("change_address already set: {}", e)))
+            .map_err(|e| InvalidInputs(format!("change_address already set: {}", e)))
     }
 
     // ========================================================================
     // Withdrawal Configuration
     // ========================================================================
 
-    pub fn rate_limiter(&self) -> &MyRateLimiter {
-        &self.config.rate_limiter
+    pub fn rate_limiter(&self) -> GuardianResult<&MyRateLimiter> {
+        self.config
+            .rate_limiter
+            .get()
+            .ok_or(InternalError("Rate limiter is not initialized".into()))
     }
 
-    pub fn withdraw_controls_config(&self) -> GuardianResult<&WithdrawConfig> {
+    pub fn withdraw_controls_config(&self) -> GuardianResult<&WithdrawalConfig> {
         self.config
             .withdraw_controls_config
             .get()
@@ -299,11 +278,18 @@ impl Enclave {
             ))
     }
 
-    pub fn set_withdraw_controls_config(&self, config: WithdrawConfig) -> GuardianResult<()> {
+    pub fn set_withdraw_controls_config(&self, config: WithdrawalConfig) -> GuardianResult<()> {
         self.config
             .withdraw_controls_config
             .set(config)
             .map_err(|_| InternalError("WithdrawControlsConfig already set".into()))
+    }
+
+    pub fn set_rate_limiter(&self, hourly_rate_limit: NonZeroU32) -> GuardianResult<()> {
+        self.config
+            .rate_limiter
+            .set(RateLimiter::direct(Quota::per_hour(hourly_rate_limit)))
+            .map_err(|_| InternalError("RateLimiter already set".into()))
     }
 
     pub fn min_and_max_delay(&self) -> GuardianResult<(Duration, Duration)> {
@@ -326,7 +312,7 @@ impl Enclave {
         self.config
             .s3_logger
             .set(logger)
-            .map_err(|_| InternalError("S3 logger already set".into()))
+            .map_err(|_| InvalidInputs("S3 logger already set".into()))
     }
 
     // ========================================================================
@@ -356,14 +342,14 @@ impl Enclave {
         self.scratchpad
             .share_commitments
             .set(commitments)
-            .map_err(|_| InternalError("Share commitments already set".into()))
+            .map_err(|_| InvalidInputs("Share commitments already set".into()))
     }
 
-    pub fn state_hash(&self) -> Option<&DigestBytes> {
+    pub fn state_hash(&self) -> Option<&[u8; 32]> {
         self.scratchpad.state_hash.get()
     }
 
-    pub fn set_state_hash(&self, hash: DigestBytes) -> GuardianResult<()> {
+    pub fn set_state_hash(&self, hash: [u8; 32]) -> GuardianResult<()> {
         self.scratchpad
             .state_hash
             .set(hash)
@@ -372,11 +358,11 @@ impl Enclave {
 }
 
 impl EnclaveState {
-    pub fn pending_withdrawals(&self) -> &HashMap<WithdrawID, DelayedWithdrawInfo> {
+    pub fn pending_withdrawals(&self) -> &HashMap<WithdrawalID, DelayedWithdrawalInfo> {
         &self.withdraw_state.pending_delayed_withdrawals
     }
 
-    pub fn pending_withdrawals_mut(&mut self) -> &mut HashMap<WithdrawID, DelayedWithdrawInfo> {
+    pub fn pending_withdrawals_mut(&mut self) -> &mut HashMap<WithdrawalID, DelayedWithdrawalInfo> {
         &mut self.withdraw_state.pending_delayed_withdrawals
     }
 }
@@ -395,7 +381,6 @@ impl Enclave {
             signing_keys,
             encryption_keys,
             Some(Network::Regtest),
-            None,
         ));
 
         // Initialize S3 logger
@@ -407,9 +392,10 @@ impl Enclave {
         enclave.set_bitcoin_key(btc_sk).unwrap();
 
         // Set withdraw controls config
-        let withdraw_config = WithdrawConfig {
+        let withdraw_config = WithdrawalConfig {
             min_delay: min_delay.unwrap_or(Duration::from_secs(60)),
             max_delay: Duration::from_secs(3600),
+            hourly_rate_limit: NonZeroU32::new(100_000_000).unwrap(),
         };
         enclave
             .set_withdraw_controls_config(withdraw_config)
@@ -417,7 +403,7 @@ impl Enclave {
 
         // Set change address
         enclave
-            .set_change_address(test_utils::DUMMY_REGTEST_ADDRESS)
+            .set_change_address(test_utils::DUMMY_REGTEST_ADDRESS.parse().unwrap())
             .unwrap();
 
         enclave
@@ -434,7 +420,7 @@ impl Enclave {
         let mut rng = rand::thread_rng();
         let signing_keys = SigningKey::new(rand::thread_rng());
         let encryption_keys = EncKeyPair::random(&mut rng);
-        let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, None, None));
+        let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, None));
 
         // Initialize S3 logger only (required for is_init_internal() to pass)
         let mock_s3_logger = S3Logger::mock_for_testing().await;

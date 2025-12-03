@@ -2,18 +2,19 @@ use crate::crypto::commit_share;
 use crate::crypto::split_secret;
 use crate::crypto::Share;
 use crate::crypto::NUM_OF_SHARES;
-use crate::EncPubKey;
 use crate::EncSecKey;
-use crate::HashiCommittee;
+use crate::HashiCommitteeInfo;
 use crate::InitExternalRequestState;
 use crate::ShareCommitment;
-use crate::WithdrawConfig;
+use crate::WithdrawalConfig;
 use crate::WithdrawalState;
+use crate::{EncPubKey, SetupNewKeyRequest};
 use bitcoin::Address;
 use bitcoin::Network;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use k256::SecretKey;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 /// Test enclave secret key
@@ -37,22 +38,23 @@ pub fn generate_kp_keypairs() -> (Vec<EncSecKey>, Vec<EncPubKey>) {
 
 /// Create a mock SetupNewKeyRequest with generated keypairs
 /// Returns (public_keys, private_keys)
-pub fn mock_setup_new_key_request() -> (Vec<EncPubKey>, Vec<EncSecKey>) {
+pub fn mock_setup_new_key_request() -> (SetupNewKeyRequest, Vec<EncSecKey>) {
     let (private_keys, public_keys) = generate_kp_keypairs();
-    (public_keys, private_keys)
+    (SetupNewKeyRequest::new(public_keys), private_keys)
 }
 
 /// Create a mock InitExternalRequestState for testing
 pub fn mock_init_external_state() -> InitExternalRequestState {
     InitExternalRequestState {
-        hashi_committee_info: HashiCommittee::default(),
-        withdraw_config: WithdrawConfig {
+        hashi_committee_info: HashiCommitteeInfo::default(),
+        withdrawal_config: WithdrawalConfig {
             min_delay: Duration::from_secs(60),
             max_delay: Duration::from_secs(3600),
+            // 0.1 BTC per hour
+            hourly_rate_limit: NonZeroU32::new(10_000_000).unwrap(),
         },
-        withdraw_state: WithdrawalState::default(),
-        change_address: DUMMY_REGTEST_ADDRESS.to_string(),
-        cached_bytes: std::sync::OnceLock::new(),
+        withdrawal_state: WithdrawalState::default(),
+        change_address: DUMMY_REGTEST_ADDRESS.to_string().parse().unwrap(),
     }
 }
 
@@ -92,12 +94,12 @@ pub fn create_test_utxo(amount_sats: u64) -> crate::bitcoin_utils::TaprootUTXO {
 }
 
 /// Helper to create a test WithdrawOutput with a regtest address
-pub fn create_test_withdraw_output(amount_sats: u64) -> crate::WithdrawOutput {
+pub fn create_test_withdraw_output(amount_sats: u64) -> crate::WithdrawalOutput {
     use bitcoin::Address;
     use bitcoin::Amount;
 
     let address: Address<_> = DUMMY_REGTEST_ADDRESS.parse().unwrap();
-    crate::WithdrawOutput {
+    crate::WithdrawalOutput {
         address: address.as_unchecked().clone(),
         amount: Amount::from_sat(amount_sats),
     }
