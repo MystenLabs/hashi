@@ -8,7 +8,7 @@ use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
-pub use fastcrypto::bls12381::min_pk::{BLS12381AggregateSignature, BLS12381Signature};
+pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::PrivateKey;
