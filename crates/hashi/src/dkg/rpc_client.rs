@@ -2,7 +2,6 @@ use crate::dkg::types::{
     ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
     SendMessageRequest, SendMessageResponse,
 };
-use crate::proto;
 use crate::proto::dkg_service_client::DkgServiceClient;
 use tonic::transport::Channel;
 
@@ -28,8 +27,7 @@ impl DkgRpcClient {
         epoch: u64,
         request: &SendMessageRequest,
     ) -> Result<SendMessageResponse> {
-        let mut proto_request = proto::SendMessageRequest::from(request);
-        proto_request.epoch = Some(epoch);
+        let proto_request = request.to_proto(epoch);
         let response = self.0.send_message(proto_request).await?;
         SendMessageResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
@@ -40,8 +38,7 @@ impl DkgRpcClient {
         epoch: u64,
         request: &RetrieveMessageRequest,
     ) -> Result<RetrieveMessageResponse> {
-        let mut proto_request = proto::RetrieveMessageRequest::from(request);
-        proto_request.epoch = Some(epoch);
+        let proto_request = request.to_proto(epoch);
         let response = self.0.retrieve_message(proto_request).await?;
         RetrieveMessageResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
@@ -52,8 +49,7 @@ impl DkgRpcClient {
         epoch: u64,
         request: &ComplainRequest,
     ) -> Result<ComplainResponse> {
-        let mut proto_request = proto::ComplainRequest::from(request);
-        proto_request.epoch = Some(epoch);
+        let proto_request = request.to_proto(epoch);
         let response = self.0.complain(proto_request).await?;
         ComplainResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
