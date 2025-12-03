@@ -18,6 +18,7 @@ impl HttpService {
         let router = {
             let bridge_service =
                 crate::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
+            let dkg_service = crate::proto::dkg_service_server::DkgServiceServer::new(self.clone());
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 
@@ -45,6 +46,7 @@ impl HttpService {
 
             for service_name in [
                 service_name(&bridge_service),
+                service_name(&dkg_service),
                 service_name(&reflection_v1),
                 service_name(&reflection_v1alpha),
             ] {
@@ -55,6 +57,7 @@ impl HttpService {
 
             axum::Router::new()
                 .add_grpc_service(bridge_service)
+                .add_grpc_service(dkg_service)
                 .add_grpc_service(reflection_v1)
                 .add_grpc_service(reflection_v1alpha)
                 .add_grpc_service(health_service)
@@ -76,6 +79,14 @@ impl HttpService {
             .tls_config(tls_config)
             .serve(self.inner.config.https_address(), router)
             .unwrap()
+    }
+
+    pub fn dkg_manager(&self) -> &std::sync::Mutex<crate::dkg::DkgManager> {
+        todo!("Hashi::dkg_manager not yet implemented")
+    }
+
+    pub fn tls_registry(&self) -> &crate::dkg::rpc::TlsRegistry {
+        todo!("Hashi::tls_registry not yet implemented")
     }
 }
 
