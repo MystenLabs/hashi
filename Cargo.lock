@@ -1745,7 +1745,9 @@ name = "hashi-guardian-shared"
 version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
+ "bincode",
  "bitcoin",
+ "blake2",
  "hpke",
  "k256",
  "rand 0.8.5",
