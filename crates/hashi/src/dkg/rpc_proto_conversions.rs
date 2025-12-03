@@ -42,12 +42,12 @@ fn serialize_bcs<T: Serialize>(value: &T, name: &str) -> Bcs {
 // SendMessageRequest
 //
 
-impl From<&types::SendMessageRequest> for proto::SendMessageRequest {
-    fn from(value: &types::SendMessageRequest) -> Self {
-        Self {
-            epoch: None,
+impl types::SendMessageRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::SendMessageRequest {
+        proto::SendMessageRequest {
+            epoch: Some(epoch),
             message: Some(serialize_bcs(
-                &value.message,
+                &self.message,
                 "fastcrypto_tbls::threshold_schnorr::avss::Message",
             )),
         }
@@ -91,11 +91,11 @@ impl TryFrom<&proto::SendMessageResponse> for types::SendMessageResponse {
 // RetrieveMessageRequest
 //
 
-impl From<&types::RetrieveMessageRequest> for proto::RetrieveMessageRequest {
-    fn from(value: &types::RetrieveMessageRequest) -> Self {
-        Self {
-            epoch: None,
-            dealer: Some(value.dealer.to_string()),
+impl types::RetrieveMessageRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::RetrieveMessageRequest {
+        proto::RetrieveMessageRequest {
+            epoch: Some(epoch),
+            dealer: Some(self.dealer.to_string()),
         }
     }
 }
@@ -138,13 +138,13 @@ impl TryFrom<&proto::RetrieveMessageResponse> for types::RetrieveMessageResponse
 // ComplainRequest
 //
 
-impl From<&types::ComplainRequest> for proto::ComplainRequest {
-    fn from(value: &types::ComplainRequest) -> Self {
-        Self {
-            epoch: None,
-            dealer: Some(value.dealer.to_string()),
+impl types::ComplainRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::ComplainRequest {
+        proto::ComplainRequest {
+            epoch: Some(epoch),
+            dealer: Some(self.dealer.to_string()),
             complaint: Some(serialize_bcs(
-                &value.complaint,
+                &self.complaint,
                 "fastcrypto_tbls::threshold_schnorr::complaint::Complaint",
             )),
         }
