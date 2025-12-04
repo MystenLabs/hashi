@@ -21,20 +21,20 @@ const HASHI_GUARDIAN_DELTA: Duration = Duration::from_secs(5 * 60);
 
 pub async fn instant_withdraw(
     State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<InstantWithdrawalRequest>,
-) -> GuardianResult<Json<InstantWithdrawalResponse>> {
+    Json(request): Json<ImmediateWithdrawalRequest>,
+) -> GuardianResult<Json<ImmediateWithdrawalResponse>> {
     // ------------------------ Validation ------------------------
     // Check cert
     validate_instant_withdraw(&request)?;
 
     // Check that the request was made recently
-    validate_time(request.info.timestamp)?;
+    validate_time(request.info.timestamp())?;
 
     // Validate all external addresses against the configured network
     let network = enclave.bitcoin_network();
     let verified_outputs = request
         .info
-        .external_dest
+        .external_dest()
         .iter()
         .map(|o| o.validate(network))
         .collect::<Result<Vec<_>, _>>()?;
@@ -72,7 +72,7 @@ pub async fn instant_withdraw(
         verified_outputs,
         enclave.change_address()?,
     )?;
-    let response = InstantWithdrawalResponse {
+    let response = ImmediateWithdrawalResponse {
         enclave_sign: signatures,
     };
 
@@ -91,7 +91,7 @@ pub async fn instant_withdraw(
         // Delete relevant info
         enclave_state
             .pending_withdrawals_mut()
-            .remove(&request.info.withdrawal_id)
+            .remove(request.info.withdrawal_id())
             .ok_or(InternalError(
                 "Could not find an earlier delayed withdrawal record".into(),
             ))?;
@@ -122,7 +122,7 @@ fn rate_limit(satoshis: u64, rate_limiter: &MyRateLimiter) -> GuardianResult<()>
 /// TODO: Ensure change_amount is within expected range?
 fn sign(
     sk: &SecretKey,
-    request: &InstantWithdrawalInfo,
+    request: &ImmediateWithdrawalInfo,
     verified_outputs: Vec<ValidatedWithdrawalOutput>,
     change_address: Address,
 ) -> GuardianResult<Vec<Signature>> {
@@ -136,13 +136,13 @@ fn sign(
     let output_txouts: Vec<TxOut> = verified_outputs.iter().map(|wo| wo.into()).collect();
 
     // Construct signing messages
-    let messages = construct_signing_messages(&request.input_utxos, &output_txouts, &change_utxo)?;
+    let messages = construct_signing_messages(request.input_utxos(), &output_txouts, &change_utxo)?;
 
     // Sign with the secret key
     sign_btc_tx(&messages, sk)
 }
 
-fn validate_instant_withdraw(_request: &InstantWithdrawalRequest) -> GuardianResult<()> {
+fn validate_instant_withdraw(_request: &ImmediateWithdrawalRequest) -> GuardianResult<()> {
     // TODO
     Ok(())
 }
@@ -168,18 +168,18 @@ pub async fn delayed_withdraw(
     validate_delayed_withdraw(&request)?;
 
     // Check if the request is sufficiently recent
-    validate_time(request.info.timestamp)?;
+    validate_time(request.info.timestamp())?;
 
     // Validate all external addresses against the configured network
     let network = enclave.bitcoin_network();
-    for output in &request.info.external_dest {
+    for output in request.info.external_dest() {
         output.validate(network)?;
     }
 
     // -------- Record --------
     // Log to S3. Note that we need to log to S3 and then update internal state in that order
     //   as the enclave may die between the two steps.
-    let log_key = &request.info.withdrawal_id;
+    let log_key = request.info.withdrawal_id();
     let s3_logger = enclave.s3_logger()?;
     s3_logger
         .log(
@@ -194,7 +194,7 @@ pub async fn delayed_withdraw(
     if let Some(x) = enclave_state
         .withdraw_state
         .pending_delayed_withdrawals
-        .insert(request.info.withdrawal_id.clone(), request.info)
+        .insert(request.info.withdrawal_id().clone(), request.info)
     {
         return Err(InternalError(format!(
             "Withdraw ID already exists: {:?}",
@@ -211,12 +211,12 @@ fn validate_delayed_withdraw(_request: &DelayedWithdrawalRequest) -> GuardianRes
 
 /// Approves withdrawal if a delayed_withdraw request was made sufficiently earlier
 fn approve_delayed_withdrawal(
-    withdrawal: &InstantWithdrawalInfo,
+    withdrawal: &ImmediateWithdrawalInfo,
     pending_withdrawals: &HashMap<WithdrawalID, DelayedWithdrawalInfo>,
     min_delay: Duration,
 ) -> GuardianResult<()> {
     // Find the matching record
-    let pending = match pending_withdrawals.get(&withdrawal.withdrawal_id) {
+    let pending = match pending_withdrawals.get(withdrawal.withdrawal_id()) {
         Some(x) => x,
         None => {
             return Err(InternalError(
@@ -226,23 +226,23 @@ fn approve_delayed_withdrawal(
     };
 
     // Check the dest (both address and amount)
-    if pending.external_dest != withdrawal.external_dest {
+    if pending.external_dest() != withdrawal.external_dest() {
         return Err(InternalError(format!(
             "WithdrawID matches but external destination \
                                          does not match {:?} {:?}",
-            pending.external_dest, withdrawal.external_dest
+            pending.external_dest(), withdrawal.external_dest()
         )));
     }
 
     // Check that the gap is sufficiently long
     let gap = withdrawal
-        .timestamp
-        .duration_since(pending.timestamp)
+        .timestamp()
+        .duration_since(pending.timestamp())
         .map_err(|_| InternalError("Time is earlier".into()))?;
     if gap < min_delay {
         Err(InternalError(format!(
             "Withdrawal timestamp {:?} is not sufficiently delayed ({:?} + {:?})",
-            withdrawal.timestamp, pending.timestamp, min_delay
+            withdrawal.timestamp(), pending.timestamp(), min_delay
         )))
     } else {
         Ok(())
@@ -280,11 +280,11 @@ mod tests {
 
         // Step 1: Submit delayed withdrawal request
         let delayed_request = DelayedWithdrawalRequest {
-            info: DelayedWithdrawalInfo {
-                withdrawal_id: withdraw_id.clone(),
-                external_dest: vec![output.clone()],
-                timestamp: initial_timestamp,
-            },
+            info: DelayedWithdrawalInfo::new(
+                withdraw_id.clone(),
+                vec![output.clone()],
+                initial_timestamp,
+            ).unwrap(),
             cert: HashiCert {},
         };
 
@@ -304,14 +304,14 @@ mod tests {
         // Wait 5 seconds to get past the initial timestamp but still within the 5-minute validation window
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let instant_request_early = InstantWithdrawalRequest {
-            info: InstantWithdrawalInfo {
-                withdrawal_id: withdraw_id.clone(),
-                external_dest: vec![output.clone()],
-                timestamp: SystemTime::now(), // Current time (5 seconds after initial)
-                input_utxos: vec![create_test_utxo(110_000)],
-                fee_sats: 1_000,
-            },
+        let instant_request_early = ImmediateWithdrawalRequest {
+            info: ImmediateWithdrawalInfo::new(
+                withdraw_id.clone(),
+                vec![output.clone()],
+                SystemTime::now(), // Current time (5 seconds after initial)
+                vec![create_test_utxo(110_000)],
+                1_000,
+            ).unwrap(),
             delayed: true,
             cert: HashiCert {},
         };
@@ -340,14 +340,14 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         // Step 4: Try instant withdrawal after delay - should SUCCEED
-        let instant_request_after = InstantWithdrawalRequest {
-            info: InstantWithdrawalInfo {
-                withdrawal_id: withdraw_id.clone(),
-                external_dest: vec![output],
-                timestamp: SystemTime::now(), // Now timestamp is well past min_delay
-                input_utxos: vec![create_test_utxo(110_000)],
-                fee_sats: 1_000,
-            },
+        let instant_request_after = ImmediateWithdrawalRequest {
+            info: ImmediateWithdrawalInfo::new(
+                withdraw_id.clone(),
+                vec![output],
+                SystemTime::now(), // Now timestamp is well past min_delay
+                vec![create_test_utxo(110_000)],
+                1_000,
+            ).unwrap(),
             delayed: true,
             cert: HashiCert {},
         };

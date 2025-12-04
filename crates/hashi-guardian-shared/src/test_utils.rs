@@ -40,7 +40,7 @@ pub fn generate_kp_keypairs() -> (Vec<EncSecKey>, Vec<EncPubKey>) {
 /// Returns (public_keys, private_keys)
 pub fn mock_setup_new_key_request() -> (SetupNewKeyRequest, Vec<EncSecKey>) {
     let (private_keys, public_keys) = generate_kp_keypairs();
-    (SetupNewKeyRequest::new(public_keys), private_keys)
+    (SetupNewKeyRequest::new(public_keys).unwrap(), private_keys)
 }
 
 /// Create a mock InitExternalRequestState for testing

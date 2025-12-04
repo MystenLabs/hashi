@@ -29,7 +29,7 @@ pub async fn init_enclave_internal(
         return Err(OpaqueError("S3 configuration previously set".into()));
     }
 
-    let logger = S3Logger::new(request.config).await?;
+    let logger = S3Logger::new(request.config()).await?;
 
     info!("Testing S3 connectivity...");
     // Test S3 connectivity with the new credentials
@@ -41,15 +41,15 @@ pub async fn init_enclave_internal(
 
     info!(
         "Storing {} share commitments...",
-        request.share_commitments.len()
+        request.share_commitments().len()
     );
-    for (i, share_commitment) in request.share_commitments.iter().enumerate() {
+    for (i, share_commitment) in request.share_commitments().iter().enumerate() {
         info!(
             "Share {}: ID {} Digest {:x?}",
             i, share_commitment.id, share_commitment.digest
         );
     }
-    enclave.set_share_commitments(request.share_commitments)?;
+    enclave.set_share_commitments(request.share_commitments().to_vec())?;
 
     info!("S3 configuration complete!");
     Ok(())
@@ -76,13 +76,13 @@ pub async fn init_enclave_external(
     }
 
     let sk = enclave.encryption_secret_key();
-    let share_id = request.encrypted_share.id;
-    let state_hash = request.state.digest();
+    let share_id = request.encrypted_share().id;
+    let state_hash = request.state().digest();
     info!("   Share ID: {:?}", share_id);
 
     // 1) Decrypt the share!
     info!("Decrypting share...");
-    let share = decrypt_share(&request.encrypted_share, sk, Some(&state_hash))?;
+    let share = decrypt_share(request.encrypted_share(), sk, Some(&state_hash))?;
     info!("Share decrypted successfully");
 
     // 2) Verify the share against the commitment
@@ -127,7 +127,7 @@ pub async fn init_enclave_external(
     // 5) If we have enough shares, finish initialization: combine shares & set config.
     if current_share_count >= THRESHOLD {
         let vec: Vec<Share> = received_shares.iter().cloned().collect::<Vec<_>>();
-        finalize_init(&vec, &enclave, request.state).await?;
+        finalize_init(&vec, &enclave, request.state().clone()).await?;
     }
 
     Ok(())
@@ -180,7 +180,6 @@ mod tests {
     use super::*;
     use crate::setup::setup_new_key;
     use hashi_guardian_shared::crypto::commit_share;
-    use hashi_guardian_shared::crypto::encrypt_share;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use hashi_guardian_shared::test_utils::*;
 
@@ -231,20 +230,14 @@ mod tests {
         for i in 0..NUM_OF_SHARES {
             // Re-encrypt the share for the enclave's encryption key
             let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();
-            let state_digest = init_state.digest();
             let mut rng = rand::thread_rng();
-            let new_encrypted_share = encrypt_share(
+            let request = InitExternalRequest::new(
                 &share,
                 enclave.encryption_public_key(),
-                Some(&state_digest),
+                init_state.clone(),
                 &mut rng,
             )
             .unwrap();
-
-            let request = InitExternalRequest {
-                encrypted_share: new_encrypted_share,
-                state: init_state.clone(),
-            };
 
             let result = init_enclave_external(State(enclave.clone()), Json(request)).await;
 

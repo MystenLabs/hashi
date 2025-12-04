@@ -83,8 +83,8 @@ async fn init_internal(
     info!("Configuring S3...");
     let share_commitments = share_commitments.unwrap_or_else(|| gen_dummy_share_data().1);
 
-    let s3_config_request = InitInternalRequest {
-        config: S3Config {
+    let s3_config_request = InitInternalRequest::new(
+        S3Config {
             access_key: env::var("AWS_ACCESS_KEY_ID")
                 .context("AWS_ACCESS_KEY_ID not found in environment")?,
             secret_key: env::var("AWS_SECRET_ACCESS_KEY")
@@ -92,10 +92,10 @@ async fn init_internal(
             bucket_name: env::var("AWS_BUCKET_NAME")
                 .context("AWS_BUCKET_NAME not found in environment")?,
         },
-        share_commitments,
-    };
+        share_commitments
+    )?;
 
-    info!("   Bucket: {}", s3_config_request.config.bucket_name);
+    info!("   Bucket: {}", s3_config_request.config().bucket_name);
 
     let client = reqwest::Client::new();
     let response = client
@@ -135,7 +135,7 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitmen
     }
 
     // let kp_public_key_bytes: Vec<Vec<u8>> = kp_public_keys.iter().map(|pk| pk.to_bytes().to_vec()).collect();
-    let request = SetupNewKeyRequest::new(kp_public_keys);
+    let request = SetupNewKeyRequest::new(kp_public_keys)?;
 
     info!("Sending setup request to server...");
     let client = reqwest::Client::new();

@@ -15,7 +15,7 @@ pub struct S3Logger {
 }
 
 impl S3Logger {
-    pub async fn new(config: S3Config) -> GuardianResult<Self> {
+    pub async fn new(config: &S3Config) -> GuardianResult<Self> {
         info!("S3 Configuration:");
         info!("   Bucket: {}", config.bucket_name);
 
@@ -31,7 +31,7 @@ impl S3Logger {
             .await;
 
         let client = S3Client::new(&aws_config);
-        Ok(Self { client, config })
+        Ok(Self { client, config: config.clone() })
     }
 
     /// Check if an object named in the key exists in the S3 bucket.
