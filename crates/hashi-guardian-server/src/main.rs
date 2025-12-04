@@ -36,8 +36,8 @@ use crate::health_check::health_check;
 use crate::s3_logger::S3Logger;
 use crate::withdraw::delayed_withdraw;
 use crate::withdraw::instant_withdraw;
-use init::init_enclave_external;
-use init::init_enclave_internal;
+use init::operator_init;
+use init::provisioner_init;
 use setup::setup_new_key;
 
 /// Enclave's config & state
@@ -85,7 +85,7 @@ pub struct Scratchpad {
     pub decrypted_shares: Mutex<Vec<Share>>,
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
-    /// Hash of the state in InitExternalRequest
+    /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
 }
 
@@ -116,10 +116,10 @@ async fn main() -> Result<()> {
         // TODO: Add a config flag that determines whether setup_new_key is exposed?
         // Setup new BTC key and secret share it with key provisioner (KP)
         .route("/setup_new_key", post(setup_new_key))
-        // Init enclave (internal)
-        .route("/init_internal", post(init_enclave_internal))
-        // Init enclave (external; called by KP's)
-        .route("/init_external", post(init_enclave_external))
+        // Init enclave (operator)
+        .route("/operator_init", post(operator_init))
+        // Init enclave (key provisioner)
+        .route("/provisioner_init", post(provisioner_init))
         // ------------------------------------------------
         // ---------------- Withdraw ----------------------
         // Instant withdraw
@@ -179,22 +179,22 @@ impl Enclave {
         }
     }
 
-    /// Is external init (KP-driven) complete?
-    pub fn is_init_external(&self) -> bool {
+    /// Is provisioner init (KP-driven) complete?
+    pub fn is_provisioner_init_complete(&self) -> bool {
         self.config.bitcoin_key.get().is_some()
             && self.config.withdraw_controls_config.get().is_some()
             && self.config.change_address.get().is_some()
         // TODO: Add withdraw_state & hashi_committee
     }
 
-    /// Is internal init complete?
-    pub fn is_init_internal(&self) -> bool {
+    /// Is operator init complete?
+    pub fn is_operator_init_complete(&self) -> bool {
         self.config.s3_logger.get().is_some()
     }
 
     /// Is the enclave fully initialized?
     pub fn is_fully_initialized(&self) -> bool {
-        self.is_init_external() && self.is_init_internal()
+        self.is_provisioner_init_complete() && self.is_operator_init_complete()
     }
 
     // ========================================================================
@@ -422,7 +422,7 @@ impl Enclave {
         let encryption_keys = EncKeyPair::random(&mut rng);
         let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, None));
 
-        // Initialize S3 logger only (required for is_init_internal() to pass)
+        // Initialize S3 logger only (required for is_operator_init_complete() to pass)
         let mock_s3_logger = S3Logger::mock_for_testing().await;
         enclave.set_s3_logger(mock_s3_logger).unwrap();
 

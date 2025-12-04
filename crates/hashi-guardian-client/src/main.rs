@@ -4,7 +4,7 @@ use hashi_guardian_shared::crypto::decrypt_share;
 use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::crypto::NUM_OF_SHARES;
 use hashi_guardian_shared::test_utils::gen_dummy_share_data;
-use hashi_guardian_shared::test_utils::mock_init_external_state;
+use hashi_guardian_shared::test_utils::mock_provisioner_init_state;
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         "health_check" => {
             _ = health_check(base_url).await?;
         }
-        "configure_s3" => init_internal(base_url, None).await?,
+        "configure_s3" => operator_init_call(base_url, None).await?,
         "get_attestation" => {
             _ = get_attestation(base_url).await?;
         }
@@ -76,14 +76,14 @@ fn print_help() {
 }
 
 /// Configure S3 credentials and bucket info
-async fn init_internal(
+async fn operator_init_call(
     base_url: &str,
     share_commitments: Option<Vec<ShareCommitment>>,
 ) -> Result<()> {
     info!("Configuring S3...");
     let share_commitments = share_commitments.unwrap_or_else(|| gen_dummy_share_data().1);
 
-    let s3_config_request = InitInternalRequest::new(
+    let s3_config_request = OperatorInitRequest::new(
         S3Config {
             access_key: env::var("AWS_ACCESS_KEY_ID")
                 .context("AWS_ACCESS_KEY_ID not found in environment")?,
@@ -99,7 +99,7 @@ async fn init_internal(
 
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("{}/init_internal", base_url))
+        .post(format!("{}/operator_init", base_url))
         .json(&s3_config_request)
         .send()
         .await
@@ -314,7 +314,7 @@ async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
 
 /// Initialize the enclave with shares and configuration
 /// Takes enclave public key and shares as arguments
-async fn init_enclave(
+async fn provisioner_init_call(
     base_url: &str,
     enclave_pub_key: &EncPubKey,
     shares: Vec<Share>,
@@ -322,7 +322,7 @@ async fn init_enclave(
     info!("Initializing enclave with {} shares...", shares.len());
 
     // Create init state
-    let init_state = mock_init_external_state();
+    let init_state = mock_provisioner_init_state();
 
     info!("Initialization config: {:?}", init_state);
 
@@ -336,7 +336,7 @@ async fn init_enclave(
 
         // Encrypt with the enclave's public key
         info!("   Encrypting share for enclave...");
-        let request = InitExternalRequest::new(
+        let request = ProvisionerInitRequest::new(
             share,
             enclave_pub_key,
             init_state.clone(),
@@ -346,7 +346,7 @@ async fn init_enclave(
 
         info!("   Sending to server...");
         let response = client
-            .post(format!("{}/init_external", base_url))
+            .post(format!("{}/provisioner_init", base_url))
             .json(&request)
             .send()
             .await
@@ -393,12 +393,12 @@ async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
 
     info!("Step 3: Configure S3 and other things");
     info!("{}\n", "=".repeat(50));
-    init_internal(base_url, Some(commitments)).await?;
+    operator_init_call(base_url, Some(commitments)).await?;
 
     // Step 3: Initialize enclave
     info!("Step 4: Initialize enclave");
     info!("{}\n", "=".repeat(50));
-    init_enclave(base_url, &enclave_pub_key, shares).await?;
+    provisioner_init_call(base_url, &enclave_pub_key, shares).await?;
 
     info!("\nInitialization with test key complete!");
     Ok(())
@@ -419,11 +419,11 @@ async fn init_with_new_key(base_url: &str, strict: bool) -> Result<()> {
 
     info!("\nStep 3: Configure S3 and other things");
     info!("{}\n", "=".repeat(50));
-    init_internal(base_url, Some(share_commitments)).await?;
+    operator_init_call(base_url, Some(share_commitments)).await?;
 
     info!("\nStep 4: Initialize enclave");
     info!("{}\n", "=".repeat(50));
-    init_enclave(base_url, &enclave_pub_key, shares).await?;
+    provisioner_init_call(base_url, &enclave_pub_key, shares).await?;
 
     info!("Initialization with new key complete!");
     Ok(())

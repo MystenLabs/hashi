@@ -19,11 +19,11 @@ use GuardianError::*;
 // Receives S3 API keys & share commitments.
 // TODO: Another option is to hard-code the share commitments after the key ceremony is over.
 // TODO: Log to S3. Q) what are the must log items for security? Enclave attestation & S3-signing-key. Anything else?
-pub async fn init_enclave_internal(
+pub async fn operator_init(
     State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<InitInternalRequest>,
+    Json(request): Json<OperatorInitRequest>,
 ) -> GuardianResult<()> {
-    info!("/init_internal - Received request");
+    info!("/operator_init - Received request");
     // If the configuration has already been set, return an error
     if enclave.s3_logger().is_ok() {
         return Err(OpaqueError("S3 configuration previously set".into()));
@@ -59,19 +59,19 @@ pub async fn init_enclave_internal(
 // While accumulating shares, we use the state hash to compare if every KP is giving us the same state.
 // When we have enough shares, we actually set all the state variables.
 // TODO: Log to S3. Q) what are the must log items for security?
-pub async fn init_enclave_external(
+pub async fn provisioner_init(
     State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<InitExternalRequest>,
+    Json(request): Json<ProvisionerInitRequest>,
 ) -> GuardianResult<()> {
-    info!("/init_external - Received encrypted share");
-    if !enclave.is_init_internal() {
+    info!("/provisioner_init - Received encrypted share");
+    if !enclave.is_operator_init_complete() {
         return Err(InternalError(
-            "Internal initialization hasn't completed!".into(),
+            "Operator initialization hasn't completed!".into(),
         ));
     }
-    if enclave.is_init_external() {
+    if enclave.is_provisioner_init_complete() {
         return Err(InternalError(
-            "External (KP) initialization already complete!".into(),
+            "Provisioner (KP) initialization already complete!".into(),
         ));
     }
 
@@ -136,7 +136,7 @@ pub async fn init_enclave_external(
 async fn finalize_init(
     shares: &[Share],
     enclave: &Arc<Enclave>,
-    incoming_state: InitExternalRequestState,
+    incoming_state: ProvisionerInitRequestState,
 ) -> GuardianResult<()> {
     info!("Threshold reached! Combining shares...");
     let secp_sk = combine_shares(shares)?;
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_init_enclave_external() {
+    async fn test_provisioner_init() {
         use crate::Enclave;
         use axum::extract::State;
 
@@ -223,15 +223,15 @@ mod tests {
             .set_share_commitments(share_commitments.clone())
             .unwrap();
 
-        // Step 5: Create InitExternalRequestState
-        let init_state = mock_init_external_state();
+        // Step 5: Create ProvisionerInitRequestState
+        let init_state = mock_provisioner_init_state();
 
-        // Step 6: Simulate THRESHOLD KPs calling init_enclave_external
+        // Step 6: Simulate THRESHOLD KPs calling provisioner_init
         for i in 0..NUM_OF_SHARES {
             // Re-encrypt the share for the enclave's encryption key
             let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();
             let mut rng = rand::thread_rng();
-            let request = InitExternalRequest::new(
+            let request = ProvisionerInitRequest::new(
                 &share,
                 enclave.encryption_public_key(),
                 init_state.clone(),
@@ -239,7 +239,7 @@ mod tests {
             )
             .unwrap();
 
-            let result = init_enclave_external(State(enclave.clone()), Json(request)).await;
+            let result = provisioner_init(State(enclave.clone()), Json(request)).await;
 
             // Check behavior based on whether we've reached/exceeded threshold
             if i == THRESHOLD - 1 {

@@ -4,7 +4,7 @@ use crate::crypto::Share;
 use crate::crypto::NUM_OF_SHARES;
 use crate::EncSecKey;
 use crate::HashiCommitteeInfo;
-use crate::InitExternalRequestState;
+use crate::ProvisionerInitRequestState;
 use crate::ShareCommitment;
 use crate::WithdrawalConfig;
 use crate::WithdrawalState;
@@ -43,9 +43,9 @@ pub fn mock_setup_new_key_request() -> (SetupNewKeyRequest, Vec<EncSecKey>) {
     (SetupNewKeyRequest::new(public_keys).unwrap(), private_keys)
 }
 
-/// Create a mock InitExternalRequestState for testing
-pub fn mock_init_external_state() -> InitExternalRequestState {
-    InitExternalRequestState {
+/// Create a mock ProvisionerInitRequestState for testing
+pub fn mock_provisioner_init_state() -> ProvisionerInitRequestState {
+    ProvisionerInitRequestState {
         hashi_committee_info: HashiCommitteeInfo::default(),
         withdrawal_config: WithdrawalConfig {
             min_delay: Duration::from_secs(60),

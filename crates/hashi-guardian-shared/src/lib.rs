@@ -41,9 +41,9 @@ pub struct SetupNewKeyResponse {
 
 /// Provides S3 API keys and share commitments to the enclave.
 /// Returns an error if something goes wrong.
-/// To be called by us.
+/// To be called by the operator.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct InitInternalRequest {
+pub struct OperatorInitRequest {
     config: S3Config,
     share_commitments: Vec<ShareCommitment>,
 }
@@ -51,13 +51,13 @@ pub struct InitInternalRequest {
 /// Provides key shares and all other necessary state values to the enclaves.
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Serialize, Deserialize, Debug)]
-pub struct InitExternalRequest {
+pub struct ProvisionerInitRequest {
     encrypted_share: EncryptedShare,
-    state: InitExternalRequestState,
+    state: ProvisionerInitRequestState,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InitExternalRequestState {
+pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
     pub hashi_committee_info: HashiCommitteeInfo,
     /// Withdrawal config
@@ -223,7 +223,7 @@ impl SetupNewKeyRequest {
     }
 }
 
-impl InitInternalRequest {
+impl OperatorInitRequest {
     pub fn new(config: S3Config, share_commitments: Vec<ShareCommitment>) -> GuardianResult<Self> {
         if share_commitments.len() != NUM_OF_SHARES {
             return Err(InvalidInputs("provide enough share commitments".into()));
@@ -243,26 +243,26 @@ impl InitInternalRequest {
     }
 }
 
-impl InitExternalRequestState {
+impl ProvisionerInitRequestState {
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(self).expect("Failed to serialize");
         Blake2b::<U32>::digest(bytes).into()
     }
 }
 
-impl InitExternalRequest {
-    /// Create a new InitExternalRequest by encrypting the share to the enclave's public key.
+impl ProvisionerInitRequest {
+    /// Create a new ProvisionerInitRequest by encrypting the share to the enclave's public key.
     /// In addition, it sets the state hash as AAD for the encryption effectively
     /// allowing the enclave to trust that state is indeed coming from the KP.
     pub fn new<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        state: InitExternalRequestState,
+        state: ProvisionerInitRequestState,
         rng: &mut R,
     ) -> GuardianResult<Self> {
         let state_hash = state.digest();
         let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng)?;
-        Ok(InitExternalRequest {
+        Ok(ProvisionerInitRequest {
             encrypted_share,
             state,
         })
@@ -272,7 +272,7 @@ impl InitExternalRequest {
         &self.encrypted_share
     }
 
-    pub fn state(&self) -> &InitExternalRequestState {
+    pub fn state(&self) -> &ProvisionerInitRequestState {
         &self.state
     }
 }
