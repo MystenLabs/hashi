@@ -62,7 +62,6 @@ pub struct BlsCommittee {
 }
 
 #[derive(Debug)]
-#[allow(unused)]
 pub struct BlsCommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
@@ -204,6 +203,18 @@ impl BlsCommitteeMember {
             public_key,
             weight,
         }
+    }
+
+    pub fn validator_address(&self) -> Address {
+        self.address
+    }
+
+    pub fn public_key(&self) -> &BLS12381PublicKey {
+        &self.public_key
+    }
+
+    pub fn weight(&self) -> u64 {
+        self.weight
     }
 }
 

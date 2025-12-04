@@ -4,8 +4,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::dkg::types::{AddressToPartyId, DkgConfig, DkgError};
 use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
+use fastcrypto_tbls::nodes::{Node, Nodes};
 use sui_sdk_types::{Address, Ed25519PublicKey, TypeTag};
 
 use crate::bls::BlsCommittee;
@@ -30,6 +32,59 @@ pub struct CommitteeSet {
     /// Id of the `Bag` containing the committee's per epoch
     pub committees_id: Address,
     pub committees: BTreeMap<u64, BlsCommittee>,
+}
+
+impl CommitteeSet {
+    pub fn build_dkg_config(&self) -> Result<DkgConfig, DkgError> {
+        use itertools::Itertools;
+
+        let committee = self
+            .committees
+            .get(&self.epoch)
+            .ok_or_else(|| DkgError::CryptoError("no committee for current epoch".into()))?;
+        let members_with_weight: Vec<_> = committee
+            .members()
+            .iter()
+            .map(|member| {
+                let addr = member.validator_address();
+                let member_info = self.members.get(&addr).ok_or_else(|| {
+                    DkgError::CryptoError(format!("no member info for validator {}", addr))
+                })?;
+                Ok((addr, member.weight(), member_info))
+            })
+            .collect::<Result<Vec<_>, DkgError>>()?
+            .into_iter()
+            .sorted_by_key(|(addr, _, _)| *addr)
+            .collect();
+        let mut nodes_vec = Vec::with_capacity(members_with_weight.len());
+        let mut address_to_party_id = AddressToPartyId::new();
+        for (id, (validator_address, weight, member_info)) in members_with_weight.iter().enumerate()
+        {
+            let encryption_pk = member_info.encryption_public_key.as_ref().ok_or_else(|| {
+                DkgError::CryptoError(format!(
+                    "validator {} has no encryption public key",
+                    validator_address
+                ))
+            })?;
+            nodes_vec.push(Node {
+                id: id as u16,
+                pk: encryption_pk.clone(),
+                weight: *weight as u16,
+            });
+            address_to_party_id.insert(*validator_address, id as u16);
+        }
+        let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        let total_weight = nodes.total_weight();
+        let max_faulty = (total_weight - 1) / 3;
+        let threshold = max_faulty + 1;
+        DkgConfig::new(
+            self.epoch,
+            nodes,
+            address_to_party_id,
+            threshold,
+            max_faulty,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -267,5 +322,142 @@ impl Coin {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bls::{BlsCommittee, BlsCommitteeMember};
+    use crate::dkg::EncryptionGroupElement;
+    use fastcrypto::bls12381::min_pk::BLS12381KeyPair;
+    use fastcrypto::traits::KeyPair;
+    use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
+
+    fn create_test_member_info(id: u8) -> MemberInfo {
+        let encryption_private_key =
+            PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
+        let encryption_public_key = PublicKey::from_private_key(&encryption_private_key);
+        let bls_keypair = BLS12381KeyPair::generate(&mut rand::thread_rng());
+
+        MemberInfo {
+            validator_address: Address::new([id; 32]),
+            operator_address: Address::new([id; 32]),
+            next_epoch_public_key: bls_keypair.public().clone(),
+            https_address: None,
+            tls_public_key: None,
+            encryption_public_key: Some(encryption_public_key),
+        }
+    }
+
+    fn create_test_committee_member(id: u8, weight: u64) -> BlsCommitteeMember {
+        let bls_keypair = BLS12381KeyPair::generate(&mut rand::thread_rng());
+        BlsCommitteeMember::new(Address::new([id; 32]), bls_keypair.public().clone(), weight)
+    }
+
+    fn create_test_committee_set(member_weights: &[(u8, u64)], epoch: u64) -> CommitteeSet {
+        let members: BTreeMap<Address, MemberInfo> = member_weights
+            .iter()
+            .map(|(id, _)| {
+                let addr = Address::new([*id; 32]);
+                (addr, create_test_member_info(*id))
+            })
+            .collect();
+
+        let committee_members: Vec<BlsCommitteeMember> = member_weights
+            .iter()
+            .map(|(id, weight)| create_test_committee_member(*id, *weight))
+            .collect();
+
+        let committee = BlsCommittee::new(committee_members, epoch);
+        let mut committees = BTreeMap::new();
+        committees.insert(epoch, committee);
+
+        CommitteeSet {
+            members_id: Address::new([0; 32]),
+            members,
+            epoch,
+            committees_id: Address::new([1; 32]),
+            committees,
+        }
+    }
+
+    #[test]
+    fn test_build_dkg_config_basic() {
+        let committee_set = create_test_committee_set(
+            &[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)],
+            42,
+        );
+        let config = committee_set.build_dkg_config().unwrap();
+
+        assert_eq!(config.epoch, 42);
+        assert_eq!(config.total_weight(), 7);
+        // max_faulty = (7-1)/3 = 2, threshold = 2+1 = 3
+        assert_eq!(config.max_faulty, 2);
+        assert_eq!(config.threshold, 3);
+    }
+
+    #[test]
+    fn test_build_dkg_config_deterministic_party_ids() {
+        // Create members in reverse order
+        let committee_set = create_test_committee_set(&[(3, 1), (2, 1), (1, 1), (0, 1)], 1);
+        let config = committee_set.build_dkg_config().unwrap();
+
+        // Party IDs should be assigned by sorted address order
+        assert_eq!(
+            config.address_to_party_id.get(&Address::new([0; 32])),
+            Some(&0)
+        );
+        assert_eq!(
+            config.address_to_party_id.get(&Address::new([1; 32])),
+            Some(&1)
+        );
+        assert_eq!(
+            config.address_to_party_id.get(&Address::new([2; 32])),
+            Some(&2)
+        );
+        assert_eq!(
+            config.address_to_party_id.get(&Address::new([3; 32])),
+            Some(&3)
+        );
+    }
+
+    #[test]
+    fn test_build_dkg_config_weighted() {
+        let committee_set = create_test_committee_set(&[(0, 3), (1, 2), (2, 2), (3, 1), (4, 1)], 1);
+        let config = committee_set.build_dkg_config().unwrap();
+
+        assert_eq!(config.total_weight(), 9);
+        // max_faulty = (9-1)/3 = 2, threshold = 2+1 = 3
+        assert_eq!(config.max_faulty, 2);
+        assert_eq!(config.threshold, 3);
+    }
+
+    #[test]
+    fn test_build_dkg_config_missing_encryption_key() {
+        let mut committee_set = create_test_committee_set(&[(0, 1), (1, 1), (2, 1), (3, 1)], 1);
+        // Remove encryption key from one member
+        committee_set
+            .members
+            .get_mut(&Address::new([0; 32]))
+            .unwrap()
+            .encryption_public_key = None;
+
+        let result = committee_set.build_dkg_config();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no encryption public key"));
+    }
+
+    #[test]
+    fn test_build_dkg_config_no_committee_for_epoch() {
+        let mut committee_set = create_test_committee_set(&[(0, 1), (1, 1), (2, 1), (3, 1)], 1);
+        // Change epoch to one without a committee
+        committee_set.epoch = 999;
+
+        let result = committee_set.build_dkg_config();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no committee for current epoch"));
     }
 }
