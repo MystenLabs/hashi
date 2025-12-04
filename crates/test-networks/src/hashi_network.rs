@@ -37,7 +37,8 @@ impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();
-        let hashi_instance = Hashi::new_with_registry(server_version, config, None, None, &registry);
+        let hashi_instance =
+            Hashi::new_with_registry(server_version, config, None, None, &registry);
         Ok(Self(hashi_instance))
     }
 
