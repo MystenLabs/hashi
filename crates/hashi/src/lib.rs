@@ -17,6 +17,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     onchain_state: std::sync::OnceLock<onchain::OnchainState>,
     // TODO: Remove `Option` wrappers below after we are able to initialize them
+    // TODO: Replace `DkgManager` by `MpcManager`
     pub dkg_manager: Option<Mutex<dkg::DkgManager>>,
     pub tls_registry: Option<dkg::rpc::TlsRegistry>,
 }
