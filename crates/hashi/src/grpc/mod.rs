@@ -82,11 +82,17 @@ impl HttpService {
     }
 
     pub fn dkg_manager(&self) -> &std::sync::Mutex<crate::dkg::DkgManager> {
-        todo!("Hashi::dkg_manager not yet implemented")
+        self.inner
+            .dkg_manager
+            .as_ref()
+            .expect("DkgManager not initialized")
     }
 
     pub fn tls_registry(&self) -> &crate::dkg::rpc::TlsRegistry {
-        todo!("Hashi::tls_registry not yet implemented")
+        self.inner
+            .tls_registry
+            .as_ref()
+            .expect("TlsRegistry not initialized")
     }
 }
 

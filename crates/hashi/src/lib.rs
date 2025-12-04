@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub mod bls;
 pub mod communication;
@@ -16,22 +16,34 @@ pub struct Hashi {
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
     onchain_state: std::sync::OnceLock<onchain::OnchainState>,
+    // TODO: Remove `Option` wrappers below
+    pub dkg_manager: Option<Mutex<dkg::DkgManager>>,
+    pub tls_registry: Option<dkg::rpc::TlsRegistry>,
 }
 
 impl Hashi {
-    pub fn new(server_version: ServerVersion, config: config::Config) -> Arc<Self> {
+    pub fn new(
+        server_version: ServerVersion,
+        config: config::Config,
+        dkg_manager: Option<dkg::DkgManager>,
+        tls_registry: Option<dkg::rpc::TlsRegistry>,
+    ) -> Arc<Self> {
         let metrics = Arc::new(metrics::Metrics::new_default());
         Arc::new(Self {
             server_version,
             config,
             metrics,
             onchain_state: Default::default(),
+            dkg_manager: dkg_manager.map(Mutex::new),
+            tls_registry,
         })
     }
 
     pub fn new_with_registry(
         server_version: ServerVersion,
         config: config::Config,
+        dkg_manager: Option<dkg::DkgManager>,
+        tls_registry: Option<dkg::rpc::TlsRegistry>,
         registry: &prometheus::Registry,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -39,6 +51,8 @@ impl Hashi {
             config,
             metrics: Arc::new(metrics::Metrics::new(registry)),
             onchain_state: Default::default(),
+            dkg_manager: dkg_manager.map(Mutex::new),
+            tls_registry,
         })
     }
 
@@ -101,7 +115,7 @@ mod test {
         let config = Config::new_for_testing();
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config);
+        let hashi = Hashi::new(server_version, config, None, None);
 
         let http_server = crate::grpc::HttpService::new(hashi).start().await;
 
