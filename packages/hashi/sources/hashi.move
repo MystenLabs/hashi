@@ -14,7 +14,7 @@ use sui::{bag::{Self, Bag}, balance::Balance, coin::Coin, object_bag::ObjectBag,
 
 public struct Hashi has key {
     id: UID,
-    committees: CommitteeSet,
+    committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
@@ -77,7 +77,7 @@ public fun confirm_deposit(
 fun init(ctx: &mut TxContext) {
     let hashi = Hashi {
         id: object::new(ctx),
-        committees: hashi::committee_set::create(ctx),
+        committee_set: hashi::committee_set::create(ctx),
         config: hashi::config::create(),
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
@@ -123,14 +123,14 @@ public fun register_validator(
     ctx: &mut TxContext,
 ) {
     self.config.assert_version();
-    self.committees.new_member(sui_system, public_key, proof_of_possession_signature, ctx);
+    self.committee_set.new_member(sui_system, public_key, proof_of_possession_signature, ctx);
 }
 
 //TODO require the validator address passed in to better support operator address
 public fun update_https_address(self: &mut Hashi, https_address: String, ctx: &mut TxContext) {
     self.config.assert_version();
 
-    self.committees.set_https_address(ctx.sender(), https_address, ctx);
+    self.committee_set.set_https_address(ctx.sender(), https_address, ctx);
 }
 
 //TODO require the validator address passed in to better support operator address
@@ -141,7 +141,7 @@ public fun update_tls_public_key(
 ) {
     self.config.assert_version();
 
-    self.committees.set_tls_public_key(ctx.sender(), tls_public_key, ctx);
+    self.committee_set.set_tls_public_key(ctx.sender(), tls_public_key, ctx);
 }
 
 //TODO require the validator address passed in to better support operator address
@@ -163,14 +163,10 @@ entry fun bootstrap(
 ) {
     self.config.assert_version();
 
-    assert!(self.committees.epoch() == 0);
-    assert!(!self.committees.has_committee(ctx.epoch()));
+    assert!(self.committee_set.epoch() == 0);
+    assert!(!self.committee_set.has_committee(ctx.epoch()));
 
-    self.committees.bootstrap(sui_system, ctx);
-}
-
-public(package) fun id_mut(self: &mut Hashi): &mut UID {
-    &mut self.id
+    self.committee_set.bootstrap(sui_system, ctx);
 }
 
 public(package) fun config(self: &Hashi): &Config {
@@ -185,12 +181,12 @@ public(package) fun treasury(self: &Hashi): &Treasury {
     &self.treasury
 }
 
-public(package) fun committees(self: &Hashi): &CommitteeSet {
-    &self.committees
+public(package) fun committee_set(self: &Hashi): &CommitteeSet {
+    &self.committee_set
 }
 
 public(package) fun current_committee(self: &Hashi): &Committee {
-    self.committees.current_committee()
+    self.committee_set.current_committee()
 }
 
 public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {

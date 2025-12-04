@@ -26,7 +26,7 @@ public fun propose(
     proposal::new(hashi, UpdateDepositFee { fee }, THRESHOLD_BPS, metadata, ctx)
 }
 
-public fun execute(self: Proposal<UpdateDepositFee>, hashi: &mut Hashi) {
-    let UpdateDepositFee { fee } = self.execute(hashi);
+public fun execute(hashi: &mut Hashi, proposal: Proposal<UpdateDepositFee>) {
+    let UpdateDepositFee { fee } = proposal.execute(hashi);
     hashi.config_mut().set_deposit_fee(fee);
 }

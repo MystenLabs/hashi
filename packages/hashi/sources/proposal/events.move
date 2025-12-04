@@ -53,6 +53,7 @@ public(package) fun emit_proposal_deleted_event(proposal_id: ID) {
     });
 }
 
+// TODO: add any relevant proposal data to the event
 public(package) fun emit_proposal_executed_event(proposal_id: ID) {
     event::emit(ProposalExecutedEvent {
         proposal_id,

@@ -20,13 +20,13 @@ public struct Proposal<T> has key, store {
 }
 
 // ~~~~~~~ Errors ~~~~~~~
-#[error]
+#[error(code = 0)]
 const EUnauthorizedCaller: vector<u8> = b"Caller must be a voting member";
-#[error]
+#[error(code = 1)]
 const EVoteAlreadyCounted: vector<u8> = b"Vote already counted";
-#[error]
+#[error(code = 2)]
 const EQuorumNotReached: vector<u8> = b"Quorum not reached";
-#[error]
+#[error(code = 3)]
 const ENoVoteFound: vector<u8> = b"Vote doesn't exist";
 
 // ~~~~~~~ Public Functions ~~~~~~~
@@ -39,7 +39,7 @@ public(package) fun new<T: store>(
     ctx: &mut TxContext,
 ) {
     // only voters can create proposal
-    assert!(hashi.committees().has_member(ctx.sender()), EUnauthorizedCaller);
+    assert!(hashi.committee_set().contains(ctx.sender()), EUnauthorizedCaller);
 
     let votes = vector[ctx.sender()];
 
@@ -61,12 +61,14 @@ public(package) fun new<T: store>(
 public(package) fun execute<T>(proposal: Proposal<T>, hashi: &Hashi): T {
     assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
 
+    // TODO: add version to proposal and check that it is a whitelisted version
+
     proposal_events::emit_proposal_executed_event(proposal.id.to_inner());
     proposal.delete()
 }
 
 public fun vote<T>(proposal: &mut Proposal<T>, hashi: &Hashi, ctx: &mut TxContext) {
-    assert!(hashi.committees().has_member(ctx.sender()), EUnauthorizedCaller);
+    assert!(hashi.committee_set().contains(ctx.sender()), EUnauthorizedCaller);
     assert!(!proposal.votes.contains(&ctx.sender()), EVoteAlreadyCounted);
 
     proposal.votes.push_back(ctx.sender());
@@ -79,10 +81,9 @@ public fun vote<T>(proposal: &mut Proposal<T>, hashi: &Hashi, ctx: &mut TxContex
 }
 
 public fun remove_vote<T>(proposal: &mut Proposal<T>, hashi: &mut Hashi, ctx: &mut TxContext) {
-    assert!(hashi.committees().has_member(ctx.sender()), EUnauthorizedCaller);
+    assert!(hashi.committee_set().contains(ctx.sender()), EUnauthorizedCaller);
 
-    let (vote_exists, index) = proposal.votes.index_of(&ctx.sender());
-    assert!(vote_exists, ENoVoteFound);
+    let index = proposal.votes.find_index!(|v| v == &ctx.sender()).destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
     proposal_events::emit_vote_removed_event(
@@ -92,8 +93,6 @@ public fun remove_vote<T>(proposal: &mut Proposal<T>, hashi: &mut Hashi, ctx: &m
 }
 
 public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
-    // if (proposal.certificate.is_some()) return true;
-
     let valid_voting_power = proposal.votes.fold!(0, |acc, voter| {
         acc + hashi.current_committee().get_member_weight(&voter)
     });
@@ -111,10 +110,6 @@ public(package) fun delete<T>(proposal: Proposal<T>): T {
     } = proposal;
     id.delete();
     data
-}
-
-public(package) fun id<T>(proposal: &Proposal<T>): ID {
-    proposal.id.to_inner()
 }
 
 // ~~~~~~~ Getters ~~~~~~~                                                                                                                                                                                                                                                                                                                                                              ~~~~~~~
