@@ -79,6 +79,14 @@ impl Hashi {
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
     }
+
+    /// TODO: Implement after committee info fetching is available.
+    /// This requires:
+    /// - HTTPS addresses for each validator (from on-chain MemberInfo.https_address)
+    /// - Current epoch (from on-chain CommitteeSet.epoch)
+    pub async fn create_mpc_p2p_channel(&self) -> dkg::rpc::RpcP2PChannel {
+        todo!("create_mpc_p2p_channel: requires committee info from chain")
+    }
 }
 
 #[derive(Clone)]
