@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod proto;
 pub mod storage;
 pub mod tls;
+pub mod onchain;
 
 pub struct Hashi {
     pub server_version: ServerVersion,

@@ -1708,6 +1708,7 @@ dependencies = [
  "sui-http",
  "sui-rpc",
  "sui-sdk-types",
+ "tap",
  "test-strategy",
  "thiserror 1.0.69",
  "tokio",

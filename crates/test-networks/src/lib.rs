@@ -191,4 +191,22 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn foo() -> Result<()> {
+        const TEST_NUM_NODES: usize = 1;
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+
+        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids).await?;
+
+        println!("{state:#?}");
+
+        Ok(())
+    }
 }

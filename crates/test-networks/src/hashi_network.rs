@@ -70,11 +70,18 @@ impl HashiNodeHandle {
     }
 }
 
-pub struct HashiNetwork(pub Vec<HashiNodeHandle>);
+pub struct HashiNetwork {
+    ids: HashiIds,
+    nodes: Vec<HashiNodeHandle>,
+}
 
 impl HashiNetwork {
     pub fn nodes(&self) -> &[HashiNodeHandle] {
-        &self.0
+        &self.nodes
+    }
+
+    pub fn ids(&self) -> HashiIds {
+        self.ids
     }
 }
 
@@ -140,7 +147,10 @@ impl HashiNetworkBuilder {
             nodes.push(node_handle);
         }
 
-        Ok(HashiNetwork(nodes))
+        Ok(HashiNetwork {
+            ids: hashi_ids,
+            nodes,
+        })
     }
 }
 
