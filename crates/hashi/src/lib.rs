@@ -81,9 +81,8 @@ impl Hashi {
     }
 
     /// TODO: Implement after committee info fetching is available.
-    /// This requires:
-    /// - HTTPS addresses for each validator (from on-chain MemberInfo.https_address)
-    /// - Current epoch (from on-chain CommitteeSet.epoch)
+    /// This requires HTTPS addresses for each validator (from on-chain MemberInfo.https_address)
+    /// and current epoch.
     pub async fn create_mpc_p2p_channel(&self) -> dkg::rpc::RpcP2PChannel {
         todo!("create_mpc_p2p_channel: requires committee info from chain")
     }
