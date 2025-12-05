@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 pub mod bls;
-pub mod committee;
 pub mod communication;
 pub mod config;
 pub mod dkg;
 pub mod grpc;
 pub mod metrics;
+pub mod onchain;
 pub mod proto;
 pub mod storage;
 pub mod tls;
@@ -15,6 +15,7 @@ pub struct Hashi {
     pub server_version: ServerVersion,
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
+    onchain_state: std::sync::OnceLock<onchain::OnchainState>,
 }
 
 impl Hashi {
@@ -24,6 +25,7 @@ impl Hashi {
             server_version,
             config,
             metrics,
+            onchain_state: Default::default(),
         })
     }
 
@@ -36,11 +38,29 @@ impl Hashi {
             server_version,
             config,
             metrics: Arc::new(metrics::Metrics::new(registry)),
+            onchain_state: Default::default(),
         })
+    }
+
+    pub fn onchain_state(&self) -> &onchain::OnchainState {
+        self.onchain_state
+            .get()
+            .expect("hashi has not finished initializing")
+    }
+
+    async fn initialize_onchain_state(&self) {
+        let onchain_state = onchain::OnchainState::new(
+            self.config.sui_rpc.as_deref().unwrap(),
+            self.config.hashi_ids(),
+        )
+        .await
+        .unwrap();
+        self.onchain_state.set(onchain_state).unwrap();
     }
 
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
+            self.initialize_onchain_state().await;
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
     }

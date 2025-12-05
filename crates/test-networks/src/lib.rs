@@ -191,4 +191,28 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_onchain_state_scraping() -> Result<()> {
+        const TEST_NUM_NODES: usize = 1;
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+
+        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids).await?;
+
+        assert_eq!(state.state().hashi().committees.committees.len(), 1);
+        assert_eq!(state.state().hashi().committees.members.len(), 1);
+        assert_eq!(state.state().hashi().treasury.treasury_caps.len(), 1);
+        assert_eq!(state.state().hashi().treasury.metadata_caps.len(), 1);
+        assert!(state.state().hashi().treasury.coins.is_empty());
+
+        // println!("{state:#?}");
+
+        Ok(())
+    }
 }
