@@ -63,7 +63,7 @@ pub struct EnclaveConfig {
     pub bitcoin_network: OnceLock<Network>,
     /// Bitcoin change address for withdrawals
     pub change_address: OnceLock<Address>,
-    /// Rate limiter
+    /// Rate limiter (Note: MyRateLimiter uses interior mutability)
     pub rate_limiter: OnceLock<MyRateLimiter>,
 }
 
@@ -71,7 +71,7 @@ pub type MyRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 /// Mutable state that changes during operation
 pub struct EnclaveState {
-    /// Hashi info, e.g., btc pk, bls pk's, etc.
+    /// Hashi bls pk's
     pub hashi_committee_info: HashiCommitteeInfo,
     /// Withdrawal-related state
     pub withdraw_state: WithdrawalState,
