@@ -899,7 +899,10 @@ mod tests {
             let response = manager
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
-                    crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
                 })?;
             Ok(response)
         }
@@ -919,7 +922,10 @@ mod tests {
             let response = manager
                 .handle_retrieve_message_request(request)
                 .map_err(|e| {
-                    crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
                 })?;
             Ok(response)
         }
@@ -1097,7 +1103,10 @@ mod tests {
             let response = manager
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
-                    crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
                 })?;
             Ok(response)
         }
@@ -1234,7 +1243,9 @@ mod tests {
                 .unwrap()
                 .get(party)
                 .cloned()
-                .ok_or_else(|| crate::communication::ChannelError::RequestFailed("No response".into()))
+                .ok_or_else(|| {
+                    crate::communication::ChannelError::RequestFailed("No response".into())
+                })
         }
     }
 
