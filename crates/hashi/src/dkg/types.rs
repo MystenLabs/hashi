@@ -576,16 +576,14 @@ mod tests {
         let config = DkgConfig::from_committee_set(&committee_set).unwrap();
         assert_eq!(config.total_weight(), 3); // Only 3 members included
         assert!(
-            config
+            !config
                 .address_to_party_id
-                .get(&Address::new([0; 32]))
-                .is_none()
+                .contains_key(&Address::new([0; 32]))
         );
         assert!(
             config
                 .address_to_party_id
-                .get(&Address::new([1; 32]))
-                .is_some()
+                .contains_key(&Address::new([1; 32]))
         );
     }
 
