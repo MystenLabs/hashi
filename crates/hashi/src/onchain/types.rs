@@ -91,6 +91,12 @@ impl MemberInfo {
     pub fn https_address(&self) -> Option<&http::Uri> {
         self.https_address.as_ref()
     }
+
+    pub fn encryption_public_key(
+        &self,
+    ) -> Option<&fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>> {
+        self.encryption_public_key.as_ref()
+    }
 }
 
 #[derive(Debug)]
