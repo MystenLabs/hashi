@@ -89,6 +89,12 @@ public struct MemberInfo has store {
     /// This public key can be rotated and any such updates will take effect
     /// immediately.
     tls_public_key: vector<u8>,
+    /// A 32-byte ristretto255 Ristretto encryption public key (ristretto255
+    /// RistrettoPoint) for MPC ECIES.
+    ///
+    /// This public key can be rotated and any such updates will take effect
+    /// immediately.
+    encryption_public_key: vector<u8>,
 }
 
 /// Register as a member of Hashi.
@@ -120,6 +126,7 @@ public(package) fun new_member(
         next_epoch_public_key: next_epoch_public_key,
         https_address: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
+        encryption_public_key: std::vector::empty(),
     };
 
     committee_set.insert_member(member);
@@ -175,6 +182,18 @@ public(package) fun set_tls_public_key(
     member.tls_public_key = tls_public_key;
 }
 
+/// Set the encryption_public_key of the member.
+public(package) fun set_encryption_public_key(
+    self: &mut CommitteeSet,
+    validator_address: address,
+    encryption_public_key: vector<u8>,
+    ctx: &TxContext,
+) {
+    let member = self.member_mut(validator_address);
+    member.assert_update_permitted(ctx);
+    member.encryption_public_key = encryption_public_key;
+}
+
 /// Set the operator_address of the member.
 fun set_operator_address(
     self: &mut CommitteeSet,
@@ -207,6 +226,11 @@ fun https_address(self: &MemberInfo): &String {
 /// Return the tls_public_key of the node.
 fun tls_public_key(self: &MemberInfo): &vector<u8> {
     &self.tls_public_key
+}
+
+/// Return the encryption_public_key of the node.
+fun encryption_public_key(self: &MemberInfo): &vector<u8> {
+    &self.encryption_public_key
 }
 
 /// Return the current epoch.

@@ -64,6 +64,13 @@ pub struct MemberInfo {
     /// This public key can be rotated and any such updates will take effect
     /// immediately.
     pub tls_public_key: Vec<u8>,
+
+    /// A 32-byte ristretto255 Ristretto encryption public key (ristretto255
+    /// RistrettoPoint) for MPC ECIES.
+    ///
+    /// This public key can be rotated and any such updates will take effect
+    /// immediately.
+    pub encryption_public_key: Vec<u8>,
 }
 
 /// Rust version of the Move hashi::committee::CommitteeMember type.

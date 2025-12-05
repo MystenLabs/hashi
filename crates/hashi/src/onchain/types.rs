@@ -61,6 +61,14 @@ pub struct MemberInfo {
     /// This public key can be rotated and any such updates will take effect
     /// immediately.
     pub tls_public_key: Option<ed25519_dalek::VerifyingKey>,
+
+    /// A 32-byte ristretto255 Ristretto encryption public key (ristretto255
+    /// RistrettoPoint) for MPC ECIES.
+    ///
+    /// This public key can be rotated and any such updates will take effect
+    /// immediately.
+    pub encryption_public_key:
+        Option<fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>>,
 }
 
 impl MemberInfo {

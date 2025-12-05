@@ -204,6 +204,9 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let tls_public_key = Input::Pure {
         value: config.tls_public_key()?.as_bytes().to_vec().to_bcs()?,
     };
+    let encryption_public_key = Input::Pure {
+        value: config.encryption_public_key()?.as_element().compress().as_slice().to_bcs()?,
+    };
 
     let pt = ProgrammableTransaction {
         inputs: vec![
@@ -221,6 +224,7 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             proof_of_possession,
             https_address,
             tls_public_key,
+            encryption_public_key,
         ],
         commands: vec![
             sui_sdk_types::Command::MoveCall(MoveCall {
@@ -248,6 +252,13 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
                 function: Identifier::from_static("update_tls_public_key"),
                 type_arguments: vec![],
                 arguments: vec![Argument::Input(1), Argument::Input(5)],
+            }),
+            sui_sdk_types::Command::MoveCall(MoveCall {
+                package: ids.package_id,
+                module: Identifier::from_static("hashi"),
+                function: Identifier::from_static("update_encryption_public_key"),
+                type_arguments: vec![],
+                arguments: vec![Argument::Input(1), Argument::Input(6)],
             }),
         ],
     };
