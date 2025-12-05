@@ -2,7 +2,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use futures::TryStreamExt;
-use sui_sdk_types::TypeTag;
+use std::sync::RwLockReadGuard;
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -17,6 +17,7 @@ use sui_rpc::{
     proto::sui::rpc::v2::{GetObjectRequest, ListPackageVersionsRequest, Object},
 };
 use sui_sdk_types::Address;
+use sui_sdk_types::TypeTag;
 use tap::Pipe;
 use tokio::sync::broadcast;
 
@@ -34,14 +35,17 @@ pub struct OnchainState(Arc<Inner>);
 
 #[derive(Debug)]
 struct Inner {
+    #[allow(unused)]
     ids: HashiIds,
+    #[allow(unused)]
     sender: broadcast::Sender<()>,
     state: RwLock<State>,
 }
 
 #[derive(Debug)]
-struct State {
+pub struct State {
     /// The checkpoint height that this state is recent to
+    #[allow(unused)]
     checkpoint: u64,
     package_versions: BTreeMap<u64, Address>,
     hashi: types::Hashi,
@@ -55,16 +59,28 @@ impl OnchainState {
 
         let state = State::scrape(client.clone(), ids).await?.pipe(RwLock::new);
 
-        //TODO spawn watcher
+        //TODO spawn watcher and enable partial updates and notifications
 
         Inner { ids, sender, state }
             .pipe(Arc::new)
             .pipe(Self)
             .pipe(Ok)
     }
+
+    pub fn state(&self) -> RwLockReadGuard<'_, State> {
+        self.0.state.read().unwrap()
+    }
 }
 
 impl State {
+    pub fn package_versions(&self) -> &BTreeMap<u64, Address> {
+        &self.package_versions
+    }
+
+    pub fn hashi(&self) -> &types::Hashi {
+        &self.hashi
+    }
+
     async fn scrape(client: Client, ids: HashiIds) -> Result<Self> {
         let (package_versions, (checkpoint, hashi)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
@@ -185,7 +201,6 @@ async fn scrape_treasury(
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
     let mut coins: BTreeMap<TypeTag, types::Coin> = BTreeMap::new();
 
-
     let mut stream = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
@@ -203,13 +218,27 @@ async fn scrape_treasury(
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        //
-        println!("{field:#?}");
+        let type_tag = field.child_object().contents().name().parse()?;
+        let contents = field.child_object().contents().value();
+
+        if let Some(treasury_cap) = types::TreasuryCap::try_from_contents(&type_tag, contents) {
+            treasury_caps.insert(treasury_cap.coin_type.clone(), treasury_cap);
+        } else if let Some(metadata_cap) =
+            types::MetadataCap::try_from_contents(&type_tag, contents)
+        {
+            metadata_caps.insert(metadata_cap.coin_type.clone(), metadata_cap);
+        } else if let Some(coin) = types::Coin::try_from_contents(&type_tag, contents) {
+            coins.insert(coin.coin_type.clone(), coin);
+        } else {
+            tracing::warn!("unknown type stored in treasury");
+        }
     }
 
-    //TODO scrape metadata and treasury caps
     Ok(types::Treasury {
         id: treasury.objects.id,
+        treasury_caps,
+        metadata_caps,
+        coins,
     })
 }
 

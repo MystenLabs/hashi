@@ -22,10 +22,12 @@ pub struct Hashi {
 
 #[derive(Debug)]
 pub struct CommitteeSet {
+    /// Id of the `Bag` containing the validator info structs
     pub members_id: Address,
     pub members: BTreeMap<Address, MemberInfo>,
     /// The current epoch.
     pub epoch: u64,
+    /// Id of the `Bag` containing the committee's per epoch
     pub committees_id: Address,
     pub committees: BTreeMap<u64, BlsCommittee>,
 }
@@ -61,6 +63,28 @@ pub struct MemberInfo {
     pub tls_public_key: Option<ed25519_dalek::VerifyingKey>,
 }
 
+impl MemberInfo {
+    pub fn validator_address(&self) -> &Address {
+        &self.validator_address
+    }
+
+    pub fn operator_address(&self) -> &Address {
+        &self.operator_address
+    }
+
+    pub fn next_epoch_public_key(&self) -> &BLS12381PublicKey {
+        &self.next_epoch_public_key
+    }
+
+    pub fn tls_public_key(&self) -> Option<&ed25519_dalek::VerifyingKey> {
+        self.tls_public_key.as_ref()
+    }
+
+    pub fn https_address(&self) -> Option<&http::Uri> {
+        self.https_address.as_ref()
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub config: BTreeMap<String, CoinfigValue>,
@@ -78,7 +102,9 @@ pub enum CoinfigValue {
 #[derive(Debug)]
 pub struct Treasury {
     pub id: Address,
-    //TODO have maps to treasury and metadata
+    pub treasury_caps: BTreeMap<TypeTag, TreasuryCap>,
+    pub metadata_caps: BTreeMap<TypeTag, MetadataCap>,
+    pub coins: BTreeMap<TypeTag, Coin>,
 }
 
 #[derive(Debug)]
@@ -143,10 +169,59 @@ pub struct TreasuryCap {
     pub supply: u64,
 }
 
+impl TreasuryCap {
+    pub fn try_from_contents(type_tag: &TypeTag, contents: &[u8]) -> Option<Self> {
+        let TypeTag::Struct(struct_tag) = type_tag else {
+            return None;
+        };
+
+        if struct_tag.address() == &Address::TWO
+            && struct_tag.module() == "coin"
+            && struct_tag.name() == "TreasuryCap"
+            && let [coin_type] = struct_tag.type_params()
+            && contents.len() == Address::LENGTH + std::mem::size_of::<u64>()
+        {
+            let id = Address::new((&contents[..Address::LENGTH]).try_into().unwrap());
+            let supply = u64::from_le_bytes((&contents[Address::LENGTH..]).try_into().unwrap());
+            Some(Self {
+                coin_type: coin_type.to_owned(),
+                id,
+                supply,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct MetadataCap {
     pub coin_type: TypeTag,
     pub id: Address,
+}
+
+impl MetadataCap {
+    pub fn try_from_contents(type_tag: &TypeTag, contents: &[u8]) -> Option<Self> {
+        let TypeTag::Struct(struct_tag) = type_tag else {
+            return None;
+        };
+
+        if struct_tag.address() == &Address::TWO
+            && struct_tag.module() == "coin_registry"
+            && struct_tag.name() == "MetadataCap"
+            && let [coin_type] = struct_tag.type_params()
+            && contents.len() == Address::LENGTH
+        {
+            let id = Address::from_bytes(contents).unwrap();
+
+            Some(Self {
+                coin_type: coin_type.to_owned(),
+                id,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -154,4 +229,29 @@ pub struct Coin {
     pub coin_type: TypeTag,
     pub id: Address,
     pub balance: u64,
+}
+
+impl Coin {
+    pub fn try_from_contents(type_tag: &TypeTag, contents: &[u8]) -> Option<Self> {
+        let TypeTag::Struct(struct_tag) = type_tag else {
+            return None;
+        };
+
+        if struct_tag.address() == &Address::TWO
+            && struct_tag.module() == "coin"
+            && struct_tag.name() == "Coin"
+            && let [coin_type] = struct_tag.type_params()
+            && contents.len() == Address::LENGTH + std::mem::size_of::<u64>()
+        {
+            let id = Address::new((&contents[..Address::LENGTH]).try_into().unwrap());
+            let balance = u64::from_le_bytes((&contents[Address::LENGTH..]).try_into().unwrap());
+            Some(Self {
+                coin_type: coin_type.to_owned(),
+                id,
+                balance,
+            })
+        } else {
+            None
+        }
+    }
 }
