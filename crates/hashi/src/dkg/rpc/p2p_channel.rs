@@ -19,9 +19,9 @@ impl RpcP2PChannel {
     }
 
     fn get_client(&self, address: &Address) -> ChannelResult<&DkgRpcClient> {
-        self.clients
-            .get(address)
-            .ok_or_else(|| ChannelError::SendFailed(format!("no client for address {}", address)))
+        self.clients.get(address).ok_or_else(|| {
+            ChannelError::RequestFailed(format!("no client for address {}", address))
+        })
     }
 }
 
@@ -35,7 +35,7 @@ impl P2PChannel for RpcP2PChannel {
         self.get_client(recipient)?
             .send_message(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::SendFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
     async fn retrieve_message(
@@ -46,7 +46,7 @@ impl P2PChannel for RpcP2PChannel {
         self.get_client(party)?
             .retrieve_message(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::SendFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
     async fn complain(
@@ -57,6 +57,6 @@ impl P2PChannel for RpcP2PChannel {
         self.get_client(party)?
             .complain(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::SendFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 }

@@ -15,8 +15,8 @@ pub type ChannelResult<T> = Result<T, ChannelError>;
 /// Error type for channel operations
 #[derive(Debug, Error)]
 pub enum ChannelError {
-    #[error("Send failed: {0}")]
-    SendFailed(String),
+    #[error("Request failed: {0}")]
+    RequestFailed(String),
 
     #[error("Receive timeout")]
     Timeout,
