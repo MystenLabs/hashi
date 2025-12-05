@@ -19,20 +19,19 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 use tracing::info;
 
-mod attestation;
-mod health_check;
+mod getters;
 mod init;
 mod s3_logger;
 mod setup;
 mod withdraw;
 
-use crate::attestation::get_attestation;
-use crate::health_check::health_check;
+use crate::getters::{get_attestation, get_enclave_info, health_check};
 use crate::s3_logger::S3Logger;
 use crate::withdraw::delayed_withdraw;
 use crate::withdraw::instant_withdraw;
@@ -61,7 +60,7 @@ pub struct EnclaveConfig {
     /// Rate limiter for withdrawals
     pub withdraw_controls_config: OnceLock<WithdrawalConfig>,
     /// Bitcoin network (mainnet, testnet, regtest, etc.)
-    pub bitcoin_network: Network,
+    pub bitcoin_network: OnceLock<Network>,
     /// Bitcoin change address for withdrawals
     pub change_address: OnceLock<Address>,
     /// Rate limiter
@@ -98,22 +97,21 @@ pub struct EphemeralKeyPairs {
 async fn main() -> Result<()> {
     init_tracing_subscriber(true);
 
-    // Read bitcoin network and max amount withdrawn per hour from environment variable
-    let bitcoin_network = std::env::var("BITCOIN_NETWORK")
-        .ok()
-        .and_then(|s| s.parse::<Network>().ok());
-    info!("Bitcoin network: {:?}", bitcoin_network);
-
     let signing_keys = SigningKey::new(rand::thread_rng());
     let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, bitcoin_network));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
     let app = Router::new()
+        // ------------------------------------------------
+        // ---------------- Getters -----------------------
+        // ------------------------------------------------
         .route("/health_check", get(health_check))
+        .route("/get_enclave_info", get(get_enclave_info))
         .route("/get_attestation", get(get_attestation))
         // ------------------------------------------------
         // ---------------- Initialization ----------------
-        // TODO: Add a config flag that determines whether setup_new_key is exposed?
+        // ------------------------------------------------
+        // TODO: Add a config flag that determines whether setup_new_key is exposed
         // Setup new BTC key and secret share it with key provisioner (KP)
         .route("/setup_new_key", post(setup_new_key))
         // Init enclave (operator)
@@ -122,6 +120,7 @@ async fn main() -> Result<()> {
         .route("/provisioner_init", post(provisioner_init))
         // ------------------------------------------------
         // ---------------- Withdraw ----------------------
+        // ------------------------------------------------
         // Instant withdraw
         .route("/instant_withdraw", post(instant_withdraw))
         // Delayed withdraw
@@ -141,7 +140,6 @@ impl EnclaveConfig {
     pub fn new(
         signing_keys: SigningKey,
         encryption_keys: EncKeyPair,
-        bitcoin_network: Option<Network>,
     ) -> Self {
         EnclaveConfig {
             eph_keys: EphemeralKeyPairs {
@@ -151,7 +149,7 @@ impl EnclaveConfig {
             s3_logger: OnceLock::new(),
             bitcoin_key: OnceLock::new(),
             withdraw_controls_config: OnceLock::new(),
-            bitcoin_network: bitcoin_network.unwrap_or(Network::Regtest),
+            bitcoin_network: OnceLock::new(),
             change_address: OnceLock::new(),
             rate_limiter: OnceLock::new(),
         }
@@ -167,10 +165,9 @@ impl Enclave {
     pub fn new(
         signing_keys: SigningKey,
         encryption_keys: EncKeyPair,
-        bitcoin_network: Option<Network>,
     ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(signing_keys, encryption_keys, bitcoin_network),
+            config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: Mutex::new(EnclaveState {
                 hashi_committee_info: HashiCommitteeInfo::default(),
                 withdraw_state: WithdrawalState::default(),
@@ -190,6 +187,8 @@ impl Enclave {
     /// Is operator init complete?
     pub fn is_operator_init_complete(&self) -> bool {
         self.config.s3_logger.get().is_some()
+            && self.config.bitcoin_network.get().is_some()
+            && self.scratchpad.share_commitments.get().is_some()
     }
 
     /// Is the enclave fully initialized?
@@ -216,12 +215,29 @@ impl Enclave {
         &self.config.eph_keys.signing_keys
     }
 
+    pub fn sign<T: Serialize>(&self, data: T) -> Signed<T> {
+        let kp = self.signing_keypair();
+        let timestamp = SystemTime::now();
+        to_signed_response(kp, data, timestamp)
+    }
+
     // ========================================================================
     // Bitcoin Configuration
     // ========================================================================
 
-    pub fn bitcoin_network(&self) -> Network {
-        self.config.bitcoin_network
+    pub fn bitcoin_network(&self) -> GuardianResult<Network> {
+        self.config
+            .bitcoin_network
+            .get()
+            .copied()
+            .ok_or(InvalidInputs("Network is uninitialized".into()))
+    }
+
+    pub fn set_bitcoin_network(&self, network: Network) -> GuardianResult<()> {
+        self.config
+            .bitcoin_network
+            .set(network)
+            .map_err(|_| InvalidInputs("Network is already initialized".into()))
     }
 
     pub fn btc_key(&self) -> GuardianResult<&SecretKey> {
@@ -248,7 +264,7 @@ impl Enclave {
     }
 
     pub fn set_change_address(&self, addr: Address<NetworkUnchecked>) -> GuardianResult<()> {
-        let network = self.bitcoin_network();
+        let network = self.bitcoin_network()?;
         let address = addr
             .require_network(network)
             .map_err(|e| InvalidInputs(format!("Change address network mismatch: {:?}", e)))?;
@@ -369,23 +385,29 @@ impl EnclaveState {
 
 #[cfg(test)]
 impl Enclave {
-    /// Create a test enclave with all necessary initialization
-    ///
-    /// # Arguments
-    /// * `min_delay` - Optional custom min_delay (defaults to 60 seconds)
-    pub async fn create_for_test_with_min_delay(min_delay: Option<Duration>) -> Arc<Self> {
-        let mut rng = rand::thread_rng();
+    pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = SigningKey::new(rand::thread_rng());
-        let encryption_keys = EncKeyPair::random(&mut rng);
-        let enclave = Arc::new(Enclave::new(
-            signing_keys,
-            encryption_keys,
-            Some(Network::Regtest),
-        ));
+        let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
+        Arc::new(Enclave::new(signing_keys, encryption_keys))
+    }
 
-        // Initialize S3 logger
+    /// Create a fully initialized enclave
+    pub async fn create_for_test_with_min_delay(min_delay: Option<Duration>) -> Arc<Self> {
+        let enclave = Enclave::create_with_random_keys();
+
+        // ---- Operator init ---
+
+        // Set BTC network
+        enclave.set_bitcoin_network(Network::Regtest).unwrap();
+
+        // Initialize mock S3 logger
         let mock_s3_logger = S3Logger::mock_for_testing().await;
         enclave.set_s3_logger(mock_s3_logger).unwrap();
+
+        // Initialize mock share commitments
+        enclave.set_share_commitments(vec![]).unwrap();
+
+        // ---- Key Provisioner init ---
 
         // Set bitcoin key
         let btc_sk = SecretKey::from_slice(&test_utils::TEST_ENCLAVE_SK).unwrap();
@@ -406,25 +428,34 @@ impl Enclave {
             .set_change_address(test_utils::DUMMY_REGTEST_ADDRESS.parse().unwrap())
             .unwrap();
 
+        // Fully initialized!
+        assert!(enclave.is_operator_init_complete() && enclave.is_provisioner_init_complete());
+
         enclave
     }
 
-    /// Create a test enclave with default 60-second delay
+    /// Create a fully initialized test enclave with default 60-second delay
     pub async fn create_for_test() -> Arc<Self> {
         Self::create_for_test_with_min_delay(None).await
     }
 
-    /// Create a bare enclave for testing initialization
-    /// Only sets up S3 logger, no bitcoin key or withdraw config
-    pub async fn create_bare_for_test() -> Arc<Self> {
-        let mut rng = rand::thread_rng();
-        let signing_keys = SigningKey::new(rand::thread_rng());
-        let encryption_keys = EncKeyPair::random(&mut rng);
-        let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, None));
+    /// Create a bare enclave for testing KP initialization flows
+    /// operator_init() succeeds but provisioner_init() fails
+    /// That is, BTC key and other state elements are not set
+    pub async fn create_partially_initialized(network: Network, commitments: &[ShareCommitment]) -> Arc<Self> {
+        let enclave = Enclave::create_with_random_keys();
 
-        // Initialize S3 logger only (required for is_operator_init_complete() to pass)
+        // Initialize S3 logger
         let mock_s3_logger = S3Logger::mock_for_testing().await;
         enclave.set_s3_logger(mock_s3_logger).unwrap();
+        
+        // Set bitcoin network
+        enclave.set_bitcoin_network(network).unwrap();
+
+        // Set share commitments
+        enclave.set_share_commitments(commitments.to_vec()).unwrap();
+
+        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
 
         enclave
     }

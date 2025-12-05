@@ -1,4 +1,6 @@
-use crate::GuardianResult;
+use std::sync::Arc;
+use axum::extract::State;
+use crate::{Enclave, GuardianResult};
 use axum::Json;
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest}; // kept only for fingerprint logging
@@ -14,8 +16,9 @@ use tracing::info;
 
 // Stateless request
 pub async fn setup_new_key(
+    State(enclave): State<Arc<Enclave>>,
     Json(request): Json<SetupNewKeyRequest>,
-) -> GuardianResult<Json<SetupNewKeyResponse>> {
+) -> GuardianResult<Json<Signed<SetupNewKeyResponse>>> {
     info!("/setup_new_key - Received request");
 
     info!("Validating key provisioner public keys...");
@@ -36,7 +39,7 @@ pub async fn setup_new_key(
     info!("Generating new Bitcoin private key...");
     let mut rng = rand::thread_rng();
     let sk = SecretKey::random(&mut rng);
-    // Note: Outputting a fingerprint for testing purposes. We can remove it
+    // Note: Outputting a fingerprint for testing purposes (no security purpose to it, so it can be removed)
     let sk_hash = Blake2b::<U32>::digest(sk.to_bytes().as_slice());
     info!("Bitcoin key generated with fingerprint {:x}", sk_hash);
 
@@ -60,8 +63,39 @@ pub async fn setup_new_key(
     info!("All {} shares encrypted", NUM_OF_SHARES);
     info!("Sending encrypted shares and commitments to client");
 
-    Ok(Json(SetupNewKeyResponse {
+    Ok(Json(enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
         share_commitments,
-    }))
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Json;
+    use hashi_guardian_shared::{commit_share, decrypt_share, NUM_OF_SHARES};
+
+    #[tokio::test]
+    async fn test_setup_new_key() {
+        let enclave = Enclave::create_with_random_keys();
+        let verification_key = &enclave.signing_keypair().verification_key();
+        let (request, kp_private_keys) = SetupNewKeyRequest::mock_for_testing();
+        let Json(resp) = setup_new_key(State(enclave), Json(request)).await.unwrap();
+        let validated_resp = validate_signed_response(verification_key, resp).unwrap();
+        assert_eq!(validated_resp.encrypted_shares.len(), NUM_OF_SHARES);
+
+        for (i, (enc_share, sk)) in validated_resp
+            .encrypted_shares
+            .iter()
+            .zip(kp_private_keys.iter())
+            .enumerate()
+            .take(NUM_OF_SHARES)
+        {
+            let share = decrypt_share(enc_share, sk, None).unwrap();
+            let commitment = &validated_resp.share_commitments[i];
+            assert_eq!(enc_share.id, commitment.id);
+            assert_eq!(commit_share(&share), *commitment);
+            println!("Received share: (id) {:?}", enc_share.id);
+        }
+    }
 }

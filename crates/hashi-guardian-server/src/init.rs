@@ -17,7 +17,6 @@ use tracing::info;
 use GuardianError::*;
 
 // Receives S3 API keys & share commitments.
-// TODO: Another option is to hard-code the share commitments after the key ceremony is over.
 // TODO: Log to S3. Q) what are the must log items for security? Enclave attestation & S3-signing-key. Anything else?
 pub async fn operator_init(
     State(enclave): State<Arc<Enclave>>,
@@ -39,6 +38,9 @@ pub async fn operator_init(
     info!("Storing S3 configuration...");
     enclave.set_s3_logger(logger)?;
 
+    info!("Setting bitcoin network to {:?}...", request.network());
+    enclave.set_bitcoin_network(request.network())?;
+
     info!(
         "Storing {} share commitments...",
         request.share_commitments().len()
@@ -50,6 +52,8 @@ pub async fn operator_init(
         );
     }
     enclave.set_share_commitments(request.share_commitments().to_vec())?;
+
+
 
     info!("S3 configuration complete!");
     Ok(())
@@ -177,32 +181,10 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 
 #[cfg(test)]
 mod tests {
+    use bitcoin::Network;
     use super::*;
     use crate::setup::setup_new_key;
-    use hashi_guardian_shared::crypto::commit_share;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
-    use hashi_guardian_shared::test_utils::*;
-
-    #[tokio::test]
-    async fn test_setup_new_key() {
-        let (request, priv_keys) = mock_setup_new_key_request();
-        let Json(resp) = setup_new_key(Json(request)).await.unwrap();
-        assert_eq!(resp.encrypted_shares.len(), NUM_OF_SHARES);
-
-        for (i, (enc_share, sk)) in resp
-            .encrypted_shares
-            .iter()
-            .zip(priv_keys.iter())
-            .enumerate()
-            .take(NUM_OF_SHARES)
-        {
-            let share = decrypt_share(enc_share, sk, None).unwrap();
-            let commitment = &resp.share_commitments[i];
-            assert_eq!(enc_share.id, commitment.id);
-            assert_eq!(commit_share(&share), *commitment);
-            println!("Received share: (id) {:?}", enc_share.id);
-        }
-    }
 
     #[tokio::test]
     async fn test_provisioner_init() {
@@ -210,23 +192,21 @@ mod tests {
         use axum::extract::State;
 
         // Step 1: Generate KP encryption keys and setup new key
-        let (request, kp_private_keys) = mock_setup_new_key_request();
-        let Json(resp) = setup_new_key(Json(request)).await.unwrap();
-        let encrypted_shares = resp.encrypted_shares;
-        let share_commitments = resp.share_commitments;
+        let enclave = Enclave::create_with_random_keys();
+        let verification_key = &enclave.signing_keypair().verification_key();
+        let (request, kp_private_keys) = SetupNewKeyRequest::mock_for_testing();
+        let Json(resp) = setup_new_key(State(enclave), Json(request)).await.unwrap();
+        let validated_resp = validate_signed_response(verification_key, resp).unwrap();
+        let encrypted_shares = validated_resp.encrypted_shares;
+        let share_commitments = validated_resp.share_commitments;
 
         // Step 2: Create bare enclave (only S3, no bitcoin key/config since we're testing initialization)
-        let enclave = Enclave::create_bare_for_test().await;
+        let enclave = Enclave::create_partially_initialized(Network::Regtest, &share_commitments).await;
 
-        // Step 4: Set share commitments in the enclave
-        enclave
-            .set_share_commitments(share_commitments.clone())
-            .unwrap();
+        // Step 3: Create ProvisionerInitRequestState
+        let init_state = ProvisionerInitRequestState::mock_for_testing();
 
-        // Step 5: Create ProvisionerInitRequestState
-        let init_state = mock_provisioner_init_state();
-
-        // Step 6: Simulate THRESHOLD KPs calling provisioner_init
+        // Step 4: Simulate THRESHOLD KPs calling provisioner_init
         for i in 0..NUM_OF_SHARES {
             // Re-encrypt the share for the enclave's encryption key
             let share = decrypt_share(&encrypted_shares[i], &kp_private_keys[i], None).unwrap();

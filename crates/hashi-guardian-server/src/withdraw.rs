@@ -31,7 +31,7 @@ pub async fn instant_withdraw(
     validate_time(request.info.timestamp())?;
 
     // Validate all external addresses against the configured network
-    let network = enclave.bitcoin_network();
+    let network = enclave.bitcoin_network()?;
     let verified_outputs = request
         .info
         .external_dest()
@@ -171,7 +171,7 @@ pub async fn delayed_withdraw(
     validate_time(request.info.timestamp())?;
 
     // Validate all external addresses against the configured network
-    let network = enclave.bitcoin_network();
+    let network = enclave.bitcoin_network()?;
     for output in request.info.external_dest() {
         output.validate(network)?;
     }
@@ -230,7 +230,8 @@ fn approve_delayed_withdrawal(
         return Err(InternalError(format!(
             "WithdrawID matches but external destination \
                                          does not match {:?} {:?}",
-            pending.external_dest(), withdrawal.external_dest()
+            pending.external_dest(),
+            withdrawal.external_dest()
         )));
     }
 
@@ -242,7 +243,9 @@ fn approve_delayed_withdrawal(
     if gap < min_delay {
         Err(InternalError(format!(
             "Withdrawal timestamp {:?} is not sufficiently delayed ({:?} + {:?})",
-            withdrawal.timestamp(), pending.timestamp(), min_delay
+            withdrawal.timestamp(),
+            pending.timestamp(),
+            min_delay
         )))
     } else {
         Ok(())
@@ -284,7 +287,8 @@ mod tests {
                 withdraw_id.clone(),
                 vec![output.clone()],
                 initial_timestamp,
-            ).unwrap(),
+            )
+            .unwrap(),
             cert: HashiCert {},
         };
 
@@ -311,7 +315,8 @@ mod tests {
                 SystemTime::now(), // Current time (5 seconds after initial)
                 vec![create_test_utxo(110_000)],
                 1_000,
-            ).unwrap(),
+            )
+            .unwrap(),
             delayed: true,
             cert: HashiCert {},
         };
@@ -347,7 +352,8 @@ mod tests {
                 SystemTime::now(), // Now timestamp is well past min_delay
                 vec![create_test_utxo(110_000)],
                 1_000,
-            ).unwrap(),
+            )
+            .unwrap(),
             delayed: true,
             cert: HashiCert {},
         };

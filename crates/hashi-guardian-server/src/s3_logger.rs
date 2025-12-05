@@ -31,7 +31,10 @@ impl S3Logger {
             .await;
 
         let client = S3Client::new(&aws_config);
-        Ok(Self { client, config: config.clone() })
+        Ok(Self {
+            client,
+            config: config.clone(),
+        })
     }
 
     /// Check if an object named in the key exists in the S3 bucket.

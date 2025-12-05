@@ -1,5 +1,5 @@
 use crate::GuardianError::{InternalError, InvalidInputs};
-use crate::GuardianResult;
+use crate::{GuardianResult, Signed};
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
@@ -13,6 +13,9 @@ use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
 use serde::Serialize;
 use std::num::NonZeroU16;
+
+use std::time::SystemTime;
+use ed25519_consensus::{Signature, SigningKey, VerificationKey};
 
 // ---------------------------------
 //      Crypto Structs & Types
@@ -258,10 +261,64 @@ pub fn decrypt_share(
     }
 }
 
+// ---------------------------------
+//    Signing utilities
+// ---------------------------------
+
+/// T -> Signed<T>. Sign the payload (used by enclave)!
+pub fn to_signed_response<T: Serialize>(
+    kp: &SigningKey,
+    payload: T,
+    timestamp: SystemTime,
+) -> Signed<T> {
+    let data = (payload, timestamp);
+    let signing_payload = bcs::to_bytes(&data).expect("should not fail");
+    let sig = kp.sign(&signing_payload);
+    Signed {
+        response: data.0,
+        timestamp: data.1,
+        signature: hex::encode(sig.to_bytes()),
+    }
+}
+
+/// Signed<T> -> T. Verify the payload is indeed from enclave!
+pub fn validate_signed_response<T: Serialize>(
+    pub_key: &VerificationKey,
+    payload: Signed<T>
+) -> GuardianResult<T> {
+    let data = (payload.response, payload.timestamp);
+    let msg_bytes = bcs::to_bytes(&data).expect("should not fail");
+    let sign_bytes = hex::decode(payload.signature)
+        .map_err(|_| InvalidInputs("hex decoding error".into()))?;
+    let signature = Signature::try_from(sign_bytes.as_slice())
+        .map_err(|_| InvalidInputs("signature deserialization failure".into()))?;
+    pub_key.verify(&signature, msg_bytes.as_slice())
+        .map_err(|_| InvalidInputs("signature invalid".into()))?;
+    Ok(data.0)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
     use super::*;
     use k256::SecretKey;
+
+    #[derive(Serialize, Debug,)]
+    struct DummyStruct {
+        pub data: String
+    }
+
+    #[test]
+    fn test_signing_and_verification() {
+        let d = DummyStruct {
+            data: String::from("Hello world")
+        };
+        let kp = SigningKey::from([2u8; 32]);
+        let rand_fixed_time = UNIX_EPOCH + Duration::from_millis(1000);
+        let signed = to_signed_response(&kp, d, rand_fixed_time);
+        println!("{:?}", signed);
+        assert!(validate_signed_response(&kp.verification_key(), signed).is_ok());
+    }
 
     #[test]
     fn test_encrypt_and_decrypt() {

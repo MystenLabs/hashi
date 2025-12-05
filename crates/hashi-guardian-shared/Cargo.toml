@@ -20,3 +20,5 @@ rand_core = "0.6.4"
 k256 = "0.13"
 blake2 = "0.10"
 bitcoin = { version =  "0.32.7", features = ["serde"] }
+hex = "0.4.3"
+ed25519-consensus = "2.1"

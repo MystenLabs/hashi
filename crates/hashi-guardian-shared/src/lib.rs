@@ -18,16 +18,18 @@ use blake2::Digest;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
-use hpke::{Deserializable, Serializable};
+use hpke::{Deserializable, Kem, Serializable};
 use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
 use std::time::SystemTime;
-
+use hpke::kem::X25519HkdfSha256;
+use crate::test_utils::DUMMY_REGTEST_ADDRESS;
 // ---------------------------------
 //    All requests and responses
 // ---------------------------------
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SetupNewKeyRequest {
     key_provisioner_public_keys: Vec<Vec<u8>>,
@@ -46,6 +48,7 @@ pub struct SetupNewKeyResponse {
 pub struct OperatorInitRequest {
     config: S3Config,
     share_commitments: Vec<ShareCommitment>,
+    network: Network
 }
 
 /// Provides key shares and all other necessary state values to the enclaves.
@@ -82,8 +85,16 @@ pub struct HealthCheckResponse {
     pub btc_key_configured: bool,
     /// Number of shares received so far
     pub shares_received: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EnclaveInfoResponse {
     /// Enclave encryption public key
-    pub enc_public_key: Option<Vec<u8>>,
+    pub enc_public_key: Vec<u8>,
+    /// Enclave signing verification key (for validating signatures)
+    pub signing_verification_key: Vec<u8>,
+    /// Share commitments
+    pub share_commitments: Option<Vec<ShareCommitment>>,
 }
 
 /// A "delayed withdrawal" request
@@ -109,6 +120,14 @@ pub struct ImmediateWithdrawalRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImmediateWithdrawalResponse {
     pub enclave_sign: Vec<Signature>,
+}
+
+/// Wrapper struct containing the response and signature
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Signed<T> {
+    pub response: T,
+    pub timestamp: SystemTime,
+    pub signature: String,
 }
 
 // ---------------------------------
@@ -221,16 +240,35 @@ impl SetupNewKeyRequest {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| InvalidInputs(format!("Failed to deserialize public key: {}", e)))
     }
+
+    /// Generates mock key provisioner keys and SetupNewKeyRequest for testing.
+    pub fn mock_for_testing() -> (Self, Vec<EncSecKey>) {
+        let mut private_keys = vec![];
+        let mut public_keys = vec![];
+        for _i in 0..NUM_OF_SHARES {
+            let mut rng = rand::thread_rng();
+            let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
+            private_keys.push(sk);
+            public_keys.push(pk);
+        }
+
+        (SetupNewKeyRequest::new(public_keys).unwrap(), private_keys)
+    }
 }
 
 impl OperatorInitRequest {
-    pub fn new(config: S3Config, share_commitments: Vec<ShareCommitment>) -> GuardianResult<Self> {
+    pub fn new(
+        config: S3Config,
+        share_commitments: Vec<ShareCommitment>,
+        network: Network,
+    ) -> GuardianResult<Self> {
         if share_commitments.len() != NUM_OF_SHARES {
             return Err(InvalidInputs("provide enough share commitments".into()));
         }
         Ok(Self {
             config,
             share_commitments,
+            network,
         })
     }
 
@@ -241,12 +279,30 @@ impl OperatorInitRequest {
     pub fn share_commitments(&self) -> &[ShareCommitment] {
         &self.share_commitments
     }
+
+    pub fn network(&self) -> Network {
+        self.network
+    }
 }
 
 impl ProvisionerInitRequestState {
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(self).expect("Failed to serialize");
         Blake2b::<U32>::digest(bytes).into()
+    }
+
+    pub fn mock_for_testing() -> Self {
+        ProvisionerInitRequestState {
+            hashi_committee_info: HashiCommitteeInfo::default(),
+            withdrawal_config: WithdrawalConfig {
+                min_delay: Duration::from_secs(60),
+                max_delay: Duration::from_secs(3600),
+                // 0.1 BTC per hour
+                hourly_rate_limit: NonZeroU32::new(10_000_000).unwrap(),
+            },
+            withdrawal_state: WithdrawalState::default(),
+            change_address: DUMMY_REGTEST_ADDRESS.to_string().parse().unwrap(),
+        }
     }
 }
 

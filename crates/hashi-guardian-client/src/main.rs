@@ -4,11 +4,12 @@ use hashi_guardian_shared::crypto::decrypt_share;
 use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::crypto::NUM_OF_SHARES;
 use hashi_guardian_shared::test_utils::gen_dummy_share_data;
-use hashi_guardian_shared::test_utils::mock_provisioner_init_state;
 use hashi_guardian_shared::*;
 use hpke::kem::X25519HkdfSha256;
 use hpke::Kem;
 use std::env;
+use bitcoin::Network;
+use ed25519_consensus::VerificationKey;
 use tracing::info;
 use tracing::warn;
 
@@ -92,7 +93,8 @@ async fn operator_init_call(
             bucket_name: env::var("AWS_BUCKET_NAME")
                 .context("AWS_BUCKET_NAME not found in environment")?,
         },
-        share_commitments
+        share_commitments,
+        Network::Regtest
     )?;
 
     info!("   Bucket: {}", s3_config_request.config().bucket_name);
@@ -185,7 +187,7 @@ async fn setup_new_key(base_url: &str) -> Result<(Vec<Share>, Vec<ShareCommitmen
     }
 }
 
-/// Health check - get server status and encryption key
+/// Health check - get basic server status (no keys)
 async fn health_check(base_url: &str) -> Result<HealthCheckResponse> {
     info!("Checking server health...");
 
@@ -209,9 +211,6 @@ async fn health_check(base_url: &str) -> Result<HealthCheckResponse> {
             "   Shares received: {}/{}",
             health_response.shares_received, THRESHOLD
         );
-        if let Some(ref pk) = health_response.enc_public_key {
-            info!("   Encryption public key: {} bytes", pk.len());
-        }
 
         Ok(health_response)
     } else {
@@ -261,55 +260,83 @@ async fn get_attestation(base_url: &str) -> Result<GetAttestationResponse> {
     }
 }
 
-/// Get enclave encryption key - tries attestation first (strict), falls back to health_check
-async fn get_enclave_key(base_url: &str, strict: bool) -> Result<EncPubKey> {
-    info!("Getting enclave encryption key...");
+/// Get enclave encryption key and signing verification key.
+///
+/// In STRICT mode (production), this:
+///   1. Requires the attestation endpoint to succeed (TODO: parse/verify document)
+///   2. Then fetches keys from /get_enclave_info and validates the signed payload
+///
+/// In permissive mode (development), it:
+///   1. Skips attestation
+///   2. Fetches keys from /get_enclave_info and validates using the self-reported signing key
+async fn get_enclave_key(base_url: &str, strict: bool) -> Result<(EncPubKey, VerificationKey)> {
+    info!("Getting enclave encryption and signing keys...");
 
-    // Try attestation first
-    info!("Trying attestation endpoint...");
-    let attestation_result = get_attestation(base_url).await;
-
-    match attestation_result {
-        Ok(_attestation) => {
-            // TODO: Extract encryption key from attestation user_data
-            // For now, need to parse the attestation document to get the user_data
-            warn!("TODO: Extract encryption key from attestation user_data");
-            warn!("Falling back to health_check endpoint...");
-
-            // Fall through to health_check
-        }
-        Err(_) => {
-            if strict {
+    // In strict mode, require attestation to succeed first
+    if strict {
+        info!("🔒 STRICT MODE: Checking attestation before fetching keys");
+        match get_attestation(base_url).await {
+            Ok(_attestation) => {
+                // TODO: Parse attestation document and extract signing verification key.
+                // For now we only require that attestation succeeds and then
+                // still use /get_enclave_info as the source of keys.
+                warn!("TODO: Parse attestation document and pin signing key from it");
+            }
+            Err(e) => {
                 return Err(anyhow::anyhow!(
-                    "Attestation required in strict mode, but attestation endpoint failed"
+                    "Attestation required in strict mode, but attestation endpoint failed: {}",
+                    e
                 ));
             }
-            info!("Attestation not available, using health_check endpoint...");
         }
-    }
-
-    // Use health_check endpoint
-    let health = health_check(base_url).await?;
-
-    if let Some(enc_pk_bytes) = health.enc_public_key {
-        use hpke::Deserializable;
-        let enc_pk = EncPubKey::from_bytes(&enc_pk_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse enclave encryption public key: {}", e))?;
-
-        info!(
-            "Retrieved enclave encryption public key ({} bytes)",
-            enc_pk_bytes.len()
-        );
-        if !strict {
-            warn!("\nNote: Using health_check endpoint for development.");
-            warn!("In production, use --strict flag to require attestation verification!");
-        }
-        Ok(enc_pk)
     } else {
-        Err(anyhow::anyhow!(
-            "No encryption public key in health check response"
-        ))
+        info!("🔓 PERMISSIVE MODE: Skipping attestation, using /get_enclave_info directly");
     }
+
+    // Fetch signed enclave info
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/get_enclave_info", base_url))
+        .send()
+        .await
+        .context("Failed to request enclave info")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response.text().await?;
+        return Err(anyhow::anyhow!(
+            "Failed to get enclave info: {} - {}",
+            status,
+            error_body
+        ));
+    }
+
+    let signed_info: Signed<EnclaveInfoResponse> = response
+        .json()
+        .await
+        .context("Failed to parse enclave info response")?;
+
+    // Build a VerificationKey from the self-reported signing key bytes
+    let vk_bytes = &signed_info.response.signing_verification_key;
+    let verification_key = VerificationKey::try_from(vk_bytes.as_slice())
+        .context("Failed to parse signing verification key from enclave info")?;
+
+    // Validate the signature over the response
+    let info = validate_signed_response(&verification_key, signed_info)
+        .context("Signature validation for enclave info failed")?;
+
+    // Parse the enclave encryption public key
+    use hpke::Deserializable;
+    let enc_pk = EncPubKey::from_bytes(&info.enc_public_key)
+        .map_err(|e| anyhow::anyhow!("Failed to parse enclave encryption public key: {}", e))?;
+
+    info!(
+        "Retrieved enclave keys: enc_pub_key={} bytes, signing_key={} bytes",
+        info.enc_public_key.len(),
+        info.signing_verification_key.len()
+    );
+
+    Ok((enc_pk, verification_key))
 }
 
 /// Initialize the enclave with shares and configuration
@@ -322,7 +349,7 @@ async fn provisioner_init_call(
     info!("Initializing enclave with {} shares...", shares.len());
 
     // Create init state
-    let init_state = mock_provisioner_init_state();
+    let init_state = ProvisionerInitRequestState::mock_for_testing();
 
     info!("Initialization config: {:?}", init_state);
 
@@ -376,17 +403,17 @@ async fn provisioner_init_call(
 async fn init_with_test_key(base_url: &str, strict: bool) -> Result<()> {
     info!("Initializing with test key...\n");
 
-    // Step 1: Get enclave encryption key
+    // Step 1: Get enclave encryption & signing keys
     info!("Step 1: Get enclave encryption key");
     info!("{}\n", "=".repeat(50));
-    let enclave_pub_key = get_enclave_key(base_url, strict).await?;
+    let (enclave_pub_key, _signing_key) = get_enclave_key(base_url, strict).await?;
 
     // Step 2: Generate dummy shares
     info!("Step 2: Generate dummy test shares locally");
     info!("{}\n", "=".repeat(50));
     info!("Creating dummy shares from test secret [1u8; 32]...");
     info!("Note: NOT FOR PRODUCTION!");
-    let (shares, commitments) = test_utils::gen_dummy_share_data();
+    let (shares, commitments) = gen_dummy_share_data();
     for d in &commitments {
         info!("Share {} Digest {:x?}", d.id, d.digest);
     }
@@ -415,7 +442,7 @@ async fn init_with_new_key(base_url: &str, strict: bool) -> Result<()> {
 
     info!("\nStep 2: Get enclave encryption key");
     info!("{}\n", "=".repeat(50));
-    let enclave_pub_key = get_enclave_key(base_url, strict).await?;
+    let (enclave_pub_key, _signing_key) = get_enclave_key(base_url, strict).await?;
 
     info!("\nStep 3: Configure S3 and other things");
     info!("{}\n", "=".repeat(50));
