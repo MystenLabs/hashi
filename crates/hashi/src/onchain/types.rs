@@ -2,6 +2,7 @@
 
 //! Usable definitions of the onchain state of hashi
 
+use itertools::Itertools;
 use std::collections::BTreeMap;
 
 use crate::dkg::types::{AddressToPartyId, DkgConfig, DkgError};
@@ -36,8 +37,6 @@ pub struct CommitteeSet {
 
 impl CommitteeSet {
     pub fn build_dkg_config(&self) -> Result<DkgConfig, DkgError> {
-        use itertools::Itertools;
-
         let committee = self
             .committees
             .get(&self.epoch)
