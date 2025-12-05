@@ -104,7 +104,7 @@ public(package) fun get_idx(self: &Committee, idx: u64): &CommitteeMember {
 }
 
 /// Checks if the committee contains a given node.
-public(package) fun contains(self: &Committee, validator_address: &address): bool {
+public(package) fun has_member(self: &Committee, validator_address: &address): bool {
     self.find_index(validator_address).is_some()
 }
 

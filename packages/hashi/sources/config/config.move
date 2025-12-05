@@ -16,7 +16,6 @@ const PACKAGE_VERSION: u64 = 1;
 const VERSION_KEY: vector<u8> = b"version";
 const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
 const PAUSED_KEY: vector<u8> = b"paused";
-const PROPOSAL_SEQ_NUM_KEY: vector<u8> = b"proposal_seq_num";
 
 public struct Config has store {
     config: VecMap<String, Value>,
@@ -28,7 +27,7 @@ fun get(self: &Config, key: vector<u8>): Value {
 
 /// Inserts or updates a configuration in the config map.
 /// If a configuration with the same key already exists, it is replaced.
-public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
+fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     let key = key.to_string();
 
     if (self.config.contains(&key)) {
@@ -62,15 +61,6 @@ public(package) fun paused(self: &Config): bool {
 
 public(package) fun set_paused(self: &mut Config, paused: bool) {
     self.upsert(PAUSED_KEY, config_value::new_bool(paused))
-}
-
-public(package) fun increment_proposal_seq_num(self: &mut Config): u64 {
-    if (!self.config.contains(&PROPOSAL_SEQ_NUM_KEY.to_string())) {
-        self.upsert(PROPOSAL_SEQ_NUM_KEY, config_value::new_u64(0));
-    };
-    let seq_num = self.get(PROPOSAL_SEQ_NUM_KEY).as_u64();
-    self.upsert(PROPOSAL_SEQ_NUM_KEY, config_value::new_u64(seq_num + 1));
-    seq_num
 }
 
 //

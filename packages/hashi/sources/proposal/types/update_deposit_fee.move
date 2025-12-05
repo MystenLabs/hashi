@@ -23,7 +23,7 @@ public fun propose(
     metadata: VecMap<String, String>,
     ctx: &mut TxContext,
 ) {
-    proposal::new(hashi, UpdateDepositFee { fee }, THRESHOLD_BPS, metadata, ctx)
+    proposal::create(hashi, UpdateDepositFee { fee }, THRESHOLD_BPS, metadata, ctx)
 }
 
 public fun execute(hashi: &mut Hashi, proposal: Proposal<UpdateDepositFee>) {

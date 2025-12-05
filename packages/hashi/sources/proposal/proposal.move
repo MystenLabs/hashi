@@ -11,7 +11,6 @@ use sui::vec_map::VecMap;
 
 public struct Proposal<T> has key, store {
     id: UID,
-    seq_num: u64,
     creator: address,
     votes: vector<address>,
     quorum_threshold_bps: u64,
@@ -31,7 +30,7 @@ const ENoVoteFound: vector<u8> = b"Vote doesn't exist";
 
 // ~~~~~~~ Public Functions ~~~~~~~
 
-public(package) fun new<T: store>(
+public(package) fun create<T: store>(
     hashi: &mut Hashi,
     data: T,
     quorum_threshold_bps: u64,
@@ -39,15 +38,12 @@ public(package) fun new<T: store>(
     ctx: &mut TxContext,
 ) {
     // only voters can create proposal
-    assert!(hashi.committee_set().contains(ctx.sender()), EUnauthorizedCaller);
+    assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
     let votes = vector[ctx.sender()];
 
-    let seq_num = hashi.config_mut().increment_proposal_seq_num();
-
     let proposal = Proposal {
         id: object::new(ctx),
-        seq_num,
         creator: ctx.sender(),
         votes,
         quorum_threshold_bps,
@@ -55,7 +51,7 @@ public(package) fun new<T: store>(
         data,
     };
 
-    hashi.add_proposal(proposal, seq_num);
+    hashi.proposals_mut().add(proposal);
 }
 
 public(package) fun execute<T>(proposal: Proposal<T>, hashi: &Hashi): T {
@@ -68,7 +64,7 @@ public(package) fun execute<T>(proposal: Proposal<T>, hashi: &Hashi): T {
 }
 
 public fun vote<T>(proposal: &mut Proposal<T>, hashi: &Hashi, ctx: &mut TxContext) {
-    assert!(hashi.committee_set().contains(ctx.sender()), EUnauthorizedCaller);
+    assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
     assert!(!proposal.votes.contains(&ctx.sender()), EVoteAlreadyCounted);
 
     proposal.votes.push_back(ctx.sender());
@@ -81,7 +77,7 @@ public fun vote<T>(proposal: &mut Proposal<T>, hashi: &Hashi, ctx: &mut TxContex
 }
 
 public fun remove_vote<T>(proposal: &mut Proposal<T>, hashi: &mut Hashi, ctx: &mut TxContext) {
-    assert!(hashi.committee_set().contains(ctx.sender()), EUnauthorizedCaller);
+    assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
     let index = proposal.votes.find_index!(|v| v == &ctx.sender()).destroy_or!(abort ENoVoteFound);
 

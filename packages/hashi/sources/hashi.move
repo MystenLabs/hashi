@@ -7,6 +7,7 @@ use hashi::{
     committee::Committee,
     committee_set::CommitteeSet,
     config::Config,
+    proposal_set::{Self, ProposalSet},
     treasury::Treasury
 };
 use std::string::String;
@@ -19,11 +20,7 @@ public struct Hashi has key {
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
-    proposals: Bag,
-}
-
-public struct ProposalKey<phantom T> has copy, drop, store {
-    seq_num: u64,
+    proposals: ProposalSet,
 }
 
 public fun deposit(
@@ -82,7 +79,7 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
-        proposals: bag::new(ctx),
+        proposals: proposal_set::create(ctx),
     };
 
     sui::transfer::share_object(hashi);
@@ -193,6 +190,6 @@ public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
     &mut self.treasury
 }
 
-public(package) fun add_proposal<T: store>(self: &mut Hashi, proposal: T, seq_num: u64) {
-    self.proposals.add(ProposalKey<T> { seq_num }, proposal);
+public(package) fun proposals_mut(self: &mut Hashi): &mut ProposalSet {
+    &mut self.proposals
 }

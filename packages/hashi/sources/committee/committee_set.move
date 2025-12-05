@@ -33,7 +33,7 @@ fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
     &self.members[validator_address]
 }
 
-public(package) fun contains(self: &CommitteeSet, validator_address: address): bool {
+public(package) fun has_member(self: &CommitteeSet, validator_address: address): bool {
     self.members.contains_with_type<_, MemberInfo>(validator_address)
 }
 
@@ -296,7 +296,7 @@ fun new_committee_from_validator_set(
         let (validator_address, weight) = validator_set.pop();
 
         // If there is no registered info for this validator, skip them
-        if (!self.contains(validator_address)) {
+        if (!self.has_member(validator_address)) {
             continue
         };
 
