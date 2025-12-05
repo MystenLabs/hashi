@@ -183,13 +183,13 @@ fn convert_move_config(config: move_types::Config) -> types::Config {
     }
 }
 
-fn convert_move_config_value(value: move_types::CoinfigValue) -> types::CoinfigValue {
+fn convert_move_config_value(value: move_types::ConfigValue) -> types::ConfigValue {
     match value {
-        move_types::CoinfigValue::U64(v) => types::CoinfigValue::U64(v),
-        move_types::CoinfigValue::Address(address) => types::CoinfigValue::Address(address),
-        move_types::CoinfigValue::String(s) => types::CoinfigValue::String(s),
-        move_types::CoinfigValue::Bool(b) => types::CoinfigValue::Bool(b),
-        move_types::CoinfigValue::Bytes(bytes) => types::CoinfigValue::Bytes(bytes),
+        move_types::ConfigValue::U64(v) => types::ConfigValue::U64(v),
+        move_types::ConfigValue::Address(address) => types::ConfigValue::Address(address),
+        move_types::ConfigValue::String(s) => types::ConfigValue::String(s),
+        move_types::ConfigValue::Bool(b) => types::ConfigValue::Bool(b),
+        move_types::ConfigValue::Bytes(bytes) => types::ConfigValue::Bytes(bytes),
     }
 }
 

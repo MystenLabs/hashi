@@ -87,11 +87,11 @@ impl MemberInfo {
 
 #[derive(Debug)]
 pub struct Config {
-    pub config: BTreeMap<String, CoinfigValue>,
+    pub config: BTreeMap<String, ConfigValue>,
 }
 
 #[derive(Debug)]
-pub enum CoinfigValue {
+pub enum ConfigValue {
     U64(u64),
     Address(Address),
     String(String),

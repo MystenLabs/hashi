@@ -91,12 +91,12 @@ pub struct Committee {
 /// Rust version of the Move hashi::config::Config type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Config {
-    pub config: Vec<(String, CoinfigValue)>,
+    pub config: Vec<(String, ConfigValue)>,
 }
 
 /// Rust version of the Move hashi::config_value::Value type.
 #[derive(Debug, serde_derive::Deserialize)]
-pub enum CoinfigValue {
+pub enum ConfigValue {
     U64(u64),
     Address(Address),
     String(String),
