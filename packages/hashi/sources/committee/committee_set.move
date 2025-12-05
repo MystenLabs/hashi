@@ -177,7 +177,7 @@ public(package) fun set_tls_public_key(
     tls_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
-    assert!(tls_public_key.len() == 32);
+    assert!(tls_public_key.length() == 32);
 
     let member = self.member_mut(validator_address);
     member.assert_update_permitted(ctx);
@@ -191,7 +191,7 @@ public(package) fun set_encryption_public_key(
     encryption_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
-    assert!(encryption_public_key.len() == 32);
+    assert!(encryption_public_key.length() == 32);
 
     let member = self.member_mut(validator_address);
     member.assert_update_permitted(ctx);
