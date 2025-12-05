@@ -205,7 +205,12 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
         value: config.tls_public_key()?.as_bytes().to_vec().to_bcs()?,
     };
     let encryption_public_key = Input::Pure {
-        value: config.encryption_public_key()?.as_element().compress().as_slice().to_bcs()?,
+        value: config
+            .encryption_public_key()?
+            .as_element()
+            .compress()
+            .as_slice()
+            .to_bcs()?,
     };
 
     let pt = ProgrammableTransaction {
