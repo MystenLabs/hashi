@@ -61,7 +61,7 @@ pub struct BlsCommittee {
     total_weight: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlsCommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
