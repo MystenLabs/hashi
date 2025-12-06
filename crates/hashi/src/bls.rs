@@ -53,7 +53,7 @@ impl Bls12381PrivateKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlsCommittee {
     epoch: u64,
     members: Vec<BlsCommitteeMember>,

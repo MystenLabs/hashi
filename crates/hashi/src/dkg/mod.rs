@@ -3,7 +3,7 @@
 pub mod rpc;
 pub mod types;
 
-use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
+use crate::bls::{BlsCommittee, BlsSignatureAggregator};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
@@ -57,14 +57,14 @@ impl DkgManager {
         bls_signing_key: crate::bls::Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> DkgResult<Self> {
-        let committee = committee_set
+        let bls_committee = committee_set
             .committees
             .get(&committee_set.epoch)
-            .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?;
+            .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
+            .clone();
         let mut nodes_vec = Vec::new();
         let mut address_to_party_id = AddressToPartyId::new();
-        let mut bls_members = Vec::new();
-        for member in committee.members() {
+        for member in bls_committee.members() {
             let addr = member.validator_address();
             let Some(member_info) = committee_set.members.get(&addr) else {
                 continue;
@@ -79,11 +79,6 @@ impl DkgManager {
                 weight: member.weight() as u16,
             });
             address_to_party_id.insert(addr, party_id);
-            bls_members.push(BlsCommitteeMember::new(
-                addr,
-                member.public_key().clone(),
-                member.weight(),
-            ));
         }
         let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
         let total_weight = nodes.total_weight();
@@ -96,7 +91,6 @@ impl DkgManager {
             threshold,
             max_faulty,
         )?;
-        let bls_committee = BlsCommittee::new(bls_members, committee_set.epoch);
         let party_id = *dkg_config
             .address_to_party_id
             .get(&address)
