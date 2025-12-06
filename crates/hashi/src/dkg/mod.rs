@@ -6,7 +6,7 @@ pub mod types;
 use crate::bls::{BlsCommittee, BlsCommitteeMember, BlsSignatureAggregator};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
-use crate::onchain::types::{CommitteeSet, MemberInfo};
+use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
@@ -612,6 +612,7 @@ mod tests {
     use super::*;
     use crate::bls::{BlsCommittee, BlsCommitteeMember};
     use crate::dkg::types::ProtocolType;
+    use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::{Encoding, Hex};
     use fastcrypto::groups::Scalar;
     use fastcrypto_tbls::ecies_v1::{MultiRecipientEncryption, PublicKey};
@@ -845,7 +846,7 @@ mod tests {
         }
 
         fn dkg_config(&self) -> DkgConfig {
-            DkgConfig::from_committee_set(&self.committee_set).unwrap()
+            self.create_manager(0).dkg_config.clone()
         }
     }
 

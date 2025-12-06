@@ -2,7 +2,6 @@
 
 use crate::bls::{BLS12381Signature, CommitteeSignature, MemberSignature};
 use fastcrypto::error::FastCryptoError;
-use fastcrypto_tbls::nodes::Node;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::{
     nodes::PartyId,
@@ -10,7 +9,6 @@ use fastcrypto_tbls::{
     random_oracle::RandomOracle,
     threshold_schnorr::{G, avss, complaint},
 };
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sui_sdk_types::Address;
 
@@ -62,48 +60,6 @@ impl DkgConfig {
             threshold,
             max_faulty,
         })
-    }
-
-    pub fn from_committee_set(
-        committee_set: &crate::onchain::types::CommitteeSet,
-    ) -> Result<Self, DkgError> {
-        let committee = committee_set
-            .committees
-            .get(&committee_set.epoch)
-            .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?;
-        let members_with_keys: Vec<_> = committee
-            .members()
-            .iter()
-            .filter_map(|member| {
-                let addr = member.validator_address();
-                let member_info = committee_set.members.get(&addr)?;
-                let encryption_pk = member_info.encryption_public_key.as_ref()?;
-                Some((addr, member.weight(), encryption_pk.clone()))
-            })
-            .sorted_by_key(|(addr, _, _)| *addr)
-            .collect();
-        let mut nodes_vec = Vec::with_capacity(members_with_keys.len());
-        let mut address_to_party_id = AddressToPartyId::new();
-        for (id, (validator_address, weight, encryption_pk)) in members_with_keys.iter().enumerate()
-        {
-            nodes_vec.push(Node {
-                id: id as u16,
-                pk: encryption_pk.clone(),
-                weight: *weight as u16,
-            });
-            address_to_party_id.insert(*validator_address, id as u16);
-        }
-        let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
-        let total_weight = nodes.total_weight();
-        let max_faulty = (total_weight - 1) / 3;
-        let threshold = max_faulty + 1;
-        Self::new(
-            committee_set.epoch,
-            nodes,
-            address_to_party_id,
-            threshold,
-            max_faulty,
-        )
     }
 
     pub fn total_weight(&self) -> u16 {
@@ -255,14 +211,9 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls::{BlsCommittee, BlsCommitteeMember};
-    use crate::onchain::types::{CommitteeSet, MemberInfo};
-    use fastcrypto::bls12381::min_pk::BLS12381KeyPair;
     use fastcrypto::groups::ristretto255::RistrettoPoint;
-    use fastcrypto::traits::KeyPair;
     use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
     use fastcrypto_tbls::nodes::Node;
-    use std::collections::BTreeMap;
 
     impl MpcMessageV1 {
         pub fn as_dkg_message(&self) -> &DkgDealerMessageHash {
@@ -465,137 +416,5 @@ mod tests {
         // Same dealer should produce same session ID
         let dealer1_session2 = sid.dealer_session_id(&dealer1);
         assert_eq!(dealer1_session, dealer1_session2);
-    }
-
-    fn create_test_member_info(id: u8) -> MemberInfo {
-        let encryption_private_key =
-            PrivateKey::<EncryptionGroupElement>::new(&mut rand::thread_rng());
-        let encryption_public_key = PublicKey::from_private_key(&encryption_private_key);
-        let bls_keypair = BLS12381KeyPair::generate(&mut rand::thread_rng());
-        MemberInfo {
-            validator_address: Address::new([id; 32]),
-            operator_address: Address::new([id; 32]),
-            next_epoch_public_key: bls_keypair.public().clone(),
-            https_address: None,
-            tls_public_key: None,
-            encryption_public_key: Some(encryption_public_key),
-        }
-    }
-
-    fn create_test_committee_member(id: u8, weight: u64) -> BlsCommitteeMember {
-        let bls_keypair = BLS12381KeyPair::generate(&mut rand::thread_rng());
-        BlsCommitteeMember::new(Address::new([id; 32]), bls_keypair.public().clone(), weight)
-    }
-
-    fn create_test_committee_set(member_weights: &[(u8, u64)], epoch: u64) -> CommitteeSet {
-        let members: BTreeMap<Address, MemberInfo> = member_weights
-            .iter()
-            .map(|(id, _)| {
-                let addr = Address::new([*id; 32]);
-                (addr, create_test_member_info(*id))
-            })
-            .collect();
-        let committee_members: Vec<BlsCommitteeMember> = member_weights
-            .iter()
-            .map(|(id, weight)| create_test_committee_member(*id, *weight))
-            .collect();
-        let committee = BlsCommittee::new(committee_members, epoch);
-        let mut committees = BTreeMap::new();
-        committees.insert(epoch, committee);
-        CommitteeSet {
-            members_id: Address::new([0; 32]),
-            members,
-            epoch,
-            committees_id: Address::new([1; 32]),
-            committees,
-        }
-    }
-
-    #[test]
-    fn test_from_committee_set_basic() {
-        let committee_set = create_test_committee_set(
-            &[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)],
-            42,
-        );
-        let config = DkgConfig::from_committee_set(&committee_set).unwrap();
-
-        assert_eq!(config.epoch, 42);
-        assert_eq!(config.total_weight(), 7);
-        // max_faulty = (7-1)/3 = 2, threshold = 2+1 = 3
-        assert_eq!(config.max_faulty, 2);
-        assert_eq!(config.threshold, 3);
-    }
-
-    #[test]
-    fn test_from_committee_set_deterministic_party_ids() {
-        // Create members in reverse order
-        let committee_set = create_test_committee_set(&[(3, 1), (2, 1), (1, 1), (0, 1)], 1);
-        let config = DkgConfig::from_committee_set(&committee_set).unwrap();
-
-        // Party IDs should be assigned by sorted address order
-        assert_eq!(
-            config.address_to_party_id.get(&Address::new([0; 32])),
-            Some(&0)
-        );
-        assert_eq!(
-            config.address_to_party_id.get(&Address::new([1; 32])),
-            Some(&1)
-        );
-        assert_eq!(
-            config.address_to_party_id.get(&Address::new([2; 32])),
-            Some(&2)
-        );
-        assert_eq!(
-            config.address_to_party_id.get(&Address::new([3; 32])),
-            Some(&3)
-        );
-    }
-
-    #[test]
-    fn test_from_committee_set_weighted() {
-        let committee_set = create_test_committee_set(&[(0, 3), (1, 2), (2, 2), (3, 1), (4, 1)], 1);
-        let config = DkgConfig::from_committee_set(&committee_set).unwrap();
-
-        assert_eq!(config.total_weight(), 9);
-        // max_faulty = (9-1)/3 = 2, threshold = 2+1 = 3
-        assert_eq!(config.max_faulty, 2);
-        assert_eq!(config.threshold, 3);
-    }
-
-    #[test]
-    fn test_from_committee_set_skips_missing_encryption_key() {
-        let mut committee_set = create_test_committee_set(&[(0, 1), (1, 1), (2, 1), (3, 1)], 1);
-        // Remove encryption key from one member
-        committee_set
-            .members
-            .get_mut(&Address::new([0; 32]))
-            .unwrap()
-            .encryption_public_key = None;
-
-        // Should succeed but skip the member without encryption key
-        let config = DkgConfig::from_committee_set(&committee_set).unwrap();
-        assert_eq!(config.total_weight(), 3); // Only 3 members included
-        assert!(
-            !config
-                .address_to_party_id
-                .contains_key(&Address::new([0; 32]))
-        );
-        assert!(
-            config
-                .address_to_party_id
-                .contains_key(&Address::new([1; 32]))
-        );
-    }
-
-    #[test]
-    fn test_from_committee_set_no_committee_for_epoch() {
-        let mut committee_set = create_test_committee_set(&[(0, 1), (1, 1), (2, 1), (3, 1)], 1);
-        // Change epoch to one without a committee
-        committee_set.epoch = 999;
-
-        let result = DkgConfig::from_committee_set(&committee_set);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("no committee for current epoch"));
     }
 }
