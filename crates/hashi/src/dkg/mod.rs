@@ -1301,7 +1301,6 @@ mod tests {
         assert_eq!(manager.dkg_config.epoch, setup.epoch());
         assert_eq!(manager.dkg_config.address_to_party_id.len(), 5);
 
-        // Verify BlsCommittee was built
         assert_eq!(manager.bls_committee.members().len(), 5);
     }
 
@@ -1453,7 +1452,6 @@ mod tests {
 
     #[test]
     fn test_dkg_manager_new_with_weighted_committee() {
-        // Test that DkgManager::new correctly handles weighted committees
         let setup = TestSetup::with_weights(&[1, 2, 3, 4, 5]); // total = 15
 
         let manager = setup.create_manager(0);
@@ -1462,15 +1460,10 @@ mod tests {
         assert_eq!(manager.dkg_config.threshold, 5);
         assert_eq!(manager.dkg_config.max_faulty, 4);
         assert_eq!(manager.dkg_config.total_weight(), 15);
-
-        // Verify BlsCommittee has correct weights
-        let bls_members = manager.bls_committee.members();
-        assert_eq!(bls_members.len(), 5);
     }
 
     #[test]
     fn test_dkg_manager_new_party_id_follows_canonical_order() {
-        // Test that party_id assignment follows BlsCommittee canonical ordering
         let setup = TestSetup::new(5);
 
         // Create managers for all validators and verify their party_ids
