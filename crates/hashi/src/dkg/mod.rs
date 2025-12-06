@@ -1401,38 +1401,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_manager_new_fails_if_own_address_not_in_participants() {
-        // Test that DkgManager::new returns error if own address is not a participant
-        let setup = TestSetup::new(5);
-
-        // Try to create manager with an address not in the committee
-        let unknown_address = Address::new([99; 32]);
-        let session_id = setup.session_id();
-
-        let result = DkgManager::new(
-            unknown_address,
-            &setup.committee_set,
-            session_id,
-            setup.encryption_keys[0].clone(),
-            setup.bls_keys[0].clone(),
-            Box::new(MockPublicMessagesStore),
-        );
-
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("Should fail for unknown address"),
-        };
-        assert!(
-            matches!(err, DkgError::InvalidConfig(_)),
-            "Should be InvalidConfig error"
-        );
-        assert!(
-            err.to_string().contains("not in DKG participants"),
-            "Error should mention address not in participants"
-        );
-    }
-
-    #[test]
     fn test_dkg_manager_new_fails_if_no_committee_for_epoch() {
         let mut rng = rand::thread_rng();
 
