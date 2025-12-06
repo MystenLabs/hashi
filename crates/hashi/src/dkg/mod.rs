@@ -100,9 +100,7 @@ impl DkgManager {
         let party_id = *dkg_config
             .address_to_party_id
             .get(&address)
-            .ok_or_else(|| {
-                DkgError::InvalidConfig(format!("own address {} not in DKG participants", address))
-            })?;
+            .expect("address not found in validator registry");
         Ok(Self {
             party_id,
             address,
