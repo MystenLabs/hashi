@@ -61,10 +61,6 @@ impl DkgConfig {
             max_faulty,
         })
     }
-
-    pub fn total_weight(&self) -> u16 {
-        self.nodes.total_weight()
-    }
 }
 
 // Unique identifier for a session of MPC protocol.
@@ -256,35 +252,6 @@ mod tests {
             .map(|(addr, node)| (*addr, node.id))
             .collect();
         (nodes, address_to_party_id)
-    }
-
-    #[test]
-    fn test_dkg_config_valid_equal_weight() {
-        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
-        let config = DkgConfig::new(100, nodes, address_to_party_id, 3, 2);
-        assert!(config.is_ok());
-        let config = config.unwrap();
-        assert_eq!(config.epoch, 100);
-        assert_eq!(config.threshold, 3);
-        assert_eq!(config.max_faulty, 2);
-        assert_eq!(config.total_weight(), 7);
-    }
-
-    #[test]
-    fn test_dkg_config_valid_weighted() {
-        let validators = vec![
-            create_test_validator(0, 3),
-            create_test_validator(1, 2),
-            create_test_validator(2, 2),
-            create_test_validator(3, 1),
-            create_test_validator(4, 1),
-        ];
-        let (nodes, address_to_party_id) = build_nodes_and_registry(validators);
-        let config = DkgConfig::new(42, nodes, address_to_party_id, 5, 2);
-        assert!(config.is_ok());
-        let config = config.unwrap();
-        assert_eq!(config.total_weight(), 9);
     }
 
     #[test]

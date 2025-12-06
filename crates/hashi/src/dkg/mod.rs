@@ -17,8 +17,9 @@ use fastcrypto_tbls::nodes::{Node, Nodes};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
 use sui_sdk_types::Address;
+use types::DkgConfig;
 pub use types::{
-    AddressToPartyId, ComplainRequest, ComplainResponse, DkgConfig, DkgError, DkgOutput, DkgResult,
+    AddressToPartyId, ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult,
     EncryptionGroupElement, MessageHash, RetrieveMessageRequest, RetrieveMessageResponse,
     SendMessageRequest, SendMessageResponse, SessionId, ValidatorSignature,
 };
@@ -1459,7 +1460,6 @@ mod tests {
         // With total_weight=15: max_faulty = (15-1)/3 = 4, threshold = 5
         assert_eq!(manager.dkg_config.threshold, 5);
         assert_eq!(manager.dkg_config.max_faulty, 4);
-        assert_eq!(manager.dkg_config.total_weight(), 15);
     }
 
     #[test]
