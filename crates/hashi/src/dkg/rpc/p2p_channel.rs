@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 
+// TODO: Centralize client management in `OnchainState` to handle TLS key/address rotation.
 pub struct RpcP2PChannel {
     clients: HashMap<Address, DkgRpcClient>,
     epoch: u64,
