@@ -10,8 +10,6 @@ use std::collections::HashMap;
 use sui_sdk_types::{Address, Ed25519PublicKey};
 use tonic::Status;
 
-type Result<T> = std::result::Result<T, Status>;
-
 pub struct TlsRegistry {
     key_to_address: HashMap<Ed25519PublicKey, Address>,
 }
@@ -29,81 +27,65 @@ impl TlsRegistry {
 
 #[tonic::async_trait]
 impl DkgService for HttpService {
+    #[tracing::instrument(skip(self, request))]
     async fn send_message(
         &self,
         request: tonic::Request<SendMessageRequest>,
-    ) -> Result<tonic::Response<SendMessageResponse>> {
-        send_message(self, request).map(tonic::Response::new)
+    ) -> Result<tonic::Response<SendMessageResponse>, Status> {
+        let sender = authenticate_caller(self, &request)?;
+        let external_request = request.into_inner();
+        let internal_request = types::SendMessageRequest::try_from(&external_request)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let mut dkg_manager = self.dkg_manager().lock().unwrap();
+        validate_epoch(dkg_manager.dkg_config.epoch, external_request.epoch)?;
+        let response = dkg_manager
+            .handle_send_message_request(sender, &internal_request)
+            .map_err(dkg_error_to_status)?;
+        Ok(tonic::Response::new(SendMessageResponse::from(&response)))
     }
 
+    #[tracing::instrument(skip(self, request))]
     async fn retrieve_message(
         &self,
         request: tonic::Request<RetrieveMessageRequest>,
-    ) -> Result<tonic::Response<RetrieveMessageResponse>> {
-        retrieve_message(self, request).map(tonic::Response::new)
+    ) -> Result<tonic::Response<RetrieveMessageResponse>, Status> {
+        authenticate_caller(self, &request)?;
+        let external_request = request.into_inner();
+        let internal_request = types::RetrieveMessageRequest::try_from(&external_request)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let dkg_manager = self.dkg_manager().lock().unwrap();
+        validate_epoch(dkg_manager.dkg_config.epoch, external_request.epoch)?;
+        let response = dkg_manager
+            .handle_retrieve_message_request(&internal_request)
+            .map_err(dkg_error_to_status)?;
+        Ok(tonic::Response::new(RetrieveMessageResponse::from(
+            &response,
+        )))
     }
 
+    #[tracing::instrument(skip(self, request))]
     async fn complain(
         &self,
         request: tonic::Request<ComplainRequest>,
-    ) -> Result<tonic::Response<ComplainResponse>> {
-        complain(self, request).map(tonic::Response::new)
+    ) -> Result<tonic::Response<ComplainResponse>, Status> {
+        authenticate_caller(self, &request)?;
+        let external_request = request.into_inner();
+        let internal_request = types::ComplainRequest::try_from(&external_request)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let mut dkg_manager = self.dkg_manager().lock().unwrap();
+        validate_epoch(dkg_manager.dkg_config.epoch, external_request.epoch)?;
+        let response = dkg_manager
+            .handle_complain_request(&internal_request)
+            .map_err(dkg_error_to_status)?;
+        Ok(tonic::Response::new(ComplainResponse::from(&response)))
     }
 }
 
-#[tracing::instrument(skip(service, request))]
-fn send_message(
-    service: &HttpService,
-    request: tonic::Request<SendMessageRequest>,
-) -> Result<SendMessageResponse> {
-    let sender = authenticate_caller(service, &request)?;
-    let external_request = request.into_inner();
-    let internal_request =
-        types::SendMessageRequest::try_from(&external_request).map_err(invalid_argument)?;
-    let mut dkg_manager = service.dkg_manager().lock().unwrap();
-    validate_epoch(dkg_manager.dkg_config.epoch, external_request.epoch)?;
-    let response = dkg_manager
-        .handle_send_message_request(sender, &internal_request)
-        .map_err(dkg_error_to_status)?;
-    Ok(SendMessageResponse::from(&response))
-}
-
-#[tracing::instrument(skip(service, request))]
-fn retrieve_message(
-    service: &HttpService,
-    request: tonic::Request<RetrieveMessageRequest>,
-) -> Result<RetrieveMessageResponse> {
-    authenticate_caller(service, &request)?;
-    let external_request = request.into_inner();
-    let internal_request =
-        types::RetrieveMessageRequest::try_from(&external_request).map_err(invalid_argument)?;
-    let dkg_manager = service.dkg_manager().lock().unwrap();
-    validate_epoch(dkg_manager.dkg_config.epoch, external_request.epoch)?;
-    let response = dkg_manager
-        .handle_retrieve_message_request(&internal_request)
-        .map_err(dkg_error_to_status)?;
-    Ok(RetrieveMessageResponse::from(&response))
-}
-
-#[tracing::instrument(skip(service, request))]
-fn complain(
-    service: &HttpService,
-    request: tonic::Request<ComplainRequest>,
-) -> Result<ComplainResponse> {
-    authenticate_caller(service, &request)?;
-    let external_request = request.into_inner();
-    let internal_request =
-        types::ComplainRequest::try_from(&external_request).map_err(invalid_argument)?;
-    let mut dkg_manager = service.dkg_manager().lock().unwrap();
-    validate_epoch(dkg_manager.dkg_config.epoch, external_request.epoch)?;
-    let response = dkg_manager
-        .handle_complain_request(&internal_request)
-        .map_err(dkg_error_to_status)?;
-    Ok(ComplainResponse::from(&response))
-}
-
 // TODO: Move authentication to a middleware layer and add validator address as a request extension.
-fn authenticate_caller<T>(service: &HttpService, request: &tonic::Request<T>) -> Result<Address> {
+fn authenticate_caller<T>(
+    service: &HttpService,
+    request: &tonic::Request<T>,
+) -> Result<Address, Status> {
     let peer_certs = request
         .extensions()
         .get::<sui_http::PeerCertificates>()
@@ -120,7 +102,7 @@ fn authenticate_caller<T>(service: &HttpService, request: &tonic::Request<T>) ->
         .ok_or_else(|| Status::permission_denied("unknown validator"))
 }
 
-fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<()> {
+fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Status> {
     let epoch =
         request_epoch.ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
     if epoch != expected {
@@ -129,10 +111,6 @@ fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn invalid_argument(err: impl std::fmt::Display) -> Status {
-    Status::invalid_argument(err.to_string())
 }
 
 fn dkg_error_to_status(err: types::DkgError) -> Status {
