@@ -10,10 +10,10 @@ const EWrongEpoch: u64 = 0;
 public struct TobRegistry has store {
     epoch: u64,
     /// Certificates indexed by dealer address (first-cert-wins).
-    certificates: Table<address, StoredMpcCertificate>,
+    certificates: Table<address, StoredMpcCertificateV1>,
 }
 
-public struct StoredMpcCertificate has copy, drop, store {
+public struct StoredMpcCertificateV1 has copy, drop, store {
     epoch: u64,
     dealer: address,
     message_hash: vector<u8>,    // 32 bytes
@@ -49,11 +49,10 @@ public(package) fun submit_certificate(
     if (table::contains(&registry.certificates, dealer)) {
         return
     };
-    let dkg_message = DkgDealerMessageHash {
-        dealer_address: dealer,
-        message_hash: message_hash,
-    };
-    let message = hashi::committee::new_message(epoch, dkg_message);
+    let message = hashi::committee::new_message(
+        epoch,
+        DkgDealerMessageHash { dealer_address: dealer, message_hash },
+    );
     hashi::committee::verify_certificate(
         committee,
         &signature,
@@ -61,7 +60,7 @@ public(package) fun submit_certificate(
         message,
         threshold,
     );
-    let cert = StoredMpcCertificate {
+    let cert = StoredMpcCertificateV1 {
         epoch,
         dealer,
         message_hash,
