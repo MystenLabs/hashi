@@ -33,20 +33,6 @@ public(package) fun create(epoch: u64, ctx: &mut TxContext): EpochCerts {
     }
 }
 
-/// Remove all DKG certificates and destroy the EpochCerts in one transaction.
-/// Can only be called when current_epoch >= epoch + 2.
-public(package) fun destroy_all(epoch_certs: EpochCerts, current_epoch: u64) {
-    let EpochCerts { epoch, mut dkg_certs } = epoch_certs;
-    assert!(current_epoch >= epoch + 2, ETooEarlyToDestroy);
-    while (!dkg_certs.is_empty()) {
-        let (
-            _,
-            DkgCertV1 { message_hash: _, signature: _, signers_bitmap: _ },
-        ) = dkg_certs.pop_front();
-    };
-    dkg_certs.destroy_empty();
-}
-
 public(package) fun submit_dkg_cert(
     epoch_certs: &mut EpochCerts,
     committee: &Committee,
@@ -77,4 +63,18 @@ public(package) fun submit_dkg_cert(
         signers_bitmap,
     };
     epoch_certs.dkg_certs.push_back(dealer, cert);
+}
+
+/// Remove all DKG certificates and destroy the EpochCerts in one transaction.
+/// Can only be called when current_epoch >= epoch + 2.
+public(package) fun destroy_all(epoch_certs: EpochCerts, current_epoch: u64) {
+    let EpochCerts { epoch, mut dkg_certs } = epoch_certs;
+    assert!(current_epoch >= epoch + 2, ETooEarlyToDestroy);
+    while (!dkg_certs.is_empty()) {
+        let (
+            _,
+            DkgCertV1 { message_hash: _, signature: _, signers_bitmap: _ },
+        ) = dkg_certs.pop_front();
+    };
+    dkg_certs.destroy_empty();
 }
