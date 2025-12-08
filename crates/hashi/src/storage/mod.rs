@@ -1,8 +1,13 @@
+mod file;
+
 use crate::dkg::EncryptionGroupElement;
 use anyhow::Result;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
+
+pub use file::FilePublicMessagesStore;
+pub use file::FileSecretsStore;
 
 pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's DKG message
