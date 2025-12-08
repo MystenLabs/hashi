@@ -73,8 +73,8 @@ impl DkgManager {
             let Some(encryption_pk) = member_info.encryption_public_key.as_ref() else {
                 continue;
             };
-            // party_id must be sequential starting from 0 (required by `Nodes::new()`).
-            // This is consistent across all validators since CommitteeSet is on-chain data.
+            // `party_id` must be sequential starting from 0 (required by `Nodes::new()`).
+            // This is consistent across all validators since `CommitteeSet` is on-chain data.
             let party_id = nodes_vec.len() as u16;
             nodes_vec.push(Node {
                 id: party_id,
@@ -83,7 +83,7 @@ impl DkgManager {
             });
             address_to_party_id.insert(addr, party_id);
         }
-        // TODO: Use Nodes::new_reduce()
+        // TODO: Use `Nodes::new_reduce()`
         let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
         // TODO: Pass t and f as arguments instead of computing them
         let total_weight = nodes.total_weight();
