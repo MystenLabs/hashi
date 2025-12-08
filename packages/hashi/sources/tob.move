@@ -16,9 +16,9 @@ public struct TobRegistry has store {
 public struct StoredMpcCertificateV1 has copy, drop, store {
     epoch: u64,
     dealer: address,
-    message_hash: vector<u8>,    // 32 bytes
-    signature: vector<u8>,       // BLS aggregate signature
-    signers_bitmap: vector<u8>,  // Bitmap of signers
+    message_hash: vector<u8>, // 32 bytes
+    signature: vector<u8>, // BLS aggregate signature
+    signers_bitmap: vector<u8>, // Bitmap of signers
 }
 
 public struct DkgDealerMessageHash has copy, drop {
