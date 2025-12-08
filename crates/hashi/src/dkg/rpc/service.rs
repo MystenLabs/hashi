@@ -102,6 +102,7 @@ fn complain(
     Ok(ComplainResponse::from(&response))
 }
 
+// TODO: Move authentication to a middleware layer and add validator address as a request extension.
 fn authenticate_caller<T>(service: &HttpService, request: &tonic::Request<T>) -> Result<Address> {
     let peer_certs = request
         .extensions()
