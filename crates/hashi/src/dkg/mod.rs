@@ -81,7 +81,9 @@ impl DkgManager {
             });
             address_to_party_id.insert(addr, party_id);
         }
+        // TODO: Use Nodes::new_reduce()
         let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        // TODO: Pass t and f as arguments instead of computing them
         let total_weight = nodes.total_weight();
         let max_faulty = (total_weight - 1) / 3;
         let threshold = max_faulty + 1;
