@@ -147,8 +147,7 @@ fun verify_proposal(self: &Committee, signers: sui::vec_set::VecSet<address>, th
 /// The `weight_verification_type` is the type of weight verification to perform,
 /// either check that the signers forms a quorum or includes at least one correct node.
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
-#[allow(unused_function)]
-fun verify_certificate<T>(
+public(package) fun verify_certificate<T>(
     self: &Committee,
     signature: &vector<u8>,
     signers_bitmap: &vector<u8>,
@@ -244,12 +243,16 @@ fun verify_certificate<T>(
     }
 }
 
-public struct Message<T> has drop {
+public struct Message<T> has copy, drop {
     epoch: u64,
     message: T,
 }
 
-public struct CertifiedMessage<T> has drop {
+public(package) fun new_message<T>(epoch: u64, message: T): Message<T> {
+    Message { epoch, message }
+}
+
+public struct CertifiedMessage<T> has copy, drop {
     epoch: u64,
     message: T,
     stake_support: u16,
