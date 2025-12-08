@@ -1,4 +1,4 @@
-/// Totally Ordered Broadcast (TOB) module
+/// Totally Ordered Broadcast (TOB)
 
 module hashi::tob;
 
