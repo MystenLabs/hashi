@@ -73,6 +73,8 @@ impl DkgManager {
             let Some(encryption_pk) = member_info.encryption_public_key.as_ref() else {
                 continue;
             };
+            // party_id must be sequential starting from 0 (required by `Nodes::new()`).
+            // This is consistent across all validators since CommitteeSet is on-chain data.
             let party_id = nodes_vec.len() as u16;
             nodes_vec.push(Node {
                 id: party_id,
