@@ -133,13 +133,15 @@ public fun update_tls_public_key(
 }
 
 //TODO require the validator address passed in to better support operator address
-public fun update_encryption_public_key(
+public fun update_next_epoch_encryption_public_key(
     self: &mut Hashi,
-    encryption_public_key: vector<u8>,
+    next_epoch_encryption_public_key: vector<u8>,
     ctx: &mut TxContext,
 ) {
     self.config.assert_version();
-    self.committees.set_encryption_public_key(ctx.sender(), encryption_public_key, ctx);
+    self
+        .committees
+        .set_next_epoch_encryption_public_key(ctx.sender(), next_epoch_encryption_public_key, ctx);
 }
 
 entry fun bootstrap(

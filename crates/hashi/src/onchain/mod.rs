@@ -271,7 +271,7 @@ async fn scrape_member_info(
                  next_epoch_public_key,
                  https_address,
                  tls_public_key,
-                 encryption_public_key,
+                 next_epoch_encryption_public_key,
              }| {
                 let info = types::MemberInfo {
                     validator_address,
@@ -281,8 +281,8 @@ async fn scrape_member_info(
                     ),
                     https_address: https_address.try_into().ok(),
                     tls_public_key: tls_public_key.as_slice().try_into().ok(),
-                    encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
-                        encryption_public_key.as_slice(),
+                    next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+                        next_epoch_encryption_public_key.as_slice(),
                     )
                     .map(Into::into)
                     .ok(),
@@ -337,6 +337,7 @@ fn convert_move_committee_member(
     move_types::CommitteeMember {
         validator_address,
         public_key,
+        encryption_key: _,
         weight,
     }: move_types::CommitteeMember,
 ) -> BlsCommitteeMember {

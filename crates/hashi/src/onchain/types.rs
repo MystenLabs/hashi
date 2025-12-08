@@ -63,11 +63,11 @@ pub struct MemberInfo {
     pub tls_public_key: Option<ed25519_dalek::VerifyingKey>,
 
     /// A 32-byte ristretto255 Ristretto encryption public key (ristretto255
-    /// RistrettoPoint) for MPC ECIES.
+    /// RistrettoPoint) for MPC ECIES, to be used in the next epoch.
     ///
-    /// This public key can be rotated and any such updates will take effect
-    /// immediately.
-    pub encryption_public_key:
+    /// This public key can be rotated but will only take effect at the
+    /// beginning of the next epoch.
+    pub next_epoch_encryption_public_key:
         Option<fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>>,
 }
 
@@ -92,10 +92,10 @@ impl MemberInfo {
         self.https_address.as_ref()
     }
 
-    pub fn encryption_public_key(
+    pub fn next_epoch_encryption_public_key(
         &self,
     ) -> Option<&fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>> {
-        self.encryption_public_key.as_ref()
+        self.next_epoch_encryption_public_key.as_ref()
     }
 }
 

@@ -261,7 +261,7 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
                 module: Identifier::from_static("hashi"),
-                function: Identifier::from_static("update_encryption_public_key"),
+                function: Identifier::from_static("update_next_epoch_encryption_public_key"),
                 type_arguments: vec![],
                 arguments: vec![Argument::Input(1), Argument::Input(6)],
             }),

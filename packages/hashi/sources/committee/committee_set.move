@@ -90,11 +90,11 @@ public struct MemberInfo has store {
     /// immediately.
     tls_public_key: vector<u8>,
     /// A 32-byte ristretto255 Ristretto encryption public key (ristretto255
-    /// RistrettoPoint) for MPC ECIES.
+    /// RistrettoPoint) for MPC ECIES, to be used in the next epoch.
     ///
-    /// This public key can be rotated and any such updates will take effect
-    /// immediately.
-    encryption_public_key: vector<u8>,
+    /// This public key can be rotated but will only take effect at the
+    /// beginning of the next epoch.
+    next_epoch_encryption_public_key: vector<u8>,
 }
 
 /// Register as a member of Hashi.
@@ -126,7 +126,7 @@ public(package) fun new_member(
         next_epoch_public_key: next_epoch_public_key,
         https_address: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
-        encryption_public_key: std::vector::empty(),
+        next_epoch_encryption_public_key: std::vector::empty(),
     };
 
     committee_set.insert_member(member);
@@ -184,18 +184,18 @@ public(package) fun set_tls_public_key(
     member.tls_public_key = tls_public_key;
 }
 
-/// Set the encryption_public_key of the member.
-public(package) fun set_encryption_public_key(
+/// Set the next_epoch_encryption_public_key of the member.
+public(package) fun set_next_epoch_encryption_public_key(
     self: &mut CommitteeSet,
     validator_address: address,
-    encryption_public_key: vector<u8>,
+    next_epoch_encryption_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
-    assert!(encryption_public_key.length() == 32);
+    assert!(next_epoch_encryption_public_key.length() == 32);
 
     let member = self.member_mut(validator_address);
     member.assert_update_permitted(ctx);
-    member.encryption_public_key = encryption_public_key;
+    member.next_epoch_encryption_public_key = next_epoch_encryption_public_key;
 }
 
 /// Set the operator_address of the member.
@@ -217,7 +217,7 @@ fun validator_address(self: &MemberInfo): &address {
     &self.validator_address
 }
 
-/// Return the public key of the node.
+/// Return the next epoch public key of the node.
 fun next_epoch_public_key(self: &MemberInfo): &Element<UncompressedG1> {
     &self.next_epoch_public_key
 }
@@ -232,9 +232,9 @@ fun tls_public_key(self: &MemberInfo): &vector<u8> {
     &self.tls_public_key
 }
 
-/// Return the encryption_public_key of the node.
-fun encryption_public_key(self: &MemberInfo): &vector<u8> {
-    &self.encryption_public_key
+/// Return the next epoch encryption public key of the node.
+fun next_epoch_encryption_public_key(self: &MemberInfo): &vector<u8> {
+    &self.next_epoch_encryption_public_key
 }
 
 /// Return the current epoch.
@@ -305,6 +305,7 @@ fun new_committee_from_validator_set(
         let committee_member = committee::new_committee_member(
             validator_address,
             member.next_epoch_public_key,
+            member.next_epoch_encryption_public_key,
             weight as u16, // XXX is this ok?
         );
 

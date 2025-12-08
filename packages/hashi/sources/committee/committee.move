@@ -21,6 +21,7 @@ const EIncorrectCommittee: u64 = 3;
 public struct CommitteeMember has copy, drop, store {
     validator_address: address,
     public_key: Element<UncompressedG1>,
+    encryption_key: vector<u8>,
     weight: u16,
 }
 
@@ -61,12 +62,14 @@ public(package) fun new_committee(epoch: u64, members: vector<CommitteeMember>):
 public(package) fun new_committee_member(
     validator_address: address,
     public_key: Element<UncompressedG1>,
+    encryption_key: vector<u8>,
     weight: u16,
 ): CommitteeMember {
     assert!(weight > 0, EIncorrectCommittee);
     CommitteeMember {
         validator_address,
         public_key,
+        encryption_key,
         weight,
     }
 }
