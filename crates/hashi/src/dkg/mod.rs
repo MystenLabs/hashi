@@ -891,7 +891,7 @@ mod tests {
         ) -> crate::communication::ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
-                crate::communication::ChannelError::SendFailed(format!(
+                crate::communication::ChannelError::RequestFailed(format!(
                     "Recipient {:?} not found",
                     recipient
                 ))
@@ -899,7 +899,10 @@ mod tests {
             let response = manager
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
-                    crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
                 })?;
             Ok(response)
         }
@@ -911,7 +914,7 @@ mod tests {
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
             let managers = self.managers.lock().unwrap();
             let manager = managers.get(party).ok_or_else(|| {
-                crate::communication::ChannelError::SendFailed(format!(
+                crate::communication::ChannelError::RequestFailed(format!(
                     "Party {:?} not found",
                     party
                 ))
@@ -919,7 +922,10 @@ mod tests {
             let response = manager
                 .handle_retrieve_message_request(request)
                 .map_err(|e| {
-                    crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
                 })?;
             Ok(response)
         }
@@ -931,13 +937,13 @@ mod tests {
         ) -> crate::communication::ChannelResult<ComplainResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(party).ok_or_else(|| {
-                crate::communication::ChannelError::SendFailed(format!(
+                crate::communication::ChannelError::RequestFailed(format!(
                     "Party {:?} not found",
                     party
                 ))
             })?;
             let response = manager.handle_complain_request(request).map_err(|e| {
-                crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+                crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
             Ok(response)
         }
@@ -982,7 +988,7 @@ mod tests {
     impl crate::communication::OrderedBroadcastChannel<Certificate> for MockOrderedBroadcastChannel {
         async fn publish(&self, message: Certificate) -> crate::communication::ChannelResult<()> {
             if let Some(ref error_msg) = self.fail_on_publish {
-                return Err(crate::communication::ChannelError::SendFailed(
+                return Err(crate::communication::ChannelError::RequestFailed(
                     error_msg.clone(),
                 ));
             }
@@ -996,7 +1002,7 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .ok_or_else(|| {
-                    crate::communication::ChannelError::SendFailed(
+                    crate::communication::ChannelError::RequestFailed(
                         "No more certificates".to_string(),
                     )
                 })
@@ -1040,7 +1046,7 @@ mod tests {
             _recipient: &Address,
             _request: &SendMessageRequest,
         ) -> crate::communication::ChannelResult<SendMessageResponse> {
-            Err(crate::communication::ChannelError::SendFailed(
+            Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
         }
@@ -1050,7 +1056,7 @@ mod tests {
             _party: &Address,
             _request: &RetrieveMessageRequest,
         ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
-            Err(crate::communication::ChannelError::SendFailed(
+            Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
         }
@@ -1060,7 +1066,7 @@ mod tests {
             _party: &Address,
             _request: &ComplainRequest,
         ) -> crate::communication::ChannelResult<ComplainResponse> {
-            Err(crate::communication::ChannelError::SendFailed(
+            Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
         }
@@ -1089,7 +1095,7 @@ mod tests {
         ) -> crate::communication::ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
-                crate::communication::ChannelError::SendFailed(format!(
+                crate::communication::ChannelError::RequestFailed(format!(
                     "Recipient {:?} not found",
                     recipient
                 ))
@@ -1097,7 +1103,10 @@ mod tests {
             let response = manager
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
-                    crate::communication::ChannelError::SendFailed(format!("Handler failed: {}", e))
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
                 })?;
             Ok(response)
         }
@@ -1151,14 +1160,14 @@ mod tests {
             let mut count = self.fail_count.lock().unwrap();
             if *count < self.max_failures {
                 *count += 1;
-                Err(crate::communication::ChannelError::SendFailed(
+                Err(crate::communication::ChannelError::RequestFailed(
                     "network error".to_string(),
                 ))
             } else {
                 drop(count); // Release the lock before calling manager
                 let mut managers = self.managers.lock().unwrap();
                 let manager = managers.get_mut(recipient).ok_or_else(|| {
-                    crate::communication::ChannelError::SendFailed(format!(
+                    crate::communication::ChannelError::RequestFailed(format!(
                         "Recipient {:?} not found",
                         recipient
                     ))
@@ -1166,7 +1175,7 @@ mod tests {
                 let response = manager
                     .handle_send_message_request(self.current_sender, request)
                     .map_err(|e| {
-                        crate::communication::ChannelError::SendFailed(format!(
+                        crate::communication::ChannelError::RequestFailed(format!(
                             "Handler failed: {}",
                             e
                         ))
@@ -1234,7 +1243,9 @@ mod tests {
                 .unwrap()
                 .get(party)
                 .cloned()
-                .ok_or_else(|| crate::communication::ChannelError::SendFailed("No response".into()))
+                .ok_or_else(|| {
+                    crate::communication::ChannelError::RequestFailed("No response".into())
+                })
         }
     }
 
@@ -1248,7 +1259,7 @@ mod tests {
     impl crate::communication::OrderedBroadcastChannel<Certificate> for FailingOrderedBroadcastChannel {
         async fn publish(&self, _message: Certificate) -> crate::communication::ChannelResult<()> {
             if self.fail_on_publish {
-                Err(crate::communication::ChannelError::SendFailed(
+                Err(crate::communication::ChannelError::RequestFailed(
                     self.error_message.clone(),
                 ))
             } else {
@@ -1258,7 +1269,7 @@ mod tests {
 
         async fn receive(&mut self) -> crate::communication::ChannelResult<Certificate> {
             if self.fail_on_receive {
-                Err(crate::communication::ChannelError::SendFailed(
+                Err(crate::communication::ChannelError::RequestFailed(
                     self.error_message.clone(),
                 ))
             } else {
