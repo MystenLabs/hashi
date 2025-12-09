@@ -26,6 +26,12 @@ public struct DkgCertV1 has copy, store {
     signers_bitmap: vector<u8>, // Bitmap of signers
 }
 
+/// Remove a DKG certificate from the registry and destroy it.
+public(package) fun remove_dkg_cert(registry: &mut EpochCerts, dealer: address) {
+    let cert = table::remove(&mut registry.dkg_certs, dealer);
+    destroy_dkg_cert(cert);
+}
+
 public(package) fun destroy_dkg_cert(cert: DkgCertV1) {
     let DkgCertV1 { message_hash: _, signature: _, signers_bitmap: _ } = cert;
 }
