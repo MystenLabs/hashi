@@ -73,7 +73,7 @@ impl DkgManager {
             // Use fallback key for nodes without valid encryption key.
             // These nodes cannot decrypt shares but still count toward thresholds.
             let encryption_pk = member_info
-                .encryption_public_key
+                .next_epoch_encryption_public_key
                 .clone()
                 .unwrap_or_else(fallback_encryption_public_key);
             let party_id = index as u16;
@@ -676,7 +676,7 @@ mod tests {
             let members: BTreeMap<Address, MemberInfo> = (0..num_validators)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
-                    let encryption_public_key =
+                    let next_epoch_encryption_public_key =
                         Some(PublicKey::from_private_key(&encryption_keys[i]));
                     let member_info = MemberInfo {
                         validator_address: addr,
@@ -684,7 +684,7 @@ mod tests {
                         next_epoch_public_key: bls_keys[i].public_key(),
                         https_address: None,
                         tls_public_key: None,
-                        encryption_public_key,
+                        next_epoch_encryption_public_key,
                     };
                     (addr, member_info)
                 })
@@ -735,7 +735,7 @@ mod tests {
             let members: BTreeMap<Address, MemberInfo> = (0..num_validators)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
-                    let encryption_public_key =
+                    let next_epoch_encryption_public_key =
                         Some(PublicKey::from_private_key(&encryption_keys[i]));
                     let member_info = MemberInfo {
                         validator_address: addr,
@@ -743,7 +743,7 @@ mod tests {
                         next_epoch_public_key: bls_keys[i].public_key(),
                         https_address: None,
                         tls_public_key: None,
-                        encryption_public_key,
+                        next_epoch_encryption_public_key,
                     };
                     (addr, member_info)
                 })
@@ -1326,7 +1326,7 @@ mod tests {
         let members: BTreeMap<Address, MemberInfo> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
-                let encryption_public_key = if i == 2 {
+                let next_epoch_encryption_public_key = if i == 2 {
                     None // No encryption key for validator 2
                 } else {
                     Some(PublicKey::from_private_key(&encryption_keys[i]))
@@ -1337,7 +1337,7 @@ mod tests {
                     next_epoch_public_key: bls_keys[i].public_key(),
                     https_address: None,
                     tls_public_key: None,
-                    encryption_public_key,
+                    next_epoch_encryption_public_key,
                 };
                 (addr, member_info)
             })
@@ -1427,7 +1427,9 @@ mod tests {
                     next_epoch_public_key: bls_keys[i].public_key(),
                     https_address: None,
                     tls_public_key: None,
-                    encryption_public_key: Some(PublicKey::from_private_key(&encryption_keys[i])),
+                    next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
+                        &encryption_keys[i],
+                    )),
                 };
                 (addr, member_info)
             })
