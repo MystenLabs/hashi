@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{BLS12381Signature, CommitteeSignature};
+use crate::committee::{BLS12381Signature, CommitteeSignature};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::{
@@ -195,8 +195,7 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastcrypto::groups::ristretto255::RistrettoPoint;
-    use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
+    use crate::committee::{EncryptionPrivateKey, EncryptionPublicKey};
     use fastcrypto_tbls::nodes::Node;
 
     impl MpcMessageV1 {
@@ -217,8 +216,8 @@ mod tests {
         party_id: u16,
         weight: u16,
     ) -> (Address, Node<EncryptionGroupElement>) {
-        let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
-        let public_key = PublicKey::from_private_key(&private_key);
+        let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let public_key = EncryptionPublicKey::from_private_key(&private_key);
         let address = Address::new([party_id as u8; 32]);
         let node = Node {
             id: party_id,

@@ -3,7 +3,7 @@
 pub mod rpc;
 pub mod types;
 
-use crate::bls::{BlsCommittee, BlsSignatureAggregator};
+use crate::committee::{BlsSignatureAggregator, Committee};
 use crate::communication::{ChannelResult, P2PChannel, with_timeout_and_retry};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
@@ -39,8 +39,8 @@ pub struct DkgManager {
     pub dkg_config: DkgConfig,
     pub session_id: SessionId,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub bls_signing_key: crate::bls::Bls12381PrivateKey,
-    pub bls_committee: BlsCommittee,
+    pub bls_signing_key: crate::committee::Bls12381PrivateKey,
+    pub committee: Committee,
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<Address, avss::PartialOutput>,
@@ -57,31 +57,20 @@ impl DkgManager {
         committee_set: &CommitteeSet,
         session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
-        bls_signing_key: crate::bls::Bls12381PrivateKey,
+        bls_signing_key: crate::committee::Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> DkgResult<Self> {
-        let bls_committee = committee_set
+        let committee = committee_set
             .current_committee()
             .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
             .clone();
-        let mut nodes_vec = Vec::with_capacity(bls_committee.members().len());
-        for (index, member) in bls_committee.members().iter().enumerate() {
-            let addr = member.validator_address();
-            let member_info = committee_set
-                .members()
-                .get(&addr)
-                .expect("committee member missing - on-chain invariant violation");
-            // Use fallback key for nodes without valid encryption key.
-            // These nodes cannot decrypt shares but still count toward thresholds.
-            let encryption_pk = member_info
-                .next_epoch_encryption_public_key
-                .clone()
-                .unwrap_or_else(fallback_encryption_public_key);
+        let mut nodes_vec = Vec::with_capacity(committee.members().len());
+        for (index, member) in committee.members().iter().enumerate() {
             let party_id = index as u16;
             debug_assert_eq!(party_id as usize, nodes_vec.len());
             nodes_vec.push(Node {
                 id: party_id,
-                pk: encryption_pk,
+                pk: member.encryption_public_key().to_owned(),
                 weight: member.weight() as u16,
             });
         }
@@ -92,7 +81,7 @@ impl DkgManager {
         let max_faulty = (total_weight - 1) / 3;
         let threshold = max_faulty + 1;
         let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
-        let party_id = bls_committee
+        let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
         Ok(Self {
@@ -102,7 +91,7 @@ impl DkgManager {
             session_id,
             encryption_key,
             bls_signing_key,
-            bls_committee,
+            committee,
             dealer_outputs: HashMap::new(),
             dealer_messages: HashMap::new(),
             message_responses: HashMap::new(),
@@ -222,7 +211,7 @@ impl DkgManager {
             .expect("own message should always be valid");
         let message_hash = compute_message_hash(&dealer_message);
         let mut aggregator = BlsSignatureAggregator::new(
-            &self.bls_committee,
+            &self.committee,
             Dkg(DkgDealerMessageHash {
                 dealer_address: self.address,
                 message_hash,
@@ -232,7 +221,7 @@ impl DkgManager {
             .add_signature_from(self.address, my_signature.clone())
             .expect("first signature should always be valid");
         let recipients: Vec<_> = self
-            .bls_committee
+            .committee
             .members()
             .iter()
             .map(|m| m.validator_address())
@@ -289,7 +278,7 @@ impl DkgManager {
                     if certified_dealers.contains_key(&dealer) {
                         continue;
                     }
-                    if let Err(e) = self.bls_committee.verify_signature(&cert) {
+                    if let Err(e) = self.committee.verify_signature(&cert) {
                         tracing::info!("Invalid certificate signature from {:?}: {}", &dealer, e);
                         continue;
                     }
@@ -323,13 +312,13 @@ impl DkgManager {
                     if self.complaints_to_process.contains_key(&dealer) {
                         self.recover_shares_via_complaint(
                             &dealer,
-                            cert.signers(&self.bls_committee)
+                            cert.signers(&self.committee)
                                 .expect("certificate verified above"),
                             p2p_channel,
                         )
                         .await?;
                     }
-                    let dealer_weight = self.bls_committee.weight_of(&dealer).map_err(|_| {
+                    let dealer_weight = self.committee.weight_of(&dealer).map_err(|_| {
                         DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                     })?;
                     dealer_weight_sum += dealer_weight as u32;
@@ -433,7 +422,7 @@ impl DkgManager {
             .keys()
             .map(|dealer| {
                 let dealer_party_id = self
-                    .bls_committee
+                    .committee
                     .index_of(dealer)
                     .expect("certified dealer must be committee member")
                     as u16;
@@ -474,7 +463,7 @@ impl DkgManager {
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
         if certificate
-            .is_signer(&self.address, &self.bls_committee)
+            .is_signer(&self.address, &self.committee)
             .map_err(|e| DkgError::CryptoError(e.to_string()))?
         {
             tracing::error!(
@@ -485,7 +474,7 @@ impl DkgManager {
                 "Self in certificate signers but message not available".to_string(),
             ));
         }
-        let signers = certificate.signers(&self.bls_committee).map_err(|_| {
+        let signers = certificate.signers(&self.committee).map_err(|_| {
             DkgError::ProtocolFailed(
                 "Certificate does not match the current epoch or committee".to_string(),
             )
@@ -591,7 +580,7 @@ impl DkgManager {
 }
 
 /// TODO: Replace generator with a nothing-up-my-sleeve point with unknown discrete log.
-fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
+pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
     PublicKey::from(EncryptionGroupElement::generator())
 }
 
@@ -621,14 +610,13 @@ async fn send_dkg_message_to_many(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls::{BlsCommittee, BlsCommitteeMember, MemberSignature};
+    use crate::committee::{Committee, CommitteeMember, EncryptionPublicKey, MemberSignature};
     use crate::dkg::types::ProtocolType;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
     use fastcrypto::encoding::Hex;
     use fastcrypto::groups::Scalar;
     use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
-    use fastcrypto_tbls::ecies_v1::PublicKey;
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
@@ -671,7 +659,7 @@ mod tests {
     struct TestSetup {
         pub committee_set: CommitteeSet,
         pub encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
-        pub bls_keys: Vec<crate::bls::Bls12381PrivateKey>,
+        pub bls_keys: Vec<crate::committee::Bls12381PrivateKey>,
     }
 
     impl TestSetup {
@@ -683,13 +671,13 @@ mod tests {
                 .collect();
 
             let bls_keys: Vec<_> = (0..num_validators)
-                .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+                .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
                 .collect();
 
             let epoch = 100u64;
 
             // Build MemberInfo for each validator
-            let members: BTreeMap<Address, MemberInfo> = (0..num_validators)
+            let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
                     let next_epoch_encryption_public_key =
@@ -706,22 +694,27 @@ mod tests {
                 })
                 .collect();
 
-            // Build BlsCommittee
-            let bls_members: Vec<_> = (0..num_validators)
+            // Build Committee
+            let members: Vec<_> = (0..num_validators)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
-                    BlsCommitteeMember::new(addr, bls_keys[i].public_key(), 1)
+                    CommitteeMember::new(
+                        addr,
+                        bls_keys[i].public_key(),
+                        EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                        1,
+                    )
                 })
                 .collect();
-            let bls_committee = BlsCommittee::new(bls_members, epoch);
+            let committee = Committee::new(members, epoch);
 
             let mut committees = BTreeMap::new();
-            committees.insert(epoch, bls_committee);
+            committees.insert(epoch, committee);
 
             let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
             committee_set
                 .set_epoch(epoch)
-                .set_members(members)
+                .set_members(member_infos)
                 .set_committees(committees);
 
             Self {
@@ -740,13 +733,13 @@ mod tests {
                 .collect();
 
             let bls_keys: Vec<_> = (0..num_validators)
-                .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+                .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
                 .collect();
 
             let epoch = 100u64;
 
             // Build MemberInfo for each validator
-            let members: BTreeMap<Address, MemberInfo> = (0..num_validators)
+            let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
                     let next_epoch_encryption_public_key =
@@ -763,22 +756,28 @@ mod tests {
                 })
                 .collect();
 
-            // Build BlsCommittee with custom weights
-            let bls_members: Vec<_> = (0..num_validators)
+            // Build Committee with custom weights
+            let members: Vec<_> = (0..num_validators)
                 .map(|i| {
                     let addr = Address::new([i as u8; 32]);
-                    BlsCommitteeMember::new(addr, bls_keys[i].public_key(), weights[i].into())
+                    let encryption_public_key = PublicKey::from_private_key(&encryption_keys[i]);
+                    CommitteeMember::new(
+                        addr,
+                        bls_keys[i].public_key(),
+                        encryption_public_key,
+                        weights[i].into(),
+                    )
                 })
                 .collect();
-            let bls_committee = BlsCommittee::new(bls_members, epoch);
+            let committee = Committee::new(members, epoch);
 
             let mut committees = BTreeMap::new();
-            committees.insert(epoch, bls_committee);
+            committees.insert(epoch, committee);
 
             let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
             committee_set
                 .set_epoch(epoch)
-                .set_members(members)
+                .set_members(member_infos)
                 .set_committees(committees);
 
             Self {
@@ -826,7 +825,7 @@ mod tests {
             )
         }
 
-        fn bls_committee(&self) -> &BlsCommittee {
+        fn committee(&self) -> &Committee {
             self.committee_set.current_committee().unwrap()
         }
 
@@ -856,7 +855,7 @@ mod tests {
     }
 
     fn create_test_certificate(
-        bls_committee: &BlsCommittee,
+        committee: &Committee,
         dealer_message: &avss::Message,
         dealer_address: Address,
         signatures: Vec<MemberSignature>,
@@ -866,7 +865,7 @@ mod tests {
             dealer_address,
             message_hash,
         });
-        let mut aggregator = BlsSignatureAggregator::new(bls_committee, dkg_message);
+        let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
         for signature in signatures {
             aggregator
                 .add_signature(signature)
@@ -1331,103 +1330,7 @@ mod tests {
         // Verify DkgConfig was built correctly
         assert_eq!(manager.dkg_config.epoch, setup.epoch());
         assert_eq!(manager.dkg_config.nodes.num_nodes(), 5);
-        assert_eq!(manager.bls_committee.members().len(), 5);
-    }
-
-    #[test]
-    fn test_dkg_manager_uses_fallback_key_for_members_without_encryption_key() {
-        let mut rng = rand::thread_rng();
-
-        // Create a custom CommitteeSet where one member lacks encryption key
-        let num_validators = 5;
-        let encryption_keys: Vec<_> = (0..num_validators)
-            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
-            .collect();
-        let bls_keys: Vec<_> = (0..num_validators)
-            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
-            .collect();
-
-        let epoch = 100u64;
-
-        // Build MemberInfo - validator 2 has NO encryption key
-        let members: BTreeMap<Address, MemberInfo> = (0..num_validators)
-            .map(|i| {
-                let addr = Address::new([i as u8; 32]);
-                let next_epoch_encryption_public_key = if i == 2 {
-                    None // No encryption key for validator 2
-                } else {
-                    Some(PublicKey::from_private_key(&encryption_keys[i]))
-                };
-                let member_info = MemberInfo {
-                    validator_address: addr,
-                    operator_address: addr,
-                    next_epoch_public_key: bls_keys[i].public_key(),
-                    https_address: None,
-                    tls_public_key: None,
-                    next_epoch_encryption_public_key,
-                };
-                (addr, member_info)
-            })
-            .collect();
-
-        // Build BlsCommittee (all validators included)
-        let bls_members: Vec<_> = (0..num_validators)
-            .map(|i| {
-                let addr = Address::new([i as u8; 32]);
-                BlsCommitteeMember::new(addr, bls_keys[i].public_key(), 1)
-            })
-            .collect();
-        let bls_committee = BlsCommittee::new(bls_members, epoch);
-
-        let mut committees = BTreeMap::new();
-        committees.insert(epoch, bls_committee);
-
-        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
-        committee_set
-            .set_epoch(epoch)
-            .set_members(members)
-            .set_committees(committees);
-
-        // Create manager for validator 0
-        let session_id = SessionId::new("test", epoch, &ProtocolType::DkgKeyGeneration);
-        let manager = DkgManager::new(
-            Address::new([0; 32]),
-            &committee_set,
-            session_id,
-            encryption_keys[0].clone(),
-            bls_keys[0].clone(),
-            Box::new(MockPublicMessagesStore),
-        )
-        .expect("Should create manager");
-
-        // All 5 validators should be in DKG (validator 2 gets fallback key)
-        assert_eq!(
-            manager.dkg_config.nodes.num_nodes(),
-            5,
-            "All members should be included (missing keys get fallback)"
-        );
-
-        // Validator 2 should have the fallback encryption key
-        let node2 = manager.dkg_config.nodes.node_id_to_node(2).unwrap();
-        assert_eq!(
-            node2.pk,
-            fallback_encryption_public_key(),
-            "Validator without encryption key should have fallback key"
-        );
-
-        // Party IDs should match committee indices
-        assert_eq!(
-            manager.bls_committee.index_of(&Address::new([0; 32])),
-            Some(0)
-        );
-        assert_eq!(
-            manager.bls_committee.index_of(&Address::new([2; 32])),
-            Some(2)
-        );
-
-        // Threshold should be based on all 5 validators: (5-1)/3 + 1 = 2
-        assert_eq!(manager.dkg_config.threshold, 2);
-        assert_eq!(manager.dkg_config.max_faulty, 1);
+        assert_eq!(manager.committee.members().len(), 5);
     }
 
     #[test]
@@ -1438,7 +1341,7 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
         let bls_keys: Vec<_> = (0..5)
-            .map(|_| crate::bls::Bls12381PrivateKey::generate(&mut rng))
+            .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
             .collect();
 
         let epoch = 100u64;
@@ -1512,12 +1415,12 @@ mod tests {
                 i
             );
 
-            // Verify the address maps to this party_id via bls_committee
-            let expected_party_id = manager.bls_committee.index_of(&setup.address(i));
+            // Verify the address maps to this party_id via committee
+            let expected_party_id = manager.committee.index_of(&setup.address(i));
             assert_eq!(
                 expected_party_id,
                 Some(i),
-                "bls_committee.index_of should map correctly for validator {}",
+                "committee.index_of should map correctly for validator {}",
                 i
             );
         }
@@ -1695,7 +1598,7 @@ mod tests {
 
             // Create certificate using helper
             let cert = create_test_certificate(
-                setup.bls_committee(),
+                setup.committee(),
                 message,
                 dealer_address,
                 validator_signatures,
@@ -1738,14 +1641,12 @@ mod tests {
 
         // Create certificates (using actual BLS signatures from validator)
         let sig0 = receive_dealer_message(&mut validator, &message0, dealer_addr0).unwrap();
-        let cert0 =
-            create_test_certificate(setup.bls_committee(), &message0, dealer_addr0, vec![sig0])
-                .unwrap();
+        let cert0 = create_test_certificate(setup.committee(), &message0, dealer_addr0, vec![sig0])
+            .unwrap();
 
         let sig1 = receive_dealer_message(&mut validator, &message1, dealer_addr1).unwrap();
-        let cert1 =
-            create_test_certificate(setup.bls_committee(), &message1, dealer_addr1, vec![sig1])
-                .unwrap();
+        let cert1 = create_test_certificate(setup.committee(), &message1, dealer_addr1, vec![sig1])
+            .unwrap();
 
         let mut certificates = HashMap::new();
         certificates.insert(dealer_addr0, cert0);
@@ -1793,9 +1694,8 @@ mod tests {
             }
 
             // Create certificate using helper
-            let cert =
-                create_test_certificate(setup.bls_committee(), message, dealer_addr, signatures)
-                    .unwrap();
+            let cert = create_test_certificate(setup.committee(), message, dealer_addr, signatures)
+                .unwrap();
             certificates.push(cert);
         }
 
@@ -1907,9 +1807,8 @@ mod tests {
                 signatures.push(sig);
             }
 
-            let cert =
-                create_test_certificate(setup.bls_committee(), message, dealer_addr, signatures)
-                    .unwrap();
+            let cert = create_test_certificate(setup.committee(), message, dealer_addr, signatures)
+                .unwrap();
             certificates.push(cert);
         }
 
@@ -2084,9 +1983,8 @@ mod tests {
             }
 
             // Create certificate using helper
-            let cert =
-                create_test_certificate(setup.bls_committee(), message, dealer_addr, signatures)
-                    .unwrap();
+            let cert = create_test_certificate(setup.committee(), message, dealer_addr, signatures)
+                .unwrap();
             certificates.push(cert);
         }
 
@@ -2176,7 +2074,7 @@ mod tests {
         let epoch = setup.epoch();
         // Create certificates with signers (excluding party 2 who has complaint)
         let cert_0 = create_certificate_with_signers(
-            setup.bls_committee(),
+            setup.committee(),
             &dealer_0_addr,
             &dealer_0_message,
             [
@@ -2191,7 +2089,7 @@ mod tests {
         .unwrap();
 
         let cert_1 = create_certificate_with_signers(
-            setup.bls_committee(),
+            setup.committee(),
             &dealer_1_addr,
             &dealer_1_message,
             [
@@ -2272,9 +2170,8 @@ mod tests {
             }
 
             // Create certificate using helper
-            let cert =
-                create_test_certificate(setup.bls_committee(), message, dealer_addr, signatures)
-                    .unwrap();
+            let cert = create_test_certificate(setup.committee(), message, dealer_addr, signatures)
+                .unwrap();
             valid_certificates.push(cert);
         }
 
@@ -2306,7 +2203,7 @@ mod tests {
             .collect();
 
         let invalid_cert = create_test_certificate(
-            setup.bls_committee(),
+            setup.committee(),
             &invalid_dealer_msg,
             dealer_addr_3,
             invalid_signatures,
@@ -2387,9 +2284,8 @@ mod tests {
             }
 
             // Create certificate using helper
-            let cert =
-                create_test_certificate(setup.bls_committee(), message, dealer_addr, signatures)
-                    .unwrap();
+            let cert = create_test_certificate(setup.committee(), message, dealer_addr, signatures)
+                .unwrap();
             certificates.push(cert);
         }
 
@@ -2586,7 +2482,7 @@ mod tests {
 
         // Get the list of signers from the certificate
         let signers = cert
-            .signers(setup.bls_committee())
+            .signers(setup.committee())
             .expect("Failed to get signers from certificate");
 
         // Verify the dealer's own signature is included
@@ -2680,9 +2576,9 @@ mod tests {
         });
 
         let config = setup.dkg_config();
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let mut aggregator =
-            crate::bls::BlsSignatureAggregator::new(bls_committee, dkg_message.clone());
+            crate::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
 
         // Add signatures from validators until we meet the required weight
         let dkg_required = config.threshold;
@@ -2909,11 +2805,9 @@ mod tests {
 
         // Create certificates using the test helper
         let cert1 =
-            create_test_certificate(setup.bls_committee(), &msg1, dealer1_addr, signatures_1)
-                .unwrap();
+            create_test_certificate(setup.committee(), &msg1, dealer1_addr, signatures_1).unwrap();
         let cert2 =
-            create_test_certificate(setup.bls_committee(), &msg2, dealer2_addr, signatures_2)
-                .unwrap();
+            create_test_certificate(setup.committee(), &msg2, dealer2_addr, signatures_2).unwrap();
 
         // Create mock P2P channel with dealers that have messages
         let mut dealers = HashMap::new();
@@ -2991,21 +2885,21 @@ mod tests {
 
         // Create certificates for all three dealers
         let cert1 = create_test_certificate(
-            setup.bls_committee(),
+            setup.committee(),
             &msg1,
             dealer1_addr,
             create_sigs(dealer1_addr, &msg1),
         )
         .unwrap();
         let cert2 = create_test_certificate(
-            setup.bls_committee(),
+            setup.committee(),
             &msg2,
             dealer2_addr,
             create_sigs(dealer2_addr, &msg2),
         )
         .unwrap();
         let cert3 = create_test_certificate(
-            setup.bls_committee(),
+            setup.committee(),
             &msg3,
             dealer3_addr,
             create_sigs(dealer3_addr, &msg3),
@@ -3087,7 +2981,7 @@ mod tests {
         let epoch = setup.epoch();
         // Create certificates with signers (excluding party 2 who has complaint)
         let cert0 = create_certificate_with_signers(
-            setup.bls_committee(),
+            setup.committee(),
             &dealer0_addr,
             &dealer0_message,
             [
@@ -3101,7 +2995,7 @@ mod tests {
         )
         .unwrap();
         let cert1 = create_certificate_with_signers(
-            setup.bls_committee(),
+            setup.committee(),
             &dealer1_addr,
             &dealer1_message,
             [
@@ -3496,9 +3390,9 @@ mod tests {
         });
 
         // Create a minimal certificate
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let cert = create_certificate_with_signers(
-            bls_committee,
+            committee,
             &dealer_addr,
             dealer_message,
             [(1usize, party_addr)]
@@ -3515,7 +3409,7 @@ mod tests {
         let result = party_manager
             .recover_shares_via_complaint(
                 &dealer_addr,
-                cert.signers(&party_manager.bls_committee).unwrap(),
+                cert.signers(&party_manager.committee).unwrap(),
                 &mock_p2p,
             )
             .await;
@@ -3777,9 +3671,9 @@ mod tests {
         let dealer_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_address, &dkg_message);
 
         // Create certificate with dealer's signature
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let cert = create_certificate_with_signers(
-            bls_committee,
+            committee,
             &dealer_address,
             dealer_message,
             vec![dealer_signature],
@@ -3839,9 +3733,9 @@ mod tests {
             setup.bls_keys[1].sign(setup.epoch(), validator_1_addr, &dkg_message);
         let dealer_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
 
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let cert = create_certificate_with_signers(
-            bls_committee,
+            committee,
             &dealer_addr,
             dealer_message,
             vec![validator_1_signature, dealer_signature],
@@ -3892,9 +3786,9 @@ mod tests {
         let party_signature = setup.bls_keys[1].sign(setup.epoch(), party_addr, &dkg_message);
         let dealer_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
 
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let cert = create_certificate_with_signers(
-            bls_committee,
+            committee,
             &dealer_addr,
             dealer_message,
             vec![party_signature, dealer_signature],
@@ -3950,9 +3844,9 @@ mod tests {
         let signer_2_signature = setup.bls_keys[2].sign(setup.epoch(), signer_2_addr, &dkg_message);
         let signer_3_signature = setup.bls_keys[3].sign(setup.epoch(), signer_3_addr, &dkg_message);
 
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let cert = create_certificate_with_signers(
-            bls_committee,
+            committee,
             &dealer_addr,
             dealer_message,
             vec![signer_2_signature, signer_3_signature],
@@ -4024,9 +3918,9 @@ mod tests {
             setup.bls_keys[3].sign(setup.epoch(), byzantine_signer_addr, &dkg_message);
         let dealer_a_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_a_addr, &dkg_message);
 
-        let bls_committee = setup.bls_committee();
+        let committee = setup.committee();
         let cert = create_certificate_with_signers(
-            bls_committee,
+            committee,
             &dealer_a_addr,
             &message_a,
             vec![byzantine_signature, dealer_a_signature],
@@ -4052,7 +3946,7 @@ mod tests {
         assert!(party_mgr.dealer_messages.contains_key(&dealer_a_addr));
     }
     fn create_certificate_with_signers(
-        bls_committee: &BlsCommittee,
+        committee: &Committee,
         dealer_address: &Address,
         message: &avss::Message,
         signatures: Vec<MemberSignature>,
@@ -4063,7 +3957,7 @@ mod tests {
             message_hash,
         });
 
-        let mut aggregator = BlsSignatureAggregator::new(bls_committee, dkg_message);
+        let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
 
         for signature in signatures {
             aggregator
@@ -4392,7 +4286,7 @@ mod tests {
             dealer_address: dealer_addr,
             message_hash,
         });
-        let committee = setup.bls_committee();
+        let committee = setup.committee();
         let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
         for (_, _, sig) in &signers {
             aggregator.add_signature(sig.clone()).unwrap();

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-pub mod bls;
+pub mod committee;
 pub mod communication;
 pub mod config;
 pub mod dkg;

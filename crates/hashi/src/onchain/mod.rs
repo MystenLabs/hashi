@@ -21,9 +21,10 @@ use sui_sdk_types::TypeTag;
 use tap::Pipe;
 use tokio::sync::broadcast;
 
-use crate::bls::BlsCommittee;
-use crate::bls::BlsCommitteeMember;
+use crate::committee::Committee;
+use crate::committee::CommitteeMember;
 use crate::config::HashiIds;
+use crate::dkg::fallback_encryption_public_key;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
@@ -331,8 +332,8 @@ async fn scrape_member_info(
 async fn scrape_committees(
     client: Client,
     committees_id: Address,
-) -> Result<BTreeMap<u64, BlsCommittee>> {
-    let committees: BTreeMap<u64, BlsCommittee> = client
+) -> Result<BTreeMap<u64, Committee>> {
+    let committees: BTreeMap<u64, Committee> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(committees_id)
@@ -356,7 +357,7 @@ async fn scrape_committees(
                 .into_iter()
                 .map(convert_move_committee_member)
                 .collect();
-            let committee = BlsCommittee::new(members, move_committee.epoch);
+            let committee = Committee::new(members, move_committee.epoch);
             (move_committee.epoch, committee)
         })
         .try_collect()
@@ -369,13 +370,18 @@ fn convert_move_committee_member(
     move_types::CommitteeMember {
         validator_address,
         public_key,
-        encryption_key: _,
+        encryption_public_key,
         weight,
     }: move_types::CommitteeMember,
-) -> BlsCommitteeMember {
-    BlsCommitteeMember::new(
+) -> CommitteeMember {
+    CommitteeMember::new(
         validator_address,
         convert_move_uncompressed_g1_pubkey(&public_key),
+        // Use fallback key for nodes without valid encryption key.
+        // These nodes cannot decrypt shares but still count toward thresholds.
+        crate::dkg::EncryptionGroupElement::try_from(encryption_public_key.as_slice())
+            .map(Into::into)
+            .unwrap_or_else(|_| fallback_encryption_public_key()),
         weight.into(),
     )
 }
@@ -468,4 +474,67 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
     };
 
     Ok(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use fastcrypto::{
+        serde_helpers::ToFromByteArray,
+        traits::{KeyPair, ToFromBytes},
+    };
+
+    use crate::dkg::EncryptionGroupElement;
+
+    use super::*;
+
+    #[test]
+    fn test_convert_move_committee_member() {
+        let mut rng = rand::thread_rng();
+        let validator_address =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
+        let bls_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let encryption_private_key =
+            fastcrypto_tbls::ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let encryption_public_key =
+            fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&encryption_private_key);
+
+        let move_committee_member = move_types::CommitteeMember {
+            validator_address,
+            public_key: bls_keypair.public().as_bytes().to_owned(),
+            encryption_public_key: encryption_public_key.as_element().to_byte_array().into(),
+            weight: 1,
+        };
+        let committee_member = convert_move_committee_member(move_committee_member);
+
+        assert_eq!(committee_member.validator_address(), validator_address);
+        assert_eq!(committee_member.public_key(), bls_keypair.public());
+        assert_eq!(
+            committee_member.encryption_public_key().as_element(),
+            encryption_public_key.as_element()
+        );
+        assert_eq!(committee_member.weight(), 1);
+    }
+
+    #[test]
+    fn test_convert_move_committee_member_uses_fallback_key() {
+        let mut rng = rand::thread_rng();
+        let validator_address =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
+        let bls_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let mut encryption_key_vec = vec![0u8; 32];
+        encryption_key_vec[0] = 1;
+
+        let move_committee_member = move_types::CommitteeMember {
+            validator_address,
+            public_key: bls_keypair.public().as_bytes().to_owned(),
+            encryption_public_key: encryption_key_vec,
+            weight: 1,
+        };
+        let committee_member = convert_move_committee_member(move_committee_member);
+
+        assert_eq!(
+            *committee_member.encryption_public_key(),
+            fallback_encryption_public_key()
+        )
+    }
 }
