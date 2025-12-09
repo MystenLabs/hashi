@@ -86,7 +86,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_new_key() {
-        init_tracing_subscriber(false);
         let enclave = Enclave::create_operator_initialized_for_setup_mode().await;
         let verification_key = &enclave.signing_pubkey();
         let (request, kp_private_keys) = SetupNewKeyRequest::mock_for_testing();

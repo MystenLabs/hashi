@@ -2281,27 +2281,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "guardian-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "aws-config",
- "aws-nitro-enclaves-nsm-api",
- "aws-sdk-s3",
- "axum 0.7.9",
- "bitcoin",
- "ed25519-consensus",
- "hashi-guardian-shared",
- "hex",
- "k256",
- "rand 0.8.5",
- "serde",
- "serde_bytes",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2437,6 +2416,27 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hashi-guardian-enclave"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-nitro-enclaves-nsm-api",
+ "aws-sdk-s3",
+ "axum 0.7.9",
+ "bitcoin",
+ "ed25519-consensus",
+ "hashi-guardian-shared",
+ "hex",
+ "k256",
+ "rand 0.8.5",
+ "serde",
+ "serde_bytes",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
