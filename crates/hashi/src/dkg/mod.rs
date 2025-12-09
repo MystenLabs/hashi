@@ -10,18 +10,18 @@ use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
+use fastcrypto::groups::GroupElement;
 use fastcrypto::hash::{Blake2b256, HashFunction};
-use fastcrypto_tbls::ecies_v1::PrivateKey;
-use fastcrypto_tbls::nodes::PartyId;
-use fastcrypto_tbls::nodes::{Node, Nodes};
+use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
+use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 use types::DkgConfig;
 pub use types::{
-    AddressToPartyId, ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult,
-    EncryptionGroupElement, MessageHash, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendMessageRequest, SendMessageResponse, SessionId, ValidatorSignature,
+    ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult, EncryptionGroupElement,
+    MessageHash, RetrieveMessageRequest, RetrieveMessageResponse, SendMessageRequest,
+    SendMessageResponse, SessionId, ValidatorSignature,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -63,25 +63,26 @@ impl DkgManager {
             .get(&committee_set.epoch)
             .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
             .clone();
-        let mut nodes_vec = Vec::new();
-        let mut address_to_party_id = AddressToPartyId::new();
-        for member in bls_committee.members() {
+        let mut nodes_vec = Vec::with_capacity(bls_committee.members().len());
+        for (index, member) in bls_committee.members().iter().enumerate() {
             let addr = member.validator_address();
-            let Some(member_info) = committee_set.members.get(&addr) else {
-                continue;
-            };
-            let Some(encryption_pk) = member_info.encryption_public_key.as_ref() else {
-                continue;
-            };
-            // `party_id` must be sequential starting from 0 (required by `Nodes::new()`).
-            // This is consistent across all validators since `CommitteeSet` is on-chain data.
-            let party_id = nodes_vec.len() as u16;
+            let member_info = committee_set
+                .members
+                .get(&addr)
+                .expect("committee member missing - on-chain invariant violation");
+            // Use fallback key for nodes without valid encryption key.
+            // These nodes cannot decrypt shares but still count toward thresholds.
+            let encryption_pk = member_info
+                .encryption_public_key
+                .clone()
+                .unwrap_or_else(fallback_encryption_public_key);
+            let party_id = index as u16;
+            debug_assert_eq!(party_id as usize, nodes_vec.len());
             nodes_vec.push(Node {
                 id: party_id,
-                pk: encryption_pk.clone(),
+                pk: encryption_pk,
                 weight: member.weight() as u16,
             });
-            address_to_party_id.insert(addr, party_id);
         }
         // TODO: Use `Nodes::new_reduce()`
         let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
@@ -89,17 +90,10 @@ impl DkgManager {
         let total_weight = nodes.total_weight();
         let max_faulty = (total_weight - 1) / 3;
         let threshold = max_faulty + 1;
-        let dkg_config = DkgConfig::new(
-            committee_set.epoch,
-            nodes,
-            address_to_party_id,
-            threshold,
-            max_faulty,
-        )?;
-        let party_id = *dkg_config
-            .address_to_party_id
-            .get(&address)
-            .expect("address not found in validator registry");
+        let dkg_config = DkgConfig::new(committee_set.epoch, nodes, threshold, max_faulty)?;
+        let party_id = bls_committee
+            .index_of(&address)
+            .expect("address not in committee") as u16;
         Ok(Self {
             party_id,
             address,
@@ -238,11 +232,12 @@ impl DkgManager {
             .expect("first signature should always be valid");
         // TODO: Send RPCs in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
-        for validator_address in self.dkg_config.address_to_party_id.keys() {
-            if validator_address != &self.address {
+        for member in self.bls_committee.members() {
+            let validator_address = member.validator_address();
+            if validator_address != self.address {
                 let response = match p2p_channel
                     .send_dkg_message(
-                        validator_address,
+                        &validator_address,
                         &SendMessageRequest {
                             message: dealer_message.clone(),
                         },
@@ -256,7 +251,7 @@ impl DkgManager {
                     }
                 };
                 if let Err(e) =
-                    aggregator.add_signature_from(*validator_address, response.signature.clone())
+                    aggregator.add_signature_from(validator_address, response.signature.clone())
                 {
                     tracing::info!("Invalid signature from {:?}: {}", validator_address, e)
                 }
@@ -442,13 +437,9 @@ impl DkgManager {
             .keys()
             .map(|dealer| {
                 // TODO: aren't the next two lookup must succeed?
-                let dealer_party_id =
-                    self.dkg_config
-                        .address_to_party_id
-                        .get(dealer)
-                        .ok_or_else(|| {
-                            DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", dealer))
-                        })?;
+                let dealer_party_id = self.bls_committee.index_of(dealer).ok_or_else(|| {
+                    DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", dealer))
+                })? as u16;
                 let output = self
                     .dealer_outputs
                     .get(dealer)
@@ -459,7 +450,7 @@ impl DkgManager {
                         ))
                     })?
                     .clone();
-                Ok((*dealer_party_id, output))
+                Ok((dealer_party_id, output))
             })
             .collect::<Result<_, DkgError>>()?;
         let combined_output =
@@ -597,6 +588,11 @@ impl DkgManager {
     }
 }
 
+/// TODO: Replace generator with a nothing-up-my-sleeve point with unknown discrete log.
+fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
+    PublicKey::from(EncryptionGroupElement::generator())
+}
+
 fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let message_bytes = bcs::to_bytes(message).expect("serialization should always succeed");
     let mut hasher = Blake2b256::default();
@@ -607,12 +603,15 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls::{BlsCommittee, BlsCommitteeMember};
+    use crate::bls::BlsCommittee;
+    use crate::bls::BlsCommitteeMember;
     use crate::dkg::types::ProtocolType;
     use crate::onchain::types::MemberInfo;
-    use fastcrypto::encoding::{Encoding, Hex};
+    use fastcrypto::encoding::Encoding;
+    use fastcrypto::encoding::Hex;
     use fastcrypto::groups::Scalar;
-    use fastcrypto_tbls::ecies_v1::{MultiRecipientEncryption, PublicKey};
+    use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
+    use fastcrypto_tbls::ecies_v1::PublicKey;
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
@@ -1304,13 +1303,12 @@ mod tests {
 
         // Verify DkgConfig was built correctly
         assert_eq!(manager.dkg_config.epoch, setup.epoch());
-        assert_eq!(manager.dkg_config.address_to_party_id.len(), 5);
-
+        assert_eq!(manager.dkg_config.nodes.num_nodes(), 5);
         assert_eq!(manager.bls_committee.members().len(), 5);
     }
 
     #[test]
-    fn test_dkg_manager_new_skips_members_without_encryption_key() {
+    fn test_dkg_manager_uses_fallback_key_for_members_without_encryption_key() {
         let mut rng = rand::thread_rng();
 
         // Create a custom CommitteeSet where one member lacks encryption key
@@ -1377,23 +1375,32 @@ mod tests {
         )
         .expect("Should create manager");
 
-        // Only 4 validators should be in DKG (validator 2 excluded)
+        // All 5 validators should be in DKG (validator 2 gets fallback key)
         assert_eq!(
-            manager.dkg_config.address_to_party_id.len(),
-            4,
-            "Should have 4 participants (one excluded due to missing encryption key)"
+            manager.dkg_config.nodes.num_nodes(),
+            5,
+            "All members should be included (missing keys get fallback)"
         );
 
-        // Validator 2's address should NOT be in the mapping
-        assert!(
-            !manager
-                .dkg_config
-                .address_to_party_id
-                .contains_key(&Address::new([2; 32])),
-            "Validator without encryption key should be excluded"
+        // Validator 2 should have the fallback encryption key
+        let node2 = manager.dkg_config.nodes.node_id_to_node(2).unwrap();
+        assert_eq!(
+            node2.pk,
+            fallback_encryption_public_key(),
+            "Validator without encryption key should have fallback key"
         );
 
-        // Threshold should be based on 4 validators: (4-1)/3 + 1 = 2
+        // Party IDs should match committee indices
+        assert_eq!(
+            manager.bls_committee.index_of(&Address::new([0; 32])),
+            Some(0)
+        );
+        assert_eq!(
+            manager.bls_committee.index_of(&Address::new([2; 32])),
+            Some(2)
+        );
+
+        // Threshold should be based on all 5 validators: (5-1)/3 + 1 = 2
         assert_eq!(manager.dkg_config.threshold, 2);
         assert_eq!(manager.dkg_config.max_faulty, 1);
     }
@@ -1480,16 +1487,12 @@ mod tests {
                 i
             );
 
-            // Verify the address maps to this party_id in dkg_config
-            let expected_party_id = manager
-                .dkg_config
-                .address_to_party_id
-                .get(&setup.address(i))
-                .copied();
+            // Verify the address maps to this party_id via bls_committee
+            let expected_party_id = manager.bls_committee.index_of(&setup.address(i));
             assert_eq!(
                 expected_party_id,
-                Some(i as u16),
-                "address_to_party_id should map correctly for validator {}",
+                Some(i),
+                "bls_committee.index_of should map correctly for validator {}",
                 i
             );
         }
