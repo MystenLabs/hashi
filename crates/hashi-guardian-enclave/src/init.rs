@@ -177,9 +177,7 @@ async fn finalize_init(
     state.hashi_committee_info = incoming_state.hashi_committee_info;
 
     // Log to S3 indicating that withdrawals can be expected henceforth
-    enclave
-        .sign_and_log(ProvisionerInitFinalizedLog)
-        .await?;
+    enclave.sign_and_log(ProvisionerInitFinalizedLog).await?;
 
     info!("Enclave initialization complete.");
     Ok(())
@@ -196,8 +194,8 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 mod tests {
     use super::*;
     use bitcoin::Network;
-    use k256::SecretKey;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
+    use k256::SecretKey;
 
     /// Helper: Generate test shares and initialized enclave
     /// Returns (shares, enclave)
@@ -280,9 +278,13 @@ mod tests {
             value: k256::Scalar::ONE,
         };
         let mut rng = rand::thread_rng();
-        let request =
-            ProvisionerInitRequest::new(&share, enclave.encryption_public_key(), init_state, &mut rng)
-                .unwrap();
+        let request = ProvisionerInitRequest::new(
+            &share,
+            enclave.encryption_public_key(),
+            init_state,
+            &mut rng,
+        )
+        .unwrap();
 
         let result = provisioner_init(State(enclave), Json(request)).await;
         assert!(result.is_err());
