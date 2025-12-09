@@ -1,5 +1,6 @@
 use crate::GuardianError::{InternalError, InvalidInputs};
-use crate::GuardianResult;
+use crate::{GuardianResult, Signed};
+use ed25519_consensus::{Signature, SigningKey, VerificationKey};
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
@@ -8,12 +9,13 @@ use hpke::Kem;
 use hpke::Serializable;
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::{Field, PrimeField};
-use k256::{FieldBytes, ProjectivePoint, Scalar};
+use k256::{CompressedPoint, FieldBytes, ProjectivePoint, Scalar, SecretKey};
 use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
 use serde::Serialize;
 use std::num::NonZeroU16;
-
+use std::time::SystemTime;
+use tracing::info;
 // ---------------------------------
 //      Crypto Structs & Types
 // ---------------------------------
@@ -211,6 +213,11 @@ pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Se
         result = result.add(&share.value.mul(&lagrange_basis));
     }
 
+    info!(
+        "Bitcoin key created with fingerprint {:x}",
+        fingerprint_scalar(&result)
+    );
+
     // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
     //       use big-endian representation. We are juggling between two libraries because secp256k1
     //       does not expose the arithmetic tools needed to implement secret-sharing.
@@ -256,6 +263,50 @@ pub fn decrypt_share(
         }),
         None => Err(InvalidInputs("Failed to deserialize share".into())),
     }
+}
+
+// ---------------------------------
+//    Signing utilities
+// ---------------------------------
+
+/// Methods for Signed<T> wrapper - signing and verification
+impl<T: Serialize> Signed<T> {
+    /// Create a new signed payload (used by enclave)
+    pub fn new(data: T, signing_key: &SigningKey, timestamp: SystemTime) -> Self {
+        let tuple = (&data, timestamp);
+        let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
+        let sig = signing_key.sign(&signing_payload);
+        Self {
+            data,
+            timestamp,
+            signature: hex::encode(sig.to_bytes()),
+        }
+    }
+
+    /// Verify signature and extract payload
+    pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
+        let tuple = (&self.data, self.timestamp);
+        let msg_bytes = bcs::to_bytes(&tuple).expect("serialization should not fail");
+
+        let sign_bytes =
+            hex::decode(&self.signature).map_err(|_| InvalidInputs("hex decoding error".into()))?;
+        let signature = Signature::try_from(sign_bytes.as_slice())
+            .map_err(|_| InvalidInputs("signature deserialization failure".into()))?;
+
+        pub_key
+            .verify(&signature, &msg_bytes)
+            .map_err(|_| InvalidInputs("signature invalid".into()))?;
+
+        Ok(self.data)
+    }
+}
+
+pub fn fingerprint(sk: &SecretKey) -> CompressedPoint {
+    fingerprint_scalar(&Scalar::from(sk.as_scalar_primitive()))
+}
+
+pub fn fingerprint_scalar(scalar: &Scalar) -> CompressedPoint {
+    (ProjectivePoint::GENERATOR * scalar).to_bytes()
 }
 
 #[cfg(test)]
