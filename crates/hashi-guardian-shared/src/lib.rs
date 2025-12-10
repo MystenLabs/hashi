@@ -12,13 +12,32 @@ use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 
-use ed25519_consensus::VerificationKey;
-use hpke::kem::X25519HkdfSha256;
-use hpke::{Deserializable, Kem, Serializable};
+use ed25519_consensus::{Signature, VerificationKey};
+use hpke::{Deserializable, Serializable};
 use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::SystemTime;
+
+// ---------------------------------
+//          Intents
+// ---------------------------------
+
+/// All possible signing intent types.
+/// Using an enum ensures no two types can accidentally share the same intent value.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntentType {
+    /// Intent for LogMessage enum
+    LogMessage = 0,
+    /// Intent for SetupNewKeyResponse
+    SetupNewKeyResponse = 1,
+}
+
+/// Trait for types that can be signed, providing domain separation via an intent.
+pub trait SigningIntent {
+    const INTENT: IntentType;
+}
 
 // ---------------------------------
 //          Envelopes
@@ -36,7 +55,7 @@ pub struct Timestamped<T> {
 pub struct Signed<T> {
     pub data: T,
     pub timestamp: SystemTime,
-    pub signature: String,
+    pub signature: Signature,
 }
 
 // ---------------------------------
@@ -90,37 +109,36 @@ pub struct GetAttestationResponse {
 //          Log Messages
 // ---------------------------------
 
+/// All log messages emitted by the guardian enclave.
+/// Uses enum discriminator for automatic domain separation between variants.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct OperatorInitAttestationLog {
-    // the only unsigned message
-    pub attestation: String,
-    pub signing_public_key: VerificationKey,
+pub enum LogMessage {
+    /// Attestation and signing public key
+    OperatorInitAttestationUnsigned {
+        attestation: Attestation,
+        signing_public_key: VerificationKey,
+    },
+    /// Share commitments given in /operator_init
+    OperatorInitShareCommitments(Vec<ShareCommitment>),
+    /// A successful /setup_new_key call
+    SetupNewKeySuccess {
+        encrypted_shares: Vec<EncryptedShare>,
+        share_commitments: Vec<ShareCommitment>,
+    },
+    /// A single successful /provisioner_init call (happens N times)
+    ProvisionerInitSuccess {
+        share_id: ShareID,
+        state_hash: [u8; 32],
+    },
+    /// Threshold reached - enclave fully initialized (happens once)
+    EnclaveFullyInitialized,
 }
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct OperatorInitShareCommitmentsLog(pub Vec<ShareCommitment>);
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SetupNewKeySuccessLog {
-    // same as SetupNewKeyResponse
-    pub encrypted_shares: Vec<EncryptedShare>,
-    pub share_commitments: Vec<ShareCommitment>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ProvisionerInitSuccessLog {
-    pub share_id: ShareID,
-    pub state_hash: [u8; 32],
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ProvisionerInitFinalizedLog;
 
 // ---------------------------------
 //          Helper structs
 // ---------------------------------
 
-pub type Attestation = String;
+pub type Attestation = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct S3Config {
@@ -137,6 +155,14 @@ pub struct HashiCommitteeInfo {}
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
+
+impl SigningIntent for LogMessage {
+    const INTENT: IntentType = IntentType::LogMessage;
+}
+
+impl SigningIntent for SetupNewKeyResponse {
+    const INTENT: IntentType = IntentType::SetupNewKeyResponse;
+}
 
 impl SetupNewKeyRequest {
     /// Serialize and return a SetupNewKeyRequest
@@ -164,6 +190,9 @@ impl SetupNewKeyRequest {
     /// Generates mock key provisioner keys and SetupNewKeyRequest for testing.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mock_for_testing() -> (Self, Vec<EncSecKey>) {
+        use hpke::Kem;
+        use hpke::kem::X25519HkdfSha256;
+
         let mut private_keys = vec![];
         let mut public_keys = vec![];
         for _i in 0..NUM_OF_SHARES {

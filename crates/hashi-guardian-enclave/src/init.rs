@@ -52,7 +52,7 @@ pub async fn operator_init(
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
     let signing_pk = enclave.signing_pubkey();
     enclave
-        .timestamp_and_log(OperatorInitAttestationLog {
+        .timestamp_and_log(LogMessage::OperatorInitAttestationUnsigned {
             attestation: get_attestation_inner(&signing_pk)?,
             signing_public_key: signing_pk,
         })
@@ -60,7 +60,7 @@ pub async fn operator_init(
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
-        .sign_and_log(OperatorInitShareCommitmentsLog(
+        .sign_and_log(LogMessage::OperatorInitShareCommitments(
             request.share_commitments().to_vec(),
         ))
         .await?;
@@ -143,7 +143,7 @@ pub async fn provisioner_init(
     );
     // TODO: This S3 log does not serve any security purpose: should we omit it?
     enclave
-        .sign_and_log(ProvisionerInitSuccessLog {
+        .sign_and_log(LogMessage::ProvisionerInitSuccess {
             share_id,
             state_hash,
         })
@@ -177,7 +177,9 @@ async fn finalize_init(
     state.hashi_committee_info = incoming_state.hashi_committee_info;
 
     // Log to S3 indicating that withdrawals can be expected henceforth
-    enclave.sign_and_log(ProvisionerInitFinalizedLog).await?;
+    enclave
+        .sign_and_log(LogMessage::EnclaveFullyInitialized)
+        .await?;
 
     info!("Enclave initialization complete.");
     Ok(())

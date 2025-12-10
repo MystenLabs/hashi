@@ -17,7 +17,7 @@ impl S3Logger {
     }
 
     /// Create a new S3 Object with a random key
-    /// TODO: Add timestamp to all log messages
+    /// TODO: Implement retries
     #[cfg(not(test))]
     pub async fn log<T: Serialize>(&self, _value: T) -> GuardianResult<()> {
         todo!("Implement me")

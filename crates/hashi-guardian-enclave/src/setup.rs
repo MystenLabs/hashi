@@ -60,10 +60,10 @@ pub async fn setup_new_key(
     }
     info!("All {} shares encrypted.", NUM_OF_SHARES);
 
-    // Log to S3. KPs check that S3 has exactly one SetupNewKeySuccessLogMessage message,
+    // Log to S3. KPs check that S3 has exactly one SetupNewKeySuccess message,
     // which ensures that KPs receive consistent shares w.r.t each other.
     enclave
-        .sign_and_log(SetupNewKeySuccessLog {
+        .sign_and_log(LogMessage::SetupNewKeySuccess {
             encrypted_shares: encrypted_shares.clone(),
             share_commitments: share_commitments.clone(),
         })

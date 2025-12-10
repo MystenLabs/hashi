@@ -48,7 +48,7 @@ pub fn get_attestation_inner(signing_pk: &VerificationKey) -> GuardianResult<Att
         NsmResponse::Attestation { document } => {
             driver::nsm_exit(fd);
             info!("Attestation document generated ({} bytes).", document.len());
-            Ok(hex::encode(document))
+            Ok(document)
         }
         _ => {
             driver::nsm_exit(fd);
@@ -63,5 +63,5 @@ pub fn get_attestation_inner(signing_pk: &VerificationKey) -> GuardianResult<Att
 #[cfg(test)]
 pub fn get_attestation_inner(_: &VerificationKey) -> GuardianResult<Attestation> {
     // Return a mock attestation for testing
-    Ok("mock_attestation_document_hex".to_string())
+    Ok("mock_attestation_document_hex".as_bytes().to_vec())
 }

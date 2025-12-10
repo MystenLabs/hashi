@@ -205,7 +205,7 @@ impl Enclave {
         self.config.eph_keys.signing_keys.verification_key()
     }
 
-    pub fn sign<T: Serialize>(&self, data: T) -> Signed<T> {
+    pub fn sign<T: Serialize + SigningIntent>(&self, data: T) -> Signed<T> {
         let kp = self.signing_keypair();
         let timestamp = SystemTime::now();
         Signed::new(data, kp, timestamp)
@@ -282,14 +282,16 @@ impl Enclave {
             .map_err(|_| InvalidInputs("S3 logger already set".into()))
     }
 
-    /// Sign and log data to S3.
-    pub async fn sign_and_log<T: Serialize>(&self, data: T) -> GuardianResult<()> {
+    /// Sign and log a LogMessage to S3.
+    /// Only LogMessage variants can be logged to enforce consistency.
+    pub async fn sign_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let signed = self.sign(data);
         self.s3_logger()?.log(signed).await
     }
 
     /// Log unsigned data to S3 with timestamp.
-    pub async fn timestamp_and_log<T: Serialize>(&self, data: T) -> GuardianResult<()> {
+    /// Only LogMessage variants can be logged to enforce consistency.
+    pub async fn timestamp_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let timestamped = Timestamped {
             data,
             timestamp: SystemTime::now(),
