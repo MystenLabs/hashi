@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
@@ -24,6 +25,12 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_address: Option<Address>,
+
+    /// Directory for storing persistent data (DKG messages, etc.)
+    ///
+    /// Defaults to `/var/lib/hashi` if not specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<PathBuf>,
 
     /// Configure the address to listen on for https
     ///
@@ -184,6 +191,12 @@ impl Config {
             package_id: Address::ZERO,
             hashi_object_id: Address::ZERO,
         })
+    }
+
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/var/lib/hashi"))
     }
 
     // Creates a new config suitable for testing. In particular this config will:

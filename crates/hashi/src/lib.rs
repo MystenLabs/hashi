@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod committee;
 pub mod communication;
@@ -23,19 +22,15 @@ pub struct Hashi {
     pub server_version: ServerVersion,
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
-    pub db: db::Database,
-    onchain_state: std::sync::OnceLock<onchain::OnchainState>,
-    // TODO: Remove `Option` wrappers below after we are able to initialize them
+    pub db: Arc<db::Database>,
+    onchain_state: OnceLock<onchain::OnchainState>,
     // TODO: Replace `DkgManager` by `MpcManager`
-    pub dkg_manager: Option<Mutex<dkg::DkgManager>>,
+    dkg_manager: OnceLock<Mutex<dkg::DkgManager>>,
+    tls_registry: OnceLock<dkg::rpc::TlsRegistry>,
 }
 
 impl Hashi {
-    pub fn new(
-        server_version: ServerVersion,
-        config: config::Config,
-        dkg_manager: Option<dkg::DkgManager>,
-    ) -> Arc<Self> {
+    pub fn new(server_version: ServerVersion, config: config::Config) -> Arc<Self> {
         init_crypto_provider();
         let metrics = Arc::new(metrics::Metrics::new_default());
         let db = db::Database::open(config.db.as_deref().unwrap());
@@ -43,16 +38,16 @@ impl Hashi {
             server_version,
             config,
             metrics,
-            db,
-            onchain_state: Default::default(),
-            dkg_manager: dkg_manager.map(Mutex::new),
+            db: Arc::new(db),
+            onchain_state: OnceLock::new(),
+            dkg_manager: OnceLock::new(),
+            tls_registry: OnceLock::new(),
         })
     }
 
     pub fn new_with_registry(
         server_version: ServerVersion,
         config: config::Config,
-        dkg_manager: Option<dkg::DkgManager>,
         registry: &prometheus::Registry,
     ) -> Arc<Self> {
         init_crypto_provider();
@@ -61,9 +56,10 @@ impl Hashi {
             server_version,
             config,
             metrics: Arc::new(metrics::Metrics::new(registry)),
-            db,
-            onchain_state: Default::default(),
-            dkg_manager: dkg_manager.map(Mutex::new),
+            db: Arc::new(db),
+            onchain_state: OnceLock::new(),
+            dkg_manager: OnceLock::new(),
+            tls_registry: OnceLock::new(),
         })
     }
 
@@ -79,6 +75,16 @@ impl Hashi {
         self.onchain_state.get()
     }
 
+    pub fn dkg_manager(&self) -> &Mutex<dkg::DkgManager> {
+        self.dkg_manager.get().expect("DkgManager not initialized")
+    }
+
+    pub fn tls_registry(&self) -> &dkg::rpc::TlsRegistry {
+        self.tls_registry
+            .get()
+            .expect("TlsRegistry not initialized")
+    }
+
     async fn initialize_onchain_state(&self) {
         let onchain_state = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
@@ -90,9 +96,47 @@ impl Hashi {
         self.onchain_state.set(onchain_state).unwrap();
     }
 
+    fn initialize_dkg(&self) -> anyhow::Result<()> {
+        let state = self.onchain_state().state();
+        let committee_set = &state.hashi().committees;
+        let tls_registry = dkg::rpc::TlsRegistry::from_committee_set(committee_set);
+        let session_id = dkg::SessionId::new(
+            self.config.sui_chain_id(),
+            committee_set.epoch(),
+            &dkg::types::ProtocolType::DkgKeyGeneration,
+        );
+        let encryption_key = self.config.encryption_private_key()?;
+        let bls_signing_key = self
+            .config
+            .protocol_private_key()
+            .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
+        let store = Box::new(db::DatabasePublicMessagesStore::new(
+            self.db.clone(),
+            committee_set.epoch(),
+        ));
+        let dkg_manager = dkg::DkgManager::new(
+            self.config.validator_address()?,
+            committee_set,
+            session_id,
+            encryption_key,
+            bls_signing_key,
+            store,
+        )?;
+        self.dkg_manager
+            .set(Mutex::new(dkg_manager))
+            .map_err(|_| anyhow::anyhow!("DkgManager already initialized"))?;
+        self.tls_registry
+            .set(tls_registry)
+            .map_err(|_| anyhow::anyhow!("TlsRegistry already initialized"))?;
+        Ok(())
+    }
+
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
             self.initialize_onchain_state().await;
+            if let Err(e) = self.initialize_dkg() {
+                tracing::error!("Failed to initialize DKG: {e}");
+            }
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
     }
@@ -134,7 +178,7 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config, None);
+        let hashi = Hashi::new(server_version, config);
 
         let http_server = crate::grpc::HttpService::new(hashi).start().await;
 
