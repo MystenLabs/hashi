@@ -8,6 +8,8 @@ use crate::committee::Bls12381PrivateKey;
 use crate::committee::EncryptionPrivateKey;
 use crate::committee::EncryptionPublicKey;
 
+const DEFAULT_DATA_DIR: &str = "/var/lib/hashi";
+
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
@@ -28,7 +30,7 @@ pub struct Config {
 
     /// Directory for storing persistent data (DKG messages, etc.)
     ///
-    /// Defaults to `/var/lib/hashi` if not specified.
+    /// Defaults to `DEFAULT_DATA_DIR` if not specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
 
@@ -196,7 +198,7 @@ impl Config {
     pub fn data_dir(&self) -> PathBuf {
         self.data_dir
             .clone()
-            .unwrap_or_else(|| PathBuf::from("/var/lib/hashi"))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
     }
 
     // Creates a new config suitable for testing. In particular this config will:
