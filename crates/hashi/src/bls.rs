@@ -53,7 +53,7 @@ impl Bls12381PrivateKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlsCommittee {
     epoch: u64,
     members: Vec<BlsCommitteeMember>,
@@ -61,8 +61,7 @@ pub struct BlsCommittee {
     total_weight: u64,
 }
 
-#[derive(Debug)]
-#[allow(unused)]
+#[derive(Debug, Clone)]
 pub struct BlsCommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
@@ -135,6 +134,11 @@ impl BlsCommittee {
         self.member(member).map(|m| m.weight)
     }
 
+    /// Returns the index of a member by address, or None if not found.
+    pub fn index_of(&self, address: &Address) -> Option<usize> {
+        self.address_to_index.get(address).copied()
+    }
+
     /// Verify a single signature provided by a [BlsCommitteeMember].
     fn verify<T: Serialize>(
         &self,
@@ -204,6 +208,18 @@ impl BlsCommitteeMember {
             public_key,
             weight,
         }
+    }
+
+    pub fn validator_address(&self) -> Address {
+        self.address
+    }
+
+    pub fn public_key(&self) -> &BLS12381PublicKey {
+        &self.public_key
+    }
+
+    pub fn weight(&self) -> u64 {
+        self.weight
     }
 }
 

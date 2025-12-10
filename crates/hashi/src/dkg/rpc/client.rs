@@ -23,34 +23,34 @@ impl DkgRpcClient {
     }
 
     pub async fn send_message(
-        &mut self,
+        &self,
         epoch: u64,
         request: &SendMessageRequest,
     ) -> Result<SendMessageResponse> {
         let proto_request = request.to_proto(epoch);
-        let response = self.0.send_message(proto_request).await?;
+        let response = self.0.clone().send_message(proto_request).await?;
         SendMessageResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
     pub async fn retrieve_message(
-        &mut self,
+        &self,
         epoch: u64,
         request: &RetrieveMessageRequest,
     ) -> Result<RetrieveMessageResponse> {
         let proto_request = request.to_proto(epoch);
-        let response = self.0.retrieve_message(proto_request).await?;
+        let response = self.0.clone().retrieve_message(proto_request).await?;
         RetrieveMessageResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
     pub async fn complain(
-        &mut self,
+        &self,
         epoch: u64,
         request: &ComplainRequest,
     ) -> Result<ComplainResponse> {
         let proto_request = request.to_proto(epoch);
-        let response = self.0.complain(proto_request).await?;
+        let response = self.0.clone().complain(proto_request).await?;
         ComplainResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }

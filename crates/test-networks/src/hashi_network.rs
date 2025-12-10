@@ -37,7 +37,8 @@ impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();
-        let hashi_instance = Hashi::new_with_registry(server_version, config, &registry);
+        let hashi_instance =
+            Hashi::new_with_registry(server_version, config, None, None, &registry);
         Ok(Self(hashi_instance))
     }
 
@@ -70,11 +71,18 @@ impl HashiNodeHandle {
     }
 }
 
-pub struct HashiNetwork(pub Vec<HashiNodeHandle>);
+pub struct HashiNetwork {
+    ids: HashiIds,
+    nodes: Vec<HashiNodeHandle>,
+}
 
 impl HashiNetwork {
     pub fn nodes(&self) -> &[HashiNodeHandle] {
-        &self.0
+        &self.nodes
+    }
+
+    pub fn ids(&self) -> HashiIds {
+        self.ids
     }
 }
 
@@ -140,7 +148,10 @@ impl HashiNetworkBuilder {
             nodes.push(node_handle);
         }
 
-        Ok(HashiNetwork(nodes))
+        Ok(HashiNetwork {
+            ids: hashi_ids,
+            nodes,
+        })
     }
 }
 
@@ -194,6 +205,14 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let tls_public_key = Input::Pure {
         value: config.tls_public_key()?.as_bytes().to_vec().to_bcs()?,
     };
+    let encryption_public_key = Input::Pure {
+        value: config
+            .encryption_public_key()?
+            .as_element()
+            .compress()
+            .as_slice()
+            .to_bcs()?,
+    };
 
     let pt = ProgrammableTransaction {
         inputs: vec![
@@ -211,6 +230,7 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             proof_of_possession,
             https_address,
             tls_public_key,
+            encryption_public_key,
         ],
         commands: vec![
             sui_sdk_types::Command::MoveCall(MoveCall {
@@ -238,6 +258,13 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
                 function: Identifier::from_static("update_tls_public_key"),
                 type_arguments: vec![],
                 arguments: vec![Argument::Input(1), Argument::Input(5)],
+            }),
+            sui_sdk_types::Command::MoveCall(MoveCall {
+                package: ids.package_id,
+                module: Identifier::from_static("hashi"),
+                function: Identifier::from_static("update_next_epoch_encryption_public_key"),
+                type_arguments: vec![],
+                arguments: vec![Argument::Input(1), Argument::Input(6)],
             }),
         ],
     };

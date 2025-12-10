@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub mod bls;
-pub mod committee;
 pub mod communication;
 pub mod config;
 pub mod dkg;
 pub mod grpc;
 pub mod metrics;
+pub mod onchain;
 pub mod proto;
 pub mod storage;
 pub mod tls;
@@ -15,32 +15,67 @@ pub struct Hashi {
     pub server_version: ServerVersion,
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
+    onchain_state: std::sync::OnceLock<onchain::OnchainState>,
+    // TODO: Remove `Option` wrappers below after we are able to initialize them
+    // TODO: Replace `DkgManager` by `MpcManager`
+    pub dkg_manager: Option<Mutex<dkg::DkgManager>>,
+    pub tls_registry: Option<dkg::rpc::TlsRegistry>,
 }
 
 impl Hashi {
-    pub fn new(server_version: ServerVersion, config: config::Config) -> Arc<Self> {
+    pub fn new(
+        server_version: ServerVersion,
+        config: config::Config,
+        dkg_manager: Option<dkg::DkgManager>,
+        tls_registry: Option<dkg::rpc::TlsRegistry>,
+    ) -> Arc<Self> {
         let metrics = Arc::new(metrics::Metrics::new_default());
         Arc::new(Self {
             server_version,
             config,
             metrics,
+            onchain_state: Default::default(),
+            dkg_manager: dkg_manager.map(Mutex::new),
+            tls_registry,
         })
     }
 
     pub fn new_with_registry(
         server_version: ServerVersion,
         config: config::Config,
+        dkg_manager: Option<dkg::DkgManager>,
+        tls_registry: Option<dkg::rpc::TlsRegistry>,
         registry: &prometheus::Registry,
     ) -> Arc<Self> {
         Arc::new(Self {
             server_version,
             config,
             metrics: Arc::new(metrics::Metrics::new(registry)),
+            onchain_state: Default::default(),
+            dkg_manager: dkg_manager.map(Mutex::new),
+            tls_registry,
         })
+    }
+
+    pub fn onchain_state(&self) -> &onchain::OnchainState {
+        self.onchain_state
+            .get()
+            .expect("hashi has not finished initializing")
+    }
+
+    async fn initialize_onchain_state(&self) {
+        let onchain_state = onchain::OnchainState::new(
+            self.config.sui_rpc.as_deref().unwrap(),
+            self.config.hashi_ids(),
+        )
+        .await
+        .unwrap();
+        self.onchain_state.set(onchain_state).unwrap();
     }
 
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
+            self.initialize_onchain_state().await;
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
     }
@@ -82,7 +117,7 @@ mod test {
         let config = Config::new_for_testing();
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config);
+        let hashi = Hashi::new(server_version, config, None, None);
 
         let http_server = crate::grpc::HttpService::new(hashi).start().await;
 

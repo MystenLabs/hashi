@@ -15,8 +15,8 @@ pub type ChannelResult<T> = Result<T, ChannelError>;
 /// Error type for channel operations
 #[derive(Debug, Error)]
 pub enum ChannelError {
-    #[error("Send failed: {0}")]
-    SendFailed(String),
+    #[error("Request failed: {0}")]
+    RequestFailed(String),
 
     #[error("Receive timeout")]
     Timeout,
@@ -29,7 +29,6 @@ pub enum ChannelError {
 }
 
 /// Point-to-point channel for direct validator-to-validator messaging
-// TODO: Implement authentication for receiver to verify caller
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
     async fn send_dkg_message(
