@@ -6,7 +6,7 @@ use hashi::{
     btc::BTC,
     committee::Committee,
     committee_set::CommitteeSet,
-    config::Config,
+    config::{Self, Config},
     proposal_set::{Self, ProposalSet},
     treasury::Treasury
 };
@@ -28,7 +28,7 @@ public fun deposit(
     request: hashi::deposit_queue::DepositRequest,
     fee: Coin<SUI>,
 ) {
-    hashi.config.assert_version();
+    hashi.config.assert_version_enabled();
 
     // Check if state is PAUSED
     assert!(!hashi.config.paused());
@@ -46,7 +46,7 @@ public fun confirm_deposit(
     // cert: Cert
     ctx: &mut TxContext,
 ) {
-    hashi.config.assert_version();
+    hashi.config.assert_version_enabled();
 
     // Check if state is PAUSED
     assert!(!hashi.config.paused());
@@ -90,7 +90,7 @@ entry fun register_btc(
     coin_registry: &mut sui::coin_registry::CoinRegistry,
     ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
@@ -102,13 +102,13 @@ entry fun register_upgrade_cap(
     upgrade_cap: sui::package::UpgradeCap,
     _ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     let this_package_id = std::type_name::original_id<Hashi>().to_id();
     // Ensure that the provided cap is for this package
     assert!(upgrade_cap.package() == this_package_id);
 
-    sui::dynamic_object_field::add(&mut self.id, b"TODO figure out key", upgrade_cap);
+    self.config_mut().set_upgrade_cap(upgrade_cap);
 }
 
 // TODO move most/all of these functions to their own module for better orginization
@@ -119,13 +119,13 @@ public fun register_validator(
     proof_of_possession_signature: vector<u8>,
     ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
     self.committee_set.new_member(sui_system, public_key, proof_of_possession_signature, ctx);
 }
 
 //TODO require the validator address passed in to better support operator address
 public fun update_https_address(self: &mut Hashi, https_address: String, ctx: &mut TxContext) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     self.committee_set.set_https_address(ctx.sender(), https_address, ctx);
 }
@@ -136,7 +136,7 @@ public fun update_tls_public_key(
     tls_public_key: vector<u8>,
     ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     self.committee_set.set_tls_public_key(ctx.sender(), tls_public_key, ctx);
 }
@@ -147,7 +147,7 @@ public fun update_next_epoch_encryption_public_key(
     next_epoch_encryption_public_key: vector<u8>,
     ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
     self
         .committee_set
         .set_next_epoch_encryption_public_key(ctx.sender(), next_epoch_encryption_public_key, ctx);
@@ -158,7 +158,7 @@ entry fun bootstrap(
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     assert!(self.committee_set.epoch() == 0);
     assert!(!self.committee_set.has_committee(ctx.epoch()));

@@ -193,6 +193,8 @@ fn convert_move_config(config: move_types::Config) -> types::Config {
             .into_iter()
             .map(|(key, value)| (key, convert_move_config_value(value)))
             .collect(),
+        enabled_versions: config.enabled_versions.contents.into_iter().collect(),
+        upgrade_cap: config.upgrade_cap.map(convert_move_upgrade_cap),
     }
 }
 
@@ -203,6 +205,15 @@ fn convert_move_config_value(value: move_types::ConfigValue) -> types::ConfigVal
         move_types::ConfigValue::String(s) => types::ConfigValue::String(s),
         move_types::ConfigValue::Bool(b) => types::ConfigValue::Bool(b),
         move_types::ConfigValue::Bytes(bytes) => types::ConfigValue::Bytes(bytes),
+    }
+}
+
+fn convert_move_upgrade_cap(cap: move_types::UpgradeCap) -> types::UpgradeCap {
+    types::UpgradeCap {
+        id: cap.id,
+        package: cap.package,
+        version: cap.version,
+        policy: cap.policy,
     }
 }
 

@@ -108,6 +108,17 @@ pub struct Committee {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Config {
     pub config: Vec<(String, ConfigValue)>,
+    pub enabled_versions: VecSet<u64>,
+    pub upgrade_cap: Option<UpgradeCap>,
+}
+
+/// Rust version of the Move sui::package::UpgradeCap type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct UpgradeCap {
+    pub id: Address,
+    pub package: Address,
+    pub version: u64,
+    pub policy: u8,
 }
 
 /// Rust version of the Move hashi::config_value::Value type.
@@ -119,6 +130,12 @@ pub enum ConfigValue {
     Bool(bool),
     Bytes(Vec<u8>),
     // Dynamic(TypeName, vector<u8>)
+}
+
+/// Rust version of the Move sui::vec_set::VecSet type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct VecSet<T> {
+    pub contents: Vec<T>,
 }
 
 /// Rust version of the Move hashi::treasury::Treasury type.
