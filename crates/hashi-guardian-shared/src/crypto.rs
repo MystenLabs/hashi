@@ -266,7 +266,7 @@ pub fn decrypt_share(
 //    Signing utilities
 // ---------------------------------
 
-/// Methods for Signed<T> wrapper - signing and verification
+/// Methods for `Signed<T>` wrapper - signing and verification
 impl<T: Serialize + SigningIntent> Signed<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
