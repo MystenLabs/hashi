@@ -122,3 +122,40 @@ public(package) fun utxo_pool(self: &Hashi): &hashi::utxo_pool::UtxoPool {
 public(package) fun utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::UtxoPool {
     &mut self.utxo_pool
 }
+
+entry fun submit_dkg_cert(
+    self: &mut Hashi,
+    epoch: u64,
+    dealer: address,
+    message_hash: vector<u8>,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+    threshold: u16,
+    ctx: &mut TxContext,
+) {
+    self.config.assert_version_enabled();
+    assert!(epoch == self.committee_set.epoch());
+    let epoch_certs_key = EpochCertsKey { epoch };
+    if (!sui::dynamic_field::exists_<EpochCertsKey>(&self.id, epoch_certs_key)) {
+        let new_certs = hashi::tob::create(epoch, ctx);
+        sui::dynamic_field::add(&mut self.id, epoch_certs_key, new_certs);
+    };
+    let epoch_certs = sui::dynamic_field::borrow_mut<EpochCertsKey, hashi::tob::EpochCerts>(
+        &mut self.id,
+        epoch_certs_key,
+    );
+    hashi::tob::submit_dkg_cert(
+        epoch_certs,
+        self.committee_set.current_committee(),
+        epoch,
+        dealer,
+        message_hash,
+        signature,
+        signers_bitmap,
+        threshold,
+    );
+}
+
+public struct EpochCertsKey has copy, drop, store {
+    epoch: u64,
+}
