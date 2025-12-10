@@ -252,7 +252,6 @@ impl SuiTobChannel {
         Ok(None)
     }
 
-    /// Fetch all certificates from on-chain state for the current epoch.
     async fn fetch_all_certificates(&self) -> Result<Vec<(Address, Certificate)>, TobError> {
         let epoch_certs = match self.fetch_epoch_certs().await? {
             Some(certs) => certs,
