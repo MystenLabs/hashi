@@ -190,8 +190,8 @@ impl SetupNewKeyRequest {
     /// Generates mock key provisioner keys and SetupNewKeyRequest for testing.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mock_for_testing() -> (Self, Vec<EncSecKey>) {
-        use hpke::Kem;
         use hpke::kem::X25519HkdfSha256;
+        use hpke::Kem;
 
         let mut private_keys = vec![];
         let mut public_keys = vec![];
