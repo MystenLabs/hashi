@@ -747,7 +747,10 @@ mod test {
 
         // Verify reconstructed certificate matches original
         assert_eq!(reconstructed.epoch(), original_cert.epoch());
-        assert_eq!(reconstructed.signature_bytes(), original_cert.signature_bytes());
+        assert_eq!(
+            reconstructed.signature_bytes(),
+            original_cert.signature_bytes()
+        );
         assert_eq!(
             reconstructed.signers_bitmap_bytes(),
             original_cert.signers_bitmap_bytes()
@@ -762,36 +765,42 @@ mod test {
 
         // Test from_parts fails with invalid signature bytes
         let invalid_sig = vec![0u8; 96];
-        assert!(CommitteeSignature::from_parts(
-            epoch,
-            message.clone(),
-            &invalid_sig,
-            bitmap_bytes,
-            &committee,
-            threshold,
-        )
-        .is_err());
+        assert!(
+            CommitteeSignature::from_parts(
+                epoch,
+                message.clone(),
+                &invalid_sig,
+                bitmap_bytes,
+                &committee,
+                threshold,
+            )
+                .is_err()
+        );
 
         // Test from_parts fails with wrong epoch
-        assert!(CommitteeSignature::from_parts(
-            epoch + 1,
-            message.clone(),
-            signature_bytes,
-            bitmap_bytes,
-            &committee,
-            threshold,
-        )
-        .is_err());
+        assert!(
+            CommitteeSignature::from_parts(
+                epoch + 1,
+                message.clone(),
+                signature_bytes,
+                bitmap_bytes,
+                &committee,
+                threshold,
+            )
+                .is_err()
+        );
 
         // Test from_parts fails with insufficient weight
-        assert!(CommitteeSignature::from_parts(
-            epoch,
-            message.clone(),
-            signature_bytes,
-            bitmap_bytes,
-            &committee,
-            4, // threshold > actual weight (3)
-        )
-        .is_err());
+        assert!(
+            CommitteeSignature::from_parts(
+                epoch,
+                message.clone(),
+                signature_bytes,
+                bitmap_bytes,
+                &committee,
+                4, // threshold > actual weight (3)
+            )
+                .is_err()
+        );
     }
 }
