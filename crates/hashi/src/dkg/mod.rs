@@ -972,6 +972,10 @@ mod tests {
         fn published_count(&self) -> usize {
             self.published.lock().unwrap().len()
         }
+
+        fn pending_messages(&self) -> Option<usize> {
+            Some(self.certificates.lock().unwrap().len())
+        }
     }
 
     #[async_trait::async_trait]
@@ -996,17 +1000,6 @@ mod tests {
                         "No more certificates".to_string(),
                     )
                 })
-        }
-
-        async fn try_receive_timeout(
-            &mut self,
-            _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<Option<Certificate>> {
-            unimplemented!()
-        }
-
-        fn pending_messages(&self) -> Option<usize> {
-            Some(self.certificates.lock().unwrap().len())
         }
 
         fn existing_certificate_weight(&self) -> u32 {
@@ -1265,17 +1258,6 @@ mod tests {
             } else {
                 unreachable!()
             }
-        }
-
-        async fn try_receive_timeout(
-            &mut self,
-            _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<Option<Certificate>> {
-            unreachable!()
-        }
-
-        fn pending_messages(&self) -> Option<usize> {
-            Some(0)
         }
     }
 
@@ -1823,7 +1805,6 @@ mod tests {
         );
 
         // Verify all certificates were consumed from the TOB channel (only threshold needed)
-        use crate::communication::OrderedBroadcastChannel;
         assert_eq!(
             mock_tob.pending_messages(),
             Some(other_certificates_len - threshold as usize),
@@ -2085,7 +2066,6 @@ mod tests {
         assert_eq!(output.commitments.len(), num_validators); // total weight = 5
 
         // Verify TOB consumed exactly threshold certificates
-        use crate::communication::OrderedBroadcastChannel;
         assert_eq!(mock_tob.pending_messages(), Some(0));
     }
 
@@ -2397,7 +2377,6 @@ mod tests {
         assert_eq!(output.commitments.len(), setup.num_validators()); // total weight = 5
 
         // Verify TOB consumed all 3 messages (not just the first 2)
-        use crate::communication::OrderedBroadcastChannel;
         assert_eq!(mock_tob.pending_messages(), Some(0));
     }
 
@@ -2721,7 +2700,6 @@ mod tests {
         // BTreeMap ordering of addresses: [0,0,0,...], [1,1,1,...], [2,2,2,...], etc
         // Weights: addr0=1, addr1=1, addr2=1, addr3=2, addr4=2
         // Should consume addr0 (weight 1) + addr1 (weight 1) + addr2 (weight 1) = total weight 3 >= threshold
-        use crate::communication::OrderedBroadcastChannel;
         let remaining = mock_tob.pending_messages().unwrap();
         assert_eq!(
             remaining, 2,
@@ -2816,7 +2794,6 @@ mod tests {
         //                dealer1 (weight 1), skip dealer1 duplicate,
         //                dealer2 (weight 1) - now we have weight 3 >= threshold
         // Should NOT process: dealer3 (since we already have enough weight)
-        use crate::communication::OrderedBroadcastChannel;
         let remaining = mock_tob.pending_messages().unwrap();
 
         // We started with 6 certificates

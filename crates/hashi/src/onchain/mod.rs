@@ -27,7 +27,7 @@ use crate::config::HashiIds;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
-mod move_types;
+pub(crate) mod move_types;
 pub mod types;
 
 #[derive(Clone, Debug)]

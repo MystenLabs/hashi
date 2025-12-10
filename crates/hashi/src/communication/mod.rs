@@ -7,7 +7,9 @@
 #[cfg(test)]
 pub mod in_memory;
 pub mod interfaces;
+pub mod sui_tob;
 
 #[cfg(test)]
 pub use in_memory::InMemoryOrderedBroadcastChannel;
 pub use interfaces::{ChannelError, ChannelResult, OrderedBroadcastChannel, P2PChannel};
+pub use sui_tob::SuiTobChannel;

@@ -276,6 +276,46 @@ impl<T> CommitteeSignature<T> {
             .ok_or_else(|| SignatureError::from_source(format!("unknown address {address}")))?;
         Ok(self.signers_bitmap.contains(*index))
     }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.as_bytes()
+    }
+
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signers_bitmap.as_bytes()
+    }
+
+    pub fn message(&self) -> &T {
+        &self.message
+    }
+
+    pub fn from_parts(
+        epoch: u64,
+        message: T,
+        signature_bytes: &[u8],
+        signers_bitmap_bytes: &[u8],
+        committee: &BlsCommittee,
+        threshold: u16,
+    ) -> Result<Self, SignatureError>
+    where
+        T: Serialize,
+    {
+        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
+            .map_err(SignatureError::from_source)?;
+        let signers_bitmap = BitMap::from_bytes(committee.members.len(), signers_bitmap_bytes);
+        let cert = Self {
+            epoch,
+            signature,
+            signers_bitmap,
+            message,
+        };
+        committee.verify_signature_and_weight(&cert, threshold as u64)?;
+        Ok(cert)
+    }
 }
 
 #[derive(Debug)]
@@ -436,6 +476,17 @@ impl BitMap {
         let bit_index = b % 8;
         let bit_mask = 1 << (7 - bit_index);
         byte_index < self.bitmap.len() && (self.bitmap[byte_index] & bit_mask != 0)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bitmap
+    }
+
+    pub(crate) fn from_bytes(size: usize, bytes: &[u8]) -> Self {
+        Self {
+            size,
+            bitmap: bytes.to_vec(),
+        }
     }
 }
 
@@ -630,5 +681,117 @@ mod test {
                 .is_signer(&addresses[0], &wrong_committee)
                 .is_err()
         );
+    }
+
+    #[proptest]
+    fn test_from_parts(private_keys: [Bls12381PrivateKey; 4], message: Vec<u8>) {
+        // Skip cases where we have the same keys
+        {
+            let mut pks: Vec<BLS12381PublicKey> =
+                private_keys.iter().map(|key| key.public_key()).collect();
+            pks.sort();
+            pks.dedup();
+            if pks.len() != 4 {
+                return Ok(());
+            }
+        }
+
+        let epoch = 7;
+        let threshold = 3u16;
+
+        let addresses = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Address::new([i as u8; 32]))
+            .collect::<Vec<_>>();
+
+        let members = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| BlsCommitteeMember {
+                address: addresses[i],
+                public_key: key.public_key(),
+                weight: 1,
+            })
+            .collect();
+        let committee = BlsCommittee::new(members, epoch);
+
+        // Create a certificate via aggregator
+        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        aggregator
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .unwrap();
+
+        let original_cert = aggregator.finish().unwrap();
+
+        // Extract parts
+        let signature_bytes = original_cert.signature_bytes();
+        let bitmap_bytes = original_cert.signers_bitmap_bytes();
+
+        // Reconstruct from parts
+        let reconstructed = CommitteeSignature::from_parts(
+            epoch,
+            message.clone(),
+            signature_bytes,
+            bitmap_bytes,
+            &committee,
+            threshold,
+        )
+        .unwrap();
+
+        // Verify reconstructed certificate matches original
+        assert_eq!(reconstructed.epoch(), original_cert.epoch());
+        assert_eq!(reconstructed.signature_bytes(), original_cert.signature_bytes());
+        assert_eq!(
+            reconstructed.signers_bitmap_bytes(),
+            original_cert.signers_bitmap_bytes()
+        );
+        assert_eq!(reconstructed.weight(&committee).unwrap(), 3);
+
+        // Verify signers match
+        assert!(reconstructed.is_signer(&addresses[0], &committee).unwrap());
+        assert!(reconstructed.is_signer(&addresses[1], &committee).unwrap());
+        assert!(reconstructed.is_signer(&addresses[2], &committee).unwrap());
+        assert!(!reconstructed.is_signer(&addresses[3], &committee).unwrap());
+
+        // Test from_parts fails with invalid signature bytes
+        let invalid_sig = vec![0u8; 96];
+        assert!(CommitteeSignature::from_parts(
+            epoch,
+            message.clone(),
+            &invalid_sig,
+            bitmap_bytes,
+            &committee,
+            threshold,
+        )
+        .is_err());
+
+        // Test from_parts fails with wrong epoch
+        assert!(CommitteeSignature::from_parts(
+            epoch + 1,
+            message.clone(),
+            signature_bytes,
+            bitmap_bytes,
+            &committee,
+            threshold,
+        )
+        .is_err());
+
+        // Test from_parts fails with insufficient weight
+        assert!(CommitteeSignature::from_parts(
+            epoch,
+            message.clone(),
+            signature_bytes,
+            bitmap_bytes,
+            &committee,
+            4, // threshold > actual weight (3)
+        )
+        .is_err());
     }
 }
