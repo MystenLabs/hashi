@@ -6,8 +6,10 @@ use hashi::{
     committee_set::CommitteeSet,
     config::Config,
     proposal_set::{Self, ProposalSet},
+    tob::EpochCerts,
     treasury::Treasury
 };
+use sui::bag::{Self, Bag};
 
 public struct Hashi has key {
     id: UID,
@@ -17,6 +19,8 @@ public struct Hashi has key {
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: ProposalSet,
+    /// TOB certificates by epoch (epoch -> EpochCerts)
+    tob: Bag,
 }
 
 #[allow(unused_function)]
@@ -29,6 +33,7 @@ fun init(ctx: &mut TxContext) {
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: proposal_set::create(ctx),
+        tob: bag::new(ctx),
     };
 
     sui::transfer::share_object(hashi);
@@ -135,15 +140,10 @@ entry fun submit_dkg_cert(
 ) {
     self.config.assert_version_enabled();
     assert!(epoch == self.committee_set.epoch());
-    let epoch_certs_key = EpochCertsKey { epoch };
-    if (!sui::dynamic_field::exists_<EpochCertsKey>(&self.id, epoch_certs_key)) {
-        let new_certs = hashi::tob::create(epoch, ctx);
-        sui::dynamic_field::add(&mut self.id, epoch_certs_key, new_certs);
+    if (!self.tob.contains(epoch)) {
+        self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };
-    let epoch_certs = sui::dynamic_field::borrow_mut<EpochCertsKey, hashi::tob::EpochCerts>(
-        &mut self.id,
-        epoch_certs_key,
-    );
+    let epoch_certs: &mut EpochCerts = self.tob.borrow_mut(epoch);
     hashi::tob::submit_dkg_cert(
         epoch_certs,
         self.committee_set.current_committee(),
@@ -156,6 +156,12 @@ entry fun submit_dkg_cert(
     );
 }
 
-public struct EpochCertsKey has copy, drop, store {
+entry fun destroy_all_dkg_certs(
+    self: &mut Hashi,
     epoch: u64,
+) {
+    self.config.assert_version_enabled();
+    let current_epoch = self.committee_set.epoch();
+    let epoch_certs: EpochCerts = self.tob.remove(epoch);
+    hashi::tob::destroy_all(epoch_certs, current_epoch);
 }
