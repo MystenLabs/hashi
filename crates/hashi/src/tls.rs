@@ -53,6 +53,25 @@ pub fn make_client_config(public_key: ed25519_dalek::VerifyingKey) -> ClientConf
         .with_no_client_auth()
 }
 
+pub fn make_client_config_with_client_auth(
+    own_private_key: ed25519_dalek::SigningKey,
+    server_public_key: ed25519_dalek::VerifyingKey,
+) -> ClientConfig {
+    let private_key_der =
+        PrivateKeyDer::try_from(own_private_key.to_pkcs8_der().unwrap().as_bytes())
+            .expect("cannot open private key file")
+            .clone_key();
+    let cert = generate_self_signed_tls_certificate(&private_key_der, HASHI_SERVER_NAME);
+
+    ClientConfig::builder_with_protocol_versions(&[&TLS13])
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(ServerCertVerifier::new_ed25519(
+            server_public_key,
+        )))
+        .with_client_auth_cert(vec![cert], private_key_der)
+        .unwrap()
+}
+
 #[derive(Debug)]
 pub struct NoCertificateVerification(CryptoProvider);
 

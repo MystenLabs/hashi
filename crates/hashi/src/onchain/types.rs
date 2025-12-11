@@ -25,11 +25,23 @@ pub struct CommitteeSet {
     /// Id of the `Bag` containing the validator info structs
     pub members_id: Address,
     pub members: BTreeMap<Address, MemberInfo>,
+    pub tls_public_key_to_address: BTreeMap<[u8; 32], Address>,
     /// The current epoch.
     pub epoch: u64,
     /// Id of the `Bag` containing the committee's per epoch
     pub committees_id: Address,
     pub committees: BTreeMap<u64, BlsCommittee>,
+}
+
+impl CommitteeSet {
+    pub fn lookup_address_by_tls_public_key(
+        &self,
+        tls_public_key: &ed25519_dalek::VerifyingKey,
+    ) -> Option<Address> {
+        self.tls_public_key_to_address
+            .get(tls_public_key.as_bytes())
+            .copied()
+    }
 }
 
 #[derive(Debug)]
