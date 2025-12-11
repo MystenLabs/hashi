@@ -13,28 +13,35 @@ use tracing::info;
 use GuardianError::*;
 
 /// Receives S3 API keys & share commitments.
+/// Returns an error for malformed requests / dup call & panics for the rest.
 pub async fn operator_init(
     State(enclave): State<Arc<Enclave>>,
     Json(request): Json<OperatorInitRequest>,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
+
     // Validation
     if enclave.is_operator_init_complete() {
         return Err(InvalidInputs("Operator init finished".into()));
     }
     if enclave.is_operator_init_partially_complete() {
-        panic!("Operator init did not fully complete. Restart!");
+        // shouldn't reach inside as we panic
+        unreachable!("Operator init did not fully complete.");
     }
     request.validate()?; // check we have received enough share commitments
     info!("Request and enclave state validated.");
 
-    let logger = S3Logger::new(request.config()).await?;
+    let logger = S3Logger::new(request.config())
+        .await
+        .expect("Unable to create logger");
 
     info!("Storing S3 configuration.");
-    enclave.set_s3_logger(logger)?;
+    enclave.set_s3_logger(logger).expect("Unable to set logger");
 
     info!("Setting bitcoin network to {:?}.", request.network());
-    enclave.set_bitcoin_network(request.network())?;
+    enclave
+        .set_bitcoin_network(request.network())
+        .expect("Unable to set network");
 
     info!(
         "Storing {} share commitments.",
@@ -46,24 +53,28 @@ pub async fn operator_init(
             i, share_commitment.id, share_commitment.digest
         );
     }
-    enclave.set_share_commitments(request.share_commitments().to_vec())?;
+    enclave
+        .set_share_commitments(request.share_commitments().to_vec())
+        .expect("Unable to set share commitments");
 
     // Log to S3!
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
     let signing_pk = enclave.signing_pubkey();
     enclave
         .timestamp_and_log(LogMessage::OperatorInitAttestationUnsigned {
-            attestation: get_attestation_inner(&signing_pk)?,
+            attestation: get_attestation_inner(&signing_pk).expect("Unable to get attestation"),
             signing_public_key: signing_pk,
         })
-        .await?;
+        .await
+        .expect("Unable to log OperatorInitAttestationUnsigned");
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
         .sign_and_log(LogMessage::OperatorInitShareCommitments(
             request.share_commitments().to_vec(),
         ))
-        .await?;
+        .await
+        .expect("Unable to log OperatorInitShareCommitments");
 
     info!("Operator initialization complete.");
     Ok(())
@@ -86,12 +97,10 @@ pub async fn provisioner_init(
         return Err(InvalidInputs("Provisioner init already complete".into()));
     }
     if enclave.is_provisioner_init_partially_complete() {
-        panic!("Provisioner init partially complete. Restart!");
+        // shouldn't reach inside as we panic
+        unreachable!("Provisioner init partially complete.");
     }
-    let network = enclave
-        .bitcoin_network()
-        .expect("btc network should be set after operator_init");
-    request.state().validate(network)?;
+    // TODO: Validate enclave state after adding withdrawal related fields
     info!("Request and enclave state validated.");
 
     let sk = enclave.encryption_secret_key();
@@ -112,11 +121,11 @@ pub async fn provisioner_init(
     verify_share(&share, share_commitments)?;
     info!("Share verified.");
 
-    // 3) Set state_hash OR make sure whatever was previously set matches. Errors upon mismatch.
+    // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
     info!("Checking state hash.");
     match enclave.state_hash() {
         Some(existing_state_hash) if *existing_state_hash != state_hash => {
-            return Err(InvalidInputs("State hash mismatch".into()));
+            panic!("State hash mismatch")
         }
         Some(_) => info!("State hash matches existing."),
         None => {
@@ -141,48 +150,55 @@ pub async fn provisioner_init(
         "Total shares received: {}/{}.",
         current_share_count, THRESHOLD
     );
-    // TODO: This S3 log does not serve any security purpose: should we omit it?
+
+    // Note: This S3 log does not serve any security purpose.
     enclave
         .sign_and_log(LogMessage::ProvisionerInitSuccess {
             share_id,
             state_hash,
         })
-        .await?;
+        .await
+        .expect("Unable to log ProvisionerInitSuccess");
 
     // 5) If we have enough shares, finish initialization: combine shares & set config
     if current_share_count >= THRESHOLD {
         let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
-        finalize_init(&shares_vec, &enclave, request.into_state()).await?;
+        finalize_init(&shares_vec, &enclave, request.into_state()).await;
+        // Log to S3 indicating that withdrawals can be expected henceforth
+        enclave
+            .sign_and_log(LogMessage::EnclaveFullyInitialized)
+            .await
+            .expect("Unable to log EnclaveFullyInitialized");
     }
 
     Ok(())
 }
 
+/// Finalize the initialization process.
+/// Panics upon an error as the enclaves state is irrecoverable at this point.
 async fn finalize_init(
     shares: &[Share],
     enclave: &Arc<Enclave>,
     incoming_state: ProvisionerInitRequestState,
-) -> GuardianResult<()> {
+) {
     info!("Threshold reached, combining shares.");
-    let secp_sk = combine_shares(shares)?;
+    let enclave_btc_keypair = combine_shares(shares).expect("Unable to combine shares");
 
-    info!("Setting private key.");
-    enclave.set_bitcoin_key(secp_sk)?;
+    info!("Setting enclave keypair.");
+    enclave
+        .set_btc_keypair(enclave_btc_keypair)
+        .expect("Unable to set enclave keypair");
 
-    info!("Setting change address.");
-    enclave.set_change_address(incoming_state.change_address)?;
+    info!("Setting hashi public key.");
+    enclave
+        .set_hashi_btc_pk(incoming_state.hashi_btc_master_pubkey)
+        .expect("Unable to set hashi public key");
 
     info!("Setting enclave state.");
     let mut state = enclave.state().await;
     state.hashi_committee_info = incoming_state.hashi_committee_info;
 
-    // Log to S3 indicating that withdrawals can be expected henceforth
-    enclave
-        .sign_and_log(LogMessage::EnclaveFullyInitialized)
-        .await?;
-
     info!("Enclave initialization complete.");
-    Ok(())
 }
 
 fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResult<()> {
@@ -196,6 +212,7 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 mod tests {
     use super::*;
     use bitcoin::Network;
+    use hashi_guardian_shared::bitcoin_utils;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use k256::SecretKey;
 
@@ -236,12 +253,12 @@ mod tests {
                     i
                 );
                 assert!(
-                    enclave.btc_key().is_ok(),
+                    enclave.btc_keypair().is_ok(),
                     "Bitcoin key should be set after threshold"
                 );
                 assert!(
-                    enclave.change_address().is_ok(),
-                    "Change address should be set after threshold"
+                    enclave.hashi_btc_pk().is_ok(),
+                    "Hashi BTC key should be set after threshold"
                 );
             } else if i >= THRESHOLD {
                 // After threshold, subsequent init calls should fail
@@ -251,17 +268,20 @@ mod tests {
                     i,
                     result
                 );
-                assert!(enclave.btc_key().is_ok(), "Bitcoin key should still be set");
+                assert!(
+                    enclave.btc_keypair().is_ok(),
+                    "Bitcoin key should still be set"
+                );
             } else {
                 // Before threshold, call should succeed
                 assert!(result.is_ok(), "Init should succeed before threshold");
                 assert!(
-                    enclave.btc_key().is_err(),
+                    enclave.btc_keypair().is_err(),
                     "Bitcoin key should not be set before threshold"
                 );
                 assert!(
-                    enclave.change_address().is_err(),
-                    "Change address should not be set before threshold"
+                    enclave.hashi_btc_pk().is_err(),
+                    "Hashi BTC key should not be set before threshold"
                 );
             }
         }
@@ -294,6 +314,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[should_panic = "State hash mismatch"]
     async fn test_provisioner_init_state_hash_mismatch() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
 
@@ -302,7 +323,7 @@ mod tests {
         let request1 = ProvisionerInitRequest::new(
             &shares[0],
             enclave.encryption_public_key(),
-            state1,
+            state1.clone(),
             &mut rand::thread_rng(),
         )
         .unwrap();
@@ -310,12 +331,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Second KP tries to send with different state (different change address)
+        // Second KP tries to send with different state (different pub key)
         let mut state2 = ProvisionerInitRequestState::mock_for_testing();
-        state2.change_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
-            .to_string()
-            .parse()
-            .unwrap();
+        let kp = bitcoin_utils::create_keypair(&[7u8; 32]);
+        state2.hashi_btc_master_pubkey = kp.public_key();
+        assert_ne!(
+            state1.hashi_btc_master_pubkey,
+            state2.hashi_btc_master_pubkey
+        );
         let request2 = ProvisionerInitRequest::new(
             &shares[1],
             enclave.encryption_public_key(),
@@ -324,9 +347,10 @@ mod tests {
         )
         .unwrap();
 
-        let result = provisioner_init(State(enclave), Json(request2)).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
+        // This should panic with "State hash mismatch"
+        provisioner_init(State(enclave), Json(request2))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -378,30 +402,6 @@ mod tests {
         )
         .unwrap();
         let result = provisioner_init(State(enclave), Json(request2)).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
-    }
-
-    #[tokio::test]
-    async fn test_provisioner_init_wrong_network() {
-        let (shares, enclave) = setup_test_shares_and_enclave().await;
-
-        // KP sends testnet address (enclave expects regtest)
-        let mut state = ProvisionerInitRequestState::mock_for_testing();
-        state.change_address = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
-            .to_string()
-            .parse()
-            .unwrap();
-
-        let request = ProvisionerInitRequest::new(
-            &shares[0],
-            enclave.encryption_public_key(),
-            state,
-            &mut rand::thread_rng(),
-        )
-        .unwrap();
-
-        let result = provisioner_init(State(enclave), Json(request)).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }

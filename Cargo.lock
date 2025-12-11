@@ -2449,7 +2449,6 @@ dependencies = [
  "bitcoin",
  "blake2",
  "ed25519-consensus",
- "hex",
  "hpke",
  "k256",
  "rand 0.8.5",

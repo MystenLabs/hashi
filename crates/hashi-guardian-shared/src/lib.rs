@@ -6,12 +6,12 @@ pub use crypto::*;
 pub use errors::*;
 
 use crate::GuardianError::*;
-use bitcoin::address::NetworkUnchecked;
 use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 
+use bitcoin::secp256k1::PublicKey;
 use ed25519_consensus::{Signature, VerificationKey};
 use hpke::{Deserializable, Serializable};
 use rand_core::{CryptoRng, RngCore};
@@ -95,8 +95,8 @@ pub struct ProvisionerInitRequest {
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
     pub hashi_committee_info: HashiCommitteeInfo,
-    /// Fixed change address for all withdrawals
-    pub change_address: Address<NetworkUnchecked>,
+    /// Hashi BTC master key used to derive child keys for diff inputs
+    pub hashi_btc_master_pubkey: PublicKey,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -247,21 +247,15 @@ impl ProvisionerInitRequestState {
         Blake2b::<U32>::digest(bytes).into()
     }
 
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        if !self.change_address.is_valid_for_network(network) {
-            return Err(InvalidInputs(
-                "Change address is not valid for network".into(),
-            ));
-        }
-        Ok(())
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mock_for_testing() -> Self {
-        let dummy_regtest_address: &str = "bcrt1q6zpf4gefu4ckuud3pjch563nm7x27u4ruahz3y";
+        use bitcoin_utils::create_keypair;
+        use bitcoin_utils::test_constants::TEST_HASHI_SK;
+
+        let kp = create_keypair(&TEST_HASHI_SK);
         ProvisionerInitRequestState {
             hashi_committee_info: HashiCommitteeInfo::default(),
-            change_address: dummy_regtest_address.to_string().parse().unwrap(),
+            hashi_btc_master_pubkey: kp.public_key(),
         }
     }
 }

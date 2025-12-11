@@ -1,4 +1,5 @@
-use crate::GuardianError::{InternalError, InvalidInputs};
+use crate::bitcoin_utils::BTC_LIB;
+use crate::GuardianError::InvalidInputs;
 use crate::{GuardianResult, Signed, SigningIntent};
 use ed25519_consensus::{SigningKey, VerificationKey};
 use hpke::aead::AesGcm256;
@@ -9,7 +10,7 @@ use hpke::Kem;
 use hpke::Serializable;
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::{Field, PrimeField};
-use k256::{CompressedPoint, FieldBytes, ProjectivePoint, Scalar, SecretKey};
+use k256::{CompressedPoint, FieldBytes, ProjectivePoint, Scalar};
 use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
 use serde::Serialize;
@@ -172,7 +173,8 @@ pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
 }
 
 /// Combine secret shares to a secp256k1 secret key
-pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
+/// Throws an error if duplicate share IDs exist or <t shares are input
+pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Keypair> {
     // Validation: ensure no duplicates
     let mut seen_ids = std::collections::HashSet::new();
     for share in shares {
@@ -218,8 +220,9 @@ pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Se
     // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
     //       use big-endian representation. We are juggling between two libraries because secp256k1
     //       does not expose the arithmetic tools needed to implement secret-sharing.
-    bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
-        .map_err(|e| InternalError(format!("Failed to cast to secret key: {}", e)))
+    let sk = bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
+        .expect("casting secret key into secp256k1 failed");
+    Ok(bitcoin::secp256k1::Keypair::from_secret_key(&BTC_LIB, &sk))
 }
 
 /// Create a commitment (hash) for a share
@@ -293,7 +296,7 @@ impl<T: Serialize + SigningIntent> Signed<T> {
     }
 }
 
-pub fn fingerprint(sk: &SecretKey) -> CompressedPoint {
+pub fn fingerprint(sk: &k256::SecretKey) -> CompressedPoint {
     exp_g(&Scalar::from(sk.as_scalar_primitive()))
 }
 

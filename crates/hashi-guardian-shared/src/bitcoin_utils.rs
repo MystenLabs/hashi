@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::sync::LazyLock;
 
-static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
+pub static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
 
 /// Represents a UTXO that will be spent using taproot script-path spending.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -151,19 +151,27 @@ fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     }
 }
 
+pub fn create_keypair(sk: &[u8; 32]) -> Keypair {
+    let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
+    Keypair::from_secret_key(&BTC_LIB, &secret_key)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_constants {
+    pub const TEST_ENCLAVE_SK: [u8; 32] = [1u8; 32];
+    pub const TEST_HASHI_SK: [u8; 32] = [2u8; 32];
+}
+
 #[cfg(test)]
 mod bitcoin_tests {
     use super::*;
+    use crate::bitcoin_utils::test_constants::*;
     use bitcoin::key::TapTweak;
     use bitcoin::key::UntweakedPublicKey;
     use bitcoin::opcodes::all::*;
     use bitcoin::script::Builder;
-    use bitcoin::secp256k1::SecretKey;
     use bitcoin::taproot::{TaprootBuilder, TaprootSpendInfo};
     use bitcoin::KnownHrp::Regtest;
-
-    pub const TEST_ENCLAVE_SK: [u8; 32] = [1u8; 32]; // Fingerprint: 9Azq+G5XdpIzMrjY/TvvhJytsZxplrwnKvH2SNlWakw=
-    pub const TEST_HASHI_SK: [u8; 32] = [2u8; 32];
 
     fn gen_keypair_and_address(bytes: Option<[u8; 32]>, network: KnownHrp) -> (Keypair, Address) {
         let mut rng = rand::thread_rng();
@@ -172,8 +180,7 @@ mod bitcoin_tests {
             rand::Rng::fill(&mut rng, &mut bytes);
             bytes
         });
-        let secret_key = SecretKey::from_slice(&bytes).expect("valid secret key");
-        let keypair = Keypair::from_secret_key(&BTC_LIB, &secret_key);
+        let keypair = create_keypair(&bytes);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
         let address = Address::p2tr(&BTC_LIB, internal_key, None, network);
         (keypair, address)

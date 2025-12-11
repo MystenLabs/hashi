@@ -2,9 +2,7 @@ use anyhow::Result;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
-use bitcoin::address::NetworkUnchecked;
-use bitcoin::secp256k1::SecretKey;
-use bitcoin::Address;
+use bitcoin::secp256k1::{Keypair, PublicKey};
 use bitcoin::Network;
 use ed25519_consensus::{SigningKey, VerificationKey};
 use hashi_guardian_shared::crypto::Share;
@@ -45,12 +43,12 @@ pub struct EnclaveConfig {
     pub eph_keys: EphemeralKeyPairs,
     /// S3 client & config
     pub s3_logger: OnceLock<S3Logger>,
-    /// Bitcoin private key
-    pub bitcoin_key: OnceLock<SecretKey>,
-    /// Bitcoin network (mainnet, testnet, regtest, etc.)
-    pub bitcoin_network: OnceLock<Network>,
-    /// Bitcoin change address for withdrawals
-    pub change_address: OnceLock<Address>,
+    /// Enclave BTC private key
+    pub enclave_btc_keypair: OnceLock<Keypair>,
+    /// BTC network (mainnet, testnet, regtest, etc.)
+    pub btc_network: OnceLock<Network>,
+    /// Hashi BTC public key used to derive child keys
+    pub hashi_btc_master_pubkey: OnceLock<PublicKey>,
 }
 
 /// Mutable state that changes during operation
@@ -133,9 +131,9 @@ impl EnclaveConfig {
                 encryption_keys,
             },
             s3_logger: OnceLock::new(),
-            bitcoin_key: OnceLock::new(),
-            bitcoin_network: OnceLock::new(),
-            change_address: OnceLock::new(),
+            enclave_btc_keypair: OnceLock::new(),
+            btc_network: OnceLock::new(),
+            hashi_btc_master_pubkey: OnceLock::new(),
         }
     }
 }
@@ -157,22 +155,24 @@ impl Enclave {
     }
 
     pub fn is_provisioner_init_complete(&self) -> bool {
-        self.config.bitcoin_key.get().is_some() && self.config.change_address.get().is_some()
+        self.config.enclave_btc_keypair.get().is_some()
+            && self.config.hashi_btc_master_pubkey.get().is_some()
     }
 
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        self.config.bitcoin_key.get().is_some() || self.config.change_address.get().is_some()
+        self.config.enclave_btc_keypair.get().is_some()
+            || self.config.hashi_btc_master_pubkey.get().is_some()
     }
 
     pub fn is_operator_init_complete(&self) -> bool {
         self.config.s3_logger.get().is_some()
-            && self.config.bitcoin_network.get().is_some()
+            && self.config.btc_network.get().is_some()
             && self.scratchpad.share_commitments.get().is_some()
     }
 
     pub fn is_operator_init_partially_complete(&self) -> bool {
         self.config.s3_logger.get().is_some()
-            || self.config.bitcoin_network.get().is_some()
+            || self.config.btc_network.get().is_some()
             || self.scratchpad.share_commitments.get().is_some()
     }
 
@@ -215,53 +215,46 @@ impl Enclave {
     // Bitcoin Configuration
     // ========================================================================
 
-    pub fn bitcoin_network(&self) -> GuardianResult<Network> {
+    pub fn bitcoin_network(&self) -> GuardianResult<&Network> {
         self.config
-            .bitcoin_network
+            .btc_network
             .get()
-            .copied()
             .ok_or(InvalidInputs("Network is uninitialized".into()))
     }
 
     pub fn set_bitcoin_network(&self, network: Network) -> GuardianResult<()> {
         self.config
-            .bitcoin_network
+            .btc_network
             .set(network)
             .map_err(|_| InvalidInputs("Network is already initialized".into()))
     }
 
-    pub fn btc_key(&self) -> GuardianResult<&SecretKey> {
+    pub fn btc_keypair(&self) -> GuardianResult<&Keypair> {
         self.config
-            .bitcoin_key
+            .enclave_btc_keypair
             .get()
             .ok_or(InternalError("Bitcoin key is not initialized".into()))
     }
 
-    pub fn set_bitcoin_key(&self, key: SecretKey) -> GuardianResult<()> {
+    pub fn set_btc_keypair(&self, keypair: Keypair) -> GuardianResult<()> {
         self.config
-            .bitcoin_key
-            .set(key)
+            .enclave_btc_keypair
+            .set(keypair)
             .map_err(|_| InvalidInputs("Bitcoin key already set".into()))
     }
 
-    pub fn change_address(&self) -> GuardianResult<Address> {
-        Ok(self
-            .config
-            .change_address
+    pub fn hashi_btc_pk(&self) -> GuardianResult<&PublicKey> {
+        self.config
+            .hashi_btc_master_pubkey
             .get()
-            .ok_or(InternalError("Change address is not initialized".into()))?
-            .clone())
+            .ok_or(InternalError("Hashi BTC key is not initialized".into()))
     }
 
-    pub fn set_change_address(&self, addr: Address<NetworkUnchecked>) -> GuardianResult<()> {
-        let network = self.bitcoin_network()?;
-        let address = addr
-            .require_network(network)
-            .map_err(|e| InvalidInputs(format!("change address network mismatch: {:?}", e)))?;
+    pub fn set_hashi_btc_pk(&self, pk: PublicKey) -> GuardianResult<()> {
         self.config
-            .change_address
-            .set(address)
-            .map_err(|e| InvalidInputs(format!("change address already set: {}", e)))
+            .hashi_btc_master_pubkey
+            .set(pk)
+            .map_err(|e| InvalidInputs(format!("Hashi BTC key is already set: {}", e)))
     }
 
     // ========================================================================
