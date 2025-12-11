@@ -103,9 +103,9 @@ impl SuiTobChannel {
         let sender = self.signer.public_key().derive_address();
         let (dealer, message_hash) = match cert.message() {
             MpcMessageV1::Dkg(DkgDealerMessageHash {
-                                  dealer_address,
-                                  message_hash,
-                              }) => (*dealer_address, message_hash.to_vec()),
+                dealer_address,
+                message_hash,
+            }) => (*dealer_address, message_hash.to_vec()),
         };
         let epoch = cert.epoch();
         let signature = cert.signature_bytes().to_vec();
@@ -309,7 +309,7 @@ impl SuiTobChannel {
             &self.bls_committee,
             self.threshold,
         )
-            .map_err(|e| TobError::InvalidCertificate(e.to_string()))
+        .map_err(|e| TobError::InvalidCertificate(e.to_string()))
     }
 }
 

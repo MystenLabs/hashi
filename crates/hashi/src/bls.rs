@@ -774,7 +774,7 @@ mod test {
                 &committee,
                 threshold,
             )
-                .is_err()
+            .is_err()
         );
 
         // Test from_parts fails with wrong epoch
@@ -787,7 +787,7 @@ mod test {
                 &committee,
                 threshold,
             )
-                .is_err()
+            .is_err()
         );
 
         // Test from_parts fails with insufficient weight
@@ -800,7 +800,7 @@ mod test {
                 &committee,
                 4, // threshold > actual weight (3)
             )
-                .is_err()
+            .is_err()
         );
     }
 }
