@@ -4,6 +4,9 @@ use tower::ServiceBuilder;
 
 use crate::Hashi;
 
+mod client;
+pub use client::Client;
+
 pub mod bridge_service;
 
 #[derive(Clone)]

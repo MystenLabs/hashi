@@ -203,7 +203,7 @@ mod tests {
         let sui_rpc_url = &test_networks.sui_network().rpc_url;
         let ids = test_networks.hashi_network().ids();
 
-        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids).await?;
+        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);

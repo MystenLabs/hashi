@@ -68,6 +68,7 @@ impl Hashi {
         let onchain_state = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
             self.config.hashi_ids(),
+            self.config.tls_private_key().ok(),
         )
         .await
         .unwrap();
@@ -107,8 +108,7 @@ mod test {
     use crate::Hashi;
     use crate::ServerVersion;
     use crate::config::Config;
-    use crate::proto::GetServiceInfoRequest;
-    use crate::proto::bridge_service_client::BridgeServiceClient;
+    use crate::grpc::Client;
 
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]
@@ -124,21 +124,13 @@ mod test {
         let address = format!("https://{}", http_server.local_addr());
         dbg!(&address);
 
-        let client_tls_config = crate::tls::make_client_config(tls_public_key);
-        // let client_tls_config = crate::tls::make_client_config_no_verification();
-        let channel = tonic_rustls::Channel::from_shared(address)
-            .unwrap()
-            .tls_config(client_tls_config)
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
+        let client_tls_config = crate::tls::make_client_config(&tls_public_key);
+        let client_auth_server = Client::new(&address, client_tls_config).unwrap();
+        let client_no_auth = Client::new_no_auth(&address).unwrap();
 
-        let mut client = BridgeServiceClient::new(channel);
-        let resp = client
-            .get_service_info(GetServiceInfoRequest::default())
-            .await
-            .unwrap();
+        let resp = client_auth_server.get_service_info().await.unwrap();
+        dbg!(resp);
+        let resp = client_no_auth.get_service_info().await.unwrap();
         dbg!(resp);
 
         //         loop {

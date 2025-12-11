@@ -46,7 +46,7 @@ pub fn make_client_config_no_verification() -> ClientConfig {
         .with_no_client_auth()
 }
 
-pub fn make_client_config(public_key: ed25519_dalek::VerifyingKey) -> ClientConfig {
+pub fn make_client_config(public_key: &ed25519_dalek::VerifyingKey) -> ClientConfig {
     ClientConfig::builder_with_protocol_versions(&[&TLS13])
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(ServerCertVerifier::new_ed25519(public_key)))
@@ -54,8 +54,8 @@ pub fn make_client_config(public_key: ed25519_dalek::VerifyingKey) -> ClientConf
 }
 
 pub fn make_client_config_with_client_auth(
-    own_private_key: ed25519_dalek::SigningKey,
-    server_public_key: ed25519_dalek::VerifyingKey,
+    own_private_key: &ed25519_dalek::SigningKey,
+    server_public_key: &ed25519_dalek::VerifyingKey,
 ) -> ClientConfig {
     let private_key_der =
         PrivateKeyDer::try_from(own_private_key.to_pkcs8_der().unwrap().as_bytes())
@@ -137,7 +137,7 @@ impl ServerCertVerifier {
         }
     }
 
-    fn new_ed25519(public_key: ed25519_dalek::VerifyingKey) -> Self {
+    fn new_ed25519(public_key: &ed25519_dalek::VerifyingKey) -> Self {
         use ed25519_dalek::pkcs8::EncodePublicKey;
 
         let trusted_spki =

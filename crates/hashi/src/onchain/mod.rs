@@ -52,12 +52,24 @@ pub struct State {
 }
 
 impl OnchainState {
-    pub async fn new(sui_rpc_url: &str, ids: HashiIds) -> Result<Self> {
+    pub async fn new(
+        sui_rpc_url: &str,
+        ids: HashiIds,
+        tls_private_key: Option<ed25519_dalek::SigningKey>,
+    ) -> Result<Self> {
         let client = Client::new(sui_rpc_url)?;
 
         let (sender, _) = broadcast::channel::<()>(BROADCAST_CHANNEL_CAPACITY);
 
-        let state = State::scrape(client.clone(), ids).await?.pipe(RwLock::new);
+        let mut state = State::scrape(client.clone(), ids).await?.pipe(RwLock::new);
+        if let Some(tls_private_key) = tls_private_key {
+            state
+                .get_mut()
+                .unwrap()
+                .hashi
+                .committees
+                .set_tls_private_key(tls_private_key);
+        }
 
         //TODO spawn watcher and enable partial updates and notifications
 

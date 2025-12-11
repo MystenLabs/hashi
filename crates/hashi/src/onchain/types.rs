@@ -8,7 +8,7 @@ use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use sui_sdk_types::{Address, TypeTag};
 
-use crate::bls::BlsCommittee;
+use crate::{bls::BlsCommittee, grpc::Client};
 
 #[derive(Debug)]
 pub struct Hashi {
@@ -31,6 +31,9 @@ pub struct CommitteeSet {
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
     committees: BTreeMap<u64, BlsCommittee>,
+
+    tls_private_key: Option<ed25519_dalek::SigningKey>,
+    clients: BTreeMap<Address, Client>,
 }
 
 impl CommitteeSet {
@@ -42,6 +45,8 @@ impl CommitteeSet {
             epoch: 0,
             committees_id,
             committees: BTreeMap::new(),
+            tls_private_key: None,
+            clients: BTreeMap::new(),
         }
     }
 
@@ -61,9 +66,14 @@ impl CommitteeSet {
         self.epoch
     }
 
+    pub fn client(&self, validator: &Address) -> Option<Client> {
+        self.clients.get(validator).cloned()
+    }
+
     // Set the tls private key to use when constructing tls configs for clients to other validators
     pub fn set_tls_private_key(&mut self, tls_private_key: ed25519_dalek::SigningKey) -> &mut Self {
-        //TODO
+        self.tls_private_key = Some(tls_private_key);
+        self.update_all_clients();
         self
     }
 
@@ -77,7 +87,35 @@ impl CommitteeSet {
             })
             .collect();
         self.members = members;
+        self.update_all_clients();
         self
+    }
+
+    fn update_all_clients(&mut self) {
+        self.clients = self
+            .members
+            .values()
+            .filter_map(|info| {
+                if let (Some(addr), Some(public_key)) =
+                    (info.https_address(), info.tls_public_key())
+                {
+                    Some((info.validator_address, addr, public_key))
+                } else {
+                    None
+                }
+            })
+            .filter_map(|(validator, https_address, tls_public_key)| {
+                let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
+                    crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
+                } else {
+                    crate::tls::make_client_config(tls_public_key)
+                };
+                let client = Client::new(https_address, tls_config)
+                    .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
+                    .ok()?;
+                Some((validator, client))
+            })
+            .collect();
     }
 
     pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {
