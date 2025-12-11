@@ -4,6 +4,7 @@ pub mod rpc;
 pub mod types;
 
 use crate::bls::{BlsCommittee, BlsSignatureAggregator};
+use crate::communication::{ChannelResult, P2PChannel};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
@@ -15,6 +16,7 @@ use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
 use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
+use futures::future::join_all;
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 use types::DkgConfig;
@@ -229,31 +231,27 @@ impl DkgManager {
         aggregator
             .add_signature_from(self.address, my_signature.clone())
             .expect("first signature should always be valid");
-        // TODO: Send RPCs in parallel
         // TODO: Add timeout and retries handling when adding RPC layer
-        for member in self.bls_committee.members() {
-            let validator_address = member.validator_address();
-            if validator_address != self.address {
-                let response = match p2p_channel
-                    .send_dkg_message(
-                        &validator_address,
-                        &SendMessageRequest {
-                            message: dealer_message.clone(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        tracing::info!("Failed to send message to {:?}: {}", validator_address, e);
-                        continue;
+        let recipients: Vec<_> = self
+            .bls_committee
+            .members()
+            .iter()
+            .map(|m| m.validator_address())
+            .filter(|addr| *addr != self.address)
+            .collect();
+        let request = SendMessageRequest {
+            message: dealer_message.clone(),
+        };
+        let results = send_dkg_message_to_many(p2p_channel, &recipients, &request).await;
+        for (addr, result) in results {
+            match result {
+                Ok(response) => {
+                    if let Err(e) = aggregator.add_signature_from(addr, response.signature.clone())
+                    {
+                        tracing::info!("Invalid signature from {:?}: {}", addr, e);
                     }
-                };
-                if let Err(e) =
-                    aggregator.add_signature_from(validator_address, response.signature.clone())
-                {
-                    tracing::info!("Invalid signature from {:?}: {}", validator_address, e)
                 }
+                Err(e) => tracing::info!("Failed to send message to {:?}: {}", addr, e),
             }
         }
         let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
@@ -597,6 +595,18 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
     hasher.finalize().into()
+}
+
+async fn send_dkg_message_to_many(
+    p2p_channel: &impl P2PChannel,
+    recipients: &[Address],
+    request: &SendMessageRequest,
+) -> Vec<(Address, ChannelResult<SendMessageResponse>)> {
+    join_all(recipients.iter().map(|addr| {
+        let addr = *addr;
+        async move { (addr, p2p_channel.send_dkg_message(&addr, request).await) }
+    }))
+        .await
 }
 
 #[cfg(test)]
