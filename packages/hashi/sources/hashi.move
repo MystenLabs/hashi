@@ -149,7 +149,7 @@ public fun update_next_epoch_encryption_public_key(
 ) {
     self.config.assert_version();
     self
-        .committees
+        .committee_set
         .set_next_epoch_encryption_public_key(ctx.sender(), next_epoch_encryption_public_key, ctx);
 }
 
