@@ -1,6 +1,6 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{BLS12381Signature, CommitteeSignature, MemberSignature};
+use crate::bls::{BLS12381Signature, CommitteeSignature};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::{
@@ -123,13 +123,6 @@ pub struct ComplainRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainResponse {
     pub response: complaint::ComplaintResponse<avss::SharesForNode>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ValidatorSignature {
-    // TODO: Remove since it's implicitly known to the caller
-    pub validator: Address,
-    pub signature: MemberSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
