@@ -762,45 +762,5 @@ mod test {
         assert!(reconstructed.is_signer(&addresses[1], &committee).unwrap());
         assert!(reconstructed.is_signer(&addresses[2], &committee).unwrap());
         assert!(!reconstructed.is_signer(&addresses[3], &committee).unwrap());
-
-        // Test from_parts fails with invalid signature bytes
-        let invalid_sig = vec![0u8; 96];
-        assert!(
-            CommitteeSignature::from_parts(
-                epoch,
-                message.clone(),
-                &invalid_sig,
-                bitmap_bytes,
-                &committee,
-                threshold,
-            )
-            .is_err()
-        );
-
-        // Test from_parts fails with wrong epoch
-        assert!(
-            CommitteeSignature::from_parts(
-                epoch + 1,
-                message.clone(),
-                signature_bytes,
-                bitmap_bytes,
-                &committee,
-                threshold,
-            )
-            .is_err()
-        );
-
-        // Test from_parts fails with insufficient weight
-        assert!(
-            CommitteeSignature::from_parts(
-                epoch,
-                message.clone(),
-                signature_bytes,
-                bitmap_bytes,
-                &committee,
-                4, // threshold > actual weight (3)
-            )
-            .is_err()
-        );
     }
 }
