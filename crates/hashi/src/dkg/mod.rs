@@ -606,7 +606,7 @@ async fn send_dkg_message_to_many(
         let addr = *addr;
         async move { (addr, p2p_channel.send_dkg_message(&addr, request).await) }
     }))
-        .await
+    .await
 }
 
 #[cfg(test)]
