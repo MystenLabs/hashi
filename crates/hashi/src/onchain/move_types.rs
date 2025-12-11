@@ -13,6 +13,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
+    pub proposals: ProposalSet,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
@@ -33,6 +34,13 @@ pub struct Bag {
 
 /// Rust version of the Move sui::object_bag::ObjectBag type.
 pub type ObjectBag = Bag;
+
+/// Rust version of the Move hashi::proposal_set::ProposalSet type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct ProposalSet {
+    pub proposals: Bag,
+    pub seq_num: u64,
+}
 
 /// Rust version of the Move hashi::committee_set::MemberInfo type.
 #[derive(Debug, serde_derive::Deserialize)]

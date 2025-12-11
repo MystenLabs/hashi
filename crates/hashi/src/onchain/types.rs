@@ -18,6 +18,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
+    pub proposals: ProposalSet,
 }
 
 #[derive(Debug)]
@@ -203,6 +204,13 @@ impl MemberInfo {
     ) -> Option<&fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>> {
         self.next_epoch_encryption_public_key.as_ref()
     }
+}
+
+#[derive(Debug)]
+pub struct ProposalSet {
+    pub id: Address,
+    pub size: u64,
+    pub seq_num: u64,
 }
 
 #[derive(Debug)]

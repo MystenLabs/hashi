@@ -154,6 +154,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         treasury,
         deposit_queue,
         utxo_pool,
+        proposals,
     } = response.get_ref().object().contents().deserialize()?;
 
     let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(
@@ -180,6 +181,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
             treasury,
             deposit_queue,
             utxo_pool,
+            proposals: convert_move_proposal_set(proposals),
         },
     ))
 }
@@ -201,6 +203,14 @@ fn convert_move_config_value(value: move_types::ConfigValue) -> types::ConfigVal
         move_types::ConfigValue::String(s) => types::ConfigValue::String(s),
         move_types::ConfigValue::Bool(b) => types::ConfigValue::Bool(b),
         move_types::ConfigValue::Bytes(bytes) => types::ConfigValue::Bytes(bytes),
+    }
+}
+
+fn convert_move_proposal_set(proposals: move_types::ProposalSet) -> types::ProposalSet {
+    types::ProposalSet {
+        id: proposals.proposals.id,
+        size: proposals.proposals.size,
+        seq_num: proposals.seq_num,
     }
 }
 
