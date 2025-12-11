@@ -21,7 +21,7 @@ use types::DkgConfig;
 pub use types::{
     ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult, EncryptionGroupElement,
     MessageHash, RetrieveMessageRequest, RetrieveMessageResponse, SendMessageRequest,
-    SendMessageResponse, SessionId, ValidatorSignature,
+    SendMessageResponse, SessionId,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -602,8 +602,7 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls::BlsCommittee;
-    use crate::bls::BlsCommitteeMember;
+    use crate::bls::{BlsCommittee, BlsCommitteeMember, MemberSignature};
     use crate::dkg::types::ProtocolType;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
@@ -640,15 +639,14 @@ mod tests {
         manager: &mut DkgManager,
         message: &avss::Message,
         dealer: Address,
-    ) -> DkgResult<ValidatorSignature> {
+    ) -> DkgResult<MemberSignature> {
         manager.store_message(dealer, message)?;
         let bls_sig = manager.try_sign_message(dealer, message)?;
-        let member_sig =
-            crate::bls::MemberSignature::new(manager.dkg_config.epoch, manager.address, bls_sig);
-        Ok(ValidatorSignature {
-            validator: manager.address,
-            signature: member_sig,
-        })
+        Ok(MemberSignature::new(
+            manager.dkg_config.epoch,
+            manager.address,
+            bls_sig,
+        ))
     }
 
     struct TestSetup {
@@ -842,17 +840,17 @@ mod tests {
         bls_committee: &BlsCommittee,
         dealer_message: &avss::Message,
         dealer_address: Address,
-        validator_signatures: Vec<ValidatorSignature>,
+        signatures: Vec<MemberSignature>,
     ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(dealer_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address,
             message_hash,
         });
-        let mut aggregator = crate::bls::BlsSignatureAggregator::new(bls_committee, dkg_message);
-        for validator_sig in validator_signatures {
+        let mut aggregator = BlsSignatureAggregator::new(bls_committee, dkg_message);
+        for signature in signatures {
             aggregator
-                .add_signature(validator_sig.signature)
+                .add_signature(signature)
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
         aggregator
@@ -1570,7 +1568,7 @@ mod tests {
             receive_dealer_message(&mut receiver_manager, &message, dealer_address).unwrap();
 
         // Verify signature format
-        assert_eq!(signature.validator, receiver_manager.address);
+        assert_eq!(signature.address(), &receiver_manager.address);
 
         // Verify receiver output was stored in memory
         assert!(
@@ -2161,10 +2159,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| ValidatorSignature {
-                validator: *a,
-                signature: setup.bls_keys[*i].sign(epoch, *a, &dealer_0_dkg_message),
-            })
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer_0_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -2179,10 +2174,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| ValidatorSignature {
-                validator: *a,
-                signature: setup.bls_keys[*i].sign(epoch, *a, &dealer_1_dkg_message),
-            })
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer_1_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -2283,15 +2275,7 @@ mod tests {
                     dealer_address: dealer_addr_3,
                     message_hash,
                 });
-                let signature = setup.bls_keys[mgr.party_id as usize].sign(
-                    setup.epoch(),
-                    mgr.address,
-                    &dkg_message,
-                );
-                ValidatorSignature {
-                    validator: mgr.address,
-                    signature,
-                }
+                setup.bls_keys[mgr.party_id as usize].sign(setup.epoch(), mgr.address, &dkg_message)
             })
             .collect();
 
@@ -2872,8 +2856,8 @@ mod tests {
             .clone();
 
         let epoch = setup.epoch();
-        // Create validator signatures for certificates
-        let validator_signatures_1: Vec<ValidatorSignature> = (0..3)
+        // Create signatures for certificates
+        let signatures_1: Vec<MemberSignature> = (0..3)
             .map(|i| {
                 let addr = setup.address(i);
                 let message_hash = compute_message_hash(&msg1);
@@ -2881,15 +2865,11 @@ mod tests {
                     dealer_address: dealer1_addr,
                     message_hash,
                 });
-                let signature = setup.bls_keys[i].sign(epoch, addr, &dkg_message);
-                ValidatorSignature {
-                    validator: addr,
-                    signature,
-                }
+                setup.bls_keys[i].sign(epoch, addr, &dkg_message)
             })
             .collect();
 
-        let validator_signatures_2: Vec<ValidatorSignature> = (0..3)
+        let signatures_2: Vec<MemberSignature> = (0..3)
             .map(|i| {
                 let addr = setup.address(i);
                 let message_hash = compute_message_hash(&msg2);
@@ -2897,29 +2877,17 @@ mod tests {
                     dealer_address: dealer2_addr,
                     message_hash,
                 });
-                let signature = setup.bls_keys[i].sign(epoch, addr, &dkg_message);
-                ValidatorSignature {
-                    validator: addr,
-                    signature,
-                }
+                setup.bls_keys[i].sign(epoch, addr, &dkg_message)
             })
             .collect();
 
         // Create certificates using the test helper
-        let cert1 = create_test_certificate(
-            setup.bls_committee(),
-            &msg1,
-            dealer1_addr,
-            validator_signatures_1,
-        )
-        .unwrap();
-        let cert2 = create_test_certificate(
-            setup.bls_committee(),
-            &msg2,
-            dealer2_addr,
-            validator_signatures_2,
-        )
-        .unwrap();
+        let cert1 =
+            create_test_certificate(setup.bls_committee(), &msg1, dealer1_addr, signatures_1)
+                .unwrap();
+        let cert2 =
+            create_test_certificate(setup.bls_committee(), &msg2, dealer2_addr, signatures_2)
+                .unwrap();
 
         // Create mock P2P channel with dealers that have messages
         let mut dealers = HashMap::new();
@@ -2980,8 +2948,8 @@ mod tests {
             .clone();
 
         let epoch = setup.epoch();
-        // Helper to create validator signatures
-        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<ValidatorSignature> {
+        // Helper to create signatures
+        let create_sigs = |dealer_addr: Address, msg: &avss::Message| -> Vec<MemberSignature> {
             (0..3)
                 .map(|i| {
                     let addr = setup.address(i);
@@ -2990,11 +2958,7 @@ mod tests {
                         dealer_address: dealer_addr,
                         message_hash,
                     });
-                    let signature = setup.bls_keys[i].sign(epoch, addr, &dkg_message);
-                    ValidatorSignature {
-                        validator: addr,
-                        signature,
-                    }
+                    setup.bls_keys[i].sign(epoch, addr, &dkg_message)
                 })
                 .collect()
         };
@@ -3106,10 +3070,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| ValidatorSignature {
-                validator: *a,
-                signature: setup.bls_keys[*i].sign(epoch, *a, &dealer0_dkg_message),
-            })
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer0_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -3123,10 +3084,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| ValidatorSignature {
-                validator: *a,
-                signature: setup.bls_keys[*i].sign(epoch, *a, &dealer1_dkg_message),
-            })
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer1_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -3455,10 +3413,7 @@ mod tests {
             dealer_message,
             [(1usize, party_addr)]
                 .iter()
-                .map(|(i, a)| ValidatorSignature {
-                    validator: *a,
-                    signature: setup.bls_keys[*i].sign(setup.epoch(), *a, &dkg_message),
-                })
+                .map(|(i, a)| setup.bls_keys[*i].sign(setup.epoch(), *a, &dkg_message))
                 .collect(),
         )
         .unwrap();
@@ -3725,10 +3680,6 @@ mod tests {
 
         // Dealer signs its own message
         let dealer_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_address, &dkg_message);
-        let validator_signatures = vec![ValidatorSignature {
-            validator: dealer_address,
-            signature: dealer_signature,
-        }];
 
         // Create certificate with dealer's signature
         let bls_committee = setup.bls_committee();
@@ -3736,7 +3687,7 @@ mod tests {
             bls_committee,
             &dealer_address,
             dealer_message,
-            validator_signatures,
+            vec![dealer_signature],
         )
         .unwrap();
 
@@ -3793,23 +3744,12 @@ mod tests {
             setup.bls_keys[1].sign(setup.epoch(), validator_1_addr, &dkg_message);
         let dealer_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
 
-        let validator_signatures = vec![
-            ValidatorSignature {
-                validator: validator_1_addr,
-                signature: validator_1_signature,
-            },
-            ValidatorSignature {
-                validator: dealer_addr,
-                signature: dealer_signature,
-            },
-        ];
-
         let bls_committee = setup.bls_committee();
         let cert = create_certificate_with_signers(
             bls_committee,
             &dealer_addr,
             dealer_message,
-            validator_signatures,
+            vec![validator_1_signature, dealer_signature],
         )
         .unwrap();
 
@@ -3857,23 +3797,12 @@ mod tests {
         let party_signature = setup.bls_keys[1].sign(setup.epoch(), party_addr, &dkg_message);
         let dealer_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
 
-        let validator_signatures = vec![
-            ValidatorSignature {
-                validator: party_addr,
-                signature: party_signature,
-            },
-            ValidatorSignature {
-                validator: dealer_addr,
-                signature: dealer_signature,
-            },
-        ];
-
         let bls_committee = setup.bls_committee();
         let cert = create_certificate_with_signers(
             bls_committee,
             &dealer_addr,
             dealer_message,
-            validator_signatures,
+            vec![party_signature, dealer_signature],
         )
         .unwrap();
 
@@ -3926,23 +3855,12 @@ mod tests {
         let signer_2_signature = setup.bls_keys[2].sign(setup.epoch(), signer_2_addr, &dkg_message);
         let signer_3_signature = setup.bls_keys[3].sign(setup.epoch(), signer_3_addr, &dkg_message);
 
-        let validator_signatures = vec![
-            ValidatorSignature {
-                validator: signer_2_addr,
-                signature: signer_2_signature,
-            },
-            ValidatorSignature {
-                validator: signer_3_addr,
-                signature: signer_3_signature,
-            },
-        ];
-
         let bls_committee = setup.bls_committee();
         let cert = create_certificate_with_signers(
             bls_committee,
             &dealer_addr,
             dealer_message,
-            validator_signatures,
+            vec![signer_2_signature, signer_3_signature],
         )
         .unwrap();
 
@@ -4011,23 +3929,12 @@ mod tests {
             setup.bls_keys[3].sign(setup.epoch(), byzantine_signer_addr, &dkg_message);
         let dealer_a_signature = setup.bls_keys[0].sign(setup.epoch(), dealer_a_addr, &dkg_message);
 
-        let validator_signatures = vec![
-            ValidatorSignature {
-                validator: byzantine_signer_addr,
-                signature: byzantine_signature,
-            },
-            ValidatorSignature {
-                validator: dealer_a_addr,
-                signature: dealer_a_signature,
-            },
-        ];
-
         let bls_committee = setup.bls_committee();
         let cert = create_certificate_with_signers(
             bls_committee,
             &dealer_a_addr,
             &message_a,
-            validator_signatures,
+            vec![byzantine_signature, dealer_a_signature],
         )
         .unwrap();
 
@@ -4053,7 +3960,7 @@ mod tests {
         bls_committee: &BlsCommittee,
         dealer_address: &Address,
         message: &avss::Message,
-        signer_signatures: Vec<ValidatorSignature>,
+        signatures: Vec<MemberSignature>,
     ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(message);
         let dkg_message = Dkg(DkgDealerMessageHash {
@@ -4061,11 +3968,11 @@ mod tests {
             message_hash,
         });
 
-        let mut aggregator = crate::bls::BlsSignatureAggregator::new(bls_committee, dkg_message);
+        let mut aggregator = BlsSignatureAggregator::new(bls_committee, dkg_message);
 
-        for validator_sig in signer_signatures {
+        for signature in signatures {
             aggregator
-                .add_signature(validator_sig.signature)
+                .add_signature(signature)
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
         aggregator
@@ -4391,9 +4298,9 @@ mod tests {
             message_hash,
         });
         let committee = setup.bls_committee();
-        let mut aggregator = crate::bls::BlsSignatureAggregator::new(committee, dkg_message);
+        let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
         for (_, _, sig) in &signers {
-            aggregator.add_signature(sig.signature.clone()).unwrap();
+            aggregator.add_signature(sig.clone()).unwrap();
         }
         let certificate = aggregator.finish().unwrap();
 
