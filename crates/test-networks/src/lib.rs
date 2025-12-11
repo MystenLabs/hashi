@@ -205,8 +205,8 @@ mod tests {
 
         let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids).await?;
 
-        assert_eq!(state.state().hashi().committees.committees.len(), 1);
-        assert_eq!(state.state().hashi().committees.members.len(), 1);
+        assert_eq!(state.state().hashi().committees.committees().len(), 1);
+        assert_eq!(state.state().hashi().committees.members().len(), 1);
         assert_eq!(state.state().hashi().treasury.treasury_caps.len(), 1);
         assert_eq!(state.state().hashi().treasury.metadata_caps.len(), 1);
         assert!(state.state().hashi().treasury.coins.is_empty());

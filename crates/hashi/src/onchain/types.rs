@@ -23,17 +23,73 @@ pub struct Hashi {
 #[derive(Debug)]
 pub struct CommitteeSet {
     /// Id of the `Bag` containing the validator info structs
-    pub members_id: Address,
-    pub members: BTreeMap<Address, MemberInfo>,
-    pub tls_public_key_to_address: BTreeMap<[u8; 32], Address>,
+    members_id: Address,
+    members: BTreeMap<Address, MemberInfo>,
+    tls_public_key_to_address: BTreeMap<[u8; 32], Address>,
     /// The current epoch.
-    pub epoch: u64,
+    epoch: u64,
     /// Id of the `Bag` containing the committee's per epoch
-    pub committees_id: Address,
-    pub committees: BTreeMap<u64, BlsCommittee>,
+    committees_id: Address,
+    committees: BTreeMap<u64, BlsCommittee>,
 }
 
 impl CommitteeSet {
+    pub fn new(members_id: Address, committees_id: Address) -> Self {
+        Self {
+            members_id,
+            members: BTreeMap::new(),
+            tls_public_key_to_address: BTreeMap::new(),
+            epoch: 0,
+            committees_id,
+            committees: BTreeMap::new(),
+        }
+    }
+
+    pub fn members(&self) -> &BTreeMap<Address, MemberInfo> {
+        &self.members
+    }
+
+    pub fn committees(&self) -> &BTreeMap<u64, BlsCommittee> {
+        &self.committees
+    }
+
+    pub fn current_committee(&self) -> Option<&BlsCommittee> {
+        self.committees().get(&self.epoch())
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    // Set the tls private key to use when constructing tls configs for clients to other validators
+    pub fn set_tls_private_key(&mut self, tls_private_key: ed25519_dalek::SigningKey) -> &mut Self {
+        //TODO
+        self
+    }
+
+    pub fn set_members(&mut self, members: BTreeMap<Address, MemberInfo>) -> &mut Self {
+        self.tls_public_key_to_address = members
+            .values()
+            .filter_map(|info| {
+                info.tls_public_key
+                    .as_ref()
+                    .map(|pubkey| (*pubkey.as_bytes(), info.validator_address))
+            })
+            .collect();
+        self.members = members;
+        self
+    }
+
+    pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {
+        self.epoch = epoch;
+        self
+    }
+
+    pub fn set_committees(&mut self, committees: BTreeMap<u64, BlsCommittee>) -> &mut Self {
+        self.committees = committees;
+        self
+    }
+
     pub fn lookup_address_by_tls_public_key(
         &self,
         tls_public_key: &ed25519_dalek::VerifyingKey,

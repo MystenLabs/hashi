@@ -59,15 +59,14 @@ impl DkgManager {
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> DkgResult<Self> {
         let bls_committee = committee_set
-            .committees
-            .get(&committee_set.epoch)
+            .current_committee()
             .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
             .clone();
         let mut nodes_vec = Vec::with_capacity(bls_committee.members().len());
         for (index, member) in bls_committee.members().iter().enumerate() {
             let addr = member.validator_address();
             let member_info = committee_set
-                .members
+                .members()
                 .get(&addr)
                 .expect("committee member missing - on-chain invariant violation");
             // Use fallback key for nodes without valid encryption key.
@@ -90,7 +89,7 @@ impl DkgManager {
         let total_weight = nodes.total_weight();
         let max_faulty = (total_weight - 1) / 3;
         let threshold = max_faulty + 1;
-        let dkg_config = DkgConfig::new(committee_set.epoch, nodes, threshold, max_faulty)?;
+        let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
         let party_id = bls_committee
             .index_of(&address)
             .expect("address not in committee") as u16;
@@ -702,14 +701,11 @@ mod tests {
             let mut committees = BTreeMap::new();
             committees.insert(epoch, bls_committee);
 
-            let committee_set = CommitteeSet {
-                members_id: Address::new([0; 32]),
-                members,
-                epoch,
-                committees_id: Address::new([1; 32]),
-                committees,
-                tls_public_key_to_address: Default::default(),
-            };
+            let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+            committee_set
+                .set_epoch(epoch)
+                .set_members(members)
+                .set_committees(committees);
 
             Self {
                 committee_set,
@@ -762,14 +758,11 @@ mod tests {
             let mut committees = BTreeMap::new();
             committees.insert(epoch, bls_committee);
 
-            let committee_set = CommitteeSet {
-                members_id: Address::new([0; 32]),
-                members,
-                epoch,
-                committees_id: Address::new([1; 32]),
-                committees,
-                tls_public_key_to_address: Default::default(),
-            };
+            let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+            committee_set
+                .set_epoch(epoch)
+                .set_members(members)
+                .set_committees(committees);
 
             Self {
                 committee_set,
@@ -790,7 +783,7 @@ mod tests {
             let address = Address::new([validator_index as u8; 32]);
             let session_id = SessionId::new(
                 "testchain",
-                self.committee_set.epoch,
+                self.committee_set.epoch(),
                 &ProtocolType::DkgKeyGeneration,
             );
             DkgManager::new(
@@ -811,16 +804,13 @@ mod tests {
         fn session_id(&self) -> SessionId {
             SessionId::new(
                 "testchain",
-                self.committee_set.epoch,
+                self.committee_set.epoch(),
                 &ProtocolType::DkgKeyGeneration,
             )
         }
 
         fn bls_committee(&self) -> &BlsCommittee {
-            self.committee_set
-                .committees
-                .get(&self.committee_set.epoch)
-                .unwrap()
+            self.committee_set.current_committee().unwrap()
         }
 
         fn num_validators(&self) -> usize {
@@ -840,7 +830,7 @@ mod tests {
         }
 
         fn epoch(&self) -> u64 {
-            self.committee_set.epoch
+            self.committee_set.epoch()
         }
 
         fn dkg_config(&self) -> DkgConfig {
@@ -1368,14 +1358,11 @@ mod tests {
         let mut committees = BTreeMap::new();
         committees.insert(epoch, bls_committee);
 
-        let committee_set = CommitteeSet {
-            members_id: Address::new([0; 32]),
-            members,
-            epoch,
-            committees_id: Address::new([1; 32]),
-            committees,
-            tls_public_key_to_address: Default::default(),
-        };
+        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committee_set
+            .set_epoch(epoch)
+            .set_members(members)
+            .set_committees(committees);
 
         // Create manager for validator 0
         let session_id = SessionId::new("test", epoch, &ProtocolType::DkgKeyGeneration);
@@ -1450,14 +1437,11 @@ mod tests {
             .collect();
 
         // Empty committees map - no committee for the epoch
-        let committee_set = CommitteeSet {
-            members_id: Address::new([0; 32]),
-            members,
-            epoch,
-            committees_id: Address::new([1; 32]),
-            committees: BTreeMap::new(), // Empty!
-            tls_public_key_to_address: Default::default(),
-        };
+        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committee_set
+            .set_epoch(epoch)
+            .set_members(members)
+            .set_committees(BTreeMap::new()); // Empty!
 
         let session_id = SessionId::new("test", epoch, &ProtocolType::DkgKeyGeneration);
         let result = DkgManager::new(
