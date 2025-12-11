@@ -431,7 +431,6 @@ impl DkgManager {
         certified_dealers: &HashMap<Address, Certificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
-        // TODO: Handle missing messages and invalid shares
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
             .keys()
             .map(|dealer| {
