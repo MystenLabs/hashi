@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tower::ServiceBuilder;
+
 use crate::Hashi;
 
 pub mod bridge_service;
@@ -65,11 +67,14 @@ impl HttpService {
 
         let health_endpoint = axum::Router::new().route("/health", axum::routing::get(health));
 
-        let router = router.merge(health_endpoint).layer(
-            sui_http::middleware::callback::CallbackLayer::new(
+        let layers = ServiceBuilder::new()
+            // Add middleware for mapping a request to a known validator
+            .map_request(lookup_validator_middleware(self.inner.clone()))
+            .layer(sui_http::middleware::callback::CallbackLayer::new(
                 crate::metrics::RpcMetricsMakeCallbackHandler::new(self.inner.metrics.clone()),
-            ),
-        );
+            ));
+
+        let router = router.merge(health_endpoint).layer(layers);
 
         let tls_config =
             crate::tls::make_server_config(self.inner.config.tls_private_key().unwrap());
@@ -86,13 +91,6 @@ impl HttpService {
             .dkg_manager
             .as_ref()
             .expect("DkgManager not initialized")
-    }
-
-    pub fn tls_registry(&self) -> &crate::dkg::rpc::TlsRegistry {
-        self.inner
-            .tls_registry
-            .as_ref()
-            .expect("TlsRegistry not initialized")
     }
 }
 
@@ -133,4 +131,31 @@ impl RouterExt for axum::Router {
     {
         self.route_service(&format!("/{}/{{*rest}}", S::NAME), svc)
     }
+}
+
+// Given a TLS client cert, pull out the ed25519 public key and map it to a validator
+fn lookup_validator_middleware<B>(
+    hashi: Arc<Hashi>,
+) -> impl Fn(axum::http::Request<B>) -> axum::http::Request<B> + Clone {
+    move |mut request| {
+        if let Some(validator_address) = lookup_validator_address(&hashi, &request) {
+            request.extensions_mut().insert(validator_address);
+        }
+        request
+    }
+}
+
+fn lookup_validator_address<B>(
+    hashi: &Hashi,
+    request: &axum::http::Request<B>,
+) -> Option<sui_sdk_types::Address> {
+    let peer_certs = request.extensions().get::<sui_http::PeerCertificates>()?;
+    let cert = peer_certs.peer_certs().first()?;
+    let tls_public_key = crate::tls::public_key_from_certificate(cert).ok()?;
+    hashi
+        .onchain_state_opt()?
+        .state()
+        .hashi()
+        .committees
+        .lookup_address_by_tls_public_key(&tls_public_key)
 }

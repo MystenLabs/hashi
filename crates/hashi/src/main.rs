@@ -45,8 +45,8 @@ async fn main() {
 
     let server_version = ServerVersion::new(env!("CARGO_BIN_NAME"), VERSION);
 
-    // TODO: Initialize DkgManager and TlsRegistry from on-chain committee info
-    Hashi::new(server_version, config, None, None).start();
+    // TODO: Initialize DkgManager from on-chain committee info
+    Hashi::new(server_version, config, None).start();
 
     wait_termination().await;
     tracing::info!("hashi shutting down; goodbye");

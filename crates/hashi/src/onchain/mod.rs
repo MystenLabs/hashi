@@ -152,9 +152,19 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         scrape_utxo_pool(client.clone(), utxo_pool.utxos.id),
     )?;
 
+    let tls_public_key_to_address = member_info
+        .values()
+        .filter_map(|info| {
+            info.tls_public_key
+                .as_ref()
+                .map(|pubkey| (*pubkey.as_bytes(), info.validator_address))
+        })
+        .collect();
+
     let committees = types::CommitteeSet {
         members_id: committees.members.id,
         members: member_info,
+        tls_public_key_to_address,
         epoch: committees.epoch,
         committees_id: committees.committees.id,
         committees: committees_per_epoch,

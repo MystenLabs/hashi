@@ -19,7 +19,6 @@ pub struct Hashi {
     // TODO: Remove `Option` wrappers below after we are able to initialize them
     // TODO: Replace `DkgManager` by `MpcManager`
     pub dkg_manager: Option<Mutex<dkg::DkgManager>>,
-    pub tls_registry: Option<dkg::rpc::TlsRegistry>,
 }
 
 impl Hashi {
@@ -27,7 +26,6 @@ impl Hashi {
         server_version: ServerVersion,
         config: config::Config,
         dkg_manager: Option<dkg::DkgManager>,
-        tls_registry: Option<dkg::rpc::TlsRegistry>,
     ) -> Arc<Self> {
         let metrics = Arc::new(metrics::Metrics::new_default());
         Arc::new(Self {
@@ -36,7 +34,6 @@ impl Hashi {
             metrics,
             onchain_state: Default::default(),
             dkg_manager: dkg_manager.map(Mutex::new),
-            tls_registry,
         })
     }
 
@@ -44,7 +41,6 @@ impl Hashi {
         server_version: ServerVersion,
         config: config::Config,
         dkg_manager: Option<dkg::DkgManager>,
-        tls_registry: Option<dkg::rpc::TlsRegistry>,
         registry: &prometheus::Registry,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -53,7 +49,6 @@ impl Hashi {
             metrics: Arc::new(metrics::Metrics::new(registry)),
             onchain_state: Default::default(),
             dkg_manager: dkg_manager.map(Mutex::new),
-            tls_registry,
         })
     }
 
@@ -61,6 +56,12 @@ impl Hashi {
         self.onchain_state
             .get()
             .expect("hashi has not finished initializing")
+    }
+
+    // Return reference to the onchain state, allowing the caller to check if it has been
+    // initialized or not
+    pub fn onchain_state_opt(&self) -> Option<&onchain::OnchainState> {
+        self.onchain_state.get()
     }
 
     async fn initialize_onchain_state(&self) {
@@ -116,7 +117,7 @@ mod test {
         let config = Config::new_for_testing();
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config, None, None);
+        let hashi = Hashi::new(server_version, config, None);
 
         let http_server = crate::grpc::HttpService::new(hashi).start().await;
 

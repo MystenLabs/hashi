@@ -708,6 +708,7 @@ mod tests {
                 epoch,
                 committees_id: Address::new([1; 32]),
                 committees,
+                tls_public_key_to_address: Default::default(),
             };
 
             Self {
@@ -767,6 +768,7 @@ mod tests {
                 epoch,
                 committees_id: Address::new([1; 32]),
                 committees,
+                tls_public_key_to_address: Default::default(),
             };
 
             Self {
@@ -1372,6 +1374,7 @@ mod tests {
             epoch,
             committees_id: Address::new([1; 32]),
             committees,
+            tls_public_key_to_address: Default::default(),
         };
 
         // Create manager for validator 0
@@ -1453,6 +1456,7 @@ mod tests {
             epoch,
             committees_id: Address::new([1; 32]),
             committees: BTreeMap::new(), // Empty!
+            tls_public_key_to_address: Default::default(),
         };
 
         let session_id = SessionId::new("test", epoch, &ProtocolType::DkgKeyGeneration);
