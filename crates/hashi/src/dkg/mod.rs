@@ -2159,7 +2159,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-                .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer_0_dkg_message))
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer_0_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -2174,7 +2174,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-                .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer_1_dkg_message))
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer_1_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -3070,7 +3070,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-                .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer0_dkg_message))
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer0_dkg_message))
             .collect(),
         )
         .unwrap();
@@ -3084,7 +3084,7 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-                .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer1_dkg_message))
+            .map(|(i, a)| setup.bls_keys[*i].sign(epoch, *a, &dealer1_dkg_message))
             .collect(),
         )
         .unwrap();
