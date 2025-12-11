@@ -191,15 +191,17 @@ pub struct EpochCertsKey {
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCerts {
     pub epoch: u64,
-    /// Table<address, DkgCertV1>
-    pub dkg_certs: Table,
+    /// LinkedTable<address, DkgCertV1>
+    pub dkg_certs: LinkedTable<Address>,
 }
 
-/// Rust version of the Move sui::table::Table type.
+/// Rust version of the Move sui::linked_table::LinkedTable type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct Table {
+pub struct LinkedTable<K> {
     pub id: Address,
     pub size: u64,
+    pub head: Option<K>,
+    pub tail: Option<K>,
 }
 
 /// Rust version of the Move hashi::tob::DkgCertV1 type.

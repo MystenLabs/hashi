@@ -262,7 +262,6 @@ impl DkgManager {
                 .finish()
                 .expect("signatures should always be valid");
             // TODO: Add timeout and retries handling when adding RPC layer
-            // TODO: do not fail in case my certificate is already published
             ordered_broadcast_channel.publish(cert).await.map_err(|e| {
                 DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
             })?;
@@ -2300,7 +2299,6 @@ mod tests {
         assert_eq!(output.commitments.len(), setup.num_validators()); // total weight = 5
 
         // TOB should have consumed at least threshold certificates
-        use crate::communication::OrderedBroadcastChannel;
         let remaining = mock_tob.pending_messages().unwrap();
         assert!(
             remaining < num_certs,
@@ -2741,7 +2739,6 @@ mod tests {
         assert!(result.is_ok());
 
         // Should consume exactly 2 certificates (weight 1+1 = 2 = threshold)
-        use crate::communication::OrderedBroadcastChannel;
         let remaining = mock_tob.pending_messages().unwrap();
         assert_eq!(
             remaining, 3,

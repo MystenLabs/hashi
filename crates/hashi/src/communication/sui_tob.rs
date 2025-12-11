@@ -52,7 +52,7 @@ impl From<TobError> for ChannelError {
     fn from(e: TobError) -> Self {
         match e {
             TobError::RpcError(msg) => ChannelError::Other(msg),
-            TobError::TransactionFailed(msg) => ChannelError::SendFailed(msg),
+            TobError::TransactionFailed(msg) => ChannelError::Other(msg),
             _ => ChannelError::Other(e.to_string()),
         }
     }
@@ -336,7 +336,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
         let signature = self
             .signer
             .sign_transaction(&tx)
-            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+            .map_err(|e| ChannelError::Other(e.to_string()))?;
         let response = channel
             .client
             .execute_transaction_and_wait_for_checkpoint(
@@ -346,10 +346,10 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
                 Duration::from_secs(30),
             )
             .await
-            .map_err(|e| ChannelError::SendFailed(e.to_string()))?
+            .map_err(|e| ChannelError::Other(e.to_string()))?
             .into_inner();
         if !response.transaction().effects().status().success() {
-            return Err(ChannelError::SendFailed(format!(
+            return Err(ChannelError::Other(format!(
                 "Transaction failed: {:?}",
                 response.transaction().effects().status()
             )));
