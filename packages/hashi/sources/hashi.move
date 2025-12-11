@@ -8,10 +8,11 @@ use hashi::{
     committee_set::CommitteeSet,
     config::Config,
     proposal_set::{Self, ProposalSet},
+    tob::EpochCerts,
     treasury::Treasury
 };
 use std::string::String;
-use sui::{bag::{Self, Bag}, balance::Balance, coin::Coin, object_bag::ObjectBag, sui::SUI};
+use sui::{bag::{Self, Bag}, coin::Coin, sui::SUI};
 
 public struct Hashi has key {
     id: UID,
@@ -21,6 +22,8 @@ public struct Hashi has key {
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: ProposalSet,
+    /// TOB certificates by epoch (epoch -> EpochCerts)
+    tob: Bag,
 }
 
 public fun deposit(
@@ -80,6 +83,7 @@ fun init(ctx: &mut TxContext) {
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: proposal_set::create(ctx),
+        tob: bag::new(ctx),
     };
 
     sui::transfer::share_object(hashi);
@@ -205,19 +209,14 @@ entry fun submit_dkg_cert(
     ctx: &mut TxContext,
 ) {
     self.config.assert_version();
-    assert!(epoch == self.committees.epoch());
-    let epoch_certs_key = EpochCertsKey { epoch };
-    if (!sui::dynamic_field::exists_<EpochCertsKey>(&self.id, epoch_certs_key)) {
-        let new_certs = hashi::tob::create(epoch, ctx);
-        sui::dynamic_field::add(&mut self.id, epoch_certs_key, new_certs);
+    assert!(epoch == self.committee_set.epoch());
+    if (!self.tob.contains(epoch)) {
+        self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };
-    let epoch_certs = sui::dynamic_field::borrow_mut<EpochCertsKey, hashi::tob::EpochCerts>(
-        &mut self.id,
-        epoch_certs_key,
-    );
+    let epoch_certs: &mut EpochCerts = self.tob.borrow_mut(epoch);
     hashi::tob::submit_dkg_cert(
         epoch_certs,
-        self.committees.current_committee(),
+        self.committee_set.current_committee(),
         epoch,
         dealer,
         message_hash,
@@ -227,6 +226,12 @@ entry fun submit_dkg_cert(
     );
 }
 
-public struct EpochCertsKey has copy, drop, store {
+entry fun destroy_all_dkg_certs(
+    self: &mut Hashi,
     epoch: u64,
+) {
+    self.config.assert_version();
+    let current_epoch = self.committee_set.epoch();
+    let epoch_certs: EpochCerts = self.tob.remove(epoch);
+    hashi::tob::destroy_all(epoch_certs, current_epoch);
 }
