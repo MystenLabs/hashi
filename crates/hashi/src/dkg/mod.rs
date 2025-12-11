@@ -435,10 +435,11 @@ impl DkgManager {
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
             .keys()
             .map(|dealer| {
-                // TODO: aren't the next two lookup must succeed?
-                let dealer_party_id = self.bls_committee.index_of(dealer).ok_or_else(|| {
-                    DkgError::ProtocolFailed(format!("Unknown dealer: {:?}", dealer))
-                })? as u16;
+                let dealer_party_id = self
+                    .bls_committee
+                    .index_of(dealer)
+                    .expect("certified dealer must be committee member")
+                    as u16;
                 let output = self
                     .dealer_outputs
                     .get(dealer)
