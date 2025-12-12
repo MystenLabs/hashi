@@ -4,11 +4,12 @@ pub mod rpc;
 pub mod types;
 
 use crate::bls::{BlsCommittee, BlsSignatureAggregator};
-use crate::communication::{ChannelResult, P2PChannel};
+use crate::communication::{ChannelError, ChannelResult, P2PChannel};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
+use backon::{ExponentialBuilder, Retryable};
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::GroupElement;
@@ -18,6 +19,8 @@ use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use futures::future::join_all;
 use std::collections::HashMap;
+use std::future::Future;
+use std::time::Duration;
 use sui_sdk_types::Address;
 use types::DkgConfig;
 pub use types::{
@@ -27,6 +30,25 @@ pub use types::{
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
+
+const RPC_RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
+const RPC_RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
+const RPC_MAX_RETRIES: usize = 3;
+const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn rpc_retry_policy() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(RPC_RETRY_MIN_DELAY)
+        .with_max_delay(RPC_RETRY_MAX_DELAY)
+        .with_max_times(RPC_MAX_RETRIES)
+}
+
+async fn with_timeout<T>(fut: impl Future<Output = ChannelResult<T>>) -> ChannelResult<T> {
+    match tokio::time::timeout(RPC_CALL_TIMEOUT, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(ChannelError::Timeout),
+    }
+}
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -211,7 +233,7 @@ impl DkgManager {
 
     async fn run_as_dealer(
         &mut self,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
@@ -231,7 +253,6 @@ impl DkgManager {
         aggregator
             .add_signature_from(self.address, my_signature.clone())
             .expect("first signature should always be valid");
-        // TODO: Add timeout and retries handling when adding RPC layer
         let recipients: Vec<_> = self
             .bls_committee
             .members()
@@ -259,11 +280,13 @@ impl DkgManager {
             let cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
-            // TODO: Add timeout and retries handling when adding RPC layer
             // TODO: do not fail in case my certificate is already published
-            ordered_broadcast_channel.publish(cert).await.map_err(|e| {
-                DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
-            })?;
+            (|| with_timeout(ordered_broadcast_channel.publish(cert.clone())))
+                .retry(rpc_retry_policy())
+                .await
+                .map_err(|e| {
+                    DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
+                })?;
         }
         Ok(())
     }
@@ -500,9 +523,8 @@ impl DkgManager {
                     "Self in certificate signers but message not available".to_string(),
                 ));
             }
-            // TODO: Add timeout and retries handling when adding RPC layer
-            match p2p_channel
-                .retrieve_message(&signer_address, &request)
+            match (|| with_timeout(p2p_channel.retrieve_message(&signer_address, &request)))
+                .retry(rpc_retry_policy())
                 .await
             {
                 Ok(response) => {
@@ -558,9 +580,17 @@ impl DkgManager {
             .expect("cannot have complaint without message");
         let mut responses = Vec::new();
         for signer in signers {
-            // TODO: Add timeout and retries handling when adding RPC layer
-            // TODO: skip signer if no response / error instead of failing the entire function
-            let response = p2p_channel.complain(&signer, &complaint_request).await?;
+            let response =
+                match (|| with_timeout(p2p_channel.complain(&signer, &complaint_request)))
+                    .retry(rpc_retry_policy())
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::info!("Complaint to {:?} failed: {}", signer, e);
+                        continue;
+                    }
+                };
             responses.push(response.response);
             match receiver.recover(message, responses.clone()) {
                 Ok(partial_output) => {
@@ -604,7 +634,12 @@ async fn send_dkg_message_to_many(
 ) -> Vec<(Address, ChannelResult<SendMessageResponse>)> {
     join_all(recipients.iter().map(|addr| {
         let addr = *addr;
-        async move { (addr, p2p_channel.send_dkg_message(&addr, request).await) }
+        async move {
+            let result = (|| with_timeout(p2p_channel.send_dkg_message(&addr, request)))
+                .retry(rpc_retry_policy())
+                .await;
+            (addr, result)
+        }
     }))
     .await
 }
@@ -623,7 +658,7 @@ mod tests {
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
 
     struct MockPublicMessagesStore;
 
@@ -1131,7 +1166,8 @@ mod tests {
     struct PartiallyFailingP2PChannel {
         managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, DkgManager>>>,
         current_sender: Address,
-        fail_count: std::sync::Arc<std::sync::Mutex<usize>>,
+        /// Recipients that always fail (even on retry)
+        failed_recipients: std::sync::Arc<std::sync::Mutex<HashSet<Address>>>,
         max_failures: usize,
     }
 
@@ -1144,44 +1180,50 @@ mod tests {
             Self {
                 managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
                 current_sender,
-                fail_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+                failed_recipients: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
                 max_failures,
             }
         }
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for PartiallyFailingP2PChannel {
+    impl P2PChannel for PartiallyFailingP2PChannel {
         async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
-            let mut count = self.fail_count.lock().unwrap();
-            if *count < self.max_failures {
-                *count += 1;
-                Err(crate::communication::ChannelError::RequestFailed(
+        ) -> ChannelResult<SendMessageResponse> {
+            let mut failed = self.failed_recipients.lock().unwrap();
+            // If this recipient already failed, keep failing (even on retry)
+            if failed.contains(recipient) {
+                return Err(crate::communication::ChannelError::RequestFailed(
                     "network error".to_string(),
+                ));
+            }
+            // If we haven't reached max failures, mark this recipient as failed
+            if failed.len() < self.max_failures {
+                failed.insert(*recipient);
+                return Err(crate::communication::ChannelError::RequestFailed(
+                    "network error".to_string(),
+                ));
+            }
+            drop(failed); // Release the lock before calling manager
+            let mut managers = self.managers.lock().unwrap();
+            let manager = managers.get_mut(recipient).ok_or_else(|| {
+                crate::communication::ChannelError::RequestFailed(format!(
+                    "Recipient {:?} not found",
+                    recipient
                 ))
-            } else {
-                drop(count); // Release the lock before calling manager
-                let mut managers = self.managers.lock().unwrap();
-                let manager = managers.get_mut(recipient).ok_or_else(|| {
+            })?;
+            let response = manager
+                .handle_send_message_request(self.current_sender, request)
+                .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
-                        "Recipient {:?} not found",
-                        recipient
+                        "Handler failed: {}",
+                        e
                     ))
                 })?;
-                let response = manager
-                    .handle_send_message_request(self.current_sender, request)
-                    .map_err(|e| {
-                        crate::communication::ChannelError::RequestFailed(format!(
-                            "Handler failed: {}",
-                            e
-                        ))
-                    })?;
-                Ok(response)
-            }
+            Ok(response)
         }
 
         async fn retrieve_message(
@@ -3107,14 +3149,15 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
         // Run as party - should ABORT on dealer0 recovery failure
+        // With retry logic, failed signers are skipped, so we get ProtocolFailed
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
 
-        // Should fail with BroadcastError (P2P call failed)
+        // Should fail with ProtocolFailed (all signers failed, not enough responses)
         assert!(result.is_err(), "Expected error, got: {:?}", result);
         let err = result.unwrap_err();
         assert!(
-            matches!(err, DkgError::BroadcastError(_)),
-            "Expected BroadcastError, got: {:?}",
+            matches!(err, DkgError::ProtocolFailed(_)),
+            "Expected ProtocolFailed, got: {:?}",
             err
         );
 
@@ -3396,6 +3439,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_recover_shares_via_complaint_skips_failed_signers() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+        let dealer_addr = setup.address(0);
+
+        // Create cheating message with corrupted shares for party 1
+        let cheating_message = create_cheating_message(&setup, 0, 1, &mut rng);
+
+        // Party 1 receives corrupted message and creates complaint
+        let party_addr = setup.address(1);
+        let mut party_manager = setup.create_manager(1);
+        party_manager
+            .store_message(dealer_addr, &cheating_message)
+            .unwrap();
+        party_manager
+            .process_certified_dealer_message(&dealer_addr)
+            .unwrap();
+        assert!(
+            party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr)
+        );
+
+        // Create 2 parties that can respond (threshold is 2)
+        let mut other_managers = vec![];
+        for party_id in 2..4 {
+            let addr = setup.address(party_id);
+            let mut mgr = setup.create_manager(party_id);
+            receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
+            other_managers.push((addr, mgr));
+        }
+
+        // Add a non-existent signer that will fail
+        let failing_signer = Address::new([99; 32]);
+
+        // Signer list: [failing_signer, valid_signer1, valid_signer2]
+        // The first signer fails, but recovery should still succeed with the remaining two
+        let mut signer_addresses = vec![failing_signer];
+        signer_addresses.extend(other_managers.iter().map(|(addr, _)| *addr));
+
+        let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
+        let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
+
+        // Recovery should succeed despite first signer failing
+        let result = party_manager
+            .recover_shares_via_complaint(&dealer_addr, signer_addresses.into_iter(), &mock_p2p)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Recovery should succeed despite failed signer: {:?}",
+            result.err()
+        );
+        assert!(party_manager.dealer_outputs.contains_key(&dealer_addr));
+        assert!(
+            !party_manager
+                .complaints_to_process
+                .contains_key(&dealer_addr),
+            "Complaint should be cleared after successful recovery"
+        );
+    }
+
+    #[tokio::test]
     async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
         let mut rng = rand::thread_rng();
         let setup = TestSetup::new(5);
@@ -3475,6 +3581,8 @@ mod tests {
         let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
         // Call recover_shares_via_complaint - should fail because P2P call fails
+        // With retry logic, failed signers are skipped (continue), so we get ProtocolFailed
+        // instead of BroadcastError
         let result = party_manager
             .recover_shares_via_complaint(&dealer_addr, signer_addresses.into_iter(), &mock_p2p)
             .await;
@@ -3482,11 +3590,14 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, DkgError::BroadcastError(_)),
-            "Expected BroadcastError, got: {:?}",
+            matches!(err, DkgError::ProtocolFailed(_)),
+            "Expected ProtocolFailed, got: {:?}",
             err
         );
-        assert!(err.to_string().contains("Party"));
+        assert!(
+            err.to_string()
+                .contains("Not enough valid complaint responses")
+        );
     }
 
     #[tokio::test]

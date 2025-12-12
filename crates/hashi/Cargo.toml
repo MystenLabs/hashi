@@ -52,6 +52,7 @@ hex = "0.4"
 bcs = "0.1.6"
 rand = "0.8"
 tap = "1.0.1"
+backon = "1"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
