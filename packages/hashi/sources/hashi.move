@@ -156,10 +156,7 @@ entry fun submit_dkg_cert(
     );
 }
 
-entry fun destroy_all_dkg_certs(
-    self: &mut Hashi,
-    epoch: u64,
-) {
+entry fun destroy_all_dkg_certs(self: &mut Hashi, epoch: u64) {
     self.config.assert_version_enabled();
     let current_epoch = self.committee_set.epoch();
     let epoch_certs: EpochCerts = self.tob.remove(epoch);
