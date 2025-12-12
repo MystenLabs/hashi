@@ -12,7 +12,9 @@ pub mod storage;
 pub mod tls;
 
 fn init_crypto_provider() {
-    rustls::crypto::ring::default_provider().install_default().ok();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 }
 
 pub struct Hashi {
