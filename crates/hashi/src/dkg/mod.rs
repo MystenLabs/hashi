@@ -36,20 +36,6 @@ const RPC_RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
 const RPC_MAX_RETRIES: usize = 3;
 const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn rpc_retry_policy() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_min_delay(RPC_RETRY_MIN_DELAY)
-        .with_max_delay(RPC_RETRY_MAX_DELAY)
-        .with_max_times(RPC_MAX_RETRIES)
-}
-
-async fn with_timeout<T>(fut: impl Future<Output = ChannelResult<T>>) -> ChannelResult<T> {
-    match tokio::time::timeout(RPC_CALL_TIMEOUT, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(ChannelError::Timeout),
-    }
-}
-
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
 // 2) Each party verifies the message and returns a signature. Once sufficient valid signatures are received from the parties, the dealer sends a certificate to Sui (TOB).
@@ -281,8 +267,7 @@ impl DkgManager {
                 .finish()
                 .expect("signatures should always be valid");
             // TODO: do not fail in case my certificate is already published
-            (|| with_timeout(ordered_broadcast_channel.publish(cert.clone())))
-                .retry(rpc_retry_policy())
+            with_timeout_and_retry(|| ordered_broadcast_channel.publish(cert.clone()))
                 .await
                 .map_err(|e| {
                     DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
@@ -523,8 +508,7 @@ impl DkgManager {
                     "Self in certificate signers but message not available".to_string(),
                 ));
             }
-            match (|| with_timeout(p2p_channel.retrieve_message(&signer_address, &request)))
-                .retry(rpc_retry_policy())
+            match with_timeout_and_retry(|| p2p_channel.retrieve_message(&signer_address, &request))
                 .await
             {
                 Ok(response) => {
@@ -581,8 +565,7 @@ impl DkgManager {
         let mut responses = Vec::new();
         for signer in signers {
             let response =
-                match (|| with_timeout(p2p_channel.complain(&signer, &complaint_request)))
-                    .retry(rpc_retry_policy())
+                match with_timeout_and_retry(|| p2p_channel.complain(&signer, &complaint_request))
                     .await
                 {
                     Ok(r) => r,
@@ -635,13 +618,34 @@ async fn send_dkg_message_to_many(
     join_all(recipients.iter().map(|addr| {
         let addr = *addr;
         async move {
-            let result = (|| with_timeout(p2p_channel.send_dkg_message(&addr, request)))
-                .retry(rpc_retry_policy())
-                .await;
+            let result =
+                with_timeout_and_retry(|| p2p_channel.send_dkg_message(&addr, request)).await;
             (addr, result)
         }
     }))
     .await
+}
+
+fn retry_policy() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(RPC_RETRY_MIN_DELAY)
+        .with_max_delay(RPC_RETRY_MAX_DELAY)
+        .with_max_times(RPC_MAX_RETRIES)
+}
+
+async fn with_timeout<T>(fut: impl Future<Output = ChannelResult<T>>) -> ChannelResult<T> {
+    match tokio::time::timeout(RPC_CALL_TIMEOUT, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(ChannelError::Timeout),
+    }
+}
+
+async fn with_timeout_and_retry<T, F, Fut>(mut f: F) -> ChannelResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ChannelResult<T>>,
+{
+    (move || with_timeout(f())).retry(retry_policy()).await
 }
 
 #[cfg(test)]
