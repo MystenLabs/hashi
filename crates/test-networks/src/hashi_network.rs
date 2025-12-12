@@ -109,16 +109,22 @@ impl HashiNetworkBuilder {
     ) -> Result<HashiNetwork> {
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();
-
+        let hashi_dir = dir.join("hashi");
+        std::fs::create_dir_all(&hashi_dir)?;
         let mut configs = Vec::with_capacity(self.num_nodes);
-        for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
+        for (i, (validator_address, private_key)) in
+            sui.validator_keys.iter().take(self.num_nodes).enumerate()
+        {
+            let validator_data_dir = hashi_dir.join(format!("validator_{i}"));
+            std::fs::create_dir_all(&validator_data_dir)?;
             let mut config = HashiConfig::new_for_testing();
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);
             config.sui_rpc = Some(sui_rpc.clone());
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
-            config.db = Some(dir.join(validator_address.to_string()));
+            config.db = Some(validator_data_dir.join("db"));
+            config.data_dir = Some(validator_data_dir);
 
             //TODO fill in chain ids
             config.sui_chain_id = None;
