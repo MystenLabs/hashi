@@ -4,12 +4,11 @@ pub mod rpc;
 pub mod types;
 
 use crate::bls::{BlsCommittee, BlsSignatureAggregator};
-use crate::communication::{ChannelError, ChannelResult, P2PChannel};
+use crate::communication::{ChannelResult, P2PChannel, with_timeout_and_retry};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
-use backon::{ExponentialBuilder, Retryable};
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::GroupElement;
@@ -19,8 +18,6 @@ use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use futures::future::join_all;
 use std::collections::HashMap;
-use std::future::Future;
-use std::time::Duration;
 use sui_sdk_types::Address;
 use types::DkgConfig;
 pub use types::{
@@ -30,11 +27,6 @@ pub use types::{
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
-
-const RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
-const RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
-const MAX_RETRIES: usize = 3;
-const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -624,28 +616,6 @@ async fn send_dkg_message_to_many(
         }
     }))
     .await
-}
-
-fn retry_policy() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_min_delay(RETRY_MIN_DELAY)
-        .with_max_delay(RETRY_MAX_DELAY)
-        .with_max_times(MAX_RETRIES)
-}
-
-async fn with_timeout<T>(fut: impl Future<Output = ChannelResult<T>>) -> ChannelResult<T> {
-    match tokio::time::timeout(CALL_TIMEOUT, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(ChannelError::Timeout),
-    }
-}
-
-async fn with_timeout_and_retry<T, F, Fut>(mut f: F) -> ChannelResult<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = ChannelResult<T>>,
-{
-    (move || with_timeout(f())).retry(retry_policy()).await
 }
 
 #[cfg(test)]
