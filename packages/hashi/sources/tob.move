@@ -32,8 +32,6 @@ public(package) fun create(epoch: u64, ctx: &mut TxContext): EpochCerts {
     }
 }
 
-/// Submit a DKG certificate to the TOB.
-/// Returns early (no error) if certificate already exists for this dealer.
 public(package) fun submit_dkg_cert(
     epoch_certs: &mut EpochCerts,
     committee: &Committee,
