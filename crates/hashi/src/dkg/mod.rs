@@ -31,10 +31,10 @@ pub use types::{
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 
-const RPC_RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
-const RPC_RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
-const RPC_MAX_RETRIES: usize = 3;
-const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+const RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
+const RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
+const MAX_RETRIES: usize = 3;
+const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -628,13 +628,13 @@ async fn send_dkg_message_to_many(
 
 fn retry_policy() -> ExponentialBuilder {
     ExponentialBuilder::default()
-        .with_min_delay(RPC_RETRY_MIN_DELAY)
-        .with_max_delay(RPC_RETRY_MAX_DELAY)
-        .with_max_times(RPC_MAX_RETRIES)
+        .with_min_delay(RETRY_MIN_DELAY)
+        .with_max_delay(RETRY_MAX_DELAY)
+        .with_max_times(MAX_RETRIES)
 }
 
 async fn with_timeout<T>(fut: impl Future<Output = ChannelResult<T>>) -> ChannelResult<T> {
-    match tokio::time::timeout(RPC_CALL_TIMEOUT, fut).await {
+    match tokio::time::timeout(CALL_TIMEOUT, fut).await {
         Ok(result) => result,
         Err(_) => Err(ChannelError::Timeout),
     }
