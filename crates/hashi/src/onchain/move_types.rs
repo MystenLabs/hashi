@@ -16,6 +16,7 @@ pub struct Hashi {
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
     pub proposals: ProposalSet,
+    pub tob: Bag,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.

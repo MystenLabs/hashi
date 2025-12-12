@@ -205,6 +205,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         deposit_queue,
         utxo_pool,
         proposals,
+        tob,
     } = response.get_ref().object().contents().deserialize()?;
 
     let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(
@@ -232,6 +233,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
             deposit_queue,
             utxo_pool,
             proposals: convert_move_proposal_set(proposals),
+            tob_id: tob.id,
         },
     ))
 }
