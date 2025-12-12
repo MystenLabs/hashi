@@ -18,6 +18,23 @@ fn clear_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// File-based storage for DKG dealer messages.
+///
+/// ## Directory Layout
+///
+/// ```text
+/// {dir}/
+/// ├── 0x0000000000000000000000000000000000000000000000000000000000000001.bin
+/// ├── 0x0000000000000000000000000000000000000000000000000000000000000002.bin
+/// └── ...
+/// ```
+///
+/// Each file is named `{dealer_address}.bin` where `dealer_address` is the
+/// hex-encoded Sui address of the dealer. Files contain BCS-serialized
+/// `avss::Message` data (~100KB per message).
+///
+/// The directory is created on construction if it doesn't exist.
+/// Calling `clear()` removes all files and recreates the empty directory.
 pub struct FilePublicMessagesStore {
     dir: PathBuf,
 }
@@ -54,6 +71,21 @@ impl PublicMessagesStore for FilePublicMessagesStore {
     }
 }
 
+/// File-based storage for DKG secrets (encryption keys).
+///
+/// ## Directory Layout
+///
+/// ```text
+/// {dir}/
+/// └── encryption_key.bin
+/// ```
+///
+/// The encryption key file contains a BCS-serialized
+/// `PrivateKey<EncryptionGroupElement>`. Only one key is stored per directory.
+///
+/// The directory is created on construction if it doesn't exist.
+/// `store_encryption_key()` fails if the key file already exists (no overwrite).
+/// Calling `clear()` removes all files and recreates the empty directory.
 pub struct FileSecretsStore {
     dir: PathBuf,
 }
