@@ -56,8 +56,7 @@ public(package) fun create<T: store>(
 
 public(package) fun execute<T>(proposal: Proposal<T>, hashi: &Hashi): T {
     assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
-
-    // TODO: add version to proposal and check that it is a whitelisted version
+    hashi.config().assert_version_enabled();
 
     proposal_events::emit_proposal_executed_event(proposal.id.to_inner());
     proposal.delete()

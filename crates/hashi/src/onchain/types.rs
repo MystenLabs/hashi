@@ -2,7 +2,7 @@
 
 //! Usable definitions of the onchain state of hashi
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
@@ -216,6 +216,16 @@ pub struct ProposalSet {
 #[derive(Debug)]
 pub struct Config {
     pub config: BTreeMap<String, ConfigValue>,
+    pub enabled_versions: BTreeSet<u64>,
+    pub upgrade_cap: Option<UpgradeCap>,
+}
+
+#[derive(Debug)]
+pub struct UpgradeCap {
+    pub id: Address,
+    pub package: Address,
+    pub version: u64,
+    pub policy: u8,
 }
 
 #[derive(Debug)]
