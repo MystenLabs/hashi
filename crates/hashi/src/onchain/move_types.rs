@@ -54,7 +54,7 @@ pub struct MemberInfo {
     /// bls12381 public key to be used in the next epoch.
     ///
     /// The public key for this node which is active in the current epoch can
-    /// be found in the `BlsCommittee` struct.
+    /// be found in the `Committee` struct.
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
@@ -86,7 +86,7 @@ pub struct MemberInfo {
 pub struct CommitteeMember {
     pub validator_address: Address,
     pub public_key: Vec<u8>, //Element<UncompressedG1>,
-    pub encryption_key: Vec<u8>,
+    pub encryption_public_key: Vec<u8>,
     pub weight: u16,
 }
 

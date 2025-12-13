@@ -10,6 +10,11 @@ use std::collections::HashMap;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
+pub type EncryptionPrivateKey =
+    fastcrypto_tbls::ecies_v1::PrivateKey<crate::dkg::EncryptionGroupElement>;
+pub type EncryptionPublicKey =
+    fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>;
+
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
@@ -54,17 +59,18 @@ impl Bls12381PrivateKey {
 }
 
 #[derive(Debug, Clone)]
-pub struct BlsCommittee {
+pub struct Committee {
     epoch: u64,
-    members: Vec<BlsCommitteeMember>,
+    members: Vec<CommitteeMember>,
     address_to_index: HashMap<Address, usize>,
     total_weight: u64,
 }
 
 #[derive(Debug, Clone)]
-pub struct BlsCommitteeMember {
+pub struct CommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
+    encryption_public_key: EncryptionPublicKey,
     weight: u64,
 }
 
@@ -97,8 +103,8 @@ impl MemberSignature {
     }
 }
 
-impl BlsCommittee {
-    pub fn new(members: Vec<BlsCommitteeMember>, epoch: u64) -> Self {
+impl Committee {
+    pub fn new(members: Vec<CommitteeMember>, epoch: u64) -> Self {
         let total_weight = members.iter().map(|member| member.weight).sum();
         let address_to_index = members
             .iter()
@@ -113,7 +119,7 @@ impl BlsCommittee {
         }
     }
 
-    pub fn members(&self) -> &[BlsCommitteeMember] {
+    pub fn members(&self) -> &[CommitteeMember] {
         &self.members
     }
 
@@ -122,7 +128,7 @@ impl BlsCommittee {
         self.total_weight
     }
 
-    fn member(&self, address: &Address) -> Result<&BlsCommitteeMember, SignatureError> {
+    fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {
         let index = self
             .address_to_index
             .get(address)
@@ -139,7 +145,7 @@ impl BlsCommittee {
         self.address_to_index.get(address).copied()
     }
 
-    /// Verify a single signature provided by a [BlsCommitteeMember].
+    /// Verify a single signature provided by a [CommitteeMember].
     fn verify<T: Serialize>(
         &self,
         message: &T,
@@ -201,11 +207,17 @@ impl BlsCommittee {
     }
 }
 
-impl BlsCommitteeMember {
-    pub fn new(address: Address, public_key: BLS12381PublicKey, weight: u64) -> Self {
+impl CommitteeMember {
+    pub fn new(
+        address: Address,
+        public_key: BLS12381PublicKey,
+        encryption_public_key: EncryptionPublicKey,
+        weight: u64,
+    ) -> Self {
         Self {
             address,
             public_key,
+            encryption_public_key,
             weight,
         }
     }
@@ -216,6 +228,10 @@ impl BlsCommitteeMember {
 
     pub fn public_key(&self) -> &BLS12381PublicKey {
         &self.public_key
+    }
+
+    pub fn encryption_public_key(&self) -> &EncryptionPublicKey {
+        &self.encryption_public_key
     }
 
     pub fn weight(&self) -> u64 {
@@ -234,7 +250,7 @@ pub struct CommitteeSignature<T> {
 impl<T> CommitteeSignature<T> {
     /// Verify that the committee could be used to verify this certificate, e.g., that the epoch and
     /// the number of signers match.
-    fn verify_committee(&self, committee: &BlsCommittee) -> Result<(), SignatureError> {
+    fn verify_committee(&self, committee: &Committee) -> Result<(), SignatureError> {
         if committee.epoch != self.epoch || self.signers_bitmap.size != committee.members.len() {
             return Err(SignatureError::from_source(
                 "committee signature does not match committee",
@@ -244,7 +260,7 @@ impl<T> CommitteeSignature<T> {
     }
 
     /// The committee members included in this signature.
-    pub fn signers(&self, committee: &BlsCommittee) -> Result<Vec<Address>, SignatureError> {
+    pub fn signers(&self, committee: &Committee) -> Result<Vec<Address>, SignatureError> {
         self.verify_committee(committee)?;
         Ok(self
             .signers_bitmap
@@ -254,7 +270,7 @@ impl<T> CommitteeSignature<T> {
     }
 
     /// The total weight of the signers of this signature.
-    pub fn weight(&self, committee: &BlsCommittee) -> Result<u64, SignatureError> {
+    pub fn weight(&self, committee: &Committee) -> Result<u64, SignatureError> {
         self.verify_committee(committee)?;
         Ok(self
             .signers_bitmap
@@ -267,7 +283,7 @@ impl<T> CommitteeSignature<T> {
     pub fn is_signer(
         &self,
         address: &Address,
-        committee: &BlsCommittee,
+        committee: &Committee,
     ) -> Result<bool, SignatureError> {
         self.verify_committee(committee)?;
         let index = committee
@@ -280,7 +296,7 @@ impl<T> CommitteeSignature<T> {
 
 #[derive(Debug)]
 pub struct BlsSignatureAggregator<'a, T> {
-    committee: &'a BlsCommittee,
+    committee: &'a Committee,
     aggregate_signature: Option<BLS12381AggregateSignature>,
     bitmap: BitMap,
     signed_weight: u64,
@@ -288,7 +304,7 @@ pub struct BlsSignatureAggregator<'a, T> {
 }
 
 impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
-    pub fn new(committee: &'a BlsCommittee, message: T) -> Self {
+    pub fn new(committee: &'a Committee, message: T) -> Self {
         Self {
             bitmap: BitMap::new(committee.size()),
             committee,
@@ -485,16 +501,24 @@ mod test {
             .map(|(i, _)| Address::new([i as u8; 32]))
             .collect::<Vec<_>>();
 
+        let mut rng = rand::thread_rng();
+        let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
+            .iter()
+            .enumerate()
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
         let members = private_keys
             .iter()
             .enumerate()
-            .map(|(i, key)| BlsCommitteeMember {
+            .map(|(i, key)| CommitteeMember {
                 address: addresses[i],
                 public_key: key.public_key(),
+                encryption_public_key: encryption_public_keys[i].clone(),
                 weight: 1,
             })
             .collect();
-        let committee = BlsCommittee::new(members, epoch);
+        let committee = Committee::new(members, epoch);
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
 
@@ -574,16 +598,24 @@ mod test {
             .map(|(i, _)| Address::new([i as u8; 32]))
             .collect::<Vec<_>>();
 
+        let mut rng = rand::thread_rng();
+        let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
+            .iter()
+            .enumerate()
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
         let members = private_keys
             .iter()
             .enumerate()
-            .map(|(i, key)| BlsCommitteeMember {
+            .map(|(i, key)| CommitteeMember {
                 address: addresses[i],
                 public_key: key.public_key(),
+                encryption_public_key: encryption_public_keys[i].clone(),
                 weight: 1,
             })
             .collect();
-        let committee = BlsCommittee::new(members, epoch);
+        let committee = Committee::new(members, epoch);
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
 
@@ -613,13 +645,14 @@ mod test {
         assert!(certificate.is_signer(&unknown_address, &committee).is_err());
 
         // Test is_signer returns error for wrong committee (different epoch)
-        let wrong_committee = BlsCommittee::new(
+        let wrong_committee = Committee::new(
             private_keys
                 .iter()
                 .enumerate()
-                .map(|(i, key)| BlsCommitteeMember {
+                .map(|(i, key)| CommitteeMember {
                     address: addresses[i],
                     public_key: key.public_key(),
+                    encryption_public_key: encryption_public_keys[i].clone(),
                     weight: 1,
                 })
                 .collect(),

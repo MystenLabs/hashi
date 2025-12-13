@@ -1,4 +1,4 @@
-use crate::bls::BLS12381Signature;
+use crate::committee::BLS12381Signature;
 use crate::dkg::types;
 use crate::proto;
 use fastcrypto::traits::ToFromBytes;

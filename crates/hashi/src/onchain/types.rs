@@ -8,7 +8,10 @@ use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use sui_sdk_types::{Address, TypeTag};
 
-use crate::{bls::BlsCommittee, grpc::Client};
+use crate::{
+    committee::{Committee, EncryptionPublicKey},
+    grpc::Client,
+};
 
 #[derive(Debug)]
 pub struct Hashi {
@@ -31,7 +34,7 @@ pub struct CommitteeSet {
     epoch: u64,
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
-    committees: BTreeMap<u64, BlsCommittee>,
+    committees: BTreeMap<u64, Committee>,
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     clients: BTreeMap<Address, Client>,
@@ -55,11 +58,11 @@ impl CommitteeSet {
         &self.members
     }
 
-    pub fn committees(&self) -> &BTreeMap<u64, BlsCommittee> {
+    pub fn committees(&self) -> &BTreeMap<u64, Committee> {
         &self.committees
     }
 
-    pub fn current_committee(&self) -> Option<&BlsCommittee> {
+    pub fn current_committee(&self) -> Option<&Committee> {
         self.committees().get(&self.epoch())
     }
 
@@ -124,7 +127,7 @@ impl CommitteeSet {
         self
     }
 
-    pub fn set_committees(&mut self, committees: BTreeMap<u64, BlsCommittee>) -> &mut Self {
+    pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
         self.committees = committees;
         self
     }
@@ -150,7 +153,7 @@ pub struct MemberInfo {
     /// bls12381 public key to be used in the next epoch.
     ///
     /// The public key for this node which is active in the current epoch can
-    /// be found in the `BlsCommittee` struct.
+    /// be found in the `Committee` struct.
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
@@ -174,8 +177,7 @@ pub struct MemberInfo {
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
-    pub next_epoch_encryption_public_key:
-        Option<fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>>,
+    pub next_epoch_encryption_public_key: Option<EncryptionPublicKey>,
 }
 
 impl MemberInfo {
@@ -199,9 +201,7 @@ impl MemberInfo {
         self.https_address.as_ref()
     }
 
-    pub fn next_epoch_encryption_public_key(
-        &self,
-    ) -> Option<&fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>> {
+    pub fn next_epoch_encryption_public_key(&self) -> Option<&EncryptionPublicKey> {
         self.next_epoch_encryption_public_key.as_ref()
     }
 }
