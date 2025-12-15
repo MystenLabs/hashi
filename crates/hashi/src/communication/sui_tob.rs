@@ -1,6 +1,6 @@
 //! Sui-backed Total Order Broadcast (TOB) Channel
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -258,15 +258,10 @@ impl SuiTobChannel {
             Some(certs) => certs,
             None => return Ok(vec![]),
         };
-
-        // If the table is empty, return early
         let Some(head) = epoch_certs.dkg_certs.head else {
             return Ok(vec![]);
         };
-
-        // Fetch all nodes from the LinkedTable
-        let mut nodes: std::collections::HashMap<Address, LinkedTableNode<Address, DkgCertV1>> =
-            std::collections::HashMap::new();
+        let mut nodes: HashMap<Address, LinkedTableNode<Address, DkgCertV1>> = HashMap::new();
         let mut stream = self
             .client
             .list_dynamic_fields(
@@ -294,8 +289,6 @@ impl SuiTobChannel {
                 .map_err(|e| TobError::SerializationError(e.to_string()))?;
             nodes.insert(dealer, node);
         }
-
-        // Iterate from head following next pointers to maintain insertion order
         let mut certificates = Vec::with_capacity(nodes.len());
         let mut current = Some(head);
         while let Some(dealer) = current {
@@ -306,7 +299,6 @@ impl SuiTobChannel {
             certificates.push((dealer, cert));
             current = node.next;
         }
-
         Ok(certificates)
     }
 
