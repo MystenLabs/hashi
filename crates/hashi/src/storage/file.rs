@@ -10,6 +10,8 @@ use super::PublicMessagesStore;
 use super::SecretsStore;
 use crate::dkg::EncryptionGroupElement;
 
+const MESSAGE_FILE_EXTENSION: &str = "bin";
+
 fn clear_dir(dir: &Path) -> Result<()> {
     if dir.exists() {
         std::fs::remove_dir_all(dir)?;
@@ -46,7 +48,7 @@ impl FilePublicMessagesStore {
     }
 
     fn message_path(&self, dealer: &Address) -> PathBuf {
-        self.dir.join(format!("{}.bin", dealer))
+        self.dir.join(format!("{}.{}", dealer, MESSAGE_FILE_EXTENSION))
     }
 }
 
@@ -65,7 +67,7 @@ impl PublicMessagesStore for FilePublicMessagesStore {
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "bin") {
+            if path.extension().is_some_and(|ext| ext == MESSAGE_FILE_EXTENSION) {
                 let stem = path
                     .file_stem()
                     .and_then(|s| s.to_str())
