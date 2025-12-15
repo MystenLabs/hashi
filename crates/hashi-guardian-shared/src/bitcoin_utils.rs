@@ -2,12 +2,15 @@ use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::*;
+use bitcoin::key::UntweakedPublicKey;
+use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL, OP_PUSHNUM_2};
+use bitcoin::script::Builder;
+use bitcoin::secp256k1::{All, Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
-use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
+use bitcoin::taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo};
 use bitcoin::transaction::Version;
 use bitcoin::*;
 use serde::Deserialize;
@@ -17,13 +20,17 @@ use std::sync::LazyLock;
 pub static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
 
 /// Represents a UTXO that will be spent using taproot script-path spending.
+/// Taproot addresses are constructed in the following way:
+/// 1. Use the input derivation path and the fixed hashi pub key to obtain a derived pub key
+/// 2. Use the fixed enclave key and the derived hashi key in a 2-out-of-2 tapscript
+/// 3. Place the tapscript as the sole leaf with a NUMS internal key
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TaprootUTXO {
     txid: Txid,
     vout: u32,
     amount: Amount,
-    script_pubkey: ScriptBuf, // P2TR script that locks the UTXO (what's on-chain)
-    leaf_script: ScriptBuf,   // The specific tapscript leaf being executed
+    derivation_path: u32,   // Derivation path used by hashi for this input
+    leaf_script: ScriptBuf, // The specific tapscript leaf being executed
 }
 
 impl TaprootUTXO {
@@ -31,12 +38,9 @@ impl TaprootUTXO {
         txid: Txid,
         vout: u32,
         amount: Amount,
-        script_pubkey: ScriptBuf,
+        derivation_path: u32,
         leaf_script: ScriptBuf,
     ) -> GuardianResult<Self> {
-        if !script_pubkey.is_p2tr() {
-            return Err(InvalidInputs("script is not P2TR".into()));
-        }
         if leaf_script.is_empty() {
             return Err(InvalidInputs("leaf script must not be empty".into()));
         }
@@ -44,7 +48,7 @@ impl TaprootUTXO {
             txid,
             vout,
             amount,
-            script_pubkey,
+            derivation_path,
             leaf_script,
         })
     }
@@ -53,10 +57,18 @@ impl TaprootUTXO {
         self.amount
     }
 
-    pub fn txout(&self) -> TxOut {
+    pub fn txout(
+        &self,
+        enclave_pubkey: PublicKey,
+        hashi_pubkey: PublicKey,
+        network: Network,
+    ) -> TxOut {
+        let derived_pubkey = get_derived_pubkey(hashi_pubkey, self.derivation_path);
+        let (address, _, _) =
+            create_2_of_2_taproot_address(enclave_pubkey, derived_pubkey, network);
         TxOut {
             value: self.amount,
-            script_pubkey: self.script_pubkey.clone(),
+            script_pubkey: address.script_pubkey(),
         }
     }
 
@@ -76,7 +88,7 @@ impl TaprootUTXO {
     }
 }
 
-/// BTC tx signing w/ taproot and script spend path
+/// BTC tx signing w/ taproot and script spend path  
 pub fn sign_btc_tx(messages: &[Message], sk: &SecretKey) -> GuardianResult<Vec<Signature>> {
     let keypair = Keypair::from_secret_key(&BTC_LIB, sk);
     Ok(messages
@@ -94,6 +106,9 @@ pub fn construct_signing_messages(
     input_utxos: &[TaprootUTXO],
     output_utxos: &[TxOut],
     change_utxo: &TxOut,
+    enclave_pubkey: PublicKey,
+    hashi_pubkey: PublicKey,
+    network: Network,
 ) -> GuardianResult<Vec<Message>> {
     // Input Validation
     if input_utxos.is_empty() {
@@ -119,7 +134,10 @@ pub fn construct_signing_messages(
 
     // Construct signing messages
     let sighash_type = TapSighashType::Default;
-    let prevouts: Vec<TxOut> = input_utxos.iter().map(|utxo| utxo.txout()).collect();
+    let prevouts: Vec<TxOut> = input_utxos
+        .iter()
+        .map(|utxo| utxo.txout(enclave_pubkey, hashi_pubkey, network))
+        .collect();
     input_utxos
         .iter()
         .enumerate()
@@ -156,6 +174,68 @@ pub fn create_keypair(sk: &[u8; 32]) -> Keypair {
     Keypair::from_secret_key(&BTC_LIB, &secret_key)
 }
 
+fn create_2_of_2_taproot_address(
+    enclave_pubkey: PublicKey,
+    hashi_pubkey: PublicKey,
+    network: Network,
+) -> (Address, TaprootSpendInfo, ScriptBuf) {
+    let enclave_xonly = XOnlyPublicKey::from(enclave_pubkey);
+    let hashi_xonly = XOnlyPublicKey::from(hashi_pubkey);
+
+    // Tapscript 2-of-2 with CHECKSIGADD pattern:
+    // <enclave_pubkey> OP_CHECKSIG <hashi_pubkey> OP_CHECKSIGADD OP_PUSHNUM_2 OP_NUMEQUAL
+    let tap_script = Builder::new()
+        .push_x_only_key(&enclave_xonly)
+        .push_opcode(OP_CHECKSIG)
+        .push_x_only_key(&hashi_xonly)
+        .push_opcode(OP_CHECKSIGADD)
+        .push_opcode(OP_PUSHNUM_2)
+        .push_opcode(OP_NUMEQUAL)
+        .into_script();
+
+    // Use a nothing-up-my-sleeve (NUMS) point as the internal key
+    // Copied from BIP-341 doc.
+    // TODO: Confirm ourselves that it is indeed secure if this code is being used in prod.
+    let nums_key = UntweakedPublicKey::from_slice(&[
+        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
+        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
+        0x3a, 0xc0,
+    ])
+    .expect("valid nums key");
+
+    // Build taproot spend info
+    let spend_info = TaprootBuilder::new()
+        .add_leaf(0, tap_script.clone())
+        .expect("add leaf")
+        .finalize(&BTC_LIB, nums_key)
+        .expect("finalize taproot");
+
+    let address = Address::p2tr(&BTC_LIB, nums_key, spend_info.merkle_root(), network);
+    (address, spend_info, tap_script)
+}
+
+/// Derives a child public key using BIP32 unhardened derivation.  
+/// For a single-level derivation path (e.g., m/5 means derivation_path=5).  
+fn get_derived_pubkey(parent_pubkey: PublicKey, derivation_index: u32) -> PublicKey {
+    use bitcoin::hashes::{sha512, Hash, HashEngine, Hmac, HmacEngine};
+
+    // BIP32 unhardened derivation: HMAC-SHA512(parent_key || index)
+    let mut hmac_engine: HmacEngine<sha512::Hash> = HmacEngine::new(b"hashi seed");
+    hmac_engine.input(&parent_pubkey.serialize());
+    hmac_engine.input(&derivation_index.to_be_bytes());
+
+    let hmac_result = Hmac::from_engine(hmac_engine);
+    let (tweak_bytes, _chain_code) = hmac_result.as_byte_array().split_at(32);
+
+    // Parse tweak as a scalar and add to parent key
+    let tweak = SecretKey::from_slice(tweak_bytes).expect("valid tweak from HMAC");
+
+    // child_key = parent_key + tweak * G
+    parent_pubkey
+        .add_exp_tweak(&BTC_LIB, &tweak.into())
+        .expect("valid child key derivation")
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_constants {
     pub const TEST_ENCLAVE_SK: [u8; 32] = [1u8; 32];
@@ -168,9 +248,7 @@ mod bitcoin_tests {
     use crate::bitcoin_utils::test_constants::*;
     use bitcoin::key::TapTweak;
     use bitcoin::key::UntweakedPublicKey;
-    use bitcoin::opcodes::all::*;
-    use bitcoin::script::Builder;
-    use bitcoin::taproot::{TaprootBuilder, TaprootSpendInfo};
+    use bitcoin::taproot::TaprootSpendInfo;
     use bitcoin::KnownHrp::Regtest;
 
     fn gen_keypair_and_address(bytes: Option<[u8; 32]>, network: KnownHrp) -> (Keypair, Address) {
@@ -209,43 +287,6 @@ mod bitcoin_tests {
             control_block_vec, // control block
         ];
         Witness::from_slice(&witness_elements)
-    }
-
-    fn create_2_of_2_taproot_address(
-        enclave_pubkey: XOnlyPublicKey,
-        hashi_pubkey: XOnlyPublicKey,
-        network: KnownHrp,
-    ) -> (Address, taproot::TaprootSpendInfo, ScriptBuf) {
-        // Tapscript 2-of-2 with CHECKSIGADD pattern:
-        // <enclave_pubkey> OP_CHECKSIG <hashi_pubkey> OP_CHECKSIGADD OP_PUSHNUM_2 OP_NUMEQUAL
-        let tap_script = Builder::new()
-            .push_x_only_key(&enclave_pubkey)
-            .push_opcode(OP_CHECKSIG)
-            .push_x_only_key(&hashi_pubkey)
-            .push_opcode(OP_CHECKSIGADD)
-            .push_opcode(OP_PUSHNUM_2)
-            .push_opcode(OP_NUMEQUAL)
-            .into_script();
-
-        // Use a nothing-up-my-sleeve (NUMS) point as the internal key
-        // Copied from BIP-341 doc.
-        // Note: Confirm ourselves that it is indeed secure if this code is being used in prod.
-        let nums_key = UntweakedPublicKey::from_slice(&[
-            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
-            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
-            0xce, 0x80, 0x3a, 0xc0,
-        ])
-        .expect("valid nums key");
-
-        // Build taproot spend info
-        let spend_info = TaprootBuilder::new()
-            .add_leaf(0, tap_script.clone())
-            .expect("add leaf")
-            .finalize(&BTC_LIB, nums_key)
-            .expect("finalize taproot");
-
-        let address = Address::p2tr(&BTC_LIB, nums_key, spend_info.merkle_root(), network);
-        (address, spend_info, tap_script)
     }
 
     #[test]
@@ -316,15 +357,15 @@ mod bitcoin_tests {
         let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_SK), Regtest);
         let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_SK), Regtest);
 
-        let enclave_x = XOnlyPublicKey::from_keypair(&enclave_keypair).0;
-        let hashi_x = XOnlyPublicKey::from_keypair(&hashi_keypair).0;
+        let enclave_pk = enclave_keypair.public_key();
+        let hashi_pk = hashi_keypair.public_key();
 
         let (address, spend_info, tap_script) =
-            create_2_of_2_taproot_address(enclave_x, hashi_x, Regtest);
+            create_2_of_2_taproot_address(enclave_pk, hashi_pk, Network::Regtest);
         println!("\n=== 2-of-2 Multisig Address ===");
         println!("Address: {}", address);
-        println!("Enclave pubkey: {}", enclave_x);
-        println!("Hashi pubkey: {}", hashi_x);
+        println!("Enclave pubkey: {}", enclave_pk);
+        println!("Hashi pubkey: {}", hashi_pk);
 
         // A) User picks destination address.
         const DEST_SK: [u8; 32] = [3u8; 32];
@@ -342,7 +383,7 @@ mod bitcoin_tests {
             out_point.txid,
             out_point.vout,
             Amount::from_sat(100000000), // 1.0 BTC
-            address.script_pubkey(),
+            0,                           // derivation_path = 0 (no derivation in this test)
             tap_script.clone(),
         )
         .unwrap();
@@ -363,6 +404,9 @@ mod bitcoin_tests {
             std::slice::from_ref(&input_utxo),
             std::slice::from_ref(&spend_out),
             &change_out,
+            enclave_pk,
+            hashi_pk,
+            Network::Regtest,
         )
         .unwrap();
         let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair.secret_key()).unwrap();
