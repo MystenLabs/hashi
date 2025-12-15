@@ -93,7 +93,7 @@ impl DkgManager {
         let party_id = bls_committee
             .index_of(&address)
             .expect("address not in committee") as u16;
-        Ok(Self {
+        let mut manager = Self {
             party_id,
             address,
             dkg_config,
@@ -107,7 +107,9 @@ impl DkgManager {
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
-        })
+        };
+        manager.load_stored_messages()?;
+        Ok(manager)
     }
 
     /// RPC endpoint handler for `SendMessageRequest`
@@ -213,8 +215,15 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
-        let dealer_message = self.create_dealer_message(rng);
-        self.store_message(self.address, &dealer_message)?;
+        // TODO(Optimization): Skip dealer phase if certificate is already on TOB
+        let dealer_message = match self.dealer_messages.get(&self.address) {
+            Some(msg) => msg.clone(),
+            None => {
+                let msg = self.create_dealer_message(rng);
+                self.store_message(self.address, &msg)?;
+                msg
+            }
+        };
         let my_signature = self
             .try_sign_message(self.address, &dealer_message)
             .expect("own message should always be valid");
@@ -585,6 +594,17 @@ impl DkgManager {
             dealer
         )))
     }
+
+    fn load_stored_messages(&mut self) -> DkgResult<()> {
+        let stored = self
+            .public_messages_store
+            .list_all()
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
+        for (dealer, message) in stored {
+            self.dealer_messages.insert(dealer, message);
+        }
+        Ok(())
+    }
 }
 
 /// TODO: Replace generator with a nothing-up-my-sleeve point with unknown discrete log.
@@ -626,8 +646,8 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
-            Ok(None)
+        fn list_all(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(vec![])
         }
 
         fn clear(&mut self) -> anyhow::Result<()> {
@@ -1519,8 +1539,8 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
-            Ok(self.stored.get(dealer).cloned())
+        fn list_all(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(self.stored.iter().map(|(k, v)| (*k, v.clone())).collect())
         }
 
         fn clear(&mut self) -> anyhow::Result<()> {
@@ -1540,8 +1560,8 @@ mod tests {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
-        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
-            Ok(None)
+        fn list_all(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(vec![])
         }
 
         fn clear(&mut self) -> anyhow::Result<()> {
@@ -1585,12 +1605,9 @@ mod tests {
         );
 
         // Verify dealer message was persisted to storage
-        let stored_message = receiver_manager
-            .public_messages_store
-            .get_dealer_message(&dealer_address)
-            .unwrap();
+        let stored = receiver_manager.public_messages_store.list_all().unwrap();
         assert!(
-            stored_message.is_some(),
+            stored.iter().any(|(d, _)| d == &dealer_address),
             "Dealer message should be persisted to storage"
         );
     }
@@ -4352,5 +4369,57 @@ mod tests {
             !receiver_manager.dealer_outputs.contains_key(&dealer_addr),
             "Invalid message should not create dealer output"
         );
+    }
+
+    #[test]
+    fn test_restart_dealer_finds_own_stored_message() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(4);
+
+        // Simulate pre-restart: dealer 0 created and stored a message
+        let original_dealer = setup.create_manager(0);
+        let dealer_address = original_dealer.address;
+        let original_message = original_dealer.create_dealer_message(&mut rng);
+        let original_hash = compute_message_hash(&original_message);
+
+        // Store it (simulating persistence)
+        let mut store = InMemoryPublicMessagesStore::new();
+        store
+            .store_dealer_message(&dealer_address, &original_message)
+            .unwrap();
+
+        // Simulate restart: create manager for same party with stored message
+        let restarted = setup.create_manager_with_store(0, Box::new(store));
+
+        // Verify same address
+        assert_eq!(restarted.address, dealer_address);
+
+        // Verify message was loaded and matches original
+        let loaded = restarted.dealer_messages.get(&dealer_address).unwrap();
+        assert_eq!(compute_message_hash(loaded), original_hash);
+    }
+
+    #[test]
+    fn test_restart_party_finds_stored_dealer_messages() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(4);
+
+        // Dealers 0 and 1 created messages before party 2 restarted
+        let dealer0 = setup.create_manager(0);
+        let dealer1 = setup.create_manager(1);
+        let msg0 = dealer0.create_dealer_message(&mut rng);
+        let msg1 = dealer1.create_dealer_message(&mut rng);
+
+        // Store them
+        let mut store = InMemoryPublicMessagesStore::new();
+        store.store_dealer_message(&dealer0.address, &msg0).unwrap();
+        store.store_dealer_message(&dealer1.address, &msg1).unwrap();
+
+        // Party 2 restarts
+        let party = setup.create_manager_with_store(2, Box::new(store));
+
+        // Verify messages are available in memory
+        assert!(party.dealer_messages.contains_key(&dealer0.address));
+        assert!(party.dealer_messages.contains_key(&dealer1.address));
     }
 }

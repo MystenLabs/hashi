@@ -57,13 +57,26 @@ impl PublicMessagesStore for FilePublicMessagesStore {
         Ok(())
     }
 
-    fn get_dealer_message(&self, dealer: &Address) -> Result<Option<avss::Message>> {
-        let path = self.message_path(dealer);
-        if !path.exists() {
-            return Ok(None);
+    fn list_all(&self) -> Result<Vec<(Address, avss::Message)>> {
+        let mut results = Vec::new();
+        if !self.dir.exists() {
+            return Ok(results);
         }
-        let bytes = std::fs::read(path)?;
-        Ok(Some(bcs::from_bytes(&bytes)?))
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "bin") {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("invalid filename"))?;
+                let dealer: Address = stem.parse()?;
+                let bytes = std::fs::read(&path)?;
+                let message: avss::Message = bcs::from_bytes(&bytes)?;
+                results.push((dealer, message));
+            }
+        }
+        Ok(results)
     }
 
     fn clear(&mut self) -> Result<()> {
@@ -157,6 +170,15 @@ mod tests {
         dealer.create_message(&mut rng).unwrap()
     }
 
+    fn find_message(store: &FilePublicMessagesStore, dealer: &Address) -> Option<avss::Message> {
+        store
+            .list_all()
+            .unwrap()
+            .into_iter()
+            .find(|(d, _)| d == dealer)
+            .map(|(_, m)| m)
+    }
+
     #[test]
     fn test_public_messages_store_and_get() {
         let dir = tempdir().unwrap();
@@ -164,11 +186,11 @@ mod tests {
         let dealer = Address::ZERO;
         let message = create_test_message();
 
-        assert!(store.get_dealer_message(&dealer).unwrap().is_none());
+        assert!(find_message(&store, &dealer).is_none());
 
         store.store_dealer_message(&dealer, &message).unwrap();
 
-        let retrieved = store.get_dealer_message(&dealer).unwrap().unwrap();
+        let retrieved = find_message(&store, &dealer).unwrap();
         assert_eq!(
             bcs::to_bytes(&retrieved).unwrap(),
             bcs::to_bytes(&message).unwrap()
@@ -187,7 +209,7 @@ mod tests {
         store.store_dealer_message(&dealer, &message1).unwrap();
         store.store_dealer_message(&dealer, &message2).unwrap();
 
-        let retrieved = store.get_dealer_message(&dealer).unwrap().unwrap();
+        let retrieved = find_message(&store, &dealer).unwrap();
         assert_eq!(
             bcs::to_bytes(&retrieved).unwrap(),
             bcs::to_bytes(&message2).unwrap()
@@ -204,7 +226,32 @@ mod tests {
         store.store_dealer_message(&dealer, &message).unwrap();
         store.clear().unwrap();
 
-        assert!(store.get_dealer_message(&dealer).unwrap().is_none());
+        assert!(find_message(&store, &dealer).is_none());
+    }
+
+    #[test]
+    fn test_public_messages_list_all() {
+        let dir = tempdir().unwrap();
+        let mut store = FilePublicMessagesStore::new(dir.path().join("messages")).unwrap();
+
+        // Empty store
+        assert!(store.list_all().unwrap().is_empty());
+
+        // Add two messages
+        let dealer1 = Address::ZERO;
+        let dealer2 = Address::new([1; 32]);
+        let message1 = create_test_message();
+        let message2 = create_test_message();
+
+        store.store_dealer_message(&dealer1, &message1).unwrap();
+        store.store_dealer_message(&dealer2, &message2).unwrap();
+
+        let all = store.list_all().unwrap();
+        assert_eq!(all.len(), 2);
+
+        let dealers: std::collections::HashSet<_> = all.iter().map(|(d, _)| *d).collect();
+        assert!(dealers.contains(&dealer1));
+        assert!(dealers.contains(&dealer2));
     }
 
     #[test]
