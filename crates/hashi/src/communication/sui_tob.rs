@@ -96,7 +96,7 @@ impl SuiTobChannel {
         }
     }
 
-    async fn build_submit_certificate_transaction(
+    async fn build_certificate_submission_transaction(
         &mut self,
         cert: &Certificate,
     ) -> Result<Transaction, TobError> {
@@ -343,7 +343,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
             threshold: self.threshold,
         };
         let tx = channel
-            .build_submit_certificate_transaction(&cert)
+            .build_certificate_submission_transaction(&cert)
             .await
             .map_err(ChannelError::from)?;
         let signature = self
