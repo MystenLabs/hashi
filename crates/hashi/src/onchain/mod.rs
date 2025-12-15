@@ -492,7 +492,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let validator_address =
             Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
-        let bls_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
         let encryption_private_key =
             fastcrypto_tbls::ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng);
         let encryption_public_key =
@@ -500,14 +500,14 @@ mod tests {
 
         let move_committee_member = move_types::CommitteeMember {
             validator_address,
-            public_key: bls_keypair.public().as_bytes().to_owned(),
+            public_key: signing_keypair.public().as_bytes().to_owned(),
             encryption_public_key: encryption_public_key.as_element().to_byte_array().into(),
             weight: 1,
         };
         let committee_member = convert_move_committee_member(move_committee_member);
 
         assert_eq!(committee_member.validator_address(), validator_address);
-        assert_eq!(committee_member.public_key(), bls_keypair.public());
+        assert_eq!(committee_member.public_key(), signing_keypair.public());
         assert_eq!(
             committee_member.encryption_public_key().as_element(),
             encryption_public_key.as_element()
@@ -520,13 +520,13 @@ mod tests {
         let mut rng = rand::thread_rng();
         let validator_address =
             Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
-        let bls_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
         let mut encryption_key_vec = vec![0u8; 32];
         encryption_key_vec[0] = 1;
 
         let move_committee_member = move_types::CommitteeMember {
             validator_address,
-            public_key: bls_keypair.public().as_bytes().to_owned(),
+            public_key: signing_keypair.public().as_bytes().to_owned(),
             encryption_public_key: encryption_key_vec,
             weight: 1,
         };
