@@ -2395,6 +2395,7 @@ dependencies = [
  "fastcrypto-tbls",
  "futures",
  "hex",
+ "lazy_static",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
