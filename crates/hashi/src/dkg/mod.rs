@@ -17,8 +17,8 @@ use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
 use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use futures::future::join_all;
-use lazy_static::lazy_static;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use sui_sdk_types::Address;
 use types::DkgConfig;
 pub use types::{
@@ -580,13 +580,11 @@ impl DkgManager {
     }
 }
 
-lazy_static! {
-    static ref FALLBACK_ENCRYPTION_PK: PublicKey<EncryptionGroupElement> =
-        PublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi"));
-}
-
 pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
-    FALLBACK_ENCRYPTION_PK.clone()
+    static FALLBACK_ENCRYPTION_PK: OnceLock<PublicKey<EncryptionGroupElement>> = OnceLock::new();
+    FALLBACK_ENCRYPTION_PK
+        .get_or_init(|| PublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi")))
+        .clone()
 }
 
 fn compute_message_hash(message: &avss::Message) -> MessageHash {
