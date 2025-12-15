@@ -204,6 +204,15 @@ pub struct LinkedTable<K> {
     pub tail: Option<K>,
 }
 
+/// Rust version of the Move sui::linked_table::Node type.
+/// This is the value stored in each dynamic field entry of a LinkedTable.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct LinkedTableNode<K, V> {
+    pub prev: Option<K>,
+    pub next: Option<K>,
+    pub value: V,
+}
+
 /// Rust version of the Move hashi::tob::DkgCertV1 type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct DkgCertV1 {

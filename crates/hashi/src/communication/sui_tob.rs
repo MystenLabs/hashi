@@ -22,7 +22,7 @@ use thiserror::Error;
 
 use crate::bls::BlsCommittee;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash, MpcMessageV1};
-use crate::onchain::move_types::{DkgCertV1, EpochCerts, EpochCertsKey};
+use crate::onchain::move_types::{DkgCertV1, EpochCerts, EpochCertsKey, LinkedTableNode};
 
 use super::{ChannelError, ChannelResult, OrderedBroadcastChannel};
 
@@ -252,12 +252,21 @@ impl SuiTobChannel {
         Ok(None)
     }
 
+    /// Fetches all certificates in insertion order by following the LinkedTable's linked list.
     async fn fetch_all_certificates(&self) -> Result<Vec<(Address, Certificate)>, TobError> {
         let epoch_certs = match self.fetch_epoch_certs().await? {
             Some(certs) => certs,
             None => return Ok(vec![]),
         };
-        let mut certificates = Vec::new();
+
+        // If the table is empty, return early
+        let Some(head) = epoch_certs.dkg_certs.head else {
+            return Ok(vec![]);
+        };
+
+        // Fetch all nodes from the LinkedTable
+        let mut nodes: std::collections::HashMap<Address, LinkedTableNode<Address, DkgCertV1>> =
+            std::collections::HashMap::new();
         let mut stream = self
             .client
             .list_dynamic_fields(
@@ -279,13 +288,25 @@ impl SuiTobChannel {
                 .name()
                 .deserialize()
                 .map_err(|e| TobError::SerializationError(e.to_string()))?;
-            let dkg_cert: DkgCertV1 = field
+            let node: LinkedTableNode<Address, DkgCertV1> = field
                 .value()
                 .deserialize()
                 .map_err(|e| TobError::SerializationError(e.to_string()))?;
-            let cert = self.convert_to_internal_cert(dealer, dkg_cert)?;
-            certificates.push((dealer, cert));
+            nodes.insert(dealer, node);
         }
+
+        // Iterate from head following next pointers to maintain insertion order
+        let mut certificates = Vec::with_capacity(nodes.len());
+        let mut current = Some(head);
+        while let Some(dealer) = current {
+            let Some(node) = nodes.remove(&dealer) else {
+                break; // Shouldn't happen, but handle gracefully
+            };
+            let cert = self.convert_to_internal_cert(dealer, node.value)?;
+            certificates.push((dealer, cert));
+            current = node.next;
+        }
+
         Ok(certificates)
     }
 
