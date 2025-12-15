@@ -133,7 +133,7 @@ impl SuiTobChannel {
             .await
             .map_err(|e| TobError::RpcError(e.to_string()))?
             .into_inner();
-        let pt = self.build_submit_dkg_cert_ptb(
+        let pt = self.build_dkg_cert_submission_ptb(
             hashi_obj.object().owner().version(),
             epoch,
             dealer,
@@ -154,7 +154,7 @@ impl SuiTobChannel {
         })
     }
 
-    fn build_submit_dkg_cert_ptb(
+    fn build_dkg_cert_submission_ptb(
         &self,
         hashi_initial_shared_version: u64,
         epoch: u64,
