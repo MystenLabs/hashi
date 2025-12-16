@@ -179,7 +179,7 @@ impl TxInfo {
         enclave_pubkey: XOnlyPublicKey,
         hashi_pubkey: XOnlyPublicKey,
         network: Network,
-    ) -> BitcoinAddress {
+    ) -> BitcoinAddress<NetworkChecked> {
         let change_scripts = compute_taproot_artifacts(
             enclave_pubkey,
             hashi_pubkey,
