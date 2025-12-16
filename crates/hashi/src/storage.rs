@@ -34,7 +34,7 @@ pub trait SecretsStore: Send + Sync {
 }
 
 pub trait DkgOutputStore {
-    fn store_dkg_output(&mut self, epoch: u64, output: &DkgOutput) -> Result<()>;
+    fn store_dkg_output(&mut self, output: &DkgOutput) -> Result<()>;
 
-    fn get_dkg_output(&self, epoch: u64) -> Result<Option<DkgOutput>>;
+    fn get_dkg_output(&self) -> Result<Option<DkgOutput>>;
 }
