@@ -33,7 +33,7 @@ pub trait SecretsStore: Send + Sync {
     fn clear(&mut self) -> Result<()>;
 }
 
-pub trait DkgOutputStore: Send + Sync {
+pub trait DkgOutputStore {
     fn store_dkg_output(&mut self, epoch: u64, output: &DkgOutput) -> Result<()>;
 
     fn get_dkg_output(&self, epoch: u64) -> Result<Option<DkgOutput>>;
