@@ -11,7 +11,6 @@ use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 
-use bitcoin::secp256k1::PublicKey;
 use ed25519_consensus::{Signature, VerificationKey};
 use hpke::{Deserializable, Serializable};
 use rand_core::{CryptoRng, RngCore};
@@ -96,7 +95,7 @@ pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
     pub hashi_committee_info: HashiCommitteeInfo,
     /// Hashi BTC master key used to derive child keys for diff inputs
-    pub hashi_btc_master_pubkey: PublicKey,
+    pub hashi_btc_master_pubkey: XOnlyPublicKey,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -255,7 +254,7 @@ impl ProvisionerInitRequestState {
         let kp = create_keypair(&TEST_HASHI_SK);
         ProvisionerInitRequestState {
             hashi_committee_info: HashiCommitteeInfo::default(),
-            hashi_btc_master_pubkey: kp.public_key(),
+            hashi_btc_master_pubkey: kp.x_only_public_key().0,
         }
     }
 }

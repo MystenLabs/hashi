@@ -1026,7 +1026,7 @@ checksum = "c361affe46a0120a077e0124e087ce1b4f7eeb9163cb6e5edc43ef21f847b3dc"
 dependencies = [
  "bdk_core",
  "bitcoin",
- "miniscript",
+ "miniscript 12.3.5",
 ]
 
 [[package]]
@@ -2473,8 +2473,11 @@ dependencies = [
  "bitcoin",
  "blake2",
  "ed25519-consensus",
+ "fastcrypto",
+ "fastcrypto-tbls",
  "hpke",
  "k256",
+ "miniscript 13.0.0",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
@@ -2527,6 +2530,12 @@ checksum = "4afe881d0527571892c4034822e59bb10c6c991cce6abe8199b6f5cf10766f55"
 dependencies = [
  "arrayvec",
 ]
+
+[[package]]
+name = "hex-conservative"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366fa3443ac84474447710ec17bb00b05dfbd096137817981e86f992f21a2793"
 
 [[package]]
 name = "hex-literal"
@@ -3197,6 +3206,17 @@ checksum = "487906208f38448e186e3deb02f2b8ef046a9078b0de00bdb28bf4fb9b76951c"
 dependencies = [
  "bech32 0.11.0",
  "bitcoin",
+]
+
+[[package]]
+name = "miniscript"
+version = "13.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "867b1f11e0545ad5ebbddd8a9f18756d9657a6758bf10d96cf15ddd0b726b650"
+dependencies = [
+ "bech32 0.11.0",
+ "bitcoin",
+ "hex-conservative 1.0.1",
 ]
 
 [[package]]

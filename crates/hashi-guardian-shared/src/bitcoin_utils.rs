@@ -1,77 +1,54 @@
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
+use bitcoin::address::{NetworkChecked, NetworkUnchecked};
 use bitcoin::hashes::Hash;
-use bitcoin::key::UntweakedPublicKey;
-use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL, OP_PUSHNUM_2};
-use bitcoin::script::Builder;
-use bitcoin::secp256k1::{All, Keypair, Message, PublicKey, Secp256k1, SecretKey};
+use bitcoin::secp256k1::{All, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
+use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
-use bitcoin::taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo};
 use bitcoin::transaction::Version;
+use bitcoin::Address as BitcoinAddress;
 use bitcoin::*;
+use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto_tbls::threshold_schnorr;
+use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
+use fastcrypto_tbls::threshold_schnorr::Address as SuiAddress;
+use miniscript::descriptor::Tr;
+use miniscript::Descriptor;
 use serde::Deserialize;
 use serde::Serialize;
+use std::str::FromStr;
 use std::sync::LazyLock;
 
 pub static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
+pub type DerivationPath = SuiAddress;
 
-/// Represents a UTXO that will be spent using taproot script-path spending.
-/// Taproot addresses are constructed in the following way:
-/// 1. Use the input derivation path and the fixed hashi pub key to obtain a derived pub key
-/// 2. Use the fixed enclave key and the derived hashi key in a 2-out-of-2 tapscript
-/// 3. Place the tapscript as the sole leaf with a NUMS internal key
+/// Hashi-owned input UTXO to be spent via taproot script-path
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TaprootUTXO {
-    txid: Txid,
-    vout: u32,
-    amount: Amount,
-    derivation_path: u32,   // Derivation path used by hashi for this input
-    leaf_script: ScriptBuf, // The specific tapscript leaf being executed
+pub struct InputUTXO {
+    pub txid: Txid,
+    pub vout: u32,
+    pub amount: Amount,
+    pub derivation_path: DerivationPath,
 }
 
-impl TaprootUTXO {
-    pub fn new(
-        txid: Txid,
-        vout: u32,
-        amount: Amount,
-        derivation_path: u32,
-        leaf_script: ScriptBuf,
-    ) -> GuardianResult<Self> {
-        if leaf_script.is_empty() {
-            return Err(InvalidInputs("leaf script must not be empty".into()));
-        }
-        Ok(Self {
-            txid,
-            vout,
-            amount,
-            derivation_path,
-            leaf_script,
-        })
-    }
+/// Contains address and the leaf script (of the sole leaf).
+struct TaprootArtifacts {
+    address: BitcoinAddress<NetworkChecked>,
+    leaf_script: ScriptBuf,
+}
 
-    pub fn amount(&self) -> Amount {
-        self.amount
-    }
+/// All data needed to sign a taproot script-path spend for a single input.
+pub struct InputSigningData {
+    pub txin: TxIn,
+    pub prevout: TxOut,
+    pub leaf_script: ScriptBuf,
+}
 
-    pub fn txout(
-        &self,
-        enclave_pubkey: PublicKey,
-        hashi_pubkey: PublicKey,
-        network: Network,
-    ) -> TxOut {
-        let derived_pubkey = get_derived_pubkey(hashi_pubkey, self.derivation_path);
-        let (address, _, _) =
-            create_2_of_2_taproot_address(enclave_pubkey, derived_pubkey, network);
-        TxOut {
-            value: self.amount,
-            script_pubkey: address.script_pubkey(),
-        }
-    }
-
+impl InputUTXO {
     pub fn txin(&self) -> TxIn {
         TxIn {
             previous_output: OutPoint {
@@ -86,9 +63,186 @@ impl TaprootUTXO {
             witness: Witness::default(),
         }
     }
+
+    /// Prepares all data needed for signing this input in one go.
+    pub fn prepare_for_signing(
+        &self,
+        enclave_pubkey: XOnlyPublicKey,
+        hashi_pubkey: XOnlyPublicKey,
+        network: Network,
+    ) -> InputSigningData {
+        let scripts =
+            compute_taproot_artifacts(enclave_pubkey, hashi_pubkey, &self.derivation_path, network);
+        InputSigningData {
+            txin: self.txin(),
+            prevout: TxOut {
+                value: self.amount,
+                script_pubkey: scripts.address.script_pubkey(),
+            },
+            leaf_script: scripts.leaf_script,
+        }
+    }
 }
 
-/// BTC tx signing w/ taproot and script spend path  
+/// Specifies a withdrawal destination address and amount
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct OutputUTXO {
+    /// Bitcoin address to withdraw to
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
+impl OutputUTXO {
+    /// Validates the address against the expected network and returns a checked TxOut
+    pub fn to_txout(&self, network: Network) -> GuardianResult<TxOut> {
+        let address = self
+            .address
+            .clone()
+            .require_network(network)
+            .map_err(|e| InvalidInputs(format!("Invalid address for the network: {:?}", e)))?;
+        Ok(TxOut {
+            value: self.amount,
+            script_pubkey: address.script_pubkey(),
+        })
+    }
+}
+
+/// The TxInfo struct contains all the Bitcoin-specific info of a withdrawal tx.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TxInfo {
+    /// The input UTXOs owned by hashi + guardian
+    internal_inputs: Vec<InputUTXO>,
+    /// External addresses and amounts
+    external_outputs: Vec<OutputUTXO>,
+    /// The derivation path for the sole internal output (change address)
+    change_derivation_path: DerivationPath,
+    /// Transaction fee in satoshis
+    fee_sats: Amount,
+}
+
+impl TxInfo {
+    pub fn new(
+        internal_inputs: Vec<InputUTXO>,
+        external_outputs: Vec<OutputUTXO>,
+        change_derivation_path: DerivationPath,
+        fee_sats: Amount,
+    ) -> GuardianResult<Self> {
+        if internal_inputs.is_empty() {
+            return Err(InvalidInputs("internal_inputs must not be empty".into()));
+        }
+        if external_outputs.is_empty() {
+            return Err(InvalidInputs("external_outputs must not be empty".into()));
+        }
+        let tx_info = Self {
+            internal_inputs,
+            external_outputs,
+            change_derivation_path,
+            fee_sats,
+        };
+
+        // Validate amounts
+        let _ = tx_info.change_amount()?;
+
+        Ok(tx_info)
+    }
+
+    pub fn internal_inputs(&self) -> &[InputUTXO] {
+        &self.internal_inputs
+    }
+
+    pub fn external_outputs(&self) -> &[OutputUTXO] {
+        &self.external_outputs
+    }
+
+    pub fn change_derivation_path(&self) -> &DerivationPath {
+        &self.change_derivation_path
+    }
+
+    pub fn fee_sats(&self) -> Amount {
+        self.fee_sats
+    }
+
+    /// Validates that all withdrawal addresses match the expected network.
+    /// Call this early (e.g., when receiving the request) to fail fast.
+    pub fn validate_outputs(&self, network: Network) -> GuardianResult<()> {
+        for output in &self.external_outputs {
+            if !output.address.is_valid_for_network(network) {
+                return Err(InvalidInputs("invalid output address".into()));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn compute_change_address(
+        &self,
+        enclave: XOnlyPublicKey,
+        hashi: XOnlyPublicKey,
+        network: Network,
+    ) -> BitcoinAddress {
+        let change_scripts =
+            compute_taproot_artifacts(enclave, hashi, &self.change_derivation_path, network);
+        change_scripts.address
+    }
+
+    /// All outputs including the internal change output.
+    /// Assumes addresses have already been validated via `validate_outputs()`.
+    /// Panics if addresses don't match network (should never happen after validation).
+    pub fn compute_all_outputs(
+        &self,
+        enclave: XOnlyPublicKey,
+        hashi: XOnlyPublicKey,
+        network: Network,
+    ) -> Vec<TxOut> {
+        let mut all_outs: Vec<TxOut> = self
+            .external_outputs
+            .iter()
+            .map(|utxo| TxOut {
+                value: utxo.amount,
+                script_pubkey: utxo
+                    .address
+                    .clone()
+                    .require_network(network)
+                    .expect("address should be validated before calling compute_all_outputs")
+                    .script_pubkey(),
+            })
+            .collect();
+
+        let change_address = self.compute_change_address(enclave, hashi, network);
+        let change_out = TxOut {
+            // expect because TxInfo::new validates change amounts
+            value: self
+                .change_amount()
+                .expect("change amount should not be negative"),
+            script_pubkey: change_address.script_pubkey(),
+        };
+
+        all_outs.push(change_out);
+
+        all_outs
+    }
+
+    fn change_amount(&self) -> GuardianResult<Amount> {
+        let input_sum = self
+            .internal_inputs
+            .iter()
+            .map(|utxo| utxo.amount)
+            .sum::<Amount>();
+        let output_sum = self
+            .external_outputs
+            .iter()
+            .map(|utxo| utxo.amount)
+            .sum();
+        if input_sum < output_sum + self.fee_sats {
+            return Err(InvalidInputs(
+                "Input sum is smaller than output sum + fee".into(),
+            ));
+        }
+        Ok(input_sum - output_sum - self.fee_sats)
+    }
+}
+
+/// BTC tx signing w/ taproot and script spend path
 pub fn sign_btc_tx(messages: &[Message], sk: &SecretKey) -> GuardianResult<Vec<Signature>> {
     let keypair = Keypair::from_secret_key(&BTC_LIB, sk);
     Ok(messages
@@ -102,49 +256,38 @@ pub fn sign_btc_tx(messages: &[Message], sk: &SecretKey) -> GuardianResult<Vec<S
         .collect())
 }
 
+/// Returns the messages to be signed for each input.
+/// Panics if tx_info has invalid output addresses. Call tx_info.validate_outputs(network) before.
 pub fn construct_signing_messages(
-    input_utxos: &[TaprootUTXO],
-    output_utxos: &[TxOut],
-    change_utxo: &TxOut,
-    enclave_pubkey: PublicKey,
-    hashi_pubkey: PublicKey,
+    tx_info: &TxInfo,
+    enclave_pubkey: XOnlyPublicKey,
+    hashi_pubkey: XOnlyPublicKey,
     network: Network,
 ) -> GuardianResult<Vec<Message>> {
-    // Input Validation
-    if input_utxos.is_empty() {
-        return Err(InvalidInputs("input utxos must not be empty".into()));
-    }
-    if output_utxos.is_empty() {
-        return Err(InvalidInputs("output utxos must not be empty".into()));
-    }
-    let in_amount = input_utxos.iter().map(|utxo| utxo.amount).sum::<Amount>();
-    let out_amount = output_utxos.iter().map(|utxo| utxo.value).sum::<Amount>();
-    let change_amount = change_utxo.value;
-    if in_amount < out_amount + change_amount {
-        return Err(InvalidInputs("Amount mismatch".into()));
-    }
+    // Prepare all input data (computes descriptor once per input)
+    let input_data: Vec<InputSigningData> = tx_info
+        .internal_inputs()
+        .iter()
+        .map(|utxo| utxo.prepare_for_signing(enclave_pubkey, hashi_pubkey, network))
+        .collect();
 
     // Construct tx
-    let mut all_outputs = output_utxos.to_vec();
-    all_outputs.push(change_utxo.clone());
+    let all_outputs = tx_info.compute_all_outputs(enclave_pubkey, hashi_pubkey, network);
     let tx = construct_tx(
-        input_utxos.iter().map(|utxo| utxo.txin()).collect(),
+        input_data.iter().map(|input| input.txin.clone()).collect(),
         all_outputs,
     );
 
     // Construct signing messages
     let sighash_type = TapSighashType::Default;
-    let prevouts: Vec<TxOut> = input_utxos
-        .iter()
-        .map(|utxo| utxo.txout(enclave_pubkey, hashi_pubkey, network))
-        .collect();
-    input_utxos
+    let prevouts: Vec<&TxOut> = input_data.iter().map(|input| &input.prevout).collect();
+
+    input_data
         .iter()
         .enumerate()
-        .map(|(index, input_utxo)| {
+        .map(|(index, input)| {
             let mut sighasher = SighashCache::new(tx.clone());
-            let leaf_hash =
-                TapLeafHash::from_script(&input_utxo.leaf_script, LeafVersion::TapScript);
+            let leaf_hash = TapLeafHash::from_script(&input.leaf_script, LeafVersion::TapScript);
             let sighash = sighasher
                 .taproot_script_spend_signature_hash(
                     index,
@@ -174,66 +317,81 @@ pub fn create_keypair(sk: &[u8; 32]) -> Keypair {
     Keypair::from_secret_key(&BTC_LIB, &secret_key)
 }
 
-fn create_2_of_2_taproot_address(
-    enclave_pubkey: PublicKey,
-    hashi_pubkey: PublicKey,
-    network: Network,
-) -> (Address, TaprootSpendInfo, ScriptBuf) {
-    let enclave_xonly = XOnlyPublicKey::from(enclave_pubkey);
-    let hashi_xonly = XOnlyPublicKey::from(hashi_pubkey);
+/// Creates a taproot descriptor for the given enclave and hashi keys with a 2-of-2 multi_a script.
+/// Taproot addresses are constructed as follows:
+/// 1. Derive a child hashi pubkey from the derivation path
+/// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
+/// 3. Place the tapscript as the sole leaf with a NUMS internal key
+pub fn compute_taproot_descriptor(
+    enclave_pubkey: XOnlyPublicKey,
+    hashi_master_pubkey: XOnlyPublicKey,
+    hashi_derivation_path: &DerivationPath,
+) -> Tr<XOnlyPublicKey> {
+    let hashi_pubkey = get_derived_pubkey(hashi_master_pubkey, hashi_derivation_path);
+    let enclave = enclave_pubkey;
+    let hashi = hashi_pubkey;
 
-    // Tapscript 2-of-2 with CHECKSIGADD pattern:
-    // <enclave_pubkey> OP_CHECKSIG <hashi_pubkey> OP_CHECKSIGADD OP_PUSHNUM_2 OP_NUMEQUAL
-    let tap_script = Builder::new()
-        .push_x_only_key(&enclave_xonly)
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&hashi_xonly)
-        .push_opcode(OP_CHECKSIGADD)
-        .push_opcode(OP_PUSHNUM_2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-
-    // Use a nothing-up-my-sleeve (NUMS) point as the internal key
-    // Copied from BIP-341 doc.
-    // TODO: Confirm ourselves that it is indeed secure if this code is being used in prod.
-    let nums_key = UntweakedPublicKey::from_slice(&[
-        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
-        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
-        0x3a, 0xc0,
-    ])
+    // Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
+    let internal = XOnlyPublicKey::from_str(
+        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    )
     .expect("valid nums key");
 
-    // Build taproot spend info
-    let spend_info = TaprootBuilder::new()
-        .add_leaf(0, tap_script.clone())
-        .expect("add leaf")
-        .finalize(&BTC_LIB, nums_key)
-        .expect("finalize taproot");
+    // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
+    // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
+    let desc_str = format!("tr({},multi_a(2,{},{}))", internal, enclave, hashi);
 
-    let address = Address::p2tr(&BTC_LIB, nums_key, spend_info.merkle_root(), network);
-    (address, spend_info, tap_script)
+    match Descriptor::<XOnlyPublicKey>::from_str(&desc_str).expect("valid descriptor") {
+        Descriptor::Tr(tr) => tr,
+        _ => panic!("unexpected descriptor"),
+    }
 }
 
-/// Derives a child public key using BIP32 unhardened derivation.  
-/// For a single-level derivation path (e.g., m/5 means derivation_path=5).  
-fn get_derived_pubkey(parent_pubkey: PublicKey, derivation_index: u32) -> PublicKey {
-    use bitcoin::hashes::{sha512, Hash, HashEngine, Hmac, HmacEngine};
+/// Computes both the address and leaf script for a given derivation path and network.
+fn compute_taproot_artifacts(
+    enclave_pubkey: XOnlyPublicKey,
+    hashi_master_pubkey: XOnlyPublicKey,
+    hashi_derivation_path: &DerivationPath,
+    network: Network,
+) -> TaprootArtifacts {
+    let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
 
-    // BIP32 unhardened derivation: HMAC-SHA512(parent_key || index)
-    let mut hmac_engine: HmacEngine<sha512::Hash> = HmacEngine::new(b"hashi seed");
-    hmac_engine.input(&parent_pubkey.serialize());
-    hmac_engine.input(&derivation_index.to_be_bytes());
+    let address = desc.address(network);
+    let leaf_script = desc
+        .tap_tree()
+        .expect("descriptor should have a tap tree")
+        .leaves()
+        .next()
+        .expect("tap tree should have at least one leaf")
+        .compute_script();
 
-    let hmac_result = Hmac::from_engine(hmac_engine);
-    let (tweak_bytes, _chain_code) = hmac_result.as_byte_array().split_at(32);
+    TaprootArtifacts {
+        address,
+        leaf_script,
+    }
+}
 
-    // Parse tweak as a scalar and add to parent key
-    let tweak = SecretKey::from_slice(tweak_bytes).expect("valid tweak from HMAC");
+/// Derives a child public key using unhardened derivation.
+/// TODO: Check correctness with Ben or Jonas
+fn get_derived_pubkey(
+    parent_pubkey: XOnlyPublicKey,
+    derivation_path: &DerivationPath,
+) -> XOnlyPublicKey {
+    // Get x-only public key bytes (32 bytes)
+    let x_bytes = parent_pubkey.serialize();
 
-    // child_key = parent_key + tweak * G
-    parent_pubkey
-        .add_exp_tweak(&BTC_LIB, &tweak.into())
-        .expect("valid child key derivation")
+    // Create point with even y-coordinate
+    let point =
+        threshold_schnorr::G::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
+
+    // Derive the new key
+    let derived_schnorr = derive_verifying_key(&point, derivation_path);
+
+    // Get the x-coordinate of the derived key (schnorr keys are x-only with even y)
+    let derived_x_bytes = derived_schnorr.to_byte_array();
+
+    // Convert to Bitcoin XOnlyPublicKey
+    XOnlyPublicKey::from_slice(&derived_x_bytes).expect("valid x-only key")
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -246,12 +404,15 @@ pub mod test_constants {
 mod bitcoin_tests {
     use super::*;
     use crate::bitcoin_utils::test_constants::*;
-    use bitcoin::key::TapTweak;
     use bitcoin::key::UntweakedPublicKey;
-    use bitcoin::taproot::TaprootSpendInfo;
+    use bitcoin::taproot::ControlBlock;
     use bitcoin::KnownHrp::Regtest;
+    use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 
-    fn gen_keypair_and_address(bytes: Option<[u8; 32]>, network: KnownHrp) -> (Keypair, Address) {
+    fn gen_keypair_and_address(
+        bytes: Option<[u8; 32]>,
+        network: KnownHrp,
+    ) -> (Keypair, BitcoinAddress) {
         let mut rng = rand::thread_rng();
         let bytes = bytes.unwrap_or({
             let mut bytes = [0u8; 32];
@@ -260,7 +421,7 @@ mod bitcoin_tests {
         });
         let keypair = create_keypair(&bytes);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
-        let address = Address::p2tr(&BTC_LIB, internal_key, None, network);
+        let address = BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network);
         (keypair, address)
     }
 
@@ -268,12 +429,8 @@ mod bitcoin_tests {
         hashi_signature: &Signature,
         enclave_signature: &Signature,
         script: &ScriptBuf,
-        spend_info: &TaprootSpendInfo,
+        control_block: &ControlBlock,
     ) -> Witness {
-        let control_block = spend_info
-            .control_block(&(script.clone(), LeafVersion::TapScript))
-            .expect("control block");
-
         // Witness stack order: [sig_for_pk2, sig_for_pk1, script, control_block]
         // Since our script is <pk1> OP_CHECKSIG <pk2> OP_CHECKSIGADD ...
         // And stack is LIFO, we need: [hashi_sig, enclave_sig, script, control]
@@ -289,59 +446,53 @@ mod bitcoin_tests {
         Witness::from_slice(&witness_elements)
     }
 
+    fn create_taproot_artifacts_for_test(
+        enclave_pubkey: XOnlyPublicKey,
+        hashi_master_pubkey: XOnlyPublicKey,
+        hashi_derivation_path: &DerivationPath,
+        network: Network,
+    ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
+        let desc =
+            compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
+        let addr = desc.address(network);
+
+        let tap_tree = desc.tap_tree().expect("descriptor should have tap tree");
+        if tap_tree.leaves().len() != 1 {
+            panic!("expected exactly one leaf in tap tree");
+        }
+        let tap_script = tap_tree.leaves().next().unwrap().compute_script();
+
+        let spend_info = desc.spend_info();
+        let control_block = spend_info
+            .leaves()
+            .next()
+            .expect("spend info should have at least one leaf")
+            .into_control_block();
+
+        (addr, control_block, tap_script)
+    }
+
     #[test]
-    fn test_taproot_key_spend_path() {
-        let (keypair, address) = gen_keypair_and_address(None, Regtest);
-        let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
+    fn test_pubkey_round_trip() {
+        let (hashi_keypair, _) = gen_keypair_and_address(None, Regtest);
+        let hashi_pk = hashi_keypair.x_only_public_key().0;
 
-        let prev_utxo = TxOut {
-            value: Amount::from_sat(1000000),
-            script_pubkey: address.script_pubkey(),
-        };
-
-        let input = TxIn {
-            previous_output: OutPoint::default(),
-            // No script sig needed for taproot
-            script_sig: ScriptBuf::default(),
-            sequence: Sequence::ZERO,
-            witness: Witness::default(),
-        };
-
-        let spend = TxOut {
-            value: Amount::from_sat(1000000),
-            script_pubkey: address.script_pubkey(),
-        };
-
-        let change = TxOut {
-            value: Amount::from_sat(1000),
-            script_pubkey: ScriptBuf::new_p2tr(&BTC_LIB, internal_key, None),
-        };
-
-        let mut tx = construct_tx(vec![input], vec![spend, change]);
-
-        let input_index = 0;
-        let prevouts = Prevouts::All(&[prev_utxo]);
-        let sighash_type = TapSighashType::Default;
-
-        let mut sighasher = SighashCache::new(&mut tx);
-        let sighash = sighasher
-            .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
-            .unwrap();
-
-        let tweaked = keypair.tap_tweak(&BTC_LIB, None);
-        let msg = sighash.into();
-        let sign = BTC_LIB.sign_schnorr_no_aux_rand(&msg, &tweaked.into());
-
-        // Update the witness stack.
-        let signature = Signature {
-            signature: sign,
-            sighash_type,
-        };
-        *sighasher.witness_mut(input_index).unwrap() = Witness::p2tr_key_spend(&signature);
-
-        let signed_tx = sighasher.into_transaction();
-
-        println!("Signed TX: {:#?}", signed_tx);
+        // Convert Bitcoin XOnlyPublicKey -> fastcrypto G -> Bitcoin XOnlyPublicKey
+        let x_bytes = hashi_pk.serialize();
+        let g_point = threshold_schnorr::G::with_even_y_from_x_be_bytes(&x_bytes)
+            .expect("valid x coordinate");
+        let schnorr_key = SchnorrPublicKey::try_from(&g_point).expect("valid schnorr key");
+        let reconstructed_x_bytes = schnorr_key.to_byte_array();
+        assert_eq!(
+            x_bytes, reconstructed_x_bytes,
+            "Round-trip conversion should preserve the key"
+        );
+        let reconstructed_pk =
+            XOnlyPublicKey::from_slice(&reconstructed_x_bytes).expect("valid x-only key");
+        assert_eq!(
+            hashi_pk, reconstructed_pk,
+            "Round-trip conversion should preserve the key"
+        );
     }
 
     // Party 1: Enclave
@@ -357,11 +508,11 @@ mod bitcoin_tests {
         let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_SK), Regtest);
         let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_SK), Regtest);
 
-        let enclave_pk = enclave_keypair.public_key();
-        let hashi_pk = hashi_keypair.public_key();
+        let enclave_pk = enclave_keypair.x_only_public_key().0;
+        let hashi_pk = hashi_keypair.x_only_public_key().0;
 
-        let (address, spend_info, tap_script) =
-            create_2_of_2_taproot_address(enclave_pk, hashi_pk, Network::Regtest);
+        let (address, control_block, tap_script) =
+            create_taproot_artifacts_for_test(enclave_pk, hashi_pk, &[0u8; 32], Network::Regtest);
         println!("\n=== 2-of-2 Multisig Address ===");
         println!("Address: {}", address);
         println!("Enclave pubkey: {}", enclave_pk);
@@ -379,36 +530,30 @@ mod bitcoin_tests {
                 .unwrap(),
             vout: 1,
         };
-        let input_utxo = TaprootUTXO::new(
-            out_point.txid,
-            out_point.vout,
-            Amount::from_sat(100000000), // 1.0 BTC
-            0,                           // derivation_path = 0 (no derivation in this test)
-            tap_script.clone(),
-        )
-        .unwrap();
-
-        let spend_out = TxOut {
-            value: Amount::from_sat(4990000), // ~0.05 BTC (leaving room for fees)
-            script_pubkey: dest_address.script_pubkey(),
-        };
-
-        // Note: sending mostly to self for ease of testing..
-        let change_out = TxOut {
-            value: Amount::from_sat(95000000),      // 0.95 BTC
-            script_pubkey: address.script_pubkey(), // back to self
+        let input_utxo = InputUTXO {
+            txid: out_point.txid,
+            vout: out_point.vout,
+            amount: Amount::from_sat(100000000), // 1.0 BTC
+            derivation_path: [0; 32],            // derivation_path = 0 (no derivation in this test)
         };
 
         // C) Enclave signs the transaction.
-        let messages = construct_signing_messages(
-            std::slice::from_ref(&input_utxo),
-            std::slice::from_ref(&spend_out),
-            &change_out,
-            enclave_pk,
-            hashi_pk,
-            Network::Regtest,
+        let tx_info = TxInfo::new(
+            vec![input_utxo.clone()],
+            vec![OutputUTXO {
+                address: dest_address.as_unchecked().clone(),
+                amount: Amount::from_sat(4990000), // ~0.05 BTC
+            }],
+            [0; 32],                 // change_derivation_path
+            Amount::from_sat(10000), // 0.0001 BTC fee
         )
         .unwrap();
+
+        // Validate addresses early (fail fast)
+        tx_info.validate_outputs(Network::Regtest).unwrap();
+
+        let messages =
+            construct_signing_messages(&tx_info, enclave_pk, hashi_pk, Network::Regtest).unwrap();
         let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair.secret_key()).unwrap();
 
         // D) Hashi signs the transaction.
@@ -422,13 +567,14 @@ mod bitcoin_tests {
             &hashi_signatures[0],
             &enclave_signatures[0],
             &tap_script,
-            &spend_info,
+            &control_block,
         );
 
-        let mut input_utxo = input_utxo.txin();
-        input_utxo.witness = witness;
+        let mut input_txin = input_utxo.txin();
+        input_txin.witness = witness;
 
-        let signed_tx = construct_tx(vec![input_utxo], vec![spend_out, change_out]);
+        let all_outputs = tx_info.compute_all_outputs(enclave_pk, hashi_pk, Network::Regtest);
+        let signed_tx = construct_tx(vec![input_txin], all_outputs);
         println!("Signed TX: {:#?}", signed_tx);
         println!("TXID: {}", signed_tx.compute_txid());
         println!(

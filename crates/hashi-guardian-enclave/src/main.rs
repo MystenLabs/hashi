@@ -2,8 +2,8 @@ use anyhow::Result;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
-use bitcoin::secp256k1::{Keypair, PublicKey};
-use bitcoin::Network;
+use bitcoin::secp256k1::Keypair;
+use bitcoin::{Network, XOnlyPublicKey};
 use ed25519_consensus::{SigningKey, VerificationKey};
 use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::{InternalError, InvalidInputs};
@@ -48,7 +48,7 @@ pub struct EnclaveConfig {
     /// BTC network (mainnet, testnet, regtest, etc.)
     pub btc_network: OnceLock<Network>,
     /// Hashi BTC public key used to derive child keys
-    pub hashi_btc_master_pubkey: OnceLock<PublicKey>,
+    pub hashi_btc_master_pubkey: OnceLock<XOnlyPublicKey>,
 }
 
 /// Mutable state that changes during operation
@@ -243,14 +243,14 @@ impl Enclave {
             .map_err(|_| InvalidInputs("Bitcoin key already set".into()))
     }
 
-    pub fn hashi_btc_pk(&self) -> GuardianResult<&PublicKey> {
+    pub fn hashi_btc_pk(&self) -> GuardianResult<&XOnlyPublicKey> {
         self.config
             .hashi_btc_master_pubkey
             .get()
             .ok_or(InternalError("Hashi BTC key is not initialized".into()))
     }
 
-    pub fn set_hashi_btc_pk(&self, pk: PublicKey) -> GuardianResult<()> {
+    pub fn set_hashi_btc_pk(&self, pk: XOnlyPublicKey) -> GuardianResult<()> {
         self.config
             .hashi_btc_master_pubkey
             .set(pk)

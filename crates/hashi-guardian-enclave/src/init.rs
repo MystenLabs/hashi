@@ -211,7 +211,7 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::Network;
+    use bitcoin::{Network, XOnlyPublicKey};
     use hashi_guardian_shared::bitcoin_utils;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use k256::SecretKey;
@@ -334,7 +334,7 @@ mod tests {
         // Second KP tries to send with different state (different pub key)
         let mut state2 = ProvisionerInitRequestState::mock_for_testing();
         let kp = bitcoin_utils::create_keypair(&[7u8; 32]);
-        state2.hashi_btc_master_pubkey = kp.public_key();
+        state2.hashi_btc_master_pubkey = XOnlyPublicKey::from_keypair(&kp).0;
         assert_ne!(
             state1.hashi_btc_master_pubkey,
             state2.hashi_btc_master_pubkey
