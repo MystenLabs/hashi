@@ -447,6 +447,7 @@ impl DkgManager {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output.commitments,
+            threshold,
         })
     }
 
