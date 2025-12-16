@@ -3,6 +3,7 @@
 use crate::committee::{BLS12381Signature, CommitteeSignature};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_tbls::types::ShareIndex;
 use fastcrypto_tbls::{
     polynomial::Eval,
     random_oracle::RandomOracle,
@@ -80,6 +81,11 @@ impl SessionId {
     pub fn dealer_session_id(&self, dealer: &Address) -> SessionId {
         let oracle = RandomOracle::new(&hex::encode(self.0));
         SessionId(oracle.evaluate(&dealer))
+    }
+
+    pub fn rotation_session_id(&self, dealer: &Address, share_index: ShareIndex) -> SessionId {
+        let oracle = RandomOracle::new(&hex::encode(self.0));
+        SessionId(oracle.evaluate(&(dealer, share_index.get())))
     }
 
     pub fn to_vec(&self) -> Vec<u8> {
@@ -197,6 +203,7 @@ mod tests {
     use super::*;
     use crate::committee::{EncryptionPrivateKey, EncryptionPublicKey};
     use fastcrypto_tbls::nodes::Node;
+    use std::num::NonZeroU16;
 
     impl MpcMessageV1 {
         pub fn as_dkg_message(&self) -> &DkgDealerMessageHash {
@@ -364,5 +371,18 @@ mod tests {
         // Same dealer should produce same session ID
         let dealer1_session2 = sid.dealer_session_id(&dealer1);
         assert_eq!(dealer1_session, dealer1_session2);
+    }
+
+    #[test]
+    fn test_rotation_session_id() {
+        let sid = SessionId::new("testnet", 100, &ProtocolType::KeyRotation);
+        let dealer = Address::new([1; 32]);
+        let share1 = NonZeroU16::new(1).unwrap();
+        let share2 = NonZeroU16::new(2).unwrap();
+
+        // Different share indices should have different session IDs
+        let session_d1_s1 = sid.rotation_session_id(&dealer, share1);
+        let session_d1_s2 = sid.rotation_session_id(&dealer, share2);
+        assert_ne!(session_d1_s1, session_d1_s2);
     }
 }
