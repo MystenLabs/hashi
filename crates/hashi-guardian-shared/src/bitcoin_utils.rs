@@ -176,12 +176,16 @@ impl TxInfo {
 
     pub fn compute_change_address(
         &self,
-        enclave: XOnlyPublicKey,
-        hashi: XOnlyPublicKey,
+        enclave_pubkey: XOnlyPublicKey,
+        hashi_pubkey: XOnlyPublicKey,
         network: Network,
     ) -> BitcoinAddress {
-        let change_scripts =
-            compute_taproot_artifacts(enclave, hashi, &self.change_derivation_path, network);
+        let change_scripts = compute_taproot_artifacts(
+            enclave_pubkey,
+            hashi_pubkey,
+            &self.change_derivation_path,
+            network,
+        );
         change_scripts.address
     }
 
@@ -190,8 +194,8 @@ impl TxInfo {
     /// Panics if addresses don't match network (should never happen after validation).
     pub fn compute_all_outputs(
         &self,
-        enclave: XOnlyPublicKey,
-        hashi: XOnlyPublicKey,
+        enclave_pubkey: XOnlyPublicKey,
+        hashi_pubkey: XOnlyPublicKey,
         network: Network,
     ) -> Vec<TxOut> {
         let mut all_outs: Vec<TxOut> = self
@@ -208,7 +212,7 @@ impl TxInfo {
             })
             .collect();
 
-        let change_address = self.compute_change_address(enclave, hashi, network);
+        let change_address = self.compute_change_address(enclave_pubkey, hashi_pubkey, network);
         let change_out = TxOut {
             // expect because TxInfo::new validates change amounts
             value: self
@@ -228,11 +232,7 @@ impl TxInfo {
             .iter()
             .map(|utxo| utxo.amount)
             .sum::<Amount>();
-        let output_sum = self
-            .external_outputs
-            .iter()
-            .map(|utxo| utxo.amount)
-            .sum();
+        let output_sum = self.external_outputs.iter().map(|utxo| utxo.amount).sum();
         if input_sum < output_sum + self.fee_sats {
             return Err(InvalidInputs(
                 "Input sum is smaller than output sum + fee".into(),
@@ -327,9 +327,7 @@ pub fn compute_taproot_descriptor(
     hashi_master_pubkey: XOnlyPublicKey,
     hashi_derivation_path: &DerivationPath,
 ) -> Tr<XOnlyPublicKey> {
-    let hashi_pubkey = get_derived_pubkey(hashi_master_pubkey, hashi_derivation_path);
-    let enclave = enclave_pubkey;
-    let hashi = hashi_pubkey;
+    let derived_hashi_pubkey = get_derived_pubkey(hashi_master_pubkey, hashi_derivation_path);
 
     // Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
     let internal = XOnlyPublicKey::from_str(
@@ -339,7 +337,10 @@ pub fn compute_taproot_descriptor(
 
     // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
     // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
-    let desc_str = format!("tr({},multi_a(2,{},{}))", internal, enclave, hashi);
+    let desc_str = format!(
+        "tr({},multi_a(2,{},{}))",
+        internal, enclave_pubkey, derived_hashi_pubkey
+    );
 
     match Descriptor::<XOnlyPublicKey>::from_str(&desc_str).expect("valid descriptor") {
         Descriptor::Tr(tr) => tr,
@@ -354,7 +355,8 @@ fn compute_taproot_artifacts(
     hashi_derivation_path: &DerivationPath,
     network: Network,
 ) -> TaprootArtifacts {
-    let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
+    let desc =
+        compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
 
     let address = desc.address(network);
     let leaf_script = desc
