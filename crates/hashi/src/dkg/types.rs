@@ -98,6 +98,7 @@ pub struct DkgOutput {
     pub public_key: Secp256k1Point,
     pub key_shares: avss::SharesForNode,
     pub commitments: Vec<Eval<G>>,
+    pub threshold: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
