@@ -609,7 +609,7 @@ impl DkgManager {
                     self.dkg_config.max_faulty,
                     sid.to_vec(),
                 )
-                    .expect(EXPECT_THRESHOLD_VALIDATED);
+                .expect(EXPECT_THRESHOLD_VALIDATED);
                 let message = dealer
                     .create_message(rng)
                     .expect(EXPECT_THRESHOLD_VALIDATED);
