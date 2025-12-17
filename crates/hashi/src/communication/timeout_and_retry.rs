@@ -5,11 +5,12 @@ use backon::{ExponentialBuilder, Retryable};
 use std::future::Future;
 use std::time::Duration;
 
-pub const RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
-// TODO: Increase the values below to 2s, 10, 60s
-pub const RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
-pub const MAX_RETRIES: usize = 2;
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+// TODO: Increase the values below to 100ms, 2s, 10, 60s.
+// TODO: Make test suite use a different set of small thresholds to improve performance.
+pub const RETRY_MIN_DELAY: Duration = Duration::from_millis(50);
+pub const RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
+pub const MAX_RETRIES: usize = 1;
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub async fn with_timeout_and_retry<T, F, Fut>(mut f: F) -> ChannelResult<T>
 where
