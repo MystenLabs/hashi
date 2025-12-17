@@ -8,7 +8,7 @@ use crate::communication::{ChannelResult, P2PChannel, with_timeout_and_retry};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
-use crate::storage::PublicMessagesStore;
+use crate::storage::{DkgOutputStore, PublicMessagesStore};
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::HashToGroupElement;
@@ -50,6 +50,7 @@ pub struct DkgManager {
     pub complaints_to_process: HashMap<Address, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
+    pub dkg_output_store: Box<dyn DkgOutputStore>,
 }
 
 impl DkgManager {
@@ -60,6 +61,7 @@ impl DkgManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: crate::committee::Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
+        dkg_output_store: Box<dyn DkgOutputStore>,
     ) -> DkgResult<Self> {
         let committee = committee_set
             .current_committee()
@@ -99,6 +101,7 @@ impl DkgManager {
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
+            dkg_output_store,
         })
     }
 
@@ -411,7 +414,7 @@ impl DkgManager {
     }
 
     fn process_outputs_from_certified_dealers(
-        &self,
+        &mut self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
@@ -438,12 +441,16 @@ impl DkgManager {
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .expect("checked that threshold is met");
-        Ok(DkgOutput {
+        let output = DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output.commitments,
             threshold,
-        })
+        };
+        self.dkg_output_store
+            .store_dkg_output(&output)
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
+        Ok(output)
     }
 
     async fn retrieve_dealer_message(
@@ -640,6 +647,18 @@ mod tests {
         }
     }
 
+    struct MockDkgOutputStore;
+
+    impl DkgOutputStore for MockDkgOutputStore {
+        fn store_dkg_output(&mut self, _output: &DkgOutput) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn get_dkg_output(&self) -> anyhow::Result<Option<DkgOutput>> {
+            Ok(None)
+        }
+    }
+
     fn receive_dealer_message(
         manager: &mut DkgManager,
         message: &avss::Message,
@@ -807,6 +826,7 @@ mod tests {
                 self.encryption_keys[validator_index].clone(),
                 self.signing_keys[validator_index].clone(),
                 store,
+                Box::new(MockDkgOutputStore),
             )
             .unwrap()
         }
@@ -1318,6 +1338,7 @@ mod tests {
             encryption_key,
             signing_key,
             Box::new(MockPublicMessagesStore),
+            Box::new(MockDkgOutputStore),
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -1376,6 +1397,7 @@ mod tests {
             encryption_keys[0].clone(),
             signing_keys[0].clone(),
             Box::new(MockPublicMessagesStore),
+            Box::new(MockDkgOutputStore),
         );
 
         let err = match result {
@@ -1605,7 +1627,7 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
-        let receiver_manager = setup.create_manager(0);
+        let mut receiver_manager = setup.create_manager(0);
 
         // Create dealers
         let dealer_addr0 = setup.address(1);
