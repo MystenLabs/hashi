@@ -1,18 +1,11 @@
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
-use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::All;
-use bitcoin::secp256k1::Keypair;
-use bitcoin::secp256k1::Message;
-use bitcoin::secp256k1::Secp256k1;
-use bitcoin::secp256k1::SecretKey;
-use bitcoin::secp256k1::XOnlyPublicKey;
+use bitcoin::secp256k1::*;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
-use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
 use bitcoin::transaction::Version;
@@ -40,7 +33,7 @@ pub type DerivationPath = SuiAddress;
 //    Core Data Structures
 // ---------------------------------
 
-/// Hashi-owned input UTXO to be spent via taproot script-path
+/// (Hashi+Guardian)-owned input UTXO
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InputUTXO {
     pub txid: Txid,
@@ -49,7 +42,7 @@ pub struct InputUTXO {
     pub derivation_path: DerivationPath,
 }
 
-/// Specifies a withdrawal destination address and amount
+/// Withdrawal destination address and amount
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct OutputUTXO {
     /// Bitcoin address to withdraw to
@@ -58,7 +51,7 @@ pub struct OutputUTXO {
     pub amount: Amount,
 }
 
-/// The TxInfo struct contains all the Bitcoin-specific info of a withdrawal tx.
+/// All the Bitcoin-specific info of a withdrawal tx.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TxInfo {
     /// The input UTXOs owned by hashi + guardian
@@ -75,17 +68,11 @@ pub struct TxInfo {
 //    Helper Data Structures
 // ---------------------------------
 
-/// Contains address and the leaf script (of the sole leaf).
-struct TaprootArtifacts {
-    address: BitcoinAddress<NetworkChecked>,
-    leaf_script: ScriptBuf,
-}
-
 /// All data needed to sign a taproot script-path spend for a single input.
 pub struct InputSigningData {
     pub txin: TxIn,
     pub prevout: TxOut,
-    pub leaf_script: ScriptBuf,
+    pub leaf_hash: TapLeafHash,
 }
 
 // ---------------------------------
@@ -113,17 +100,16 @@ impl InputUTXO {
         &self,
         enclave_pubkey: XOnlyPublicKey,
         hashi_pubkey: XOnlyPublicKey,
-        network: Network,
     ) -> InputSigningData {
-        let scripts =
-            compute_taproot_artifacts(enclave_pubkey, hashi_pubkey, &self.derivation_path, network);
+        let artifacts =
+            compute_taproot_artifacts(enclave_pubkey, hashi_pubkey, &self.derivation_path);
         InputSigningData {
             txin: self.txin(),
             prevout: TxOut {
                 value: self.amount,
-                script_pubkey: scripts.address.script_pubkey(),
+                script_pubkey: artifacts.0,
             },
-            leaf_script: scripts.leaf_script,
+            leaf_hash: artifacts.1,
         }
     }
 }
@@ -196,19 +182,17 @@ impl TxInfo {
         Ok(())
     }
 
-    pub fn compute_change_address(
+    pub fn compute_change_script(
         &self,
         enclave_pubkey: XOnlyPublicKey,
         hashi_pubkey: XOnlyPublicKey,
-        network: Network,
-    ) -> BitcoinAddress<NetworkChecked> {
+    ) -> ScriptBuf {
         let change_scripts = compute_taproot_artifacts(
             enclave_pubkey,
             hashi_pubkey,
             &self.change_derivation_path,
-            network,
         );
-        change_scripts.address
+        change_scripts.0
     }
 
     /// All outputs including the internal change output.
@@ -234,13 +218,13 @@ impl TxInfo {
             })
             .collect();
 
-        let change_address = self.compute_change_address(enclave_pubkey, hashi_pubkey, network);
+        let change_script = self.compute_change_script(enclave_pubkey, hashi_pubkey);
         let change_out = TxOut {
             // expect because TxInfo::new validates change amounts
             value: self
                 .change_amount()
                 .expect("change amount should not be negative"),
-            script_pubkey: change_address.script_pubkey(),
+            script_pubkey: change_script,
         };
 
         all_outs.push(change_out);
@@ -269,17 +253,16 @@ impl TxInfo {
 // -------------------------------------------------
 
 /// BTC tx signing w/ taproot and script spend path
-pub fn sign_btc_tx(messages: &[Message], sk: &SecretKey) -> GuardianResult<Vec<Signature>> {
-    let keypair = Keypair::from_secret_key(&BTC_LIB, sk);
-    Ok(messages
+pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
+    messages
         .iter()
         // Not using aux randomness which only provides side-channel protection
-        .map(|m| BTC_LIB.sign_schnorr_no_aux_rand(m, &keypair))
+        .map(|m| BTC_LIB.sign_schnorr_no_aux_rand(m, kp))
         .map(|s| Signature {
             signature: s,
             sighash_type: TapSighashType::Default,
         })
-        .collect())
+        .collect()
 }
 
 /// Returns the messages to be signed for each input.
@@ -290,11 +273,11 @@ pub fn construct_signing_messages(
     hashi_pubkey: XOnlyPublicKey,
     network: Network,
 ) -> GuardianResult<Vec<Message>> {
-    // Prepare all input data (computes descriptor once per input)
+    // Prepare all input data
     let input_data: Vec<InputSigningData> = tx_info
         .internal_inputs()
         .iter()
-        .map(|utxo| utxo.prepare_for_signing(enclave_pubkey, hashi_pubkey, network))
+        .map(|utxo| utxo.prepare_for_signing(enclave_pubkey, hashi_pubkey))
         .collect();
 
     // Construct tx
@@ -313,12 +296,11 @@ pub fn construct_signing_messages(
         .enumerate()
         .map(|(index, input)| {
             let mut sighasher = SighashCache::new(tx.clone());
-            let leaf_hash = TapLeafHash::from_script(&input.leaf_script, LeafVersion::TapScript);
             let sighash = sighasher
                 .taproot_script_spend_signature_hash(
                     index,
                     &Prevouts::All(&prevouts),
-                    leaf_hash,
+                    input.leaf_hash,
                     sighash_type,
                 )
                 .expect("sighash failed unexpectedly");
@@ -378,24 +360,18 @@ fn compute_taproot_artifacts(
     enclave_pubkey: XOnlyPublicKey,
     hashi_master_pubkey: XOnlyPublicKey,
     hashi_derivation_path: &DerivationPath,
-    network: Network,
-) -> TaprootArtifacts {
+) -> (ScriptBuf, TapLeafHash) {
     let desc =
         compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
 
-    let address = desc.address(network);
-    let leaf_script = desc
-        .tap_tree()
-        .expect("descriptor should have a tap tree")
+    let address_script = desc.script_pubkey();
+    let item = desc
         .leaves()
         .next()
-        .expect("tap tree should have at least one leaf")
-        .compute_script();
+        .expect("tap tree should have at least one leaf");
+    let leaf_hash = item.compute_tap_leaf_hash();
 
-    TaprootArtifacts {
-        address,
-        leaf_script,
-    }
+    (address_script, leaf_hash)
 }
 
 /// Derives a child public key using unhardened derivation.
@@ -592,10 +568,10 @@ mod bitcoin_tests {
 
         let messages =
             construct_signing_messages(&tx_info, enclave_pk, hashi_pk, Network::Regtest).unwrap();
-        let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair.secret_key()).unwrap();
+        let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair);
 
         // D) Hashi signs the transaction.
-        let hashi_signatures = sign_btc_tx(&messages, &hashi_keypair.secret_key()).unwrap();
+        let hashi_signatures = sign_btc_tx(&messages, &hashi_keypair);
 
         // E) Relayer combines the signatures and finalizes the transaction.
         // Note: If there are multiple inputs, we need to construct the witness for each input.
