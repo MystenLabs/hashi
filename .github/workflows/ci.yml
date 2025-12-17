@@ -71,20 +71,20 @@ jobs:
 
       - name: Install Sui Binary
         run: |
-          # Get latest mainnet release version
-          echo "Detecting latest Sui mainnet version..."
+          # Get latest mainnet release that has ubuntu binary available
+          echo "Detecting latest Sui mainnet version with ubuntu binary..."
           SUI_VERSION=$(curl -s https://api.github.com/repos/MystenLabs/sui/releases | \
-            jq -r '.[] | select(.tag_name | startswith("mainnet-")) | .tag_name' | \
-            head -n 1)
+            jq -r '.[] | select(.tag_name | startswith("mainnet-")) |
+                   select(.assets[].name | contains("ubuntu-x86_64")) |
+                   .tag_name' | head -n 1)
 
           if [ -z "$SUI_VERSION" ]; then
-            echo "Failed to detect latest mainnet version, falling back to mainnet-v1.56.2"
+            echo "Failed to detect mainnet version, falling back to mainnet-v1.56.2"
             SUI_VERSION="mainnet-v1.56.2"
           fi
 
           echo "Installing Sui binary ${SUI_VERSION}..."
 
-          # Download Sui binary for Linux
           wget https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz || {
             echo "Failed to download Sui ${SUI_VERSION}"
             exit 1
