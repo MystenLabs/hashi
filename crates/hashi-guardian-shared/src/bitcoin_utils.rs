@@ -285,7 +285,6 @@ pub fn construct_signing_messages(
     );
 
     // Construct signing messages
-    let sighash_type = TapSighashType::Default;
     let prevouts: Vec<&TxOut> = input_data.iter().map(|input| &input.prevout).collect();
 
     input_data
@@ -298,7 +297,7 @@ pub fn construct_signing_messages(
                     index,
                     &Prevouts::All(&prevouts),
                     input.leaf_hash,
-                    sighash_type,
+                    TapSighashType::Default,
                 )
                 .expect("sighash failed unexpectedly");
             Ok(Message::from_digest(*sighash.as_byte_array()))
@@ -372,7 +371,6 @@ fn compute_taproot_artifacts(
 }
 
 /// Derives a child public key using unhardened derivation.
-/// TODO: Check correctness with Ben or Jonas
 fn get_derived_pubkey(
     parent_pubkey: XOnlyPublicKey,
     derivation_path: &DerivationPath,
