@@ -6,9 +6,10 @@ use std::future::Future;
 use std::time::Duration;
 
 pub const RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
-pub const RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
-pub const MAX_RETRIES: usize = 10;
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+// TODO: Increase the values below to 2s, 10, 60s
+pub const RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
+pub const MAX_RETRIES: usize = 2;
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn with_timeout_and_retry<T, F, Fut>(mut f: F) -> ChannelResult<T>
 where
