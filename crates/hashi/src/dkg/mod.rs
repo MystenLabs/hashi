@@ -593,8 +593,8 @@ impl DkgManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<Vec<RotationMessage>> {
-        let previous = self.get_previous_dkg_output()?;
-        let messages = previous
+        let previous_output = self.get_previous_dkg_output()?;
+        let messages = previous_output
             .key_shares
             .shares
             .iter()
@@ -626,10 +626,11 @@ impl DkgManager {
     fn try_sign_rotation_message(
         &mut self,
         dealer: Address,
-        share_index: ShareIndex,
-        message: &avss::Message,
+        rotation_message: &RotationMessage,
     ) -> DkgResult<BLS12381Signature> {
-        let session_id = self.session_id.rotation_session_id(&dealer, share_index);
+        let session_id = self
+            .session_id
+            .rotation_session_id(&dealer, rotation_message.share_index);
         let commitment = self
             .dkg_output_store
             .get_dkg_output()
@@ -638,7 +639,7 @@ impl DkgManager {
             .and_then(|prev| {
                 prev.commitments
                     .iter()
-                    .find(|c| c.index == share_index)
+                    .find(|c| c.index == rotation_message.share_index)
                     .map(|c| c.value)
             });
         let receiver = avss::Receiver::new(
@@ -649,10 +650,11 @@ impl DkgManager {
             commitment,
             self.encryption_key.clone(),
         );
-        match receiver.process_message(message)? {
+        match receiver.process_message(&rotation_message.message)? {
             avss::ProcessedMessage::Valid(output) => {
-                self.rotation_outputs.insert(share_index, output);
-                let message_hash = compute_message_hash(message);
+                self.rotation_outputs
+                    .insert(rotation_message.share_index, output);
+                let message_hash = compute_message_hash(&rotation_message.message);
                 let signature = self.signing_key.sign(
                     self.dkg_config.epoch,
                     self.address,
