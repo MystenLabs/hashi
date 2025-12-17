@@ -187,11 +187,8 @@ impl TxInfo {
         enclave_pubkey: XOnlyPublicKey,
         hashi_pubkey: XOnlyPublicKey,
     ) -> ScriptBuf {
-        let change_scripts = compute_taproot_artifacts(
-            enclave_pubkey,
-            hashi_pubkey,
-            &self.change_derivation_path,
-        );
+        let change_scripts =
+            compute_taproot_artifacts(enclave_pubkey, hashi_pubkey, &self.change_derivation_path);
         change_scripts.0
     }
 
