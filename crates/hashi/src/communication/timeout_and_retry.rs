@@ -10,7 +10,7 @@ use std::time::Duration;
 pub const RETRY_MIN_DELAY: Duration = Duration::from_millis(50);
 pub const RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
 pub const MAX_RETRIES: usize = 1;
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(1);
+pub const CALL_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub async fn with_timeout_and_retry<T, F, Fut>(mut f: F) -> ChannelResult<T>
 where
