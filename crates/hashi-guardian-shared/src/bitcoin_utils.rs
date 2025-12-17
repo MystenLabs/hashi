@@ -1,9 +1,15 @@
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
-use bitcoin::address::{NetworkChecked, NetworkUnchecked};
+use bitcoin::address::NetworkChecked;
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{All, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
+use bitcoin::secp256k1::All;
+use bitcoin::secp256k1::Keypair;
+use bitcoin::secp256k1::Message;
+use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1::SecretKey;
+use bitcoin::secp256k1::XOnlyPublicKey;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::LeafVersion;
@@ -23,8 +29,16 @@ use serde::Serialize;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
+// ---------------------------------
+//    Constants & Type Aliases
+// ---------------------------------
+
 pub static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
 pub type DerivationPath = SuiAddress;
+
+// ---------------------------------
+//    Core Data Structures
+// ---------------------------------
 
 /// Hashi-owned input UTXO to be spent via taproot script-path
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -34,6 +48,32 @@ pub struct InputUTXO {
     pub amount: Amount,
     pub derivation_path: DerivationPath,
 }
+
+/// Specifies a withdrawal destination address and amount
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct OutputUTXO {
+    /// Bitcoin address to withdraw to
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
+/// The TxInfo struct contains all the Bitcoin-specific info of a withdrawal tx.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TxInfo {
+    /// The input UTXOs owned by hashi + guardian
+    internal_inputs: Vec<InputUTXO>,
+    /// External addresses and amounts
+    external_outputs: Vec<OutputUTXO>,
+    /// The derivation path for the sole internal output (change address)
+    change_derivation_path: DerivationPath,
+    /// Transaction fee in satoshis
+    fee_sats: Amount,
+}
+
+// ---------------------------------
+//    Helper Data Structures
+// ---------------------------------
 
 /// Contains address and the leaf script (of the sole leaf).
 struct TaprootArtifacts {
@@ -47,6 +87,10 @@ pub struct InputSigningData {
     pub prevout: TxOut,
     pub leaf_script: ScriptBuf,
 }
+
+// ---------------------------------
+//    Implementations
+// ---------------------------------
 
 impl InputUTXO {
     pub fn txin(&self) -> TxIn {
@@ -84,15 +128,6 @@ impl InputUTXO {
     }
 }
 
-/// Specifies a withdrawal destination address and amount
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct OutputUTXO {
-    /// Bitcoin address to withdraw to
-    pub address: BitcoinAddress<NetworkUnchecked>,
-    /// Amount in satoshis
-    pub amount: Amount,
-}
-
 impl OutputUTXO {
     /// Validates the address against the expected network and returns a checked TxOut
     pub fn to_txout(&self, network: Network) -> GuardianResult<TxOut> {
@@ -106,19 +141,6 @@ impl OutputUTXO {
             script_pubkey: address.script_pubkey(),
         })
     }
-}
-
-/// The TxInfo struct contains all the Bitcoin-specific info of a withdrawal tx.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TxInfo {
-    /// The input UTXOs owned by hashi + guardian
-    internal_inputs: Vec<InputUTXO>,
-    /// External addresses and amounts
-    external_outputs: Vec<OutputUTXO>,
-    /// The derivation path for the sole internal output (change address)
-    change_derivation_path: DerivationPath,
-    /// Transaction fee in satoshis
-    fee_sats: Amount,
 }
 
 impl TxInfo {
@@ -242,6 +264,10 @@ impl TxInfo {
     }
 }
 
+// -------------------------------------------------
+//      Transaction Construction & Signing
+// -------------------------------------------------
+
 /// BTC tx signing w/ taproot and script spend path
 pub fn sign_btc_tx(messages: &[Message], sk: &SecretKey) -> GuardianResult<Vec<Signature>> {
     let keypair = Keypair::from_secret_key(&BTC_LIB, sk);
@@ -312,10 +338,9 @@ fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     }
 }
 
-pub fn create_keypair(sk: &[u8; 32]) -> Keypair {
-    let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
-    Keypair::from_secret_key(&BTC_LIB, &secret_key)
-}
+// -------------------------------------------------
+//      Taproot Descriptor & Address Computation
+// -------------------------------------------------
 
 /// Creates a taproot descriptor for the given enclave and hashi keys with a 2-of-2 multi_a script.
 /// Taproot addresses are constructed as follows:
@@ -396,16 +421,27 @@ fn get_derived_pubkey(
     XOnlyPublicKey::from_slice(&derived_x_bytes).expect("valid x-only key")
 }
 
+// ---------------------------------
+//    Test Utilities & Tests
+// ---------------------------------
+
 #[cfg(any(test, feature = "test-utils"))]
-pub mod test_constants {
+pub mod test_utils {
+    use super::*;
+
     pub const TEST_ENCLAVE_SK: [u8; 32] = [1u8; 32];
     pub const TEST_HASHI_SK: [u8; 32] = [2u8; 32];
+
+    pub fn create_keypair(sk: &[u8; 32]) -> Keypair {
+        let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
+        Keypair::from_secret_key(&BTC_LIB, &secret_key)
+    }
 }
 
 #[cfg(test)]
 mod bitcoin_tests {
     use super::*;
-    use crate::bitcoin_utils::test_constants::*;
+    use crate::bitcoin_utils::test_utils::*;
     use bitcoin::key::UntweakedPublicKey;
     use bitcoin::taproot::ControlBlock;
     use bitcoin::KnownHrp::Regtest;

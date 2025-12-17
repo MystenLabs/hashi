@@ -11,9 +11,12 @@ use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 
-use ed25519_consensus::{Signature, VerificationKey};
-use hpke::{Deserializable, Serializable};
-use rand_core::{CryptoRng, RngCore};
+use ed25519_consensus::Signature;
+use ed25519_consensus::VerificationKey;
+use hpke::Deserializable;
+use hpke::Serializable;
+use rand_core::CryptoRng;
+use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::SystemTime;
@@ -248,8 +251,8 @@ impl ProvisionerInitRequestState {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mock_for_testing() -> Self {
-        use bitcoin_utils::create_keypair;
-        use bitcoin_utils::test_constants::TEST_HASHI_SK;
+        use bitcoin_utils::test_utils::create_keypair;
+        use bitcoin_utils::test_utils::TEST_HASHI_SK;
 
         let kp = create_keypair(&TEST_HASHI_SK);
         ProvisionerInitRequestState {

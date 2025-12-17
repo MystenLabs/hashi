@@ -333,7 +333,7 @@ mod tests {
 
         // Second KP tries to send with different state (different pub key)
         let mut state2 = ProvisionerInitRequestState::mock_for_testing();
-        let kp = bitcoin_utils::create_keypair(&[7u8; 32]);
+        let kp = bitcoin_utils::test_utils::create_keypair(&[7u8; 32]);
         state2.hashi_btc_master_pubkey = XOnlyPublicKey::from_keypair(&kp).0;
         assert_ne!(
             state1.hashi_btc_master_pubkey,
