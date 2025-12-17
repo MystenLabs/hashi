@@ -71,34 +71,24 @@ jobs:
 
       - name: Install Sui Binary
         run: |
-          # Get mainnet release versions
-          echo "Detecting Sui mainnet versions..."
-          MAINNET_VERSIONS=$(curl -s https://api.github.com/repos/MystenLabs/sui/releases | \
-            jq -r '.[] | select(.tag_name | startswith("mainnet-")) | .tag_name' | \
-            head -n 3)
+          # Get latest mainnet release that has ubuntu binary available
+          echo "Detecting latest Sui mainnet version with ubuntu binary..."
+          SUI_VERSION=$(curl -s https://api.github.com/repos/MystenLabs/sui/releases | \
+            jq -r '.[] | select(.tag_name | startswith("mainnet-")) |
+                   select(.assets[].name | contains("ubuntu-x86_64")) |
+                   .tag_name' | head -n 1)
 
-          if [ -z "$MAINNET_VERSIONS" ]; then
-            echo "Failed to detect mainnet versions, falling back to mainnet-v1.56.2"
-            MAINNET_VERSIONS="mainnet-v1.56.2"
+          if [ -z "$SUI_VERSION" ]; then
+            echo "Failed to detect mainnet version, falling back to mainnet-v1.56.2"
+            SUI_VERSION="mainnet-v1.56.2"
           fi
 
-          # Try versions in order until one succeeds
-          DOWNLOAD_SUCCESS=false
-          for SUI_VERSION in $MAINNET_VERSIONS; do
-            echo "Trying Sui binary ${SUI_VERSION}..."
-            if wget -q https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz; then
-              echo "Successfully downloaded ${SUI_VERSION}"
-              DOWNLOAD_SUCCESS=true
-              break
-            else
-              echo "Failed to download ${SUI_VERSION}, trying next version..."
-            fi
-          done
+          echo "Installing Sui binary ${SUI_VERSION}..."
 
-          if [ "$DOWNLOAD_SUCCESS" = false ]; then
-            echo "Failed to download any Sui version"
+          wget https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz || {
+            echo "Failed to download Sui ${SUI_VERSION}"
             exit 1
-          fi
+          }
 
           echo "Extracting Sui binary..."
           tar -xzf sui-*.tgz ./sui
