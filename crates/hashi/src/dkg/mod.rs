@@ -16,6 +16,7 @@ use fastcrypto::hash::{Blake2b256, HashFunction};
 use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
 use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
+use fastcrypto_tbls::types::{IndexedValue, ShareIndex};
 use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -23,11 +24,13 @@ use sui_sdk_types::Address;
 use types::DkgConfig;
 pub use types::{
     ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult, EncryptionGroupElement,
-    MessageHash, RetrieveMessageRequest, RetrieveMessageResponse, SendMessageRequest,
-    SendMessageResponse, SessionId,
+    MessageHash, RetrieveMessageRequest, RetrieveMessageResponse, RotationMessage,
+    SendMessageRequest, SendMessageResponse, SessionId,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
+#[allow(dead_code)]
+const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -50,7 +53,9 @@ pub struct DkgManager {
     pub complaints_to_process: HashMap<Address, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
+    // TODO(Optimization): Add lazy caching for `DkgOutput` to avoid repeated storage reads in rotation methods.
     pub dkg_output_store: Box<dyn DkgOutputStore>,
+    pub rotation_outputs: HashMap<ShareIndex, avss::PartialOutput>,
 }
 
 impl DkgManager {
@@ -102,6 +107,7 @@ impl DkgManager {
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
             dkg_output_store,
+            rotation_outputs: HashMap::new(),
         })
     }
 
@@ -580,6 +586,141 @@ impl DkgManager {
             "Not enough valid complaint responses for dealer {:?}",
             dealer
         )))
+    }
+
+    #[allow(dead_code)]
+    fn create_rotation_messages(
+        &self,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<Vec<RotationMessage>> {
+        let previous = self.get_previous_dkg_output()?;
+        let messages = previous
+            .key_shares
+            .shares
+            .iter()
+            .map(|share| {
+                let sid = self
+                    .session_id
+                    .rotation_session_id(&self.address, share.index);
+                let dealer = avss::Dealer::new(
+                    Some(share.value),
+                    self.dkg_config.nodes.clone(),
+                    self.dkg_config.threshold,
+                    self.dkg_config.max_faulty,
+                    sid.to_vec(),
+                )
+                    .expect(EXPECT_THRESHOLD_VALIDATED);
+                let message = dealer
+                    .create_message(rng)
+                    .expect(EXPECT_THRESHOLD_VALIDATED);
+                RotationMessage {
+                    share_index: share.index,
+                    message,
+                }
+            })
+            .collect();
+        Ok(messages)
+    }
+
+    #[allow(dead_code)]
+    fn try_sign_rotation_message(
+        &mut self,
+        dealer: Address,
+        share_index: ShareIndex,
+        message: &avss::Message,
+    ) -> DkgResult<BLS12381Signature> {
+        let session_id = self.session_id.rotation_session_id(&dealer, share_index);
+        let commitment = self
+            .dkg_output_store
+            .get_dkg_output()
+            .ok()
+            .flatten()
+            .and_then(|prev| {
+                prev.commitments
+                    .iter()
+                    .find(|c| c.index == share_index)
+                    .map(|c| c.value)
+            });
+        let receiver = avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            session_id.to_vec(),
+            commitment,
+            self.encryption_key.clone(),
+        );
+        match receiver.process_message(message)? {
+            avss::ProcessedMessage::Valid(output) => {
+                self.rotation_outputs.insert(share_index, output);
+                let message_hash = compute_message_hash(message);
+                let signature = self.signing_key.sign(
+                    self.dkg_config.epoch,
+                    self.address,
+                    &Dkg(DkgDealerMessageHash {
+                        dealer_address: dealer,
+                        message_hash,
+                    }),
+                );
+                Ok(signature.signature().clone())
+            }
+            avss::ProcessedMessage::Complaint(_) => Err(DkgError::InvalidMessage {
+                sender: dealer,
+                reason: "Invalid rotation shares".to_string(),
+            }),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn process_rotation_certificates(
+        &mut self,
+        certified_share_indices: &[ShareIndex],
+    ) -> DkgResult<DkgOutput> {
+        let previous = self.get_previous_dkg_output()?;
+        let threshold = previous.threshold;
+        let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
+            .iter()
+            .take(threshold as usize)
+            .map(|&share_index| {
+                let output = self.rotation_outputs.get(&share_index).ok_or_else(|| {
+                    DkgError::ProtocolFailed(format!(
+                        "No rotation output found for share index: {}",
+                        share_index
+                    ))
+                })?;
+                Ok(IndexedValue {
+                    index: share_index,
+                    value: output.clone(),
+                })
+            })
+            .collect::<Result<_, DkgError>>()?;
+        let combined = avss::ReceiverOutput::complete_key_rotation(
+            threshold,
+            self.party_id,
+            &self.dkg_config.nodes,
+            &indexed_outputs,
+        )?;
+        if combined.vk != previous.public_key {
+            return Err(DkgError::ProtocolFailed(
+                "Key rotation produced different public key".into(),
+            ));
+        }
+        let output = DkgOutput {
+            public_key: combined.vk,
+            key_shares: combined.my_shares,
+            commitments: combined.commitments,
+            threshold: self.dkg_config.threshold,
+        };
+        self.dkg_output_store
+            .store_dkg_output(&output)
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
+        Ok(output)
+    }
+
+    fn get_previous_dkg_output(&self) -> DkgResult<DkgOutput> {
+        self.dkg_output_store
+            .get_dkg_output()
+            .map_err(|e| DkgError::StorageError(e.to_string()))?
+            .ok_or_else(|| DkgError::ProtocolFailed("key rotation requires previous output".into()))
     }
 }
 

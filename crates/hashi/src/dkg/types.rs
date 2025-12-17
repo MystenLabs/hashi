@@ -101,6 +101,12 @@ pub struct DkgOutput {
     pub threshold: u16,
 }
 
+#[derive(Clone, Debug)]
+pub struct RotationMessage {
+    pub share_index: ShareIndex,
+    pub message: avss::Message,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageRequest {
     pub message: avss::Message,
