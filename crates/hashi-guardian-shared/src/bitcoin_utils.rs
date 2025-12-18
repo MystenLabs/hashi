@@ -109,8 +109,13 @@ pub fn validate_address_for_network(
     Ok(())
 }
 
+/// Represents an input to be spent.
+///
+/// All inputs are expected to be P2TR (Pay-to-Taproot) since spending is done via taproot script path.
 impl InputUTXO {
-    /// Constructs a new `InputUTXO` and validates network-independent invariants.
+    /// Constructs a new `InputUTXO` and validates structural invariants.
+    ///
+    /// To validate the address for a specific network, call `validate(network)`.
     pub fn new(
         outpoint: OutPoint,
         amount: Amount,
@@ -127,21 +132,13 @@ impl InputUTXO {
         Ok(utxo)
     }
 
-    /// Validates this value as part of an incoming request.
-    ///
-    /// Call this at the request boundary (after deserialization) to enforce both:
-    /// - network-independent invariants (`validate_invariants()`), and
-    /// - network-dependent constraints (e.g. address belongs to `network`).
+    /// Validates this value, including that the address is valid for `network`.
     pub fn validate(&self, network: Network) -> GuardianResult<()> {
         self.validate_invariants()?;
         validate_address_for_network(&self.address, network)
     }
 
     /// Validates network-independent structural invariants.
-    ///
-    /// This is called by `new()` (fail fast for library users) and by `validate(network)` (to cover
-    /// serde-based construction). It intentionally does **not** validate the address against a specific
-    /// Bitcoin `Network`.
     fn validate_invariants(&self) -> GuardianResult<()> {
         // TODO: Validate amount > 0.
         if !self
@@ -156,6 +153,9 @@ impl InputUTXO {
         Ok(())
     }
 
+    /// Returns a `TxIn` for this UTXO with placeholder witness data.
+    ///
+    /// The witness will be populated later after signing.
     pub fn txin(&self) -> TxIn {
         TxIn {
             previous_output: self.outpoint,
@@ -168,6 +168,7 @@ impl InputUTXO {
         }
     }
 
+    /// Returns the previous output as a `TxOut` (for sighash computation).
     pub fn prevout(&self, network: Network) -> TxOut {
         TxOut {
             value: self.amount,
@@ -181,10 +182,11 @@ impl InputUTXO {
     }
 }
 
+/// Represents an output destination for a withdrawal.
+///
+/// Outputs can be **external** (to a user-provided address) or **internal** (change, derived inside enclave).
 impl OutputUTXO {
-    /// Validates this value as part of an incoming request.
-    ///
-    /// For `External` outputs, this enforces that the destination address matches `network`.
+    /// Validates this value, including external addresses against `network`.
     pub fn validate(&self, network: Network) -> GuardianResult<()> {
         // TODO: Validate amount > 0 (and optionally enforce dust rules for External outputs).
         if let OutputUTXO::External { address, .. } = self {
@@ -193,6 +195,7 @@ impl OutputUTXO {
         Ok(())
     }
 
+    /// Returns the output amount in satoshis.
     pub fn amount(&self) -> Amount {
         match self {
             OutputUTXO::External { amount, .. } => *amount,
@@ -200,7 +203,9 @@ impl OutputUTXO {
         }
     }
 
-    /// Assumes validated address & returns a checked TxOut. Panics if address does not match network.
+    /// Constructs a `TxOut` for this output.
+    ///
+    /// Requires that `validate(network)` has been called; panics if address doesn't match `network`.
     pub fn to_txout(
         &self,
         enclave_pubkey: XOnlyPublicKey,
@@ -232,30 +237,20 @@ impl OutputUTXO {
 }
 
 impl OutputUTXOVec {
-    /// Constructs a new `OutputUTXOVec` and validates network-independent invariants.
-    ///
-    /// This is intended for *local construction* (e.g. in an SDK / client library). For request validation,
-    /// call `validate(network)`.
+    /// Constructs a new `OutputUTXOVec` and validates structural invariants.
     pub fn new(utxos: Vec<OutputUTXO>) -> GuardianResult<Self> {
         let v = Self(utxos);
         v.validate_invariants()?;
         Ok(v)
     }
 
-    /// Validates this value as part of an incoming request.
-    ///
-    /// Call this at the request boundary (after deserialization) to enforce both:
-    /// - vector invariants (non-empty), and
-    /// - network checks for each element.
+    /// Validates this value, including that each output is valid for `network`.
     pub fn validate(&self, network: Network) -> GuardianResult<()> {
         self.validate_invariants()?;
         self.0.iter().try_for_each(|utxo| utxo.validate(network))
     }
 
     /// Validates network-independent structural invariants.
-    ///
-    /// This is called by `new()` (fail fast for library users) and by `validate(network)` (to cover
-    /// serde-based construction).
     fn validate_invariants(&self) -> GuardianResult<()> {
         if self.0.is_empty() {
             Err(InvalidInputs("output UTXOs must not be empty".into()))
@@ -266,12 +261,9 @@ impl OutputUTXOVec {
 }
 
 impl TxUTXOs {
-    /// Constructs a new `TxUTXOs` and validates network-independent invariants.
+    /// Constructs a new `TxUTXOs` and validates structural invariants.
     ///
-    /// This is intended for *local construction* (e.g. in an SDK / client library). It does **not** validate
-    /// addresses against a specific Bitcoin `Network`.
-    ///
-    /// For request validation, call `validate(network)`.
+    /// To validate addresses for a specific network, call `validate(network)`.
     pub fn new(inputs: Vec<InputUTXO>, outputs: Vec<OutputUTXO>) -> GuardianResult<Self> {
         let tx_info = Self {
             inputs,
@@ -281,11 +273,7 @@ impl TxUTXOs {
         Ok(tx_info)
     }
 
-    /// Validates this value as part of an incoming request.
-    ///
-    /// Call this at the request boundary (after deserialization) to enforce both:
-    /// - transaction invariants (`validate_invariants()`), and
-    /// - per-input / per-output network checks.
+    /// Validates this value, including that all inputs and outputs are valid for `network`.
     pub fn validate(&self, network: Network) -> GuardianResult<()> {
         self.validate_invariants()?;
         self.inputs
@@ -295,9 +283,6 @@ impl TxUTXOs {
     }
 
     /// Validates network-independent structural invariants.
-    ///
-    /// This is called by `new()` (fail fast for library users) and by `validate(network)` (to cover
-    /// serde-based construction).
     fn validate_invariants(&self) -> GuardianResult<()> {
         if self.inputs.is_empty() {
             return Err(InvalidInputs("input utxos must not be empty".into()));
@@ -322,15 +307,22 @@ impl TxUTXOs {
         Ok(())
     }
 
-    pub fn internal_inputs(&self) -> &[InputUTXO] {
+    /// Returns a reference to the inputs.
+    pub fn get_inputs(&self) -> &[InputUTXO] {
         &self.inputs
     }
 
-    pub fn external_outputs(&self) -> &OutputUTXOVec {
+    /// Returns a reference to the outputs.
+    pub fn get_outputs(&self) -> &OutputUTXOVec {
         &self.outputs
     }
 
-    /// Assumes that `validate()` has been called. Panics if addresses don't match network.
+    /// Constructs all outputs (both external and internal).
+    ///
+    /// For `External` outputs, uses the user-provided address. For `Internal` outputs,
+    /// derives a taproot address using the enclave and hashi keys.
+    ///
+    /// Requires that `validate(network)` has been called.
     pub fn compute_all_outputs(
         &self,
         enclave_pubkey: XOnlyPublicKey,
@@ -361,7 +353,9 @@ impl TxUTXOs {
 //      Transaction Construction & Signing
 // -------------------------------------------------
 
-/// BTC tx signing w/ taproot and script spend path
+/// Signs messages using Schnorr signatures (suitable for taproot script-spend).
+///
+/// Each message is signed and wrapped in a `Signature` with `TapSighashType::Default`.
 pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
     messages
         .iter()
@@ -374,15 +368,18 @@ pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
         .collect()
 }
 
-/// Returns the messages to be signed for each input.
-/// Assumes `tx_info.validate(network)` has been called. Panics if addresses don't match `network`.
+/// Constructs sighash messages for each input, ready for signing.
+///
+/// Uses `taproot_script_spend_signature_hash` for script-path spending.
+///
+/// Requires that `tx_info.validate(network)` has been called.
 pub fn construct_signing_messages(
     tx_info: &TxUTXOs,
     enclave_pubkey: XOnlyPublicKey,
     hashi_pubkey: XOnlyPublicKey,
     network: Network,
 ) -> GuardianResult<Vec<Message>> {
-    let inputs = tx_info.internal_inputs();
+    let inputs = tx_info.get_inputs();
 
     // Construct tx
     let all_outputs = tx_info.compute_all_outputs(enclave_pubkey, hashi_pubkey, network);
@@ -412,6 +409,9 @@ pub fn construct_signing_messages(
         .collect::<GuardianResult<Vec<Message>>>()
 }
 
+/// Constructs a Bitcoin transaction with the given inputs and outputs.
+///
+/// Uses BTC tx version 2 and disables lock time.
 fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     Transaction {
         // The latest BTC tx version
@@ -477,7 +477,9 @@ fn compute_taproot_artifacts(
     (address_script, leaf_hash)
 }
 
-/// Derives a child public key using unhardened derivation.
+/// Derives a child public key using unhardened derivation from a parent public key.
+///
+/// Uses the provided derivation path to compute a new public key.
 fn get_derived_pubkey(
     parent_pubkey: XOnlyPublicKey,
     derivation_path: &DerivationPath,
