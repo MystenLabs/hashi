@@ -18,7 +18,7 @@ use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use fastcrypto_tbls::types::{IndexedValue, ShareIndex};
 use futures::future::join_all;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use sui_sdk_types::Address;
 use types::DkgConfig;
@@ -55,7 +55,6 @@ pub struct DkgManager {
     pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
     pub rotation_outputs: HashMap<ShareIndex, avss::PartialOutput>,
-    pub certified_dealers: HashSet<Address>,
 }
 
 impl DkgManager {
@@ -106,7 +105,6 @@ impl DkgManager {
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
             rotation_outputs: HashMap::new(),
-            certified_dealers: HashSet::new(),
         })
     }
 
@@ -423,16 +421,9 @@ impl DkgManager {
         &mut self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
-        self.certified_dealers = certified_dealers.keys().cloned().collect();
-        self.construct_dkg_output()
-    }
-
-    // TODO: Restore state from certificates and stored messages before rotation can proceed after a restart.
-    fn construct_dkg_output(&self) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
-        let outputs: HashMap<PartyId, avss::PartialOutput> = self
-            .certified_dealers
-            .iter()
+        let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
+            .keys()
             .map(|dealer| {
                 let dealer_party_id = self
                     .committee
@@ -595,10 +586,10 @@ impl DkgManager {
     #[allow(dead_code)]
     fn create_rotation_messages(
         &self,
+        previous_dkg_output: &DkgOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<RotationMessages> {
-        let previous = self.construct_dkg_output()?;
-        let messages = previous
+    ) -> RotationMessages {
+        let messages = previous_dkg_output
             .key_shares
             .shares
             .iter()
@@ -623,22 +614,22 @@ impl DkgManager {
                 }
             })
             .collect();
-        Ok(RotationMessages { messages })
+        RotationMessages { messages }
     }
 
     #[allow(dead_code)]
     fn try_sign_rotation_messages(
         &mut self,
+        previous_dkg_output: &DkgOutput,
         dealer: Address,
         rotation_messages: &RotationMessages,
     ) -> DkgResult<BLS12381Signature> {
-        let previous = self.construct_dkg_output()?;
         let mut outputs = Vec::with_capacity(rotation_messages.messages.len());
         for rotation_message in &rotation_messages.messages {
             let session_id = self
                 .session_id
                 .rotation_session_id(&dealer, rotation_message.share_index);
-            let commitment = previous
+            let commitment = previous_dkg_output
                 .commitments
                 .iter()
                 .find(|c| c.index == rotation_message.share_index)
@@ -682,10 +673,10 @@ impl DkgManager {
     #[allow(dead_code)]
     fn process_rotation_certificates(
         &mut self,
+        previous_dkg_output: &DkgOutput,
         certified_share_indices: &[ShareIndex],
     ) -> DkgResult<DkgOutput> {
-        let previous = self.construct_dkg_output()?;
-        let threshold = previous.threshold;
+        let threshold = previous_dkg_output.threshold;
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
             .take(threshold as usize)
@@ -708,7 +699,7 @@ impl DkgManager {
             &self.dkg_config.nodes,
             &indexed_outputs,
         )?;
-        if combined.vk != previous.public_key {
+        if combined.vk != previous_dkg_output.public_key {
             return Err(DkgError::ProtocolFailed(
                 "Key rotation produced different public key".into(),
             ));
@@ -4520,7 +4511,7 @@ mod tests {
         }
 
         // Process certificates to complete DKG
-        let _dkg_output = receiver_manager
+        let receiver_dkg_output = receiver_manager
             .process_certificates(&certificates)
             .unwrap();
 
@@ -4534,15 +4525,19 @@ mod tests {
             let dealer_address = dealer_managers[i].address;
             receive_dealer_message(&mut rotation_dealer, message, dealer_address).unwrap();
         }
-        rotation_dealer.process_certificates(&certificates).unwrap();
+        let dealer_dkg_output = rotation_dealer.process_certificates(&certificates).unwrap();
 
         // Create valid rotation messages from dealer
-        let rotation_messages = rotation_dealer.create_rotation_messages(&mut rng).unwrap();
+        let rotation_messages =
+            rotation_dealer.create_rotation_messages(&dealer_dkg_output, &mut rng);
 
         // Test 1: Happy path - all valid messages should succeed
         let rotation_outputs_before = receiver_manager.rotation_outputs.len();
-        let result =
-            receiver_manager.try_sign_rotation_messages(rotation_dealer_addr, &rotation_messages);
+        let result = receiver_manager.try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        );
 
         assert!(result.is_ok(), "All valid messages should succeed");
         let signature = result.unwrap();
@@ -4566,7 +4561,7 @@ mod tests {
             let dealer_address = dealer_managers[i].address;
             receive_dealer_message(&mut receiver_manager2, message, dealer_address).unwrap();
         }
-        receiver_manager2
+        let receiver2_dkg_output = receiver_manager2
             .process_certificates(&certificates)
             .unwrap();
 
@@ -4587,8 +4582,11 @@ mod tests {
         }
 
         let rotation_outputs_before = receiver_manager2.rotation_outputs.len();
-        let result =
-            receiver_manager2.try_sign_rotation_messages(rotation_dealer_addr, &tampered_messages);
+        let result = receiver_manager2.try_sign_rotation_messages(
+            &receiver2_dkg_output,
+            rotation_dealer_addr,
+            &tampered_messages,
+        );
 
         // Should fail due to invalid message
         assert!(
