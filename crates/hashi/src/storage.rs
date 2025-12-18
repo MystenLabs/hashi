@@ -1,5 +1,4 @@
 use crate::committee::EncryptionPrivateKey;
-use crate::dkg::types::DkgOutput;
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
@@ -31,10 +30,4 @@ pub trait SecretsStore: Send + Sync {
 
     /// Clear all secrets (called at epoch transitions)
     fn clear(&mut self) -> Result<()>;
-}
-
-pub trait DkgOutputStore: Send + Sync {
-    fn store_dkg_output(&mut self, output: &DkgOutput) -> Result<()>;
-
-    fn get_dkg_output(&self) -> Result<Option<DkgOutput>>;
 }
