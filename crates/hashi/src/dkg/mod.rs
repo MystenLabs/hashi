@@ -710,6 +710,45 @@ impl DkgManager {
             threshold: self.dkg_config.threshold,
         })
     }
+
+    #[allow(dead_code)]
+    fn reconstruct_previous_dkg_output(
+        &mut self,
+        certificates: &[Certificate],
+    ) -> DkgResult<DkgOutput> {
+        let mut certified_dealers = HashMap::new();
+        for cert in certificates {
+            let (dealer_address, expected_hash) = match &cert.message {
+                Dkg(msg) => (msg.dealer_address, msg.message_hash),
+                Rotation(_) => {
+                    return Err(DkgError::InvalidCertificate(
+                        "Expected DKG certificate, got Rotation".into(),
+                    ));
+                }
+            };
+            let message = self
+                .public_messages_store
+                .get_dealer_message(&dealer_address)
+                .map_err(|e| DkgError::StorageError(e.to_string()))?
+                .ok_or_else(|| {
+                    DkgError::StorageError(format!(
+                        "Message not found for dealer: {:?}",
+                        dealer_address
+                    ))
+                })?;
+            let actual_hash = compute_message_hash(&message);
+            if actual_hash != expected_hash {
+                return Err(DkgError::ProtocolFailed(format!(
+                    "Message hash mismatch for dealer {:?}: stored message does not match certificate",
+                    dealer_address
+                )));
+            }
+            self.dealer_messages.insert(dealer_address, message);
+            self.process_certified_dealer_message(&dealer_address)?;
+            certified_dealers.insert(dealer_address, cert.clone());
+        }
+        self.process_certificates(&certified_dealers)
+    }
 }
 
 pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
