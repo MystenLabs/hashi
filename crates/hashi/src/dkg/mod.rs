@@ -422,7 +422,7 @@ impl DkgManager {
     }
 
     fn process_certificates(
-        &mut self,
+        &self,
         certified_dealers: &HashMap<Address, Certificate>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
@@ -1774,7 +1774,7 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
-        let mut receiver_manager = setup.create_manager(0);
+        let receiver_manager = setup.create_manager(0);
 
         // Create dealers
         let dealer0 = setup.create_manager(1);
