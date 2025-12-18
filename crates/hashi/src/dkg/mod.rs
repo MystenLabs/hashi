@@ -8,7 +8,7 @@ use crate::communication::{ChannelResult, P2PChannel, with_timeout_and_retry};
 use crate::dkg::types::MpcMessageV1::Dkg;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
-use crate::storage::{DkgOutputStore, PublicMessagesStore};
+use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::HashToGroupElement;
@@ -18,7 +18,7 @@ use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use fastcrypto_tbls::types::{IndexedValue, ShareIndex};
 use futures::future::join_all;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use sui_sdk_types::Address;
 use types::DkgConfig;
@@ -53,9 +53,8 @@ pub struct DkgManager {
     pub complaints_to_process: HashMap<Address, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
-    // TODO(Optimization): Add lazy caching for `DkgOutput` to avoid repeated storage reads in rotation methods.
-    pub dkg_output_store: Box<dyn DkgOutputStore>,
     pub rotation_outputs: HashMap<ShareIndex, avss::PartialOutput>,
+    pub certified_dealers: HashSet<Address>,
 }
 
 impl DkgManager {
@@ -66,7 +65,6 @@ impl DkgManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: crate::committee::Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
-        dkg_output_store: Box<dyn DkgOutputStore>,
     ) -> DkgResult<Self> {
         let committee = committee_set
             .current_committee()
@@ -106,8 +104,8 @@ impl DkgManager {
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
-            dkg_output_store,
             rotation_outputs: HashMap::new(),
+            certified_dealers: HashSet::new(),
         })
     }
 
@@ -427,9 +425,16 @@ impl DkgManager {
         &mut self,
         certified_dealers: &HashMap<Address, Certificate>,
     ) -> DkgResult<DkgOutput> {
+        self.certified_dealers = certified_dealers.keys().cloned().collect();
+        self.construct_dkg_output()
+    }
+
+    // TODO: Restore state from certificates and stored messages before rotation can proceed after a restart.
+    fn construct_dkg_output(&self) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
-        let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
-            .keys()
+        let outputs: HashMap<PartyId, avss::PartialOutput> = self
+            .certified_dealers
+            .iter()
             .map(|dealer| {
                 let dealer_party_id = self
                     .committee
@@ -452,16 +457,12 @@ impl DkgManager {
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .expect("checked that threshold is met");
-        let output = DkgOutput {
+        Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output.commitments,
             threshold,
-        };
-        self.dkg_output_store
-            .store_dkg_output(&output)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        Ok(output)
+        })
     }
 
     async fn retrieve_dealer_message(
@@ -598,8 +599,8 @@ impl DkgManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<Vec<RotationMessage>> {
-        let previous_output = self.get_previous_dkg_output()?;
-        let messages = previous_output
+        let previous = self.construct_dkg_output()?;
+        Ok(previous
             .key_shares
             .shares
             .iter()
@@ -623,8 +624,7 @@ impl DkgManager {
                     message,
                 }
             })
-            .collect();
-        Ok(messages)
+            .collect())
     }
 
     #[allow(dead_code)]
@@ -633,20 +633,15 @@ impl DkgManager {
         dealer: Address,
         rotation_message: &RotationMessage,
     ) -> DkgResult<BLS12381Signature> {
+        let previous = self.construct_dkg_output()?;
         let session_id = self
             .session_id
             .rotation_session_id(&dealer, rotation_message.share_index);
-        let commitment = self
-            .dkg_output_store
-            .get_dkg_output()
-            .ok()
-            .flatten()
-            .and_then(|prev| {
-                prev.commitments
-                    .iter()
-                    .find(|c| c.index == rotation_message.share_index)
-                    .map(|c| c.value)
-            });
+        let commitment = previous
+            .commitments
+            .iter()
+            .find(|c| c.index == rotation_message.share_index)
+            .map(|c| c.value);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -682,7 +677,7 @@ impl DkgManager {
         &mut self,
         certified_share_indices: &[ShareIndex],
     ) -> DkgResult<DkgOutput> {
-        let previous = self.get_previous_dkg_output()?;
+        let previous = self.construct_dkg_output()?;
         let threshold = previous.threshold;
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
@@ -711,23 +706,12 @@ impl DkgManager {
                 "Key rotation produced different public key".into(),
             ));
         }
-        let output = DkgOutput {
+        Ok(DkgOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
             commitments: combined.commitments,
             threshold: self.dkg_config.threshold,
-        };
-        self.dkg_output_store
-            .store_dkg_output(&output)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        Ok(output)
-    }
-
-    fn get_previous_dkg_output(&self) -> DkgResult<DkgOutput> {
-        self.dkg_output_store
-            .get_dkg_output()
-            .map_err(|e| DkgError::StorageError(e.to_string()))?
-            .ok_or_else(|| DkgError::ProtocolFailed("key rotation requires previous output".into()))
+        })
     }
 }
 
@@ -792,18 +776,6 @@ mod tests {
 
         fn clear(&mut self) -> anyhow::Result<()> {
             Ok(())
-        }
-    }
-
-    struct MockDkgOutputStore;
-
-    impl DkgOutputStore for MockDkgOutputStore {
-        fn store_dkg_output(&mut self, _output: &DkgOutput) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn get_dkg_output(&self) -> anyhow::Result<Option<DkgOutput>> {
-            Ok(None)
         }
     }
 
@@ -974,7 +946,6 @@ mod tests {
                 self.encryption_keys[validator_index].clone(),
                 self.signing_keys[validator_index].clone(),
                 store,
-                Box::new(MockDkgOutputStore),
             )
             .unwrap()
         }
@@ -1486,7 +1457,6 @@ mod tests {
             encryption_key,
             signing_key,
             Box::new(MockPublicMessagesStore),
-            Box::new(MockDkgOutputStore),
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -1545,7 +1515,6 @@ mod tests {
             encryption_keys[0].clone(),
             signing_keys[0].clone(),
             Box::new(MockPublicMessagesStore),
-            Box::new(MockDkgOutputStore),
         );
 
         let err = match result {
