@@ -151,6 +151,8 @@ pub struct DkgDealerMessageHash {
     pub message_hash: MessageHash,
 }
 
+/// Hash of bundled rotation messages from a single dealer.
+/// One certificate per dealer (not per share).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RotationDealerMessagesHash {
     pub dealer_address: Address,
