@@ -5,8 +5,8 @@ pub mod types;
 
 use crate::committee::{BlsSignatureAggregator, Committee};
 use crate::communication::{ChannelResult, P2PChannel, with_timeout_and_retry};
-use crate::dkg::types::MpcMessageV1::Dkg;
-use crate::dkg::types::{Certificate, DkgDealerMessageHash};
+use crate::dkg::types::MpcMessageV1::{Dkg, Rotation};
+use crate::dkg::types::{Certificate, DkgDealerMessageHash, RotationDealerMessagesHash};
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
@@ -25,12 +25,13 @@ use types::DkgConfig;
 pub use types::{
     ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult, EncryptionGroupElement,
     MessageHash, RetrieveMessageRequest, RetrieveMessageResponse, RotationMessage,
-    SendMessageRequest, SendMessageResponse, SessionId,
+    RotationMessages, SendMessageRequest, SendMessageResponse, SessionId,
 };
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 #[allow(dead_code)]
 const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
+const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed";
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -328,6 +329,7 @@ impl DkgManager {
                     dealer_weight_sum += dealer_weight as u32;
                     certified_dealers.insert(dealer);
                 }
+                Rotation(_) => continue,
             }
         }
         self.process_outputs_from_certified_dealers(certified_dealers.into_iter())
@@ -594,9 +596,9 @@ impl DkgManager {
     fn create_rotation_messages(
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<Vec<RotationMessage>> {
+    ) -> DkgResult<RotationMessages> {
         let previous = self.construct_dkg_output()?;
-        Ok(previous
+        let messages = previous
             .key_shares
             .shares
             .iter()
@@ -620,52 +622,61 @@ impl DkgManager {
                     message,
                 }
             })
-            .collect())
+            .collect();
+        Ok(RotationMessages { messages })
     }
 
     #[allow(dead_code)]
-    fn try_sign_rotation_message(
+    fn try_sign_rotation_messages(
         &mut self,
         dealer: Address,
-        rotation_message: &RotationMessage,
+        rotation_messages: &RotationMessages,
     ) -> DkgResult<BLS12381Signature> {
         let previous = self.construct_dkg_output()?;
-        let session_id = self
-            .session_id
-            .rotation_session_id(&dealer, rotation_message.share_index);
-        let commitment = previous
-            .commitments
-            .iter()
-            .find(|c| c.index == rotation_message.share_index)
-            .map(|c| c.value);
-        let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
-            session_id.to_vec(),
-            commitment,
-            self.encryption_key.clone(),
-        );
-        match receiver.process_message(&rotation_message.message)? {
-            avss::ProcessedMessage::Valid(output) => {
-                self.rotation_outputs
-                    .insert(rotation_message.share_index, output);
-                let message_hash = compute_message_hash(&rotation_message.message);
-                let signature = self.signing_key.sign(
-                    self.dkg_config.epoch,
-                    self.address,
-                    &Dkg(DkgDealerMessageHash {
-                        dealer_address: dealer,
-                        message_hash,
-                    }),
-                );
-                Ok(signature.signature().clone())
+        let mut outputs = Vec::with_capacity(rotation_messages.messages.len());
+        for rotation_message in &rotation_messages.messages {
+            let session_id = self
+                .session_id
+                .rotation_session_id(&dealer, rotation_message.share_index);
+            let commitment = previous
+                .commitments
+                .iter()
+                .find(|c| c.index == rotation_message.share_index)
+                .map(|c| c.value);
+            let receiver = avss::Receiver::new(
+                self.dkg_config.nodes.clone(),
+                self.party_id,
+                self.dkg_config.threshold,
+                session_id.to_vec(),
+                commitment,
+                self.encryption_key.clone(),
+            );
+            match receiver.process_message(&rotation_message.message)? {
+                avss::ProcessedMessage::Valid(output) => {
+                    outputs.push((rotation_message.share_index, output));
+                }
+                avss::ProcessedMessage::Complaint(_) => {
+                    return Err(DkgError::InvalidMessage {
+                        sender: dealer,
+                        reason: format!(
+                            "Invalid rotation share for index {}",
+                            rotation_message.share_index
+                        ),
+                    });
+                }
             }
-            avss::ProcessedMessage::Complaint(_) => Err(DkgError::InvalidMessage {
-                sender: dealer,
-                reason: "Invalid rotation shares".to_string(),
-            }),
         }
+        self.rotation_outputs.extend(outputs);
+        let messages_hash = compute_rotation_messages_hash(rotation_messages);
+        let signature = self.signing_key.sign(
+            self.dkg_config.epoch,
+            self.address,
+            &Rotation(RotationDealerMessagesHash {
+                dealer_address: dealer,
+                messages_hash,
+            }),
+        );
+        Ok(signature.signature().clone())
     }
 
     #[allow(dead_code)]
@@ -718,9 +729,19 @@ pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
 }
 
 fn compute_message_hash(message: &avss::Message) -> MessageHash {
-    let message_bytes = bcs::to_bytes(message).expect("serialization should always succeed");
+    let message_bytes = bcs::to_bytes(message).expect(EXPECT_SERIALIZATION_SUCCESS);
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
+    hasher.finalize().into()
+}
+
+fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
+    let mut hasher = Blake2b256::default();
+    for msg in &bundle.messages {
+        let message_bytes = bcs::to_bytes(&msg.message).expect(EXPECT_SERIALIZATION_SUCCESS);
+        hasher.update(msg.share_index.get().to_le_bytes());
+        hasher.update(&message_bytes);
+    }
     hasher.finalize().into()
 }
 
@@ -4445,6 +4466,141 @@ mod tests {
         assert!(
             !receiver_manager.dealer_outputs.contains_key(&dealer_addr),
             "Invalid message should not create dealer output"
+        );
+    }
+
+    #[test]
+    fn test_try_sign_rotation_messages_all_or_nothing() {
+        let mut rng = rand::thread_rng();
+
+        // Use different weights: [3, 2, 4, 1, 2] (total = 12)
+        // threshold = (12 - 1) / 3 + 1 = 4
+        let weights = [3, 2, 4, 1, 2];
+        let setup = TestSetup::with_weights(&weights);
+
+        // Using validators 0, 1, 4 as dealers (total weight = 3 + 2 + 2 = 7 >= threshold 4)
+        let dealer_indices = [0usize, 1, 4];
+        let mut dealer_managers: Vec<_> = dealer_indices
+            .iter()
+            .map(|&i| setup.create_manager(i))
+            .collect();
+
+        // Create receiver (party 2 with weight=4 - will receive 4 shares)
+        let mut receiver_manager = setup.create_manager(2);
+
+        // Each dealer creates a message
+        let dealer_messages: Vec<_> = dealer_managers
+            .iter()
+            .map(|dm| dm.create_dealer_message(&mut rng))
+            .collect();
+
+        // Receiver processes all dealer messages and creates certificates
+        let mut certificates = HashMap::new();
+        for (i, message) in dealer_messages.iter().enumerate() {
+            let dealer_address = dealer_managers[i].address;
+
+            // Receiver processes the message
+            receive_dealer_message(&mut receiver_manager, message, dealer_address).unwrap();
+
+            // Create a certificate by collecting signatures from other validators
+            let validator_signatures = vec![
+                receive_dealer_message(&mut dealer_managers[0], message, dealer_address).unwrap(),
+                receive_dealer_message(&mut dealer_managers[1], message, dealer_address).unwrap(),
+            ];
+
+            let cert = create_test_certificate(
+                setup.committee(),
+                message,
+                dealer_address,
+                validator_signatures,
+            )
+            .unwrap();
+
+            certificates.insert(dealer_address, cert);
+        }
+
+        // Process certificates to complete DKG
+        let _dkg_output = receiver_manager
+            .process_certificates(&certificates)
+            .unwrap();
+
+        // Create a dealer for rotation (use dealer 0)
+        let rotation_dealer_index = 0;
+        let mut rotation_dealer = setup.create_manager(rotation_dealer_index);
+        let rotation_dealer_addr = setup.address(rotation_dealer_index);
+
+        // Rotation dealer also needs to have completed DKG
+        for (i, message) in dealer_messages.iter().enumerate() {
+            let dealer_address = dealer_managers[i].address;
+            receive_dealer_message(&mut rotation_dealer, message, dealer_address).unwrap();
+        }
+        rotation_dealer.process_certificates(&certificates).unwrap();
+
+        // Create valid rotation messages from dealer
+        let rotation_messages = rotation_dealer.create_rotation_messages(&mut rng).unwrap();
+
+        // Test 1: Happy path - all valid messages should succeed
+        let rotation_outputs_before = receiver_manager.rotation_outputs.len();
+        let result =
+            receiver_manager.try_sign_rotation_messages(rotation_dealer_addr, &rotation_messages);
+
+        assert!(result.is_ok(), "All valid messages should succeed");
+        let signature = result.unwrap();
+        assert!(
+            !signature.as_ref().is_empty(),
+            "Should return valid signature"
+        );
+
+        // Verify outputs were stored (rotation_dealer has weight=3, so creates 3 rotation messages)
+        let rotation_outputs_after = receiver_manager.rotation_outputs.len();
+        assert_eq!(
+            rotation_outputs_after - rotation_outputs_before,
+            rotation_messages.messages.len(),
+            "All rotation outputs should be stored"
+        );
+
+        // Test 2: Failure path - one invalid message in bundle should reject everything
+        // Create a separate receiver to test failure case
+        let mut receiver_manager2 = setup.create_manager(2);
+        for (i, message) in dealer_messages.iter().enumerate() {
+            let dealer_address = dealer_managers[i].address;
+            receive_dealer_message(&mut receiver_manager2, message, dealer_address).unwrap();
+        }
+        receiver_manager2
+            .process_certificates(&certificates)
+            .unwrap();
+
+        // Tamper with one message in the bundle to make it invalid
+        // We swap the share_index of the first message to make the commitment check fail.
+        // The commitment for share_index X won't match the message created for share_index Y.
+        let mut tampered_messages = rotation_messages.clone();
+        if tampered_messages.messages.len() >= 2 {
+            // Swap share indices of the first two messages
+            // Message 0 will have share_index of message 1, but content from message 0
+            // This will cause commitment mismatch during validation
+            let original_index = tampered_messages.messages[0].share_index;
+            tampered_messages.messages[0].share_index = tampered_messages.messages[1].share_index;
+            tampered_messages.messages[1].share_index = original_index;
+        } else if !tampered_messages.messages.is_empty() {
+            // If only one message, use a non-existent share index
+            tampered_messages.messages[0].share_index = std::num::NonZeroU16::new(9999).unwrap();
+        }
+
+        let rotation_outputs_before = receiver_manager2.rotation_outputs.len();
+        let result =
+            receiver_manager2.try_sign_rotation_messages(rotation_dealer_addr, &tampered_messages);
+
+        // Should fail due to invalid message
+        assert!(
+            result.is_err(),
+            "Should fail when any message in bundle is invalid"
+        );
+
+        // Verify NO outputs were stored (all-or-nothing semantics)
+        let rotation_outputs_after = receiver_manager2.rotation_outputs.len();
+        assert_eq!(
+            rotation_outputs_before, rotation_outputs_after,
+            "No rotation outputs should be stored when any message fails"
         );
     }
 }
