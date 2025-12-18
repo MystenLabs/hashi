@@ -418,12 +418,11 @@ impl DkgManager {
     }
 
     fn process_outputs_from_certified_dealers(
-        &mut self,
+        &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
-            .keys()
             .map(|dealer| {
                 let dealer_party_id = self
                     .committee
@@ -1752,7 +1751,7 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
-        let mut receiver_manager = setup.create_manager(0);
+        let receiver_manager = setup.create_manager(0);
 
         // Create dealers
         let dealer_addr0 = setup.address(1);
