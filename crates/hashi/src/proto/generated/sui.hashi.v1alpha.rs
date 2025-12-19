@@ -844,7 +844,6 @@ pub mod dkg_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-/// A single rotation message for a specific share index.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RotationMessage {
     /// The share index being reshared.
@@ -975,7 +974,7 @@ pub mod key_rotation_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Send rotation messages (bundled) to a party and receive their signature.
+        /// Send rotation messages to a party and receive their signature.
         pub async fn send_rotation_messages(
             &mut self,
             request: impl tonic::IntoRequest<super::SendRotationMessagesRequest>,
@@ -1050,7 +1049,7 @@ pub mod key_rotation_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with KeyRotationServiceServer.
     #[async_trait]
     pub trait KeyRotationService: std::marker::Send + std::marker::Sync + 'static {
-        /// Send rotation messages (bundled) to a party and receive their signature.
+        /// Send rotation messages to a party and receive their signature.
         async fn send_rotation_messages(
             &self,
             request: tonic::Request<super::SendRotationMessagesRequest>,
