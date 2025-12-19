@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+import "sui/rpc/v2/bcs.proto";
+
+service KeyRotationService {
+  // Send rotation messages to a party and receive their signature.
+  rpc SendRotationMessages(SendRotationMessagesRequest) returns (SendRotationMessagesResponse);
+
+  // Retrieve a dealer's rotation messages from the certificate signers.
+  rpc RetrieveRotationMessages(RetrieveRotationMessagesRequest) returns (RetrieveRotationMessagesResponse);
+}
+
+message RotationMessage {
+  // The share index being reshared.
+  optional uint32 share_index = 1;
+
+  // The AVSS message for this share.
+  optional sui.rpc.v2.Bcs message = 2;
+}
+
+message SendRotationMessagesRequest {
+  // The epoch for this rotation instance.
+  optional uint64 epoch = 1;
+
+  // The bundle of rotation messages (one per share the dealer holds).
+  repeated RotationMessage messages = 2;
+}
+
+message SendRotationMessagesResponse {
+  // The BLS12-381 signature from the receiving validator.
+  optional bytes signature = 1;
+}
+
+message RetrieveRotationMessagesRequest {
+  // The epoch for this rotation instance.
+  optional uint64 epoch = 1;
+
+  // The hex-encoded Sui address of the dealer whose messages are requested.
+  optional string dealer = 2;
+}
+
+message RetrieveRotationMessagesResponse {
+  // The bundle of rotation messages.
+  repeated RotationMessage messages = 1;
+}

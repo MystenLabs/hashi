@@ -115,6 +115,26 @@ pub struct RotationMessages {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendRotationMessagesRequest {
+    pub messages: RotationMessages,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendRotationMessagesResponse {
+    pub signature: BLS12381Signature,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrieveRotationMessagesRequest {
+    pub dealer: Address,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrieveRotationMessagesResponse {
+    pub messages: RotationMessages,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageRequest {
     pub message: avss::Message,
 }
