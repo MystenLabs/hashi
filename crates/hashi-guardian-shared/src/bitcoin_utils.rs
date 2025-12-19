@@ -77,17 +77,13 @@ pub enum OutputUTXO {
     },
 }
 
-/// A container for output UTXOs
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct OutputUTXOVec(Vec<OutputUTXO>);
-
 /// All the UTXOs associated with a withdrawal transaction
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TxUTXOs {
     /// Inputs: internal
     inputs: Vec<InputUTXO>,
     /// Outputs: either external or internal
-    outputs: OutputUTXOVec,
+    outputs: Vec<OutputUTXO>,
 }
 
 // ---------------------------------
@@ -236,39 +232,12 @@ impl OutputUTXO {
     }
 }
 
-impl OutputUTXOVec {
-    /// Constructs a new `OutputUTXOVec` and validates structural invariants.
-    pub fn new(utxos: Vec<OutputUTXO>) -> GuardianResult<Self> {
-        let v = Self(utxos);
-        v.validate_invariants()?;
-        Ok(v)
-    }
-
-    /// Validates this value, including that each output is valid for `network`.
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        self.validate_invariants()?;
-        self.0.iter().try_for_each(|utxo| utxo.validate(network))
-    }
-
-    /// Validates network-independent structural invariants.
-    fn validate_invariants(&self) -> GuardianResult<()> {
-        if self.0.is_empty() {
-            Err(InvalidInputs("output UTXOs must not be empty".into()))
-        } else {
-            Ok(())
-        }
-    }
-}
-
 impl TxUTXOs {
     /// Constructs a new `TxUTXOs` and validates structural invariants.
     ///
     /// To validate addresses for a specific network, call `validate(network)`.
     pub fn new(inputs: Vec<InputUTXO>, outputs: Vec<OutputUTXO>) -> GuardianResult<Self> {
-        let tx_info = Self {
-            inputs,
-            outputs: OutputUTXOVec::new(outputs)?,
-        };
+        let tx_info = Self { inputs, outputs };
         tx_info.validate_invariants()?;
         Ok(tx_info)
     }
@@ -279,13 +248,18 @@ impl TxUTXOs {
         self.inputs
             .iter()
             .try_for_each(|utxo| utxo.validate(network))?;
-        self.outputs.validate(network)
+        self.outputs
+            .iter()
+            .try_for_each(|utxo| utxo.validate(network))
     }
 
     /// Validates network-independent structural invariants.
     fn validate_invariants(&self) -> GuardianResult<()> {
         if self.inputs.is_empty() {
             return Err(InvalidInputs("input utxos must not be empty".into()));
+        }
+        if self.outputs.is_empty() {
+            return Err(InvalidInputs("output utxos must not be empty".into()));
         }
 
         // Disallow duplicate inputs (same txid,vout), which would result in an invalid transaction.
@@ -299,8 +273,6 @@ impl TxUTXOs {
             }
         }
 
-        self.outputs.validate_invariants()?;
-
         // Enforce the intended invariant: fees > 0.
         let _ = self.fees()?;
 
@@ -313,7 +285,7 @@ impl TxUTXOs {
     }
 
     /// Returns a reference to the outputs.
-    pub fn get_outputs(&self) -> &OutputUTXOVec {
+    pub fn get_outputs(&self) -> &[OutputUTXO] {
         &self.outputs
     }
 
@@ -330,7 +302,6 @@ impl TxUTXOs {
         network: Network,
     ) -> Vec<TxOut> {
         self.outputs
-            .0
             .iter()
             .map(|utxo| utxo.to_txout(enclave_pubkey, hashi_pubkey, network))
             .collect()
@@ -338,7 +309,7 @@ impl TxUTXOs {
 
     fn fees(&self) -> GuardianResult<Amount> {
         let input_sum = self.inputs.iter().map(|utxo| utxo.amount).sum::<Amount>();
-        let output_sum = self.outputs.0.iter().map(|utxo| utxo.amount()).sum();
+        let output_sum = self.outputs.iter().map(|utxo| utxo.amount()).sum();
         if input_sum <= output_sum {
             return Err(InvalidInputs(format!(
                 "fees must be positive: input_sum={} output_sum={}",
