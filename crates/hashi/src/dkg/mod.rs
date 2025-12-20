@@ -56,7 +56,6 @@ pub use types::SendRotationMessagesResponse;
 pub use types::SessionId;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
-#[allow(dead_code)]
 const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed";
 
@@ -937,7 +936,6 @@ impl DkgManager {
         )))
     }
 
-    #[allow(dead_code)]
     fn create_rotation_messages(
         &self,
         previous_dkg_output: &DkgOutput,
@@ -971,7 +969,6 @@ impl DkgManager {
         RotationMessages { messages }
     }
 
-    #[allow(dead_code)]
     fn try_sign_rotation_messages(
         &mut self,
         previous_dkg_output: &DkgOutput,
@@ -1063,7 +1060,6 @@ impl DkgManager {
         Ok(signature.signature().clone())
     }
 
-    #[allow(dead_code)]
     fn process_rotation_certificates(
         &mut self,
         previous_dkg_output: &DkgOutput,
@@ -1105,7 +1101,6 @@ impl DkgManager {
         })
     }
 
-    #[allow(dead_code)]
     fn reconstruct_previous_dkg_output(
         &mut self,
         certificates: &[Certificate],
