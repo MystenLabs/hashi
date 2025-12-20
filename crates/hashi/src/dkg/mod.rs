@@ -856,7 +856,7 @@ impl DkgManager {
             match with_timeout_and_retry(|| {
                 p2p_channel.retrieve_rotation_messages(&signer_address, &request)
             })
-                .await
+            .await
             {
                 Ok(response) => {
                     let messages_hash = compute_rotation_messages_hash(&response.messages);
@@ -1200,11 +1200,12 @@ async fn send_rotation_messages_to_many(
         let addr = *addr;
         async move {
             let result =
-                with_timeout_and_retry(|| p2p_channel.send_rotation_messages(&addr, request)).await;
+                with_timeout_and_retry(|| p2p_channel.send_rotation_messages(&addr, request))
+                    .await;
             (addr, result)
         }
     }))
-        .await
+    .await
 }
 
 #[cfg(test)]
@@ -5482,7 +5483,7 @@ mod tests {
                     addr,
                     vec![own_member_sig, test_member_sig],
                 )
-                    .unwrap();
+                .unwrap();
                 rotation_certificates.push(cert);
             }
         }
