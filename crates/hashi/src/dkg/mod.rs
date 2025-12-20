@@ -788,15 +788,6 @@ impl DkgManager {
             )
         })?;
         for signer_address in signers {
-            if signer_address == self.address {
-                tracing::error!(
-                    "Self in certificate signers but message not available for dealer {:?}.",
-                    message.dealer_address
-                );
-                return Err(DkgError::ProtocolFailed(
-                    "Self in certificate signers but message not available".to_string(),
-                ));
-            }
             match with_timeout_and_retry(|| p2p_channel.retrieve_message(&signer_address, &request))
                 .await
             {
@@ -850,9 +841,6 @@ impl DkgManager {
             )
         })?;
         for signer_address in signers {
-            if signer_address == self.address {
-                continue;
-            }
             match with_timeout_and_retry(|| {
                 p2p_channel.retrieve_rotation_messages(&signer_address, &request)
             })
@@ -1200,8 +1188,7 @@ async fn send_rotation_messages_to_many(
         let addr = *addr;
         async move {
             let result =
-                with_timeout_and_retry(|| p2p_channel.send_rotation_messages(&addr, request))
-                    .await;
+                with_timeout_and_retry(|| p2p_channel.send_rotation_messages(&addr, request)).await;
             (addr, result)
         }
     }))
