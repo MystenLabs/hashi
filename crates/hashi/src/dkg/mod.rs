@@ -5407,15 +5407,15 @@ mod tests {
         let test_addr = setup.address(0);
 
         // Set up previous_dkg_output for all other managers (they need it to verify rotation messages)
-        let dkg_certs_map: HashMap<_, _> = dkg_certificates
+        let certified_dealers: HashSet<_> = dkg_certificates
             .iter()
             .map(|c| match &c.message {
-                Dkg(m) => (m.dealer_address, c.clone()),
+                Dkg(m) => m.dealer_address,
                 _ => panic!("Expected DKG certificate"),
             })
             .collect();
         for manager in managers.iter_mut() {
-            let output = manager.process_certificates(&dkg_certs_map).unwrap();
+            let output = manager.process_certificates(&certified_dealers).unwrap();
             manager.previous_dkg_output = Some(output);
         }
 
@@ -5429,7 +5429,9 @@ mod tests {
 
         // Phase 3: Pre-create rotation certificates from other validators to put on TOB
         // First, test_manager needs to reconstruct its previous DKG output
-        let test_dkg_output = test_manager.process_certificates(&dkg_certs_map).unwrap();
+        let test_dkg_output = test_manager
+            .process_certificates(&certified_dealers)
+            .unwrap();
         test_manager.previous_dkg_output = Some(test_dkg_output.clone());
 
         // Create rotation messages and certificates for other validators
