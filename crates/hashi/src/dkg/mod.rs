@@ -140,10 +140,9 @@ impl DkgManager {
         let message = self
             .dealer_messages
             .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("Message not available".to_string()))?;
-        Ok(RetrieveMessageResponse {
-            message: message.clone(),
-        })
+            .ok_or_else(|| DkgError::ProtocolFailed("Message not available".to_string()))?
+            .clone();
+        Ok(RetrieveMessageResponse { message })
     }
 
     /// RPC endpoint handler for `ComplainRequest`
@@ -219,7 +218,7 @@ impl DkgManager {
             }),
         );
         aggregator
-            .add_signature_from(self.address, my_signature.clone())
+            .add_signature_from(self.address, my_signature)
             .expect("first signature should always be valid");
         let recipients: Vec<_> = self
             .committee
@@ -229,7 +228,7 @@ impl DkgManager {
             .filter(|addr| *addr != self.address)
             .collect();
         let request = SendMessageRequest {
-            message: dealer_message.clone(),
+            message: dealer_message,
         };
         let results = send_dkg_message_to_many(p2p_channel, &recipients, &request).await;
         for (addr, result) in results {
@@ -263,7 +262,7 @@ impl DkgManager {
         p2p_channel: &impl crate::communication::P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
     ) -> DkgResult<DkgOutput> {
-        let mut certified_dealers = HashMap::new();
+        let mut certified_dealers = Vec::new();
         let mut dealer_weight_sum = 0u32;
         loop {
             if dealer_weight_sum >= self.dkg_config.threshold as u32 {
@@ -276,7 +275,7 @@ impl DkgManager {
             match cert.message {
                 Dkg(ref message) => {
                     let dealer = message.dealer_address;
-                    if certified_dealers.contains_key(&dealer) {
+                    if certified_dealers.contains(&dealer) {
                         continue;
                     }
                     if let Err(e) = self.committee.verify_signature(&cert) {
@@ -305,11 +304,6 @@ impl DkgManager {
                                 e
                             })?;
                     }
-                    if !self.dealer_outputs.contains_key(&dealer)
-                        && !self.complaints_to_process.contains_key(&dealer)
-                    {
-                        self.process_certified_dealer_message(&dealer)?;
-                    }
                     if self.complaints_to_process.contains_key(&dealer) {
                         self.recover_shares_via_complaint(
                             &dealer,
@@ -318,16 +312,18 @@ impl DkgManager {
                             p2p_channel,
                         )
                         .await?;
+                    } else if !self.dealer_outputs.contains_key(&dealer) {
+                        self.process_certified_dealer_message(&dealer)?;
                     }
                     let dealer_weight = self.committee.weight_of(&dealer).map_err(|_| {
                         DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                     })?;
                     dealer_weight_sum += dealer_weight as u32;
-                    certified_dealers.insert(dealer, cert.clone());
+                    certified_dealers.push(dealer);
                 }
             }
         }
-        self.process_certificates(&certified_dealers)
+        self.process_outputs_from_dealers(&certified_dealers)
     }
 
     fn create_dealer_message(
@@ -414,13 +410,10 @@ impl DkgManager {
         Ok(())
     }
 
-    fn process_certificates(
-        &self,
-        certified_dealers: &HashMap<Address, Certificate>,
-    ) -> DkgResult<DkgOutput> {
+    fn process_outputs_from_dealers(&self, certified_dealers: &[Address]) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
-            .keys()
+            .iter()
             .map(|dealer| {
                 let dealer_party_id = self
                     .committee
@@ -1582,7 +1575,7 @@ mod tests {
             .collect();
 
         // Receiver processes all dealer messages and creates certificates
-        let mut certificates = HashMap::new();
+        let mut certificates = Vec::new();
         for (i, message) in dealer_messages.iter().enumerate() {
             let dealer_address = dealer_managers[i].address;
 
@@ -1598,21 +1591,12 @@ mod tests {
                 receive_dealer_message(&mut dealer_managers[1], message, dealer_address).unwrap(),
             ];
 
-            // Create certificate using helper
-            let cert = create_test_certificate(
-                setup.committee(),
-                message,
-                dealer_address,
-                validator_signatures,
-            )
-            .unwrap();
-
-            certificates.insert(dealer_address, cert);
+            certificates.push(dealer_address);
         }
 
         // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_certificates(&certificates)
+            .process_outputs_from_dealers(&certificates)
             .unwrap();
 
         // Verify output structure
@@ -1623,39 +1607,21 @@ mod tests {
 
     #[test]
     fn test_process_certificates_missing_dealer_output() {
-        let mut rng = rand::thread_rng();
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
         let receiver_manager = setup.create_manager(0);
 
         // Create dealers
-        let dealer0 = setup.create_manager(1);
-        let dealer1 = setup.create_manager(2);
         let dealer_addr0 = setup.address(1);
         let dealer_addr1 = setup.address(2);
 
-        let message0 = dealer0.create_dealer_message(&mut rng);
-        let message1 = dealer1.create_dealer_message(&mut rng);
-
-        // Create a validator to sign the dealer messages
-        let mut validator = setup.create_manager(3);
-
-        // Create certificates (using actual BLS signatures from validator)
-        let sig0 = receive_dealer_message(&mut validator, &message0, dealer_addr0).unwrap();
-        let cert0 = create_test_certificate(setup.committee(), &message0, dealer_addr0, vec![sig0])
-            .unwrap();
-
-        let sig1 = receive_dealer_message(&mut validator, &message1, dealer_addr1).unwrap();
-        let cert1 = create_test_certificate(setup.committee(), &message1, dealer_addr1, vec![sig1])
-            .unwrap();
-
-        let mut certificates = HashMap::new();
-        certificates.insert(dealer_addr0, cert0);
-        certificates.insert(dealer_addr1, cert1);
+        let mut certified_dealers = Vec::new();
+        certified_dealers.push(dealer_addr0);
+        certified_dealers.push(dealer_addr1);
 
         // Process certificates should fail because receiver never processed the dealer messages
-        let result = receiver_manager.process_certificates(&certificates);
+        let result = receiver_manager.process_outputs_from_dealers(&certified_dealers);
         assert!(result.is_err());
         assert!(
             result
@@ -2077,7 +2043,7 @@ mod tests {
         // Create certificates with signers (excluding party 2 who has complaint)
         let cert_0 = create_certificate_with_signers(
             setup.committee(),
-            &dealer_0_addr,
+            dealer_0_addr,
             &dealer_0_message,
             [
                 (0usize, setup.address(0)),
@@ -2092,7 +2058,7 @@ mod tests {
 
         let cert_1 = create_certificate_with_signers(
             setup.committee(),
-            &dealer_1_addr,
+            dealer_1_addr,
             &dealer_1_message,
             [
                 (0usize, setup.address(0)),
@@ -2988,7 +2954,7 @@ mod tests {
         // Create certificates with signers (excluding party 2 who has complaint)
         let cert0 = create_certificate_with_signers(
             setup.committee(),
-            &dealer0_addr,
+            dealer0_addr,
             &dealer0_message,
             [
                 (0usize, setup.address(0)),
@@ -3002,7 +2968,7 @@ mod tests {
         .unwrap();
         let cert1 = create_certificate_with_signers(
             setup.committee(),
-            &dealer1_addr,
+            dealer1_addr,
             &dealer1_message,
             [
                 (0usize, setup.address(0)),
@@ -3399,7 +3365,7 @@ mod tests {
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
             committee,
-            &dealer_addr,
+            dealer_addr,
             dealer_message,
             [(1usize, party_addr)]
                 .iter()
@@ -3681,7 +3647,7 @@ mod tests {
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
             committee,
-            &dealer_address,
+            dealer_address,
             dealer_message,
             vec![dealer_signature],
         )
@@ -3743,7 +3709,7 @@ mod tests {
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
             committee,
-            &dealer_addr,
+            dealer_addr,
             dealer_message,
             vec![validator_1_signature, dealer_signature],
         )
@@ -3796,7 +3762,7 @@ mod tests {
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
             committee,
-            &dealer_addr,
+            dealer_addr,
             dealer_message,
             vec![party_signature, dealer_signature],
         )
@@ -3856,7 +3822,7 @@ mod tests {
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
             committee,
-            &dealer_addr,
+            dealer_addr,
             dealer_message,
             vec![signer_2_signature, signer_3_signature],
         )
@@ -3931,7 +3897,7 @@ mod tests {
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
             committee,
-            &dealer_a_addr,
+            dealer_a_addr,
             &message_a,
             vec![byzantine_signature, dealer_a_signature],
         )
@@ -3957,13 +3923,13 @@ mod tests {
     }
     fn create_certificate_with_signers(
         committee: &Committee,
-        dealer_address: &Address,
+        dealer_address: Address,
         message: &avss::Message,
         signatures: Vec<MemberSignature>,
     ) -> DkgResult<Certificate> {
         let message_hash = compute_message_hash(message);
         let dkg_message = Dkg(DkgDealerMessageHash {
-            dealer_address: *dealer_address,
+            dealer_address,
             message_hash,
         });
 
