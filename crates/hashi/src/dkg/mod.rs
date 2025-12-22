@@ -245,7 +245,7 @@ impl DkgManager {
             .rotation_dealer_messages
             .get(&request.dealer)
             .ok_or_else(|| {
-                DkgError::ProtocolFailed("Rotation messages not available".to_string())
+                DkgError::NotFound(format!("Rotation messages for dealer {:?}", request.dealer))
             })?;
         Ok(RetrieveRotationMessagesResponse {
             messages: messages.clone(),

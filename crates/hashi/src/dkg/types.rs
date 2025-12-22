@@ -223,6 +223,9 @@ pub enum DkgError {
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
 
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     #[error("Protocol failed: {0}")]
     ProtocolFailed(String),
 }
