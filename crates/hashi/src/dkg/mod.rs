@@ -204,12 +204,12 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
-        let dealer_message = self.create_dealer_message(rng);
-        self.store_message(self.address, &dealer_message)?;
+        let message = self.create_dealer_message(rng);
+        self.store_message(self.address, &message)?;
         let my_signature = self
-            .try_sign_message(self.address, &dealer_message)
+            .try_sign_message(self.address, &message)
             .expect("own message should always be valid");
-        let message_hash = compute_message_hash(&dealer_message);
+        let message_hash = compute_message_hash(&message);
         let mut aggregator = BlsSignatureAggregator::new(
             &self.committee,
             Dkg(DkgDealerMessageHash {
@@ -227,15 +227,12 @@ impl DkgManager {
             .map(|m| m.validator_address())
             .filter(|addr| *addr != self.address)
             .collect();
-        let request = SendMessageRequest {
-            message: dealer_message,
-        };
+        let request = SendMessageRequest { message };
         let results = send_dkg_message_to_many(p2p_channel, &recipients, &request).await;
         for (addr, result) in results {
             match result {
                 Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature.clone())
-                    {
+                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
                         tracing::info!("Invalid signature from {:?}: {}", addr, e);
                     }
                 }
