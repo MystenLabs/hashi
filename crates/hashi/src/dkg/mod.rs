@@ -323,7 +323,7 @@ impl DkgManager {
                 }
             }
         }
-        self.process_outputs_from_dealers(certified_dealers.into_iter())
+        self.process_outputs_from_certified_dealers(certified_dealers.into_iter())
     }
 
     fn create_dealer_message(
@@ -410,7 +410,7 @@ impl DkgManager {
         Ok(())
     }
 
-    fn process_outputs_from_dealers(
+    fn process_outputs_from_certified_dealers(
         &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
@@ -1589,7 +1589,7 @@ mod tests {
 
         // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_outputs_from_dealers(certificates.into_iter())
+            .process_outputs_from_certified_dealers(certificates.into_iter())
             .unwrap();
 
         // Verify output structure
@@ -1614,7 +1614,8 @@ mod tests {
         certified_dealers.push(dealer_addr1);
 
         // Process certificates should fail because receiver never processed the dealer messages
-        let result = receiver_manager.process_outputs_from_dealers(certified_dealers.into_iter());
+        let result =
+            receiver_manager.process_outputs_from_certified_dealers(certified_dealers.into_iter());
         assert!(result.is_err());
         assert!(
             result
