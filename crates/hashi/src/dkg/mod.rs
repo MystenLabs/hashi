@@ -796,13 +796,8 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
 }
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
-    let mut hasher = Blake2b256::default();
-    for msg in &bundle.messages {
-        let message_bytes = bcs::to_bytes(&msg.message).expect(EXPECT_SERIALIZATION_SUCCESS);
-        hasher.update(msg.share_index.get().to_le_bytes());
-        hasher.update(&message_bytes);
-    }
-    hasher.finalize().into()
+    let bytes = bcs::to_bytes(bundle).expect(EXPECT_SERIALIZATION_SUCCESS);
+    Blake2b256::digest(&bytes).into()
 }
 
 async fn send_dkg_message_to_many(
