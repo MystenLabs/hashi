@@ -314,9 +314,11 @@ impl DkgManager {
     ) -> DkgResult<DkgOutput> {
         let previous = self.reconstruct_previous_dkg_output(dkg_certificates)?;
         self.previous_dkg_output = Some(previous.clone());
-        if let Err(e) = self
-            .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
-            .await
+        if ordered_broadcast_channel.existing_certificate_weight()
+            < self.dkg_config.threshold as u32
+            && let Err(e) = self
+                .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
+                .await
         {
             tracing::error!(
                 "Rotation dealer phase failed: {}. Continuing as party only.",
