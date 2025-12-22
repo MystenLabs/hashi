@@ -106,6 +106,7 @@ public(package) fun new_member(
     sui_system: &sui_system::sui_system::SuiSystemState,
     public_key: vector<u8>,
     proof_of_possession_signature: vector<u8>,
+    encryption_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
     let validator_address = ctx.sender();
@@ -120,13 +121,15 @@ public(package) fun new_member(
         proof_of_possession_signature,
     );
 
+    assert!(encryption_public_key.length() == 32);
+
     let member = MemberInfo {
         validator_address: validator_address,
         operator_address: validator_address,
         next_epoch_public_key: next_epoch_public_key,
         https_address: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
-        next_epoch_encryption_public_key: std::vector::empty(),
+        next_epoch_encryption_public_key: encryption_public_key,
     };
 
     committee_set.insert_member(member);

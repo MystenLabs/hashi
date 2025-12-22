@@ -9,10 +9,19 @@ public fun register(
     sui_system: &sui_system::sui_system::SuiSystemState,
     public_key: vector<u8>,
     proof_of_possession_signature: vector<u8>,
+    encryption_public_key: vector<u8>,
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
-    self.committee_set_mut().new_member(sui_system, public_key, proof_of_possession_signature, ctx);
+    self
+        .committee_set_mut()
+        .new_member(
+            sui_system,
+            public_key,
+            proof_of_possession_signature,
+            encryption_public_key,
+            ctx,
+        );
 }
 
 //TODO require the validator address passed in to better support operator address
