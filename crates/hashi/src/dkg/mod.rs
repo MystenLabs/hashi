@@ -304,7 +304,7 @@ impl DkgManager {
                     if !self.dealer_outputs.contains_key(&dealer)
                         && !self.complaints_to_process.contains_key(&dealer)
                     {
-                        self.process_certified_dealer_message(&dealer)?;
+                        self.process_certified_dealer_message(dealer)?;
                     }
                     if self.complaints_to_process.contains_key(&dealer) {
                         self.recover_shares_via_complaint(
@@ -385,12 +385,12 @@ impl DkgManager {
         }
     }
 
-    fn process_certified_dealer_message(&mut self, dealer: &Address) -> DkgResult<()> {
+    fn process_certified_dealer_message(&mut self, dealer: Address) -> DkgResult<()> {
         let message = self
             .dealer_messages
-            .get(dealer)
+            .get(&dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?;
-        let dealer_session_id = self.session_id.dealer_session_id(dealer);
+        let dealer_session_id = self.session_id.dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -401,10 +401,10 @@ impl DkgManager {
         );
         match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => {
-                self.dealer_outputs.insert(*dealer, output);
+                self.dealer_outputs.insert(dealer, output);
             }
             avss::ProcessedMessage::Complaint(complaint) => {
-                self.complaints_to_process.insert(*dealer, complaint);
+                self.complaints_to_process.insert(dealer, complaint);
             }
         }
         Ok(())
@@ -1609,9 +1609,7 @@ mod tests {
         let dealer_addr0 = setup.address(1);
         let dealer_addr1 = setup.address(2);
 
-        let mut certified_dealers = Vec::new();
-        certified_dealers.push(dealer_addr0);
-        certified_dealers.push(dealer_addr1);
+        let certified_dealers = vec![dealer_addr0, dealer_addr1];
 
         // Process certificates should fail because receiver never processed the dealer messages
         let result =
