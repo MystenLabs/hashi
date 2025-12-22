@@ -1577,19 +1577,20 @@ mod tests {
             .collect();
 
         // Receiver processes all dealer messages and creates certificates
-        let mut certificates = Vec::new();
-        for (i, message) in dealer_messages.iter().enumerate() {
-            let dealer_address = dealer_managers[i].address;
-
-            // Receiver processes the message
-            let _sig = receive_dealer_message(&mut receiver_manager, message, dealer_address);
-
-            certificates.push(dealer_address);
-        }
+        let certified_dealers = dealer_messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| {
+                let dealer_address = dealer_managers[i].address;
+                // Receiver processes the message
+                let _sig = receive_dealer_message(&mut receiver_manager, message, dealer_address);
+                dealer_address
+            })
+            .collect::<Vec<_>>();
 
         // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_outputs_from_certified_dealers(certificates.into_iter())
+            .process_outputs_from_certified_dealers(certified_dealers.into_iter())
             .unwrap();
 
         // Verify output structure
@@ -2013,7 +2014,7 @@ mod tests {
             .store_message(dealer_1_addr, &dealer_1_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(&dealer_1_addr)
+            .process_certified_dealer_message(dealer_1_addr)
             .unwrap();
         assert!(
             party_manager
@@ -3227,7 +3228,7 @@ mod tests {
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(&dealer_addr)
+            .process_certified_dealer_message(dealer_addr)
             .unwrap();
         assert!(
             party_manager
@@ -3286,7 +3287,7 @@ mod tests {
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(&dealer_addr)
+            .process_certified_dealer_message(dealer_addr)
             .unwrap();
         assert!(
             party_manager
@@ -3448,7 +3449,7 @@ mod tests {
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(&dealer_addr)
+            .process_certified_dealer_message(dealer_addr)
             .unwrap();
         assert!(
             party_manager
@@ -3507,7 +3508,7 @@ mod tests {
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(&dealer_addr)
+            .process_certified_dealer_message(dealer_addr)
             .unwrap();
         assert!(
             party_manager
@@ -3560,7 +3561,7 @@ mod tests {
             .store_message(dealer_addr, &dealer_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(&dealer_addr)
+            .process_certified_dealer_message(dealer_addr)
             .unwrap();
 
         // Pre-collect complaint responses from parties 3 and 4
@@ -3662,7 +3663,7 @@ mod tests {
 
         // Process the message to verify it's valid
         party_manager
-            .process_certified_dealer_message(&dealer_address)
+            .process_certified_dealer_message(dealer_address)
             .unwrap();
         assert!(party_manager.dealer_outputs.contains_key(&dealer_address));
     }
@@ -4296,7 +4297,7 @@ mod tests {
 
         // Now process the message - should create a complaint
         receiver_manager
-            .process_certified_dealer_message(&dealer_addr)
+            .process_certified_dealer_message(dealer_addr)
             .unwrap();
 
         assert!(
