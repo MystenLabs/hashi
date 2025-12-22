@@ -3,7 +3,6 @@
 use crate::committee::{BLS12381Signature, CommitteeSignature};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::threshold_schnorr::avss::ReceiverOutput;
 use fastcrypto_tbls::types::ShareIndex;
 use fastcrypto_tbls::{
     polynomial::Eval,

@@ -17,7 +17,7 @@ use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
 use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
 use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
 use futures::future::join_all;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use sui_sdk_types::Address;
 use types::DkgConfig;
@@ -262,7 +262,7 @@ impl DkgManager {
         p2p_channel: &impl crate::communication::P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
     ) -> DkgResult<DkgOutput> {
-        let mut certified_dealers = Vec::new();
+        let mut certified_dealers = HashSet::new();
         let mut dealer_weight_sum = 0u32;
         loop {
             if dealer_weight_sum >= self.dkg_config.threshold as u32 {
@@ -319,11 +319,11 @@ impl DkgManager {
                         DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                     })?;
                     dealer_weight_sum += dealer_weight as u32;
-                    certified_dealers.push(dealer);
+                    certified_dealers.insert(dealer);
                 }
             }
         }
-        self.process_outputs_from_dealers(&certified_dealers)
+        self.process_outputs_from_dealers(certified_dealers.into_iter())
     }
 
     fn create_dealer_message(
@@ -410,19 +410,21 @@ impl DkgManager {
         Ok(())
     }
 
-    fn process_outputs_from_dealers(&self, certified_dealers: &[Address]) -> DkgResult<DkgOutput> {
+    fn process_outputs_from_dealers(
+        &self,
+        certified_dealers: impl Iterator<Item = Address>,
+    ) -> DkgResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
-            .iter()
             .map(|dealer| {
                 let dealer_party_id = self
                     .committee
-                    .index_of(dealer)
+                    .index_of(&dealer)
                     .expect("certified dealer must be committee member")
                     as u16;
                 let output = self
                     .dealer_outputs
-                    .get(dealer)
+                    .get(&dealer)
                     .ok_or_else(|| {
                         DkgError::ProtocolFailed(format!(
                             "No dealer output found for dealer: {:?}.",
@@ -1560,7 +1562,7 @@ mod tests {
 
         // Using validators 0, 1, 4 as dealers
         let dealer_indices = [0usize, 1, 4];
-        let mut dealer_managers: Vec<_> = dealer_indices
+        let dealer_managers: Vec<_> = dealer_indices
             .iter()
             .map(|&i| setup.create_manager(i))
             .collect();
@@ -1582,21 +1584,12 @@ mod tests {
             // Receiver processes the message
             let _sig = receive_dealer_message(&mut receiver_manager, message, dealer_address);
 
-            // Create a certificate by collecting signatures from other validators
-            // Using validators 0 and 1 with weights 3 and 2 respectively (total = 5)
-            let validator_signatures = vec![
-                // Validator 0 (weight=3) signs
-                receive_dealer_message(&mut dealer_managers[0], message, dealer_address).unwrap(),
-                // Validator 1 (weight=2) signs
-                receive_dealer_message(&mut dealer_managers[1], message, dealer_address).unwrap(),
-            ];
-
             certificates.push(dealer_address);
         }
 
         // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_outputs_from_dealers(&certificates)
+            .process_outputs_from_dealers(certificates.into_iter())
             .unwrap();
 
         // Verify output structure
@@ -1621,7 +1614,7 @@ mod tests {
         certified_dealers.push(dealer_addr1);
 
         // Process certificates should fail because receiver never processed the dealer messages
-        let result = receiver_manager.process_outputs_from_dealers(&certified_dealers);
+        let result = receiver_manager.process_outputs_from_dealers(certified_dealers.into_iter());
         assert!(result.is_err());
         assert!(
             result
