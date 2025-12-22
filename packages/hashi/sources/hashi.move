@@ -1,17 +1,13 @@
-#[allow(unused_function, unused_field, unused_use)]
 /// Module: hashi
 module hashi::hashi;
 
 use hashi::{
-    btc::BTC,
     committee::Committee,
     committee_set::CommitteeSet,
-    config::{Self, Config},
+    config::Config,
     proposal_set::{Self, ProposalSet},
     treasury::Treasury
 };
-use std::string::String;
-use sui::{bag::{Self, Bag}, balance::Balance, coin::Coin, object_bag::ObjectBag, sui::SUI};
 
 public struct Hashi has key {
     id: UID,
@@ -21,53 +17,6 @@ public struct Hashi has key {
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: ProposalSet,
-}
-
-public fun deposit(
-    hashi: &mut Hashi,
-    request: hashi::deposit_queue::DepositRequest,
-    fee: Coin<SUI>,
-) {
-    hashi.config.assert_version_enabled();
-
-    // Check if state is PAUSED
-    assert!(!hashi.config.paused());
-
-    // Check that the fee is sufficient
-    assert!(hashi.config.deposit_fee() == fee.value());
-    hashi.treasury.deposit_fee(fee);
-
-    hashi.deposit_queue.insert(request);
-}
-
-public fun confirm_deposit(
-    hashi: &mut Hashi,
-    utxo_id: hashi::utxo::UtxoId,
-    // cert: Cert
-    ctx: &mut TxContext,
-) {
-    hashi.config.assert_version_enabled();
-
-    // Check if state is PAUSED
-    assert!(!hashi.config.paused());
-
-    let request = hashi.deposit_queue.remove(utxo_id);
-
-    // verify cert over the request
-    // cert.verify(&request)
-
-    let utxo = request.into_utxo();
-    let derivation_path = utxo.derivation_path();
-
-    if (derivation_path.is_some()) {
-        let recipient = derivation_path.destroy_some();
-        let amount = utxo.amount();
-        // XXX Do we want to check an inflow limit here?
-        let btc = hashi.treasury.mint<BTC>(amount, ctx);
-        sui::transfer::public_transfer(btc, recipient);
-    };
-
-    hashi.utxo_pool.insert(utxo);
 }
 
 #[allow(unused_function)]
@@ -111,48 +60,6 @@ entry fun register_upgrade_cap(
     self.config_mut().set_upgrade_cap(upgrade_cap);
 }
 
-// TODO move most/all of these functions to their own module for better orginization
-public fun register_validator(
-    self: &mut Hashi,
-    sui_system: &sui_system::sui_system::SuiSystemState,
-    public_key: vector<u8>,
-    proof_of_possession_signature: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version_enabled();
-    self.committee_set.new_member(sui_system, public_key, proof_of_possession_signature, ctx);
-}
-
-//TODO require the validator address passed in to better support operator address
-public fun update_https_address(self: &mut Hashi, https_address: String, ctx: &mut TxContext) {
-    self.config.assert_version_enabled();
-
-    self.committee_set.set_https_address(ctx.sender(), https_address, ctx);
-}
-
-//TODO require the validator address passed in to better support operator address
-public fun update_tls_public_key(
-    self: &mut Hashi,
-    tls_public_key: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version_enabled();
-
-    self.committee_set.set_tls_public_key(ctx.sender(), tls_public_key, ctx);
-}
-
-//TODO require the validator address passed in to better support operator address
-public fun update_next_epoch_encryption_public_key(
-    self: &mut Hashi,
-    next_epoch_encryption_public_key: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version_enabled();
-    self
-        .committee_set
-        .set_next_epoch_encryption_public_key(ctx.sender(), next_epoch_encryption_public_key, ctx);
-}
-
 entry fun bootstrap(
     self: &mut Hashi,
     sui_system: &sui_system::sui_system::SuiSystemState,
@@ -182,6 +89,10 @@ public(package) fun committee_set(self: &Hashi): &CommitteeSet {
     &self.committee_set
 }
 
+public(package) fun committee_set_mut(self: &mut Hashi): &mut CommitteeSet {
+    &mut self.committee_set
+}
+
 public(package) fun current_committee(self: &Hashi): &Committee {
     self.committee_set.current_committee()
 }
@@ -192,4 +103,22 @@ public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
 
 public(package) fun proposals_mut(self: &mut Hashi): &mut ProposalSet {
     &mut self.proposals
+}
+
+public(package) fun deposit_queue(self: &Hashi): &hashi::deposit_queue::DepositRequestQueue {
+    &self.deposit_queue
+}
+
+public(package) fun deposit_queue_mut(
+    self: &mut Hashi,
+): &mut hashi::deposit_queue::DepositRequestQueue {
+    &mut self.deposit_queue
+}
+
+public(package) fun utxo_pool(self: &Hashi): &hashi::utxo_pool::UtxoPool {
+    &self.utxo_pool
+}
+
+public(package) fun utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::UtxoPool {
+    &mut self.utxo_pool
 }

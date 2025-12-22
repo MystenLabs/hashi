@@ -234,8 +234,8 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
         commands: vec![
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
-                function: Identifier::from_static("register_validator"),
+                module: Identifier::from_static("validator"),
+                function: Identifier::from_static("register"),
                 type_arguments: vec![],
                 arguments: vec![
                     Argument::Input(1),
@@ -246,21 +246,21 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             }),
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
+                module: Identifier::from_static("validator"),
                 function: Identifier::from_static("update_https_address"),
                 type_arguments: vec![],
                 arguments: vec![Argument::Input(1), Argument::Input(4)],
             }),
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
+                module: Identifier::from_static("validator"),
                 function: Identifier::from_static("update_tls_public_key"),
                 type_arguments: vec![],
                 arguments: vec![Argument::Input(1), Argument::Input(5)],
             }),
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
+                module: Identifier::from_static("validator"),
                 function: Identifier::from_static("update_next_epoch_encryption_public_key"),
                 type_arguments: vec![],
                 arguments: vec![Argument::Input(1), Argument::Input(6)],
