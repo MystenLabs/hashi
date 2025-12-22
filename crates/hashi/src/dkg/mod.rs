@@ -301,6 +301,11 @@ impl DkgManager {
                                 e
                             })?;
                     }
+                    if !self.dealer_outputs.contains_key(&dealer)
+                        && !self.complaints_to_process.contains_key(&dealer)
+                    {
+                        self.process_certified_dealer_message(&dealer)?;
+                    }
                     if self.complaints_to_process.contains_key(&dealer) {
                         self.recover_shares_via_complaint(
                             &dealer,
@@ -309,8 +314,6 @@ impl DkgManager {
                             p2p_channel,
                         )
                         .await?;
-                    } else if !self.dealer_outputs.contains_key(&dealer) {
-                        self.process_certified_dealer_message(&dealer)?;
                     }
                     let dealer_weight = self.committee.weight_of(&dealer).map_err(|_| {
                         DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
