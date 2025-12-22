@@ -775,10 +775,10 @@ impl DkgManager {
                 )));
             }
             self.dealer_messages.insert(dealer_address, message);
-            self.process_certified_dealer_message(&dealer_address)?;
+            self.process_certified_dealer_message(dealer_address)?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
-        self.process_certificates(&certified_dealers)
+        self.process_outputs_from_certified_dealers(certified_dealers.into_keys())
     }
 }
 
@@ -4574,7 +4574,7 @@ mod tests {
                     dealer_address,
                     validator_signatures,
                 )
-                    .unwrap();
+                .unwrap();
 
                 certificates.insert(dealer_address, cert);
             }
@@ -4601,7 +4601,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = receiver_manager
-                .process_certificates(&self.certificates)
+                .process_outputs_from_certified_dealers(self.certificates.keys().copied())
                 .unwrap();
 
             (receiver_manager, dkg_output)
@@ -4623,7 +4623,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = dealer_manager
-                .process_certificates(&self.certificates)
+                .process_outputs_from_certified_dealers(self.certificates.keys().copied())
                 .unwrap();
 
             // Create rotation messages
