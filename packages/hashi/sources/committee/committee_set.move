@@ -140,7 +140,7 @@ fun assert_update_permitted(self: &MemberInfo, ctx: &TxContext) {
 }
 
 /// Set the public key of the member.
-fun set_next_epoch_public_key(
+public(package) fun set_next_epoch_public_key(
     self: &mut CommitteeSet,
     validator_address: address,
     next_epoch_public_key: vector<u8>,
@@ -202,7 +202,7 @@ public(package) fun set_next_epoch_encryption_public_key(
 }
 
 /// Set the operator_address of the member.
-fun set_operator_address(
+public(package) fun set_operator_address(
     self: &mut CommitteeSet,
     validator_address: address,
     operator_address: address,

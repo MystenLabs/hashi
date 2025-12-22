@@ -24,32 +24,66 @@ public fun register(
         );
 }
 
-//TODO require the validator address passed in to better support operator address
-public fun update_https_address(self: &mut Hashi, https_address: String, ctx: &mut TxContext) {
+public fun update_next_epoch_public_key(
+    self: &mut Hashi,
+    validator: address,
+    next_epoch_public_key: vector<u8>,
+    proof_of_possession_signature: vector<u8>,
+    ctx: &mut TxContext,
+) {
     self.config().assert_version_enabled();
 
-    self.committee_set_mut().set_https_address(ctx.sender(), https_address, ctx);
+    self
+        .committee_set_mut()
+        .set_next_epoch_public_key(
+            validator,
+            next_epoch_public_key,
+            proof_of_possession_signature,
+            ctx,
+        )
 }
 
-//TODO require the validator address passed in to better support operator address
+public fun update_operator_address(
+    self: &mut Hashi,
+    validator: address,
+    operator: address,
+    ctx: &mut TxContext,
+) {
+    self.config().assert_version_enabled();
+
+    self.committee_set_mut().set_operator_address(validator, operator, ctx);
+}
+
+public fun update_https_address(
+    self: &mut Hashi,
+    validator: address,
+    https_address: String,
+    ctx: &mut TxContext,
+) {
+    self.config().assert_version_enabled();
+
+    self.committee_set_mut().set_https_address(validator, https_address, ctx);
+}
+
 public fun update_tls_public_key(
     self: &mut Hashi,
+    validator: address,
     tls_public_key: vector<u8>,
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
 
-    self.committee_set_mut().set_tls_public_key(ctx.sender(), tls_public_key, ctx);
+    self.committee_set_mut().set_tls_public_key(validator, tls_public_key, ctx);
 }
 
-//TODO require the validator address passed in to better support operator address
 public fun update_next_epoch_encryption_public_key(
     self: &mut Hashi,
+    validator: address,
     next_epoch_encryption_public_key: vector<u8>,
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
     self
         .committee_set_mut()
-        .set_next_epoch_encryption_public_key(ctx.sender(), next_epoch_encryption_public_key, ctx);
+        .set_next_epoch_encryption_public_key(validator, next_epoch_encryption_public_key, ctx);
 }
