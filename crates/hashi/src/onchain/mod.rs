@@ -3,9 +3,11 @@ use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
+use std::sync::atomic::AtomicU64;
 use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
@@ -29,6 +31,7 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
 mod move_types;
 pub mod types;
+mod watcher;
 
 #[derive(Clone, Debug)]
 pub struct OnchainState(Arc<Inner>);
@@ -45,9 +48,9 @@ struct Inner {
 #[derive(Debug)]
 pub struct State {
     /// The checkpoint height that this state is recent to
-    #[allow(unused)]
-    checkpoint: u64,
+    checkpoint: AtomicU64,
     package_versions: BTreeMap<u64, Address>,
+    package_ids: BTreeSet<Address>,
     hashi: types::Hashi,
 }
 
@@ -71,12 +74,11 @@ impl OnchainState {
                 .set_tls_private_key(tls_private_key);
         }
 
-        //TODO spawn watcher and enable partial updates and notifications
+        let state = Inner { ids, sender, state }.pipe(Arc::new).pipe(Self);
 
-        Inner { ids, sender, state }
-            .pipe(Arc::new)
-            .pipe(Self)
-            .pipe(Ok)
+        tokio::spawn(watcher::watcher(client, state.clone()));
+
+        Ok(state)
     }
 
     pub fn state(&self) -> RwLockReadGuard<'_, State> {
@@ -99,11 +101,23 @@ impl State {
             scrape_hashi(client, ids.hashi_object_id),
         )?;
 
+        let package_ids = package_versions.values().cloned().collect();
+
         Ok(State {
-            checkpoint,
+            checkpoint: AtomicU64::new(checkpoint),
             package_versions,
+            package_ids,
             hashi,
         })
+    }
+
+    pub fn latest_checkpoint(&self) -> u64 {
+        self.checkpoint.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn update_latest_checkpoint(&self, checkpoint: u64) {
+        self.checkpoint
+            .store(checkpoint, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
