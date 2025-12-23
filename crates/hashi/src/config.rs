@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
-use crate::committee::{Bls12381PrivateKey, EncryptionPrivateKey, EncryptionPublicKey};
+use crate::committee::Bls12381PrivateKey;
+use crate::committee::EncryptionPrivateKey;
+use crate::committee::EncryptionPublicKey;
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]

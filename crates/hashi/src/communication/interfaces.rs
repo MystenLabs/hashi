@@ -1,9 +1,11 @@
 //! Communication channel interfaces
 
-use crate::dkg::{
-    ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendMessageRequest, SendMessageResponse,
-};
+use crate::dkg::ComplainRequest;
+use crate::dkg::ComplainResponse;
+use crate::dkg::RetrieveMessageRequest;
+use crate::dkg::RetrieveMessageResponse;
+use crate::dkg::SendMessageRequest;
+use crate::dkg::SendMessageResponse;
 use async_trait::async_trait;
 use std::time::Duration;
 use sui_sdk_types::Address;

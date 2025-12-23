@@ -2,16 +2,17 @@
 
 //! Usable definitions of the onchain state of hashi
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
-use sui_sdk_types::{Address, TypeTag};
+use sui_sdk_types::Address;
+use sui_sdk_types::TypeTag;
 
-use crate::{
-    committee::{Committee, EncryptionPublicKey},
-    grpc::Client,
-};
+use crate::committee::Committee;
+use crate::committee::EncryptionPublicKey;
+use crate::grpc::Client;
 
 #[derive(Debug)]
 pub struct Hashi {

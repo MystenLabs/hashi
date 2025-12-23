@@ -1,15 +1,17 @@
 //! Core types for the DKG protocol
 
-use crate::committee::{BLS12381Signature, CommitteeSignature};
+use crate::committee::BLS12381Signature;
+use crate::committee::CommitteeSignature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_tbls::polynomial::Eval;
+use fastcrypto_tbls::random_oracle::RandomOracle;
+use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
-use fastcrypto_tbls::{
-    polynomial::Eval,
-    random_oracle::RandomOracle,
-    threshold_schnorr::{G, avss, complaint},
-};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
@@ -220,7 +222,8 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::{EncryptionPrivateKey, EncryptionPublicKey};
+    use crate::committee::EncryptionPrivateKey;
+    use crate::committee::EncryptionPublicKey;
     use fastcrypto_tbls::nodes::Node;
     use std::num::NonZeroU16;
 
