@@ -32,8 +32,11 @@ use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::future::join_all;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::LazyLock;
 use sui_sdk_types::Address;
 pub use types::ComplainRequest;
@@ -794,31 +797,29 @@ impl DkgManager {
                 "Certificate does not match the current epoch or committee".to_string(),
             )
         })?;
-        for signer_address in signers {
-            match with_timeout_and_retry(|| p2p_channel.retrieve_message(&signer_address, &request))
-                .await
-            {
-                Ok(response) => {
-                    let message_hash = compute_message_hash(&response.message);
-                    if message_hash != message.message_hash {
-                        tracing::info!(
-                            "Signer {:?} returned message with wrong hash",
-                            signer_address
-                        );
-                        continue;
-                    }
-                    self.store_message(message.dealer_address, &response.message)?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::info!("Failed to retrieve from signer {:?}: {}", signer_address, e);
-                    continue;
-                }
+        let result = fetch_first_valid(
+            signers,
+            request,
+            |signer_address, request| async move {
+                p2p_channel
+                    .retrieve_message(&signer_address, &request)
+                    .await
+            },
+            |r| r.message,
+            compute_message_hash,
+            message.message_hash,
+            "message",
+        )
+        .await;
+        match result {
+            Some((_, msg)) => {
+                self.store_message(message.dealer_address, &msg)?;
+                Ok(())
             }
+            None => Err(DkgError::PairwiseCommunicationError(
+                "Failed to retrieve message from any signer".to_string(),
+            )),
         }
-        Err(DkgError::PairwiseCommunicationError(
-            "Failed to retrieve message from any signer".to_string(),
-        ))
     }
 
     async fn retrieve_rotation_messages(
@@ -847,38 +848,30 @@ impl DkgManager {
                 "Certificate does not match the current epoch or committee".to_string(),
             )
         })?;
-        for signer_address in signers {
-            match with_timeout_and_retry(|| {
-                p2p_channel.retrieve_rotation_messages(&signer_address, &request)
-            })
-            .await
-            {
-                Ok(response) => {
-                    let messages_hash = compute_rotation_messages_hash(&response.messages);
-                    if messages_hash != message.messages_hash {
-                        tracing::info!(
-                            "Signer {:?} returned rotation messages with wrong hash",
-                            signer_address
-                        );
-                        continue;
-                    }
-                    self.rotation_dealer_messages
-                        .insert(message.dealer_address, response.messages.clone());
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::info!(
-                        "Failed to retrieve rotation messages from signer {:?}: {}",
-                        signer_address,
-                        e
-                    );
-                    continue;
-                }
+        let result = fetch_first_valid(
+            signers,
+            request,
+            |signer_address, request| async move {
+                p2p_channel
+                    .retrieve_rotation_messages(&signer_address, &request)
+                    .await
+            },
+            |r| r.messages,
+            compute_rotation_messages_hash,
+            message.messages_hash,
+            "rotation messages",
+        )
+        .await;
+        match result {
+            Some((_, messages)) => {
+                self.rotation_dealer_messages
+                    .insert(message.dealer_address, messages);
+                Ok(())
             }
+            None => Err(DkgError::PairwiseCommunicationError(
+                "Failed to retrieve rotation messages from any signer".to_string(),
+            )),
         }
-        Err(DkgError::PairwiseCommunicationError(
-            "Failed to retrieve rotation messages from any signer".to_string(),
-        ))
     }
 
     async fn recover_shares_via_complaint(
@@ -1197,6 +1190,85 @@ async fn send_rotation_messages_to_many(
         }
     }))
     .await
+}
+
+fn validate_retrieved<T>(
+    result: ChannelResult<T>,
+    signer_address: Address,
+    compute_hash: impl FnOnce(&T) -> MessageHash,
+    expected_hash: MessageHash,
+    context: &str,
+) -> Option<T> {
+    match result {
+        Ok(data) => {
+            if compute_hash(&data) == expected_hash {
+                Some(data)
+            } else {
+                tracing::info!(
+                    "Signer {:?} returned {} with wrong hash",
+                    signer_address,
+                    context
+                );
+                None
+            }
+        }
+        Err(e) => {
+            tracing::info!(
+                "Failed to retrieve {} from signer {:?}: {}",
+                context,
+                signer_address,
+                e
+            );
+            None
+        }
+    }
+}
+
+async fn fetch_first_valid<Output, Response, Request, FetchFn, ExtractFn, HashFn, FetchFuture>(
+    signers: impl IntoIterator<Item = Address>,
+    request: Request,
+    fetch: FetchFn,
+    extract: ExtractFn,
+    compute_hash: HashFn,
+    expected_hash: MessageHash,
+    context: &'static str,
+) -> Option<(Address, Output)>
+where
+    Output: Send,
+    Response: Send,
+    Request: Clone + Send + Sync,
+    FetchFn: Fn(Address, Request) -> FetchFuture + Clone + Send + Sync,
+    FetchFuture: Future<Output = ChannelResult<Response>> + Send,
+    ExtractFn: Fn(Response) -> Output + Clone + Send + Sync,
+    HashFn: Fn(&Output) -> MessageHash + Clone + Send + Sync,
+{
+    let futures: Vec<_> = signers
+        .into_iter()
+        .map(|addr| {
+            let req = request.clone();
+            let fetch = fetch.clone();
+            let extract = extract.clone();
+            let compute_hash = compute_hash.clone();
+            async move {
+                let result = with_timeout_and_retry(|| fetch(addr, req.clone())).await;
+                let validated = validate_retrieved(
+                    result.map(&extract),
+                    addr,
+                    &compute_hash,
+                    expected_hash,
+                    context,
+                );
+                (addr, validated)
+            }
+        })
+        .collect();
+    let mut stream: FuturesUnordered<_> = futures.into_iter().collect();
+    while let Some((addr, result)) = stream.next().await {
+        if let Some(output) = result {
+            return Some((addr, output));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
