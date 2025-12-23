@@ -3,6 +3,7 @@
 pub mod rpc;
 pub mod types;
 
+use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::Committee;
 use crate::communication::ChannelResult;
@@ -70,7 +71,7 @@ pub struct DkgManager {
     pub dkg_config: DkgConfig,
     pub session_id: SessionId,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub signing_key: crate::committee::Bls12381PrivateKey,
+    pub signing_key: Bls12381PrivateKey,
     pub committee: Committee,
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
@@ -95,7 +96,7 @@ impl DkgManager {
         committee_set: &CommitteeSet,
         session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
-        signing_key: crate::committee::Bls12381PrivateKey,
+        signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> DkgResult<Self> {
         let committee = committee_set
@@ -387,7 +388,7 @@ impl DkgManager {
 
     async fn run_as_party(
         &mut self,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
     ) -> DkgResult<DkgOutput> {
         let mut certified_dealers = HashSet::new();
@@ -455,7 +456,7 @@ impl DkgManager {
                 Rotation(_) => continue,
             }
         }
-        self.process_outputs_from_certified_dealers(certified_dealers.into_iter())
+        self.complete_dkg(certified_dealers.into_iter())
     }
 
     async fn run_key_rotation_as_dealer(
@@ -594,7 +595,7 @@ impl DkgManager {
                 Dkg(_) => continue,
             }
         }
-        self.process_rotation_certificates(previous, &certified_share_indices)
+        self.complete_key_rotation(previous, &certified_share_indices)
     }
 
     fn create_dealer_message(
@@ -727,7 +728,7 @@ impl DkgManager {
         Ok(())
     }
 
-    fn process_outputs_from_certified_dealers(
+    fn complete_dkg(
         &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
@@ -767,7 +768,7 @@ impl DkgManager {
         &mut self,
         message: &DkgDealerMessageHash,
         certificate: &Certificate,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
             dealer: message.dealer_address,
@@ -880,11 +881,12 @@ impl DkgManager {
         ))
     }
 
+    // TODO: Implement share recovery for key rotation.
     async fn recover_shares_via_complaint(
         &mut self,
         dealer: &Address,
         signers: impl IntoIterator<Item = Address>,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
     ) -> DkgResult<()> {
         let complaint = self
             .complaints_to_process
@@ -1067,7 +1069,7 @@ impl DkgManager {
         Ok(signature.signature().clone())
     }
 
-    fn process_rotation_certificates(
+    fn complete_key_rotation(
         &mut self,
         previous_dkg_output: &DkgOutput,
         certified_share_indices: &[ShareIndex],
@@ -1108,6 +1110,7 @@ impl DkgManager {
         })
     }
 
+    // TODO: Handle new committee members who weren't in the previous committee.
     fn reconstruct_previous_dkg_output(
         &mut self,
         certificates: &[Certificate],
@@ -1143,7 +1146,7 @@ impl DkgManager {
             self.process_certified_dealer_message(dealer_address)?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
-        self.process_outputs_from_certified_dealers(certified_dealers.into_keys())
+        self.complete_dkg(certified_dealers.into_keys())
     }
 }
 
@@ -1252,7 +1255,7 @@ mod tests {
     struct TestSetup {
         pub committee_set: CommitteeSet,
         pub encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
-        pub signing_keys: Vec<crate::committee::Bls12381PrivateKey>,
+        pub signing_keys: Vec<Bls12381PrivateKey>,
     }
 
     impl TestSetup {
@@ -1264,7 +1267,7 @@ mod tests {
                 .collect();
 
             let signing_keys: Vec<_> = (0..num_validators)
-                .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
+                .map(|_| Bls12381PrivateKey::generate(&mut rng))
                 .collect();
 
             let epoch = 100u64;
@@ -1329,7 +1332,7 @@ mod tests {
                 .collect();
 
             let signing_keys: Vec<_> = (0..num_validators)
-                .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
+                .map(|_| Bls12381PrivateKey::generate(&mut rng))
                 .collect();
 
             let epoch = 100u64;
@@ -1512,12 +1515,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for MockP2PChannel {
+    impl P2PChannel for MockP2PChannel {
         async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1540,7 +1543,7 @@ mod tests {
             &self,
             party: &Address,
             request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             let managers = self.managers.lock().unwrap();
             let manager = managers.get(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1563,7 +1566,7 @@ mod tests {
             &self,
             party: &Address,
             request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1581,7 +1584,7 @@ mod tests {
             &self,
             recipient: &Address,
             request: &SendRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<SendRotationMessagesResponse> {
+        ) -> ChannelResult<SendRotationMessagesResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1604,7 +1607,7 @@ mod tests {
             &self,
             party: &Address,
             request: &RetrieveRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<RetrieveRotationMessagesResponse> {
+        ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             let managers = self.managers.lock().unwrap();
             let manager = managers.get(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1661,7 +1664,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OrderedBroadcastChannel<Certificate> for MockOrderedBroadcastChannel {
-        async fn publish(&self, message: Certificate) -> crate::communication::ChannelResult<()> {
+        async fn publish(&self, message: Certificate) -> ChannelResult<()> {
             if let Some(ref error_msg) = self.fail_on_publish {
                 return Err(crate::communication::ChannelError::RequestFailed(
                     error_msg.clone(),
@@ -1671,7 +1674,7 @@ mod tests {
             Ok(())
         }
 
-        async fn receive(&mut self) -> crate::communication::ChannelResult<Certificate> {
+        async fn receive(&mut self) -> ChannelResult<Certificate> {
             self.certificates
                 .lock()
                 .unwrap()
@@ -1686,7 +1689,7 @@ mod tests {
         async fn try_receive_timeout(
             &mut self,
             _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<Option<Certificate>> {
+        ) -> ChannelResult<Option<Certificate>> {
             unimplemented!()
         }
 
@@ -1715,12 +1718,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for FailingP2PChannel {
+    impl P2PChannel for FailingP2PChannel {
         async fn send_dkg_message(
             &self,
             _recipient: &Address,
             _request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1730,7 +1733,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1740,7 +1743,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1750,7 +1753,7 @@ mod tests {
             &self,
             _recipient: &Address,
             _request: &SendRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<SendRotationMessagesResponse> {
+        ) -> ChannelResult<SendRotationMessagesResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1760,7 +1763,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<RetrieveRotationMessagesResponse> {
+        ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1782,12 +1785,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for SucceedingP2PChannel {
+    impl P2PChannel for SucceedingP2PChannel {
         async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1810,7 +1813,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_message")
         }
 
@@ -1818,7 +1821,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             unimplemented!("SucceedingP2PChannel does not implement complain")
         }
 
@@ -1826,7 +1829,7 @@ mod tests {
             &self,
             _recipient: &Address,
             _request: &SendRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<SendRotationMessagesResponse> {
+        ) -> ChannelResult<SendRotationMessagesResponse> {
             unimplemented!("SucceedingP2PChannel does not implement send_rotation_messages")
         }
 
@@ -1834,7 +1837,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<RetrieveRotationMessagesResponse> {
+        ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_rotation_messages")
         }
     }
@@ -1906,7 +1909,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_message")
         }
 
@@ -1914,7 +1917,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement complain")
         }
 
@@ -1922,7 +1925,7 @@ mod tests {
             &self,
             _recipient: &Address,
             _request: &SendRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<SendRotationMessagesResponse> {
+        ) -> ChannelResult<SendRotationMessagesResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement send_rotation_messages")
         }
 
@@ -1930,7 +1933,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<RetrieveRotationMessagesResponse> {
+        ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             unimplemented!(
                 "PartiallyFailingP2PChannel does not implement retrieve_rotation_messages"
             )
@@ -1952,12 +1955,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for PreCollectedP2PChannel {
+    impl P2PChannel for PreCollectedP2PChannel {
         async fn send_dkg_message(
             &self,
             _: &Address,
             _: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement send_dkg_message")
         }
 
@@ -1965,7 +1968,7 @@ mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement retrieve_message")
         }
 
@@ -1973,7 +1976,7 @@ mod tests {
             &self,
             party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             self.responses
                 .lock()
                 .unwrap()
@@ -1988,7 +1991,7 @@ mod tests {
             &self,
             _recipient: &Address,
             _request: &SendRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<SendRotationMessagesResponse> {
+        ) -> ChannelResult<SendRotationMessagesResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement send_rotation_messages")
         }
 
@@ -1996,7 +1999,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveRotationMessagesRequest,
-        ) -> crate::communication::ChannelResult<RetrieveRotationMessagesResponse> {
+        ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement retrieve_rotation_messages")
         }
     }
@@ -2009,7 +2012,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OrderedBroadcastChannel<Certificate> for FailingOrderedBroadcastChannel {
-        async fn publish(&self, _message: Certificate) -> crate::communication::ChannelResult<()> {
+        async fn publish(&self, _message: Certificate) -> ChannelResult<()> {
             if self.fail_on_publish {
                 Err(crate::communication::ChannelError::RequestFailed(
                     self.error_message.clone(),
@@ -2019,7 +2022,7 @@ mod tests {
             }
         }
 
-        async fn receive(&mut self) -> crate::communication::ChannelResult<Certificate> {
+        async fn receive(&mut self) -> ChannelResult<Certificate> {
             if self.fail_on_receive {
                 Err(crate::communication::ChannelError::RequestFailed(
                     self.error_message.clone(),
@@ -2032,7 +2035,7 @@ mod tests {
         async fn try_receive_timeout(
             &mut self,
             _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<Option<Certificate>> {
+        ) -> ChannelResult<Option<Certificate>> {
             unreachable!()
         }
 
@@ -2078,7 +2081,7 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
         let signing_keys: Vec<_> = (0..5)
-            .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
+            .map(|_| Bls12381PrivateKey::generate(&mut rng))
             .collect();
 
         let epoch = 100u64;
@@ -2292,7 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_certificates_success() {
+    fn test_complete_dkg_success() {
         let mut rng = rand::thread_rng();
 
         // Use different weights: [3, 2, 4, 1, 2] (total = 12)
@@ -2328,9 +2331,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_outputs_from_certified_dealers(certified_dealers.into_iter())
+            .complete_dkg(certified_dealers.into_iter())
             .unwrap();
 
         // Verify output structure
@@ -2340,7 +2342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_certificates_missing_dealer_output() {
+    fn test_complete_dkg_missing_dealer_output() {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
@@ -2352,9 +2354,7 @@ mod tests {
 
         let certified_dealers = vec![dealer_addr0, dealer_addr1];
 
-        // Process certificates should fail because receiver never processed the dealer messages
-        let result =
-            receiver_manager.process_outputs_from_certified_dealers(certified_dealers.into_iter());
+        let result = receiver_manager.complete_dkg(certified_dealers.into_iter());
         assert!(result.is_err());
         assert!(
             result
@@ -5119,7 +5119,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = receiver_manager
-                .process_outputs_from_certified_dealers(self.certificates.keys().copied())
+                .complete_dkg(self.certificates.keys().copied())
                 .unwrap();
 
             (receiver_manager, dkg_output)
@@ -5141,7 +5141,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = dealer_manager
-                .process_outputs_from_certified_dealers(self.certificates.keys().copied())
+                .complete_dkg(self.certificates.keys().copied())
                 .unwrap();
 
             // Create rotation messages
@@ -5418,7 +5418,7 @@ mod tests {
             .collect();
         for manager in managers.iter_mut() {
             let output = manager
-                .process_outputs_from_certified_dealers(certified_dealers.iter().copied())
+                .complete_dkg(certified_dealers.iter().copied())
                 .unwrap();
             manager.previous_dkg_output = Some(output);
         }
@@ -5434,7 +5434,7 @@ mod tests {
         // Phase 3: Pre-create rotation certificates from other validators to put on TOB
         // First, test_manager needs to reconstruct its previous DKG output
         let test_dkg_output = test_manager
-            .process_outputs_from_certified_dealers(certified_dealers.iter().copied())
+            .complete_dkg(certified_dealers.iter().copied())
             .unwrap();
         test_manager.previous_dkg_output = Some(test_dkg_output.clone());
 
