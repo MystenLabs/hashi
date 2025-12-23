@@ -526,11 +526,7 @@ impl DkgManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
     ) -> DkgResult<DkgOutput> {
-        let mut certified_share_indices = self
-            .dkg_config
-            .nodes
-            .share_ids_of(self.party_id)
-            .expect("party has shares");
+        let mut certified_share_indices: Vec<_> = self.rotation_outputs.keys().copied().collect();
         let mut certified_dealers = HashSet::new();
         loop {
             if certified_share_indices.len() >= previous.threshold as usize {
@@ -554,15 +550,24 @@ impl DkgManager {
                         );
                         continue;
                     }
-                    let dealer_share_indices = self
-                        .dkg_config
-                        .nodes
-                        .share_ids_of(
-                            self.committee
-                                .index_of(&dealer)
-                                .expect("dealer in committee") as u16,
-                        )
-                        .expect("dealer has shares");
+                    let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+                        DkgError::InvalidConfig("Key rotation requires previous nodes".into())
+                    })?;
+                    let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
+                        DkgError::InvalidConfig("Key rotation requires previous committee".into())
+                    })?;
+                    let dealer_party_id = previous_committee.index_of(&dealer).ok_or_else(|| {
+                        DkgError::InvalidMessage {
+                            sender: dealer,
+                            reason: "Dealer not in previous committee".into(),
+                        }
+                    })? as u16;
+                    let dealer_share_indices = previous_nodes
+                        .share_ids_of(dealer_party_id)
+                        .map_err(|_| DkgError::InvalidMessage {
+                            sender: dealer,
+                            reason: "Dealer has no shares in previous committee".into(),
+                        })?;
                     let needs_retrieval = dealer_share_indices
                         .iter()
                         .any(|idx| !self.rotation_outputs.contains_key(idx));
@@ -5412,7 +5417,9 @@ mod tests {
             })
             .collect();
         for manager in managers.iter_mut() {
-            let output = manager.process_certificates(&certified_dealers).unwrap();
+            let output = manager
+                .process_outputs_from_certified_dealers(certified_dealers.iter().copied())
+                .unwrap();
             manager.previous_dkg_output = Some(output);
         }
 
@@ -5427,15 +5434,17 @@ mod tests {
         // Phase 3: Pre-create rotation certificates from other validators to put on TOB
         // First, test_manager needs to reconstruct its previous DKG output
         let test_dkg_output = test_manager
-            .process_certificates(&certified_dealers)
+            .process_outputs_from_certified_dealers(certified_dealers.iter().copied())
             .unwrap();
         test_manager.previous_dkg_output = Some(test_dkg_output.clone());
 
-        // Create rotation messages and certificates for other validators
+        // Create rotation messages and certificates for some other validators
+        // Only create certificates with combined weight < threshold so test_manager must run as dealer
+        // threshold = 3, validators 1 and 2 have weight 1 each = 2 < 3
         let mut rotation_certificates = Vec::new();
         {
             let mut other_managers = mock_p2p.managers.lock().unwrap();
-            for validator_idx in 1..num_validators {
+            for validator_idx in 1..3 {
                 let addr = setup.address(validator_idx);
                 let manager = other_managers.get_mut(&addr).unwrap();
                 let prev_output = manager.previous_dkg_output.clone().unwrap();
