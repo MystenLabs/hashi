@@ -3,6 +3,7 @@
 pub mod rpc;
 pub mod types;
 
+use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::Committee;
 use crate::communication::ChannelResult;
@@ -66,7 +67,7 @@ pub struct DkgManager {
     pub dkg_config: DkgConfig,
     pub session_id: SessionId,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub signing_key: crate::committee::Bls12381PrivateKey,
+    pub signing_key: Bls12381PrivateKey,
     pub committee: Committee,
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
@@ -87,7 +88,7 @@ impl DkgManager {
         committee_set: &CommitteeSet,
         session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
-        signing_key: crate::committee::Bls12381PrivateKey,
+        signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
     ) -> DkgResult<Self> {
         let committee = committee_set
@@ -557,6 +558,7 @@ impl DkgManager {
         ))
     }
 
+    // TODO: Implement share recovery for key rotation.
     async fn recover_shares_via_complaint(
         &mut self,
         dealer: &Address,
@@ -788,6 +790,7 @@ impl DkgManager {
         })
     }
 
+    // TODO: Handle new committee members who weren't in the previous committee.
     #[allow(dead_code)]
     fn reconstruct_previous_dkg_output(
         &mut self,
@@ -918,7 +921,7 @@ mod tests {
     struct TestSetup {
         pub committee_set: CommitteeSet,
         pub encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
-        pub signing_keys: Vec<crate::committee::Bls12381PrivateKey>,
+        pub signing_keys: Vec<Bls12381PrivateKey>,
     }
 
     impl TestSetup {
@@ -930,7 +933,7 @@ mod tests {
                 .collect();
 
             let signing_keys: Vec<_> = (0..num_validators)
-                .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
+                .map(|_| Bls12381PrivateKey::generate(&mut rng))
                 .collect();
 
             let epoch = 100u64;
@@ -995,7 +998,7 @@ mod tests {
                 .collect();
 
             let signing_keys: Vec<_> = (0..num_validators)
-                .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
+                .map(|_| Bls12381PrivateKey::generate(&mut rng))
                 .collect();
 
             let epoch = 100u64;
@@ -1606,7 +1609,7 @@ mod tests {
             .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
         let signing_keys: Vec<_> = (0..5)
-            .map(|_| crate::committee::Bls12381PrivateKey::generate(&mut rng))
+            .map(|_| Bls12381PrivateKey::generate(&mut rng))
             .collect();
 
         let epoch = 100u64;
