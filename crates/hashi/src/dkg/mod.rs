@@ -227,7 +227,7 @@ impl DkgManager {
     // TODO: Consider making dealer and party flows concurrent
     pub async fn run(
         &mut self,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<DkgOutput> {
@@ -301,7 +301,7 @@ impl DkgManager {
 
     async fn run_as_party(
         &mut self,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl crate::communication::OrderedBroadcastChannel<Certificate>,
     ) -> DkgResult<DkgOutput> {
         let mut certified_dealers = HashSet::new();
@@ -496,7 +496,7 @@ impl DkgManager {
         &mut self,
         message: &DkgDealerMessageHash,
         certificate: &Certificate,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
     ) -> DkgResult<()> {
         let request = RetrieveMessageRequest {
             dealer: message.dealer_address,
@@ -563,7 +563,7 @@ impl DkgManager {
         &mut self,
         dealer: &Address,
         signers: impl IntoIterator<Item = Address>,
-        p2p_channel: &impl crate::communication::P2PChannel,
+        p2p_channel: &impl P2PChannel,
     ) -> DkgResult<()> {
         let complaint = self
             .complaints_to_process
@@ -749,7 +749,7 @@ impl DkgManager {
     }
 
     #[allow(dead_code)]
-    fn process_rotation_certificates(
+    fn complete_key_rotation(
         &mut self,
         previous_dkg_output: &DkgOutput,
         certified_share_indices: &[ShareIndex],
@@ -1159,12 +1159,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for MockP2PChannel {
+    impl P2PChannel for MockP2PChannel {
         async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1187,7 +1187,7 @@ mod tests {
             &self,
             party: &Address,
             request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             let managers = self.managers.lock().unwrap();
             let manager = managers.get(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1210,7 +1210,7 @@ mod tests {
             &self,
             party: &Address,
             request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1262,7 +1262,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::OrderedBroadcastChannel<Certificate> for MockOrderedBroadcastChannel {
-        async fn publish(&self, message: Certificate) -> crate::communication::ChannelResult<()> {
+        async fn publish(&self, message: Certificate) -> ChannelResult<()> {
             if let Some(ref error_msg) = self.fail_on_publish {
                 return Err(crate::communication::ChannelError::RequestFailed(
                     error_msg.clone(),
@@ -1272,7 +1272,7 @@ mod tests {
             Ok(())
         }
 
-        async fn receive(&mut self) -> crate::communication::ChannelResult<Certificate> {
+        async fn receive(&mut self) -> ChannelResult<Certificate> {
             self.certificates
                 .lock()
                 .unwrap()
@@ -1287,7 +1287,7 @@ mod tests {
         async fn try_receive_timeout(
             &mut self,
             _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<Option<Certificate>> {
+        ) -> ChannelResult<Option<Certificate>> {
             unimplemented!()
         }
 
@@ -1316,12 +1316,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for FailingP2PChannel {
+    impl P2PChannel for FailingP2PChannel {
         async fn send_dkg_message(
             &self,
             _recipient: &Address,
             _request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1331,7 +1331,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1341,7 +1341,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
@@ -1363,12 +1363,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for SucceedingP2PChannel {
+    impl P2PChannel for SucceedingP2PChannel {
         async fn send_dkg_message(
             &self,
             recipient: &Address,
             request: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             let mut managers = self.managers.lock().unwrap();
             let manager = managers.get_mut(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
@@ -1391,7 +1391,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_message")
         }
 
@@ -1399,7 +1399,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             unimplemented!("SucceedingP2PChannel does not implement complain")
         }
     }
@@ -1471,7 +1471,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_message")
         }
 
@@ -1479,7 +1479,7 @@ mod tests {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement complain")
         }
     }
@@ -1499,12 +1499,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::communication::P2PChannel for PreCollectedP2PChannel {
+    impl P2PChannel for PreCollectedP2PChannel {
         async fn send_dkg_message(
             &self,
             _: &Address,
             _: &SendMessageRequest,
-        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+        ) -> ChannelResult<SendMessageResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement send_dkg_message")
         }
 
@@ -1512,7 +1512,7 @@ mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessageRequest,
-        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+        ) -> ChannelResult<RetrieveMessageResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement retrieve_message")
         }
 
@@ -1520,7 +1520,7 @@ mod tests {
             &self,
             party: &Address,
             _request: &ComplainRequest,
-        ) -> crate::communication::ChannelResult<ComplainResponse> {
+        ) -> ChannelResult<ComplainResponse> {
             self.responses
                 .lock()
                 .unwrap()
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::communication::OrderedBroadcastChannel<Certificate> for FailingOrderedBroadcastChannel {
-        async fn publish(&self, _message: Certificate) -> crate::communication::ChannelResult<()> {
+        async fn publish(&self, _message: Certificate) -> ChannelResult<()> {
             if self.fail_on_publish {
                 Err(crate::communication::ChannelError::RequestFailed(
                     self.error_message.clone(),
@@ -1550,7 +1550,7 @@ mod tests {
             }
         }
 
-        async fn receive(&mut self) -> crate::communication::ChannelResult<Certificate> {
+        async fn receive(&mut self) -> ChannelResult<Certificate> {
             if self.fail_on_receive {
                 Err(crate::communication::ChannelError::RequestFailed(
                     self.error_message.clone(),
@@ -1563,7 +1563,7 @@ mod tests {
         async fn try_receive_timeout(
             &mut self,
             _duration: std::time::Duration,
-        ) -> crate::communication::ChannelResult<Option<Certificate>> {
+        ) -> ChannelResult<Option<Certificate>> {
             unreachable!()
         }
 
