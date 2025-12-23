@@ -32,7 +32,7 @@ use tracing::{info, warn};
 ///     2. S3 logging issue: Unable to log to S3
 pub async fn delayed_withdraw(
     State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<HashiSigned<DelayedWithdrawalRequest>>,
+    Json(request): Json<HashiNodeSigned<DelayedWithdrawalRequest>>,
 ) -> GuardianResult<()> {
     info!("/delayed_withdraw - Received request.");
 
@@ -125,7 +125,7 @@ pub async fn delayed_withdraw(
 ///     4. Type 2 request uses insufficient delay
 pub async fn immediate_withdraw(
     State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<HashiSigned<ImmediateWithdrawalRequest>>,
+    Json(request): Json<HashiNodeSigned<ImmediateWithdrawalRequest>>,
 ) -> GuardianResult<Json<GuardianSigned<ImmediateWithdrawalResponse>>> {
     info!("/immediate_withdraw - Received request.");
 
@@ -157,17 +157,22 @@ pub async fn immediate_withdraw(
     let hashi_btc_pk = enclave
         .hashi_btc_pk()
         .expect("hashi btc pub key should be set");
-    let min_delay = enclave
-        .min_delay()
-        .expect("withdrawal config should be set");
 
     // ------------------------ Apply rate limits / check delay ------------------------
 
     if request.is_delayed() {
         info!("Checking delayed withdrawal eligibility.");
-        let ws = enclave.get_withdraw_state().await; // Acquire lock
-                                                     // Check if we have seen this request before
-        approve_delayed_withdrawal(&request, &ws.pending_delayed_withdrawals, min_delay)?; // Release lock
+        let min_delay = enclave
+            .delayed_withdrawals_delay()
+            .expect("withdrawal config should be set");
+
+        // Acquire lock
+        let ws = enclave.get_withdraw_state().await;
+
+        // Check if we have seen this request before
+        approve_delayed_withdrawal(&request, &ws.pending_delayed_withdrawals, min_delay)?;
+        // Release lock
+
         info!("Delayed withdrawal approved.");
     } else {
         // Check and apply rate limits
@@ -260,7 +265,7 @@ pub async fn immediate_withdraw(
 fn approve_delayed_withdrawal(
     cur_withdrawal: &ImmediateWithdrawalRequest,
     pending_withdrawals: &HashMap<WithdrawalID, DelayedWithdrawalRequest>,
-    min_delay: Duration,
+    delayed_withdrawals_delay: Duration,
 ) -> GuardianResult<()> {
     // Find the matching record
     let pending_withdrawal = match pending_withdrawals.get(&cur_withdrawal.wid()) {
@@ -288,7 +293,7 @@ fn approve_delayed_withdrawal(
 
     // Check that the gap is sufficiently long
     // TODO: confirm below impl after confirming HashiTime type
-    let required_timestamp = min_delay.as_secs() + pending_withdrawal.timestamp();
+    let required_timestamp = delayed_withdrawals_delay.as_secs() + pending_withdrawal.timestamp();
     if cur_withdrawal.timestamp() < required_timestamp {
         return Err(InvalidInputs(format!(
             "Request too early. Required time: {:?}, Actual time: {:?}",

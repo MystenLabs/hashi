@@ -67,7 +67,7 @@ pub struct GuardianSigned<T> {
 /// Hashi-signed wrapper
 /// TODO: Add cert, intent
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HashiSigned<T> {
+pub struct HashiNodeSigned<T> {
     pub data: T,
 }
 
@@ -80,7 +80,7 @@ pub struct SetupNewKeyRequest {
     key_provisioner_public_keys: Vec<Vec<u8>>,
 }
 
-/// EnclaveSigned<T>
+/// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: Vec<EncryptedShare>,
@@ -122,7 +122,7 @@ pub struct GetAttestationResponse {
     pub attestation: Attestation,
 }
 
-/// An "immediate withdrawal" request. HashiSigned<T>.
+/// An "immediate withdrawal" request. `HashiNodeSigned<T>.`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ImmediateWithdrawalRequest {
     /// Unique withdrawal ID assigned by Hashi
@@ -135,13 +135,13 @@ pub struct ImmediateWithdrawalRequest {
     is_delayed: bool,
 }
 
-/// EnclaveSigned<T>
+/// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ImmediateWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
 
-/// A "delayed withdrawal" request. HashiSigned<T>.
+/// A "delayed withdrawal" request. `HashiNodeSigned<T>`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DelayedWithdrawalRequest {
     /// Unique withdrawal ID assigned by Hashi
@@ -215,9 +215,9 @@ pub type HashiTime = u64;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WithdrawalConfig {
     /// The min delay after which any withdrawal is approved
-    pub min_delay: Duration,
+    pub delayed_withdrawals_delay: Duration,
     /// The max delay after which pending withdrawals are cleaned up
-    pub max_delay: Duration,
+    pub delayed_withdrawals_timeout: Duration,
 }
 
 /// Withdrawal state - all that is needed to restart the enclave
@@ -246,7 +246,7 @@ impl SigningIntent for ImmediateWithdrawalResponse {
     const INTENT: IntentType = IntentType::ImmediateWithdrawalResponse;
 }
 
-impl<T> HashiSigned<T> {
+impl<T> HashiNodeSigned<T> {
     pub fn verify_cert(self, _committee: &HashiCommitteeInfo) -> GuardianResult<T> {
         // TODO: Validate sig with committee
         Ok(self.data)
@@ -348,8 +348,8 @@ impl ProvisionerInitRequestState {
         let kp = create_keypair(&TEST_HASHI_SK);
         ProvisionerInitRequestState {
             withdrawal_config: WithdrawalConfig {
-                min_delay: Duration::from_secs(10),
-                max_delay: Duration::from_secs(60),
+                delayed_withdrawals_delay: Duration::from_secs(10),
+                delayed_withdrawals_timeout: Duration::from_secs(60),
             },
             withdrawal_state: WithdrawalState::default(),
             hashi_committee_info: HashiCommitteeInfo::default(),
@@ -395,15 +395,13 @@ impl DelayedWithdrawalRequest {
         timestamp_secs: HashiTime,
         external_output_utxos: Vec<OutputUTXO>,
     ) -> GuardianResult<Self> {
-        if external_output_utxos.is_empty() {
-            return Err(InvalidInputs("output utxo list is empty".into()));
-        }
-        // TODO: Check that all OutputUTXO's are External?
-        Ok(Self {
+        let r = Self {
             wid,
             timestamp_secs,
             external_output_utxos,
-        })
+        };
+        r.validate_invariants()?;
+        Ok(r)
     }
 
     pub fn wid(&self) -> WithdrawalID {
@@ -422,14 +420,30 @@ impl DelayedWithdrawalRequest {
     /// Called from two places: `delayed_withdraw()` & `provisioner_init()`.
     /// `fresh_withdrawal` is true for calls from `delayed_withdraw()` and false for `provisioner_init()`.
     pub fn validate(&self, network: Network, fresh_withdrawal: bool) -> GuardianResult<()> {
+        self.validate_invariants()?;
+
+        // verify timestamp is latest for a delayed_withdraw(); skip for provisioner_init()
         if fresh_withdrawal {
-            // verify timestamp is latest for a delayed_withdraw(); skip for provisioner_init
             validate_time(self.timestamp_secs)?;
         }
-        // TODO: if max_delay is pre-configured, we could do some validation for provisioner_init() too
+
         self.external_output_utxos
             .iter()
             .try_for_each(|utxo| utxo.validate(network))
+    }
+
+    fn validate_invariants(&self) -> GuardianResult<()> {
+        if self.external_output_utxos.is_empty() {
+            return Err(InvalidInputs("output utxo list is empty".into()));
+        }
+
+        for utxo in &self.external_output_utxos {
+            if !matches!(utxo, OutputUTXO::External { .. }) {
+                return Err(InvalidInputs("output must be external".into()));
+            }
+        }
+
+        Ok(())
     }
 }
 
