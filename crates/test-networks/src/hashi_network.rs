@@ -4,6 +4,7 @@ use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use sui_crypto::SuiSigner;
 use sui_rpc::field::FieldMask;
@@ -101,6 +102,7 @@ impl HashiNetworkBuilder {
 
     pub async fn build(
         self,
+        dir: &Path,
         sui: &SuiNetworkHandle,
         bitcoin: &BitcoinNodeHandle,
         hashi_ids: HashiIds,
@@ -116,6 +118,7 @@ impl HashiNetworkBuilder {
             config.operator_private_key = Some(private_key.to_pem()?);
             config.sui_rpc = Some(sui_rpc.clone());
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
+            config.db = Some(dir.join(validator_address.to_string()));
 
             //TODO fill in chain ids
             config.sui_chain_id = None;

@@ -130,7 +130,9 @@ impl TestNetworksBuilder {
 
         let hashi_network = self
             .hashi_builder
-            .build(&sui_network, &bitcoin_node, hashi_ids)
+            .build(
+                &dir.path().join("hashi"),
+                &sui_network, &bitcoin_node, hashi_ids)
             .await?;
 
         let test_networks = TestNetworks {

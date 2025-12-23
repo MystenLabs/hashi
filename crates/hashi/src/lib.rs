@@ -4,6 +4,7 @@ use std::sync::Mutex;
 pub mod committee;
 pub mod communication;
 pub mod config;
+pub mod db;
 pub mod dkg;
 pub mod grpc;
 pub mod metrics;
@@ -22,6 +23,7 @@ pub struct Hashi {
     pub server_version: ServerVersion,
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
+    pub db: db::Database,
     onchain_state: std::sync::OnceLock<onchain::OnchainState>,
     // TODO: Remove `Option` wrappers below after we are able to initialize them
     // TODO: Replace `DkgManager` by `MpcManager`
@@ -36,10 +38,12 @@ impl Hashi {
     ) -> Arc<Self> {
         init_crypto_provider();
         let metrics = Arc::new(metrics::Metrics::new_default());
+        let db = db::Database::open(config.db.as_deref().unwrap());
         Arc::new(Self {
             server_version,
             config,
             metrics,
+            db,
             onchain_state: Default::default(),
             dkg_manager: dkg_manager.map(Mutex::new),
         })
@@ -52,10 +56,12 @@ impl Hashi {
         registry: &prometheus::Registry,
     ) -> Arc<Self> {
         init_crypto_provider();
+        let db = db::Database::open(config.db.as_deref().unwrap());
         Arc::new(Self {
             server_version,
             config,
             metrics: Arc::new(metrics::Metrics::new(registry)),
+            db,
             onchain_state: Default::default(),
             dkg_manager: dkg_manager.map(Mutex::new),
         })
@@ -122,8 +128,10 @@ mod test {
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]
     async fn tls() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let server_version = ServerVersion::new("unknown", "unknown");
-        let config = Config::new_for_testing();
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
         let hashi = Hashi::new(server_version, config, None);

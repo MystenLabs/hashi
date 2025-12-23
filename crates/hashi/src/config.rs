@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
@@ -56,6 +57,10 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_rpc: Option<String>,
+
+    /// Database path
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db: Option<PathBuf>,
 }
 
 impl Config {
