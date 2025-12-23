@@ -323,7 +323,7 @@ impl DkgManager {
                 }
             }
         }
-        self.process_outputs_from_certified_dealers(certified_dealers.into_iter())
+        self.complete_dkg(certified_dealers.into_iter())
     }
 
     fn create_dealer_message(
@@ -410,7 +410,7 @@ impl DkgManager {
         Ok(())
     }
 
-    fn process_outputs_from_certified_dealers(
+    fn complete_dkg(
         &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_certificates_success() {
+    fn test_complete_dkg_success() {
         let mut rng = rand::thread_rng();
 
         // Use different weights: [3, 2, 4, 1, 2] (total = 12)
@@ -1588,9 +1588,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_outputs_from_certified_dealers(certified_dealers.into_iter())
+            .complete_dkg(certified_dealers.into_iter())
             .unwrap();
 
         // Verify output structure
@@ -1600,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_certificates_missing_dealer_output() {
+    fn test_complete_dkg_missing_dealer_output() {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
@@ -1612,9 +1611,7 @@ mod tests {
 
         let certified_dealers = vec![dealer_addr0, dealer_addr1];
 
-        // Process certificates should fail because receiver never processed the dealer messages
-        let result =
-            receiver_manager.process_outputs_from_certified_dealers(certified_dealers.into_iter());
+        let result = receiver_manager.complete_dkg(certified_dealers.into_iter());
         assert!(result.is_err());
         assert!(
             result
