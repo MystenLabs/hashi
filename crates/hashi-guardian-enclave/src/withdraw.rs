@@ -14,16 +14,19 @@ use axum::extract::State;
 use axum::Json;
 use bitcoin::key::Keypair;
 use bitcoin::taproot::Signature;
-use bitcoin::{Network, XOnlyPublicKey};
+use bitcoin::Network;
+use bitcoin::XOnlyPublicKey;
+use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
 use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
-use hashi_guardian_shared::bitcoin_utils::{construct_signing_messages, TxUTXOs};
+use hashi_guardian_shared::bitcoin_utils::TxUTXOs;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
+use tracing::warn;
 
 /// Delayed withdrawal
 ///

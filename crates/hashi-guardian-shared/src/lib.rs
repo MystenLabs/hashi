@@ -6,7 +6,8 @@ pub use crypto::*;
 pub use errors::*;
 use std::collections::HashMap;
 
-use crate::bitcoin_utils::{OutputUTXO, TxUTXOs};
+use crate::bitcoin_utils::OutputUTXO;
+use crate::bitcoin_utils::TxUTXOs;
 use crate::GuardianError::*;
 use bitcoin::taproot::Signature as BitcoinSignature;
 use bitcoin::*;
@@ -21,7 +22,8 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use std::time::SystemTime;
 
 // ---------------------------------
 //          Intents
