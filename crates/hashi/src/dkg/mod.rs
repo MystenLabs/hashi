@@ -68,6 +68,8 @@ pub struct DkgManager {
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub signing_key: crate::committee::Bls12381PrivateKey,
     pub committee: Committee,
+    pub previous_committee: Option<Committee>,
+    pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<Address, avss::PartialOutput>,
@@ -112,6 +114,18 @@ impl DkgManager {
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
+        let previous_committee = committee_set.previous_committee().cloned();
+        let previous_nodes = previous_committee.as_ref().and_then(|prev_committee| {
+            let mut prev_nodes_vec = Vec::with_capacity(prev_committee.members().len());
+            for (index, member) in prev_committee.members().iter().enumerate() {
+                prev_nodes_vec.push(Node {
+                    id: index as u16,
+                    pk: member.encryption_public_key().to_owned(),
+                    weight: member.weight() as u16,
+                });
+            }
+            Nodes::new(prev_nodes_vec).ok()
+        });
         Ok(Self {
             party_id,
             address,
@@ -120,6 +134,8 @@ impl DkgManager {
             encryption_key,
             signing_key,
             committee,
+            previous_committee,
+            previous_nodes,
             dealer_outputs: HashMap::new(),
             dealer_messages: HashMap::new(),
             message_responses: HashMap::new(),
@@ -645,9 +661,39 @@ impl DkgManager {
         dealer: Address,
         rotation_messages: &RotationMessages,
     ) -> DkgResult<BLS12381Signature> {
+        let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
+            DkgError::InvalidConfig("Key rotation requires previous committee".into())
+        })?;
+        let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+            DkgError::InvalidConfig("Key rotation requires previous nodes".into())
+        })?;
+        let dealer_party_id =
+            previous_committee
+                .index_of(&dealer)
+                .ok_or_else(|| DkgError::InvalidMessage {
+                    sender: dealer,
+                    reason: "Dealer not in previous committee".into(),
+                })? as u16;
+        let dealer_share_indices: HashSet<_> = previous_nodes
+            .share_ids_of(dealer_party_id)
+            .map_err(|_| DkgError::InvalidMessage {
+                sender: dealer,
+                reason: "Dealer has no shares in previous committee".into(),
+            })?
+            .into_iter()
+            .collect();
         let mut outputs = Vec::with_capacity(rotation_messages.messages.len());
         let mut seen_indices = HashSet::new();
         for rotation_message in &rotation_messages.messages {
+            if !dealer_share_indices.contains(&rotation_message.share_index) {
+                return Err(DkgError::InvalidMessage {
+                    sender: dealer,
+                    reason: format!(
+                        "Share index {} does not belong to dealer",
+                        rotation_message.share_index
+                    ),
+                });
+            }
             let share_index = rotation_message.share_index;
             if self.rotation_outputs.contains_key(&share_index) {
                 return Err(DkgError::InvalidMessage {
@@ -918,9 +964,12 @@ mod tests {
                     )
                 })
                 .collect();
-            let committee = Committee::new(members, epoch);
+            let committee = Committee::new(members.clone(), epoch);
+            // Also create a previous committee for key rotation tests
+            let previous_committee = Committee::new(members, epoch - 1);
 
             let mut committees = BTreeMap::new();
+            committees.insert(epoch - 1, previous_committee);
             committees.insert(epoch, committee);
 
             let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -981,9 +1030,12 @@ mod tests {
                     )
                 })
                 .collect();
-            let committee = Committee::new(members, epoch);
+            let committee = Committee::new(members.clone(), epoch);
+            // Also create a previous committee for key rotation tests
+            let previous_committee = Committee::new(members, epoch - 1);
 
             let mut committees = BTreeMap::new();
+            committees.insert(epoch - 1, previous_committee);
             committees.insert(epoch, committee);
 
             let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -4792,6 +4844,52 @@ mod tests {
                 assert!(
                     reason.contains("Duplicate share index"),
                     "Error should mention duplicate: {}",
+                    reason
+                );
+            }
+            _ => panic!("Expected InvalidMessage error, got: {:?}", err),
+        }
+
+        // Verify no outputs were stored (all-or-nothing semantics)
+        assert!(
+            receiver_manager.rotation_outputs.is_empty(),
+            "No rotation outputs should be stored when validation fails"
+        );
+    }
+
+    #[test]
+    fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
+        let rotation_setup = RotationTestSetup::new();
+
+        // Create receiver (party 2 with weight=4)
+        let (mut receiver_manager, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(2);
+
+        // Create rotation dealer (party 0 with weight=3, owns share indices 1, 2, 3)
+        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+        let rotation_dealer_addr = rotation_setup.setup.address(0);
+
+        // Tamper with bundle: change share_index to one that belongs to party 2 (index 6)
+        let mut tampered_messages = rotation_messages.clone();
+        let stolen_share_index = std::num::NonZeroU16::new(6).unwrap(); // Belongs to party 2, not party 0
+        tampered_messages.messages[0].share_index = stolen_share_index;
+
+        let result = receiver_manager.try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &tampered_messages,
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject share index not belonging to dealer"
+        );
+        let err = result.unwrap_err();
+        match err {
+            DkgError::InvalidMessage { reason, .. } => {
+                assert!(
+                    reason.contains("does not belong to dealer"),
+                    "Error should mention share doesn't belong to dealer: {}",
                     reason
                 );
             }
