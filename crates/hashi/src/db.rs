@@ -2,8 +2,9 @@ use std::path::Path;
 
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
+use fjall::Keyspace;
+use fjall::KeyspaceCreateOptions;
 use fjall::Result;
-use fjall::{Keyspace, KeyspaceCreateOptions};
 use sui_sdk_types::Address;
 
 use crate::committee::EncryptionPrivateKey;
