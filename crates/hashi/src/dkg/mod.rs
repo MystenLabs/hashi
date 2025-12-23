@@ -315,11 +315,10 @@ impl DkgManager {
     ) -> DkgResult<DkgOutput> {
         let previous = self.reconstruct_previous_dkg_output(dkg_certificates)?;
         self.previous_dkg_output = Some(previous.clone());
-        if ordered_broadcast_channel.existing_certificate_weight()
-            < self.dkg_config.threshold as u32
-            && let Err(e) = self
-                .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
-                .await
+        // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
+        if let Err(e) = self
+            .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
+            .await
         {
             tracing::error!(
                 "Rotation dealer phase failed: {}. Continuing as party only.",
@@ -589,6 +588,7 @@ impl DkgManager {
                             })?;
                         self.process_certified_rotation_message(&dealer, previous)?;
                     }
+                    // TODO: Implement share recovery.
                     certified_share_indices.extend(dealer_share_indices);
                     certified_dealers.insert(dealer);
                 }
@@ -881,7 +881,6 @@ impl DkgManager {
         ))
     }
 
-    // TODO: Implement share recovery for key rotation.
     async fn recover_shares_via_complaint(
         &mut self,
         dealer: &Address,
@@ -5105,11 +5104,40 @@ mod tests {
             }
         }
 
+        fn certificates(&self) -> Vec<Certificate> {
+            self.certificates.values().cloned().collect()
+        }
+
         fn create_receiver_with_completed_dkg(
             &self,
             receiver_index: usize,
         ) -> (DkgManager, DkgOutput) {
             let mut receiver_manager = self.setup.create_manager(receiver_index);
+
+            // Process all dealer messages
+            for (i, message) in self.dealer_messages.iter().enumerate() {
+                let dealer_address = self.setup.address(self.dealer_indices[i]);
+                receive_dealer_message(&mut receiver_manager, message, dealer_address).unwrap();
+            }
+
+            // Complete DKG
+            let dkg_output = receiver_manager
+                .complete_dkg(self.certificates.keys().copied())
+                .unwrap();
+
+            (receiver_manager, dkg_output)
+        }
+
+        /// Creates a manager with InMemoryPublicMessagesStore and completed DKG.
+        /// The store contains all dealer messages for later reconstruction.
+        fn create_receiver_with_memory_store(
+            &self,
+            receiver_index: usize,
+        ) -> (DkgManager, DkgOutput) {
+            let mut receiver_manager = self.setup.create_manager_with_store(
+                receiver_index,
+                Box::new(InMemoryPublicMessagesStore::new()),
+            );
 
             // Process all dealer messages
             for (i, message) in self.dealer_messages.iter().enumerate() {
@@ -5132,6 +5160,34 @@ mod tests {
         ) -> (DkgManager, DkgOutput, RotationMessages) {
             let mut rng = rand::thread_rng();
             let mut dealer_manager = self.setup.create_manager(dealer_index);
+
+            // Process all dealer messages
+            for (i, message) in self.dealer_messages.iter().enumerate() {
+                let dealer_address = self.setup.address(self.dealer_indices[i]);
+                receive_dealer_message(&mut dealer_manager, message, dealer_address).unwrap();
+            }
+
+            // Complete DKG
+            let dkg_output = dealer_manager
+                .complete_dkg(self.certificates.keys().copied())
+                .unwrap();
+
+            // Create rotation messages
+            let rotation_messages = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
+
+            (dealer_manager, dkg_output, rotation_messages)
+        }
+
+        /// Creates a rotation dealer with InMemoryPublicMessagesStore.
+        fn create_rotation_dealer_with_memory_store(
+            &self,
+            dealer_index: usize,
+        ) -> (DkgManager, DkgOutput, RotationMessages) {
+            let mut rng = rand::thread_rng();
+            let mut dealer_manager = self.setup.create_manager_with_store(
+                dealer_index,
+                Box::new(InMemoryPublicMessagesStore::new()),
+            );
 
             // Process all dealer messages
             for (i, message) in self.dealer_messages.iter().enumerate() {
@@ -5372,131 +5428,88 @@ mod tests {
     #[tokio::test]
     async fn test_run_key_rotation() {
         let mut rng = rand::thread_rng();
-        let weights: [u16; 5] = [1, 1, 1, 2, 2];
-        let num_validators = weights.len();
-        let setup = TestSetup::with_weights(&weights);
+        let rotation_setup = RotationTestSetup::new();
+        // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+        // Dealers are validators 0, 1, 4
 
-        // Phase 1: Run DKG to get certificates and outputs
-        // Use InMemoryPublicMessagesStore for rotation (needs to retrieve stored messages)
-        let mut managers: Vec<_> = (0..num_validators)
-            .map(|i| {
-                setup.create_manager_with_store(i, Box::new(InMemoryPublicMessagesStore::new()))
-            })
-            .collect();
-
-        // Create all dealer messages
-        let dealer_messages: Vec<_> = managers
-            .iter()
-            .map(|mgr| mgr.create_dealer_message(&mut rng))
-            .collect();
-
-        // Collect signatures and create DKG certificates
-        let mut dkg_certificates = Vec::new();
-        for (dealer_idx, message) in dealer_messages.iter().enumerate() {
-            let dealer_addr = setup.address(dealer_idx);
-            let mut signatures = Vec::new();
-            for manager in managers.iter_mut() {
-                let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
-                signatures.push(sig);
-            }
-            let cert = create_test_certificate(setup.committee(), message, dealer_addr, signatures)
-                .unwrap();
-            dkg_certificates.push(cert);
-        }
-
-        // Phase 2: Run key rotation for validator 0
-        let mut test_manager = managers.remove(0);
-        let test_addr = setup.address(0);
-
-        // Set up previous_dkg_output for all other managers (they need it to verify rotation messages)
-        let certified_dealers: HashSet<_> = dkg_certificates
-            .iter()
-            .map(|c| match &c.message {
-                Dkg(m) => m.dealer_address,
-                _ => panic!("Expected DKG certificate"),
-            })
-            .collect();
-        for manager in managers.iter_mut() {
-            let output = manager
-                .complete_dkg(certified_dealers.iter().copied())
-                .unwrap();
-            manager.previous_dkg_output = Some(output);
-        }
-
-        // Create mock P2P channel with remaining managers
-        let other_managers: HashMap<_, _> = managers
-            .into_iter()
-            .enumerate()
-            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
-            .collect();
-        let mock_p2p = MockP2PChannel::new(other_managers, test_addr);
-
-        // Phase 3: Pre-create rotation certificates from other validators to put on TOB
-        // First, test_manager needs to reconstruct its previous DKG output
-        let test_dkg_output = test_manager
-            .complete_dkg(certified_dealers.iter().copied())
-            .unwrap();
+        // Create test_manager (validator 0, weight=3) with memory store for message retrieval
+        let (mut test_manager, test_dkg_output, _) =
+            rotation_setup.create_rotation_dealer_with_memory_store(0);
+        let test_addr = rotation_setup.setup.address(0);
         test_manager.previous_dkg_output = Some(test_dkg_output.clone());
 
-        // Create rotation messages and certificates for some other validators
-        // Only create certificates with combined weight < threshold so test_manager must run as dealer
-        // threshold = 3, validators 1 and 2 have weight 1 each = 2 < 3
+        // Create other managers for MockP2PChannel (validators 1-4)
+        let mut other_managers_map = HashMap::new();
+        for i in 1..5 {
+            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager.previous_dkg_output = Some(output);
+            other_managers_map.insert(rotation_setup.setup.address(i), manager);
+        }
+        let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+        // Create rotation certificates covering < threshold share indices
+        // so test_manager must run as dealer.
+        // Validator 3 has weight=1 (1 share index), which is < threshold (4).
         let mut rotation_certificates = Vec::new();
         {
             let mut other_managers = mock_p2p.managers.lock().unwrap();
-            for validator_idx in 1..3 {
-                let addr = setup.address(validator_idx);
-                let manager = other_managers.get_mut(&addr).unwrap();
-                let prev_output = manager.previous_dkg_output.clone().unwrap();
+            let validator_idx = 3; // weight = 1
+            let addr = rotation_setup.setup.address(validator_idx);
+            let manager = other_managers.get_mut(&addr).unwrap();
+            let prev_output = manager.previous_dkg_output.clone().unwrap();
 
-                // Create rotation messages
-                let rotation_messages = manager.create_rotation_messages(&prev_output, &mut rng);
-                manager
-                    .rotation_dealer_messages
-                    .insert(addr, rotation_messages.clone());
+            // Create rotation messages
+            let rotation_messages = manager.create_rotation_messages(&prev_output, &mut rng);
+            manager
+                .rotation_dealer_messages
+                .insert(addr, rotation_messages.clone());
 
-                // Sign own messages
-                let own_sig = manager
-                    .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
-                    .unwrap();
-
-                // Collect signatures from test_manager
-                test_manager
-                    .rotation_dealer_messages
-                    .insert(addr, rotation_messages.clone());
-                let test_sig = test_manager
-                    .try_sign_rotation_messages(&test_dkg_output, addr, &rotation_messages)
-                    .unwrap();
-
-                // Create certificate
-                let epoch = manager.dkg_config.epoch;
-                let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
-                let test_member_sig = MemberSignature::new(epoch, test_addr, test_sig);
-                let cert = create_rotation_test_certificate(
-                    setup.committee(),
-                    &rotation_messages,
-                    addr,
-                    vec![own_member_sig, test_member_sig],
-                )
+            // Sign own messages
+            let own_sig = manager
+                .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
                 .unwrap();
-                rotation_certificates.push(cert);
-            }
+
+            // Collect signature from test_manager
+            test_manager
+                .rotation_dealer_messages
+                .insert(addr, rotation_messages.clone());
+            let test_sig = test_manager
+                .try_sign_rotation_messages(&test_dkg_output, addr, &rotation_messages)
+                .unwrap();
+
+            // Create certificate
+            let epoch = manager.dkg_config.epoch;
+            let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
+            let test_member_sig = MemberSignature::new(epoch, test_addr, test_sig);
+            let cert = create_rotation_test_certificate(
+                rotation_setup.setup.committee(),
+                &rotation_messages,
+                addr,
+                vec![own_member_sig, test_member_sig],
+            )
+            .unwrap();
+            rotation_certificates.push(cert);
         }
 
-        // Create mock TOB with rotation certificates from other validators
+        // Create mock TOB with rotation certificates
         let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
 
-        // Phase 4: Run key rotation
+        // Run key rotation
         let new_output = test_manager
-            .run_key_rotation(&dkg_certificates, &mock_p2p, &mut mock_tob, &mut rng)
+            .run_key_rotation(
+                &rotation_setup.certificates(),
+                &mock_p2p,
+                &mut mock_tob,
+                &mut rng,
+            )
             .await
             .unwrap();
 
-        // Phase 5: Verify results
-        // Verify new output has correct number of shares (equal to validator 0's weight)
+        // Verify results
+        // Validator 0 has weight=3, so should have 3 shares
         assert_eq!(
             new_output.key_shares.shares.len(),
-            weights[0] as usize,
+            3,
             "Should have shares equal to validator weight"
         );
 
@@ -5506,17 +5519,16 @@ mod tests {
             "Threshold should be preserved after rotation"
         );
 
-        // Verify public key is preserved (rotation should not change the aggregate public key)
+        // Verify public key is preserved
         assert_eq!(
             new_output.public_key, test_dkg_output.public_key,
             "Public key should be preserved after rotation"
         );
 
-        // Verify commitments exist for all share indices
-        let total_weight: u16 = weights.iter().sum();
+        // Verify commitments exist for all share indices (total weight = 12)
         assert_eq!(
             new_output.commitments.len(),
-            total_weight as usize,
+            12,
             "Should have commitments for all share indices"
         );
 
