@@ -292,8 +292,8 @@ impl Enclave {
             .map_err(|_| InternalError("WithdrawControlsConfig already set".into()))
     }
 
-    pub fn delayed_withdrawals_delay(&self) -> GuardianResult<Duration> {
-        Ok(self.withdrawal_config()?.delayed_withdrawals_delay)
+    pub fn delayed_withdrawals_min_delay(&self) -> GuardianResult<Duration> {
+        Ok(self.withdrawal_config()?.delayed_withdrawals_min_delay)
     }
 
     pub fn delayed_withdrawals_timeout(&self) -> GuardianResult<Duration> {

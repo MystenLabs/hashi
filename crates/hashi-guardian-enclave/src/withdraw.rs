@@ -32,7 +32,8 @@ use tracing::warn;
 ///
 /// Throws an error if:
 ///     1. Validation issue: invalid cert or request contents
-///     2. S3 logging issue: Unable to log to S3
+///     2. S3 logging issue
+///     3. Duplicate request
 pub async fn delayed_withdraw(
     State(enclave): State<Arc<Enclave>>,
     Json(request): Json<HashiNodeSigned<DelayedWithdrawalRequest>>,
@@ -63,6 +64,7 @@ pub async fn delayed_withdraw(
     // What should the order be between updating pending_delayed_withdrawals and writing to S3?
     // 1) update pending_delayed_withdrawals -> write to S3: If writing to S3 fails, what to do?
     //    should the caller retry? if so, should we not error out upon seeing a duplicate request & instead allow S3 log write?
+    //    the downside of doing so is that an unbounded number of S3 logs can get created for a single withdrawal.
     // 2) write to S3 -> update pending_delayed_withdrawals: in this direction, S3 logging failures
     //    implicitly imply that caller should retry. so we choose this option.
 
@@ -166,7 +168,7 @@ pub async fn immediate_withdraw(
     if request.is_delayed() {
         info!("Checking delayed withdrawal eligibility.");
         let min_delay = enclave
-            .delayed_withdrawals_delay()
+            .delayed_withdrawals_min_delay()
             .expect("withdrawal config should be set");
 
         // Acquire lock
@@ -268,7 +270,7 @@ pub async fn immediate_withdraw(
 fn approve_delayed_withdrawal(
     cur_withdrawal: &ImmediateWithdrawalRequest,
     pending_withdrawals: &HashMap<WithdrawalID, DelayedWithdrawalRequest>,
-    delayed_withdrawals_delay: Duration,
+    delayed_withdrawals_min_delay: Duration,
 ) -> GuardianResult<()> {
     // Find the matching record
     let pending_withdrawal = match pending_withdrawals.get(&cur_withdrawal.wid()) {
@@ -295,8 +297,8 @@ fn approve_delayed_withdrawal(
     }
 
     // Check that the gap is sufficiently long
-    // TODO: confirm below impl after confirming HashiTime type
-    let required_timestamp = delayed_withdrawals_delay.as_secs() + pending_withdrawal.timestamp();
+    let required_timestamp =
+        delayed_withdrawals_min_delay.as_secs() + pending_withdrawal.timestamp();
     if cur_withdrawal.timestamp() < required_timestamp {
         return Err(InvalidInputs(format!(
             "Request too early. Required time: {:?}, Actual time: {:?}",

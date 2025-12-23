@@ -58,23 +58,29 @@ pub struct InputUTXO {
     leaf_hash: TapLeafHash,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ExternalOutputUTXO {
+    /// Bitcoin address to withdraw to
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct InternalOutputUTXO {
+    /// The derivation path
+    pub derivation_path: DerivationPath,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
 /// Withdrawal destination and amount.
 /// External amounts count towards rate limits whereas internal amounts don't.
 /// Internal address is derived inside the enclave to ensure that it is actually internal.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum OutputUTXO {
-    External {
-        /// Bitcoin address to withdraw to
-        address: BitcoinAddress<NetworkUnchecked>,
-        /// Amount in satoshis
-        amount: Amount,
-    },
-    Internal {
-        /// The derivation path
-        derivation_path: DerivationPath,
-        /// Amount in satoshis
-        amount: Amount,
-    },
+    External(ExternalOutputUTXO),
+    Internal(InternalOutputUTXO),
 }
 
 /// All the UTXOs associated with a withdrawal transaction
@@ -91,7 +97,6 @@ pub struct TxUTXOs {
 // ---------------------------------
 
 /// Validates that an unchecked address is appropriate for `network`.
-/// This returns a `Result` (rather than a `bool`) so callers can surface useful error context.
 pub fn validate_address_for_network(
     address: &BitcoinAddress<NetworkUnchecked>,
     network: Network,
@@ -178,6 +183,13 @@ impl InputUTXO {
     }
 }
 
+impl ExternalOutputUTXO {
+    pub fn validate(&self, network: Network) -> GuardianResult<()> {
+        // TODO: Validate amount > 0
+        validate_address_for_network(&self.address, network)
+    }
+}
+
 /// Represents an output destination for a withdrawal.
 ///
 /// Outputs can be **external** (to a user-provided address) or **internal** (change, derived inside enclave).
@@ -185,8 +197,8 @@ impl OutputUTXO {
     /// Validates this value, including external addresses against `network`.
     pub fn validate(&self, network: Network) -> GuardianResult<()> {
         // TODO: Validate amount > 0 (and optionally enforce dust rules for External outputs).
-        if let OutputUTXO::External { address, .. } = self {
-            validate_address_for_network(address, network)?
+        if let OutputUTXO::External(x) = self {
+            x.validate(network)?
         }
         Ok(())
     }
@@ -194,8 +206,8 @@ impl OutputUTXO {
     /// Returns the output amount in satoshis.
     pub fn amount(&self) -> Amount {
         match self {
-            OutputUTXO::External { amount, .. } => *amount,
-            OutputUTXO::Internal { amount, .. } => *amount,
+            OutputUTXO::External(ExternalOutputUTXO { amount, .. }) => *amount,
+            OutputUTXO::Internal(InternalOutputUTXO { amount, .. }) => *amount,
         }
     }
 
@@ -209,7 +221,7 @@ impl OutputUTXO {
         network: Network,
     ) -> TxOut {
         match self {
-            OutputUTXO::External { address, amount } => TxOut {
+            OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
                 value: *amount,
                 script_pubkey: address
                     .clone()
@@ -217,10 +229,10 @@ impl OutputUTXO {
                     .expect("address should be validated before calling compute_all_outputs")
                     .script_pubkey(),
             },
-            OutputUTXO::Internal {
+            OutputUTXO::Internal(InternalOutputUTXO {
                 derivation_path,
                 amount,
-            } => {
+            }) => {
                 let scripts =
                     compute_taproot_artifacts(enclave_pubkey, hashi_pubkey, derivation_path);
                 TxOut {
@@ -307,18 +319,24 @@ impl TxUTXOs {
             .collect()
     }
 
-    pub fn external_outs(&self) -> Vec<&OutputUTXO> {
+    pub fn external_outs(&self) -> Vec<&ExternalOutputUTXO> {
         self.outputs
             .iter()
-            .filter(|utxo| matches!(utxo, OutputUTXO::External { .. }))
+            .filter_map(|utxo| match utxo {
+                OutputUTXO::External(x) => Some(x),
+                OutputUTXO::Internal(_) => None,
+            })
             .collect::<Vec<_>>()
     }
 
     pub fn external_out_amount(&self) -> Amount {
-        self.external_outs()
+        self.outputs
             .iter()
-            .map(|utxo| utxo.amount())
-            .sum::<Amount>()
+            .filter_map(|utxo| match utxo {
+                OutputUTXO::External(x) => Some(x.amount),
+                OutputUTXO::Internal(_) => None,
+            })
+            .sum()
     }
 
     fn fees(&self) -> GuardianResult<Amount> {
@@ -648,14 +666,14 @@ mod bitcoin_tests {
         let tx_info = TxUTXOs::new(
             vec![input_utxo.clone()],
             vec![
-                OutputUTXO::External {
+                OutputUTXO::External(ExternalOutputUTXO {
                     address: dest_address.as_unchecked().clone(),
                     amount: Amount::from_sat(100), // 100 sats is sent
-                },
-                OutputUTXO::Internal {
+                }),
+                OutputUTXO::Internal(InternalOutputUTXO {
                     derivation_path: [0; 32],
                     amount: input_amount - Amount::from_sat(1000),
-                },
+                }),
             ],
         )
         .unwrap();
