@@ -100,6 +100,18 @@ pub struct DkgOutput {
     pub public_key: Secp256k1Point,
     pub key_shares: avss::SharesForNode,
     pub commitments: Vec<Eval<G>>,
+    pub threshold: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationMessage {
+    pub share_index: ShareIndex,
+    pub message: avss::Message,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationMessages {
+    pub messages: Vec<RotationMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,10 +151,17 @@ pub struct DkgDealerMessageHash {
     pub message_hash: MessageHash,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationDealerMessagesHash {
+    pub dealer_address: Address,
+    pub messages_hash: MessageHash,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MpcMessageV1 {
     Dkg(DkgDealerMessageHash),
+    Rotation(RotationDealerMessagesHash),
 }
 
 pub type Certificate = CommitteeSignature<MpcMessageV1>;
@@ -208,16 +227,20 @@ mod tests {
     use fastcrypto_tbls::nodes::Node;
     use std::num::NonZeroU16;
 
+    const EXPECT_DKG_MESSAGE: &str = "expected Dkg message";
+
     impl MpcMessageV1 {
         pub fn as_dkg_message(&self) -> &DkgDealerMessageHash {
             match self {
                 MpcMessageV1::Dkg(msg) => msg,
+                MpcMessageV1::Rotation(_) => panic!("{}", EXPECT_DKG_MESSAGE),
             }
         }
 
         pub fn as_mut_dkg_message(&mut self) -> &mut DkgDealerMessageHash {
             match self {
                 MpcMessageV1::Dkg(msg) => msg,
+                MpcMessageV1::Rotation(_) => panic!("{}", EXPECT_DKG_MESSAGE),
             }
         }
     }
