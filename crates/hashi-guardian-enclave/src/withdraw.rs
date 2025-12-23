@@ -5,7 +5,7 @@
 //! the pattern employed in this file is: log to s3 and then update state. This ensures that all the
 //! state updates are committed to S3.
 //!
-//! The above state of things also leads to the following invariant: Killing the enclave at any point
+//! Relatedly, the code in this file follows the following invariant: Killing the enclave at any point
 //! after a S3 write & restarting it with the recon script should lead to an enclave with the same
 //! state as another enclave that didn't die in the first place.
 
