@@ -1,7 +1,9 @@
-use crate::dkg::types::{
-    ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendMessageRequest, SendMessageResponse,
-};
+use crate::dkg::types::ComplainRequest;
+use crate::dkg::types::ComplainResponse;
+use crate::dkg::types::RetrieveMessageRequest;
+use crate::dkg::types::RetrieveMessageResponse;
+use crate::dkg::types::SendMessageRequest;
+use crate::dkg::types::SendMessageResponse;
 use crate::proto::dkg_service_client::DkgServiceClient;
 use tonic::transport::Channel;
 

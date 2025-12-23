@@ -1,9 +1,13 @@
-use crate::communication::{ChannelError, ChannelResult, P2PChannel};
+use crate::communication::ChannelError;
+use crate::communication::ChannelResult;
+use crate::communication::P2PChannel;
 use crate::dkg::rpc::DkgRpcClient;
-use crate::dkg::types::{
-    ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendMessageRequest, SendMessageResponse,
-};
+use crate::dkg::types::ComplainRequest;
+use crate::dkg::types::ComplainResponse;
+use crate::dkg::types::RetrieveMessageRequest;
+use crate::dkg::types::RetrieveMessageResponse;
+use crate::dkg::types::SendMessageRequest;
+use crate::dkg::types::SendMessageResponse;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use sui_sdk_types::Address;

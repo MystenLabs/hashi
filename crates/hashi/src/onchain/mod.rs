@@ -2,20 +2,19 @@ use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use futures::TryStreamExt;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
+use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
-use sui_rpc::{
-    Client,
-    proto::sui::rpc::v2::{GetObjectRequest, ListPackageVersionsRequest, Object},
-};
+use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
+use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
 use tap::Pipe;
@@ -478,10 +477,9 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
 
 #[cfg(test)]
 mod tests {
-    use fastcrypto::{
-        serde_helpers::ToFromByteArray,
-        traits::{KeyPair, ToFromBytes},
-    };
+    use fastcrypto::serde_helpers::ToFromByteArray;
+    use fastcrypto::traits::KeyPair;
+    use fastcrypto::traits::ToFromBytes;
 
     use crate::dkg::EncryptionGroupElement;
 

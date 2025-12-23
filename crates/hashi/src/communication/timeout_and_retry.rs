@@ -1,7 +1,9 @@
 //! Retry and timeout utilities
 
-use super::{ChannelError, ChannelResult};
-use backon::{ExponentialBuilder, Retryable};
+use super::ChannelError;
+use super::ChannelResult;
+use backon::ExponentialBuilder;
+use backon::Retryable;
 use std::future::Future;
 use std::time::Duration;
 
