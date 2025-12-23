@@ -112,7 +112,7 @@ impl Hashi {
             .config
             .protocol_private_key()
             .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
-        let store = Box::new(storage::DatabasePublicMessagesStore::new(
+        let store = Box::new(storage::EpochPublicMessagesStore::new(
             self.db.clone(),
             committee_set.epoch(),
         ));

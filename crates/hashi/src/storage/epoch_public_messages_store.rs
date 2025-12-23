@@ -6,18 +6,18 @@ use sui_sdk_types::Address;
 use crate::db::Database;
 use crate::storage::PublicMessagesStore;
 
-pub struct DatabasePublicMessagesStore {
+pub struct EpochPublicMessagesStore {
     db: Arc<Database>,
     epoch: u64,
 }
 
-impl DatabasePublicMessagesStore {
+impl EpochPublicMessagesStore {
     pub fn new(db: Arc<Database>, epoch: u64) -> Self {
         Self { db, epoch }
     }
 }
 
-impl PublicMessagesStore for DatabasePublicMessagesStore {
+impl PublicMessagesStore for EpochPublicMessagesStore {
     fn store_dealer_message(
         &mut self,
         dealer: &Address,
