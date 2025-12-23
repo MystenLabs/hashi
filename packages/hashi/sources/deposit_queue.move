@@ -1,9 +1,7 @@
-#[allow(unused_function, unused_field, unused_use)]
 module hashi::deposit_queue;
 
 use hashi::utxo::{Utxo, UtxoId};
-use std::string::String;
-use sui::{bag::Bag, balance::Balance, clock::Clock, object_bag::ObjectBag};
+use sui::{bag::Bag, clock::Clock};
 
 public struct DepositRequestQueue has store {
     // XXX bag or table?

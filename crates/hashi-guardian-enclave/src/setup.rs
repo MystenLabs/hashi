@@ -81,7 +81,9 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use axum::Json;
-    use hashi_guardian_shared::{commit_share, decrypt_share, NUM_OF_SHARES};
+    use hashi_guardian_shared::commit_share;
+    use hashi_guardian_shared::decrypt_share;
+    use hashi_guardian_shared::NUM_OF_SHARES;
 
     #[tokio::test]
     async fn test_setup_new_key() {

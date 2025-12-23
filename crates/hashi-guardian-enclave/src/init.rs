@@ -224,7 +224,8 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{Network, XOnlyPublicKey};
+    use bitcoin::Network;
+    use bitcoin::XOnlyPublicKey;
     use hashi_guardian_shared::bitcoin_utils;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use k256::SecretKey;

@@ -3,29 +3,46 @@
 pub mod rpc;
 pub mod types;
 
-use crate::committee::{BlsSignatureAggregator, Committee};
-use crate::communication::{ChannelResult, P2PChannel, with_timeout_and_retry};
+use crate::committee::BlsSignatureAggregator;
+use crate::committee::Committee;
+use crate::communication::ChannelResult;
+use crate::communication::P2PChannel;
+use crate::communication::with_timeout_and_retry;
+use crate::dkg::types::Certificate;
+use crate::dkg::types::DkgDealerMessageHash;
 use crate::dkg::types::MpcMessageV1::Dkg;
-use crate::dkg::types::{Certificate, DkgDealerMessageHash};
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::HashToGroupElement;
-use fastcrypto::hash::{Blake2b256, HashFunction};
-use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
-use fastcrypto_tbls::nodes::{Node, Nodes, PartyId};
-use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::HashFunction;
+use fastcrypto_tbls::ecies_v1::PrivateKey;
+use fastcrypto_tbls::ecies_v1::PublicKey;
+use fastcrypto_tbls::nodes::Node;
+use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_tbls::nodes::PartyId;
+use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::complaint;
 use futures::future::join_all;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use sui_sdk_types::Address;
+pub use types::ComplainRequest;
+pub use types::ComplainResponse;
 use types::DkgConfig;
-pub use types::{
-    ComplainRequest, ComplainResponse, DkgError, DkgOutput, DkgResult, EncryptionGroupElement,
-    MessageHash, RetrieveMessageRequest, RetrieveMessageResponse, SendMessageRequest,
-    SendMessageResponse, SessionId,
-};
+pub use types::DkgError;
+pub use types::DkgOutput;
+pub use types::DkgResult;
+pub use types::EncryptionGroupElement;
+pub use types::MessageHash;
+pub use types::RetrieveMessageRequest;
+pub use types::RetrieveMessageResponse;
+pub use types::SendMessageRequest;
+pub use types::SendMessageResponse;
+pub use types::SessionId;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 
@@ -323,7 +340,7 @@ impl DkgManager {
                 }
             }
         }
-        self.process_outputs_from_certified_dealers(certified_dealers.into_iter())
+        self.complete_dkg(certified_dealers.into_iter())
     }
 
     fn create_dealer_message(
@@ -410,7 +427,7 @@ impl DkgManager {
         Ok(())
     }
 
-    fn process_outputs_from_certified_dealers(
+    fn complete_dkg(
         &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
@@ -607,7 +624,10 @@ async fn send_dkg_message_to_many(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::{Committee, CommitteeMember, EncryptionPublicKey, MemberSignature};
+    use crate::committee::Committee;
+    use crate::committee::CommitteeMember;
+    use crate::committee::EncryptionPublicKey;
+    use crate::committee::MemberSignature;
     use crate::dkg::types::ProtocolType;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
@@ -617,7 +637,8 @@ mod tests {
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
+    use std::collections::HashSet;
 
     struct MockPublicMessagesStore;
 
@@ -1552,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_certificates_success() {
+    fn test_complete_dkg_success() {
         let mut rng = rand::thread_rng();
 
         // Use different weights: [3, 2, 4, 1, 2] (total = 12)
@@ -1588,9 +1609,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        // Process certificates to complete DKG
         let dkg_output = receiver_manager
-            .process_outputs_from_certified_dealers(certified_dealers.into_iter())
+            .complete_dkg(certified_dealers.into_iter())
             .unwrap();
 
         // Verify output structure
@@ -1600,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_certificates_missing_dealer_output() {
+    fn test_complete_dkg_missing_dealer_output() {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
@@ -1612,9 +1632,7 @@ mod tests {
 
         let certified_dealers = vec![dealer_addr0, dealer_addr1];
 
-        // Process certificates should fail because receiver never processed the dealer messages
-        let result =
-            receiver_manager.process_outputs_from_certified_dealers(certified_dealers.into_iter());
+        let result = receiver_manager.complete_dkg(certified_dealers.into_iter());
         assert!(result.is_err());
         assert!(
             result

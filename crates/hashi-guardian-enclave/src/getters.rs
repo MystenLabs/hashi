@@ -8,15 +8,17 @@ use tracing::info;
 
 // Only needed in non-test builds (for NSM hardware interaction)
 #[cfg(not(test))]
-use {
-    crate::GuardianError,
-    nsm_api::{
-        api::{Request as NsmRequest, Response as NsmResponse},
-        driver,
-    },
-    serde_bytes::ByteBuf,
-    tracing::error,
-};
+use crate::GuardianError;
+#[cfg(not(test))]
+use nsm_api::api::Request as NsmRequest;
+#[cfg(not(test))]
+use nsm_api::api::Response as NsmResponse;
+#[cfg(not(test))]
+use nsm_api::driver;
+#[cfg(not(test))]
+use serde_bytes::ByteBuf;
+#[cfg(not(test))]
+use tracing::error;
 
 /// Endpoint that returns an attestation committed to the enclave's signing public key
 pub async fn get_attestation(

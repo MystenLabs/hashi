@@ -1,11 +1,16 @@
-pub use fastcrypto::bls12381::min_pk::{
-    BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
-};
-use fastcrypto::bls12381::{BLS_PRIVATE_KEY_LENGTH, min_pk};
-use fastcrypto::traits::{
-    AggregateAuthenticator, AllowedRng, KeyPair, Signer, ToFromBytes, VerifyingKey,
-};
-use serde::{Deserialize, Serialize};
+use fastcrypto::bls12381::BLS_PRIVATE_KEY_LENGTH;
+use fastcrypto::bls12381::min_pk;
+pub use fastcrypto::bls12381::min_pk::BLS12381AggregateSignature;
+pub use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
+pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
+use fastcrypto::traits::AggregateAuthenticator;
+use fastcrypto::traits::AllowedRng;
+use fastcrypto::traits::KeyPair;
+use fastcrypto::traits::Signer;
+use fastcrypto::traits::ToFromBytes;
+use fastcrypto::traits::VerifyingKey;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;

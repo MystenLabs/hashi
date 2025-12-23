@@ -212,6 +212,9 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             .as_slice()
             .to_bcs()?,
     };
+    let validator_address_pure = Input::Pure {
+        value: validator_address.to_bcs()?,
+    };
 
     let pt = ProgrammableTransaction {
         inputs: vec![
@@ -230,40 +233,35 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             https_address,
             tls_public_key,
             encryption_public_key,
+            validator_address_pure,
         ],
         commands: vec![
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
-                function: Identifier::from_static("register_validator"),
+                module: Identifier::from_static("validator"),
+                function: Identifier::from_static("register"),
                 type_arguments: vec![],
                 arguments: vec![
                     Argument::Input(1),
                     Argument::Input(0),
                     Argument::Input(2),
                     Argument::Input(3),
+                    Argument::Input(6),
                 ],
             }),
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
+                module: Identifier::from_static("validator"),
                 function: Identifier::from_static("update_https_address"),
                 type_arguments: vec![],
-                arguments: vec![Argument::Input(1), Argument::Input(4)],
+                arguments: vec![Argument::Input(1), Argument::Input(7), Argument::Input(4)],
             }),
             sui_sdk_types::Command::MoveCall(MoveCall {
                 package: ids.package_id,
-                module: Identifier::from_static("hashi"),
+                module: Identifier::from_static("validator"),
                 function: Identifier::from_static("update_tls_public_key"),
                 type_arguments: vec![],
-                arguments: vec![Argument::Input(1), Argument::Input(5)],
-            }),
-            sui_sdk_types::Command::MoveCall(MoveCall {
-                package: ids.package_id,
-                module: Identifier::from_static("hashi"),
-                function: Identifier::from_static("update_next_epoch_encryption_public_key"),
-                type_arguments: vec![],
-                arguments: vec![Argument::Input(1), Argument::Input(6)],
+                arguments: vec![Argument::Input(1), Argument::Input(7), Argument::Input(5)],
             }),
         ],
     };
