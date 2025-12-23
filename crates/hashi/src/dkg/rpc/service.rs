@@ -1,11 +1,13 @@
 use crate::dkg::types;
 use crate::grpc::HttpService;
 use crate::onchain::types::CommitteeSet;
+use crate::proto::ComplainRequest;
+use crate::proto::ComplainResponse;
+use crate::proto::RetrieveMessageRequest;
+use crate::proto::RetrieveMessageResponse;
+use crate::proto::SendMessageRequest;
+use crate::proto::SendMessageResponse;
 use crate::proto::dkg_service_server::DkgService;
-use crate::proto::{
-    ComplainRequest, ComplainResponse, RetrieveMessageRequest, RetrieveMessageResponse,
-    SendMessageRequest, SendMessageResponse,
-};
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use sui_sdk_types::Address;

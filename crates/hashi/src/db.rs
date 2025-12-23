@@ -2,6 +2,7 @@ use std::path::Path;
 
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto_tbls::threshold_schnorr::avss;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
 use fjall::Result;
@@ -87,7 +88,7 @@ impl Database {
         &self,
         epoch: u64,
         dealer: &Address,
-        message: &fastcrypto_tbls::threshold_schnorr::avss::Message,
+        message: &avss::Message,
     ) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         let value = bcs::to_bytes(message).unwrap();
@@ -98,10 +99,10 @@ impl Database {
         &self,
         epoch: u64,
         dealer: &Address,
-    ) -> Result<Option<fastcrypto_tbls::threshold_schnorr::avss::Message>> {
+    ) -> Result<Option<avss::Message>> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
 
-        let bytes = match self.encryption_keys.get(key) {
+        let bytes = match self.dealer_messages.get(key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e),
@@ -115,6 +116,15 @@ impl Database {
         })?;
 
         Ok(Some(message))
+    }
+
+    pub fn clear_dealer_messages(&self, epoch: u64) -> Result<()> {
+        let prefix = epoch.to_be_bytes();
+        for guard in self.dealer_messages.prefix(prefix) {
+            let key = guard.key()?;
+            self.dealer_messages.remove(key)?;
+        }
+        Ok(())
     }
 }
 

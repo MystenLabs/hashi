@@ -1,4 +1,6 @@
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 pub mod committee;
 pub mod communication;
@@ -106,11 +108,11 @@ impl Hashi {
             &dkg::types::ProtocolType::DkgKeyGeneration,
         );
         let encryption_key = self.config.encryption_private_key()?;
-        let bls_signing_key = self
+        let signing_key = self
             .config
             .protocol_private_key()
             .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
-        let store = Box::new(db::DatabasePublicMessagesStore::new(
+        let store = Box::new(storage::DatabasePublicMessagesStore::new(
             self.db.clone(),
             committee_set.epoch(),
         ));
@@ -119,7 +121,7 @@ impl Hashi {
             committee_set,
             session_id,
             encryption_key,
-            bls_signing_key,
+            signing_key,
             store,
         )?;
         self.dkg_manager
