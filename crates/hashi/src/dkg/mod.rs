@@ -1874,7 +1874,7 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
-        let mut receiver_manager = setup.create_manager(0);
+        let receiver_manager = setup.create_manager(0);
 
         // Create dealers
         let dealer_addr0 = setup.address(1);
