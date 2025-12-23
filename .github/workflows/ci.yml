@@ -132,9 +132,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: rustfmt
-        run: |
-          cargo fmt -- --check
-          buf format --diff --exit-code
+        run: make check-fmt
 
       - name: clippy
         run: make clippy
