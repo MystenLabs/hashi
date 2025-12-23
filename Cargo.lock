@@ -2455,7 +2455,6 @@ dependencies = [
  "bitcoin",
  "ed25519-consensus",
  "hashi-guardian-shared",
- "hex",
  "k256",
  "rand 0.8.5",
  "serde",

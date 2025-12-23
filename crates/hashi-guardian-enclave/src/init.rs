@@ -97,10 +97,13 @@ pub async fn provisioner_init(
         return Err(InvalidInputs("Provisioner init already complete".into()));
     }
     if enclave.is_provisioner_init_partially_complete() {
-        // shouldn't reach inside as we panic
+        // shouldn't reach inside as we must've panicked elsewhere
         unreachable!("Provisioner init partially complete.");
     }
-    // TODO: Validate enclave state after adding withdrawal related fields
+    let network = enclave
+        .bitcoin_network()
+        .expect("network should be initialized in operator_init");
+    request.state().validate(network)?;
     info!("Request and enclave state validated.");
 
     let sk = enclave.encryption_secret_key();
@@ -194,9 +197,19 @@ async fn finalize_init(
         .set_hashi_btc_pk(incoming_state.hashi_btc_master_pubkey)
         .expect("Unable to set hashi public key");
 
+    info!("Setting withdraw config.");
+    enclave
+        .set_withdrawal_config(incoming_state.withdrawal_config)
+        .expect("Unable to set withdraw config");
+
     info!("Setting enclave state.");
-    let mut state = enclave.state().await;
-    state.hashi_committee_info = incoming_state.hashi_committee_info;
+    enclave
+        .set_state(
+            incoming_state.hashi_committee_info,
+            incoming_state.withdrawal_state,
+        )
+        .await
+        .expect("Unable to set state");
 
     info!("Enclave initialization complete.");
 }

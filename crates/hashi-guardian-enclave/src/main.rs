@@ -9,9 +9,9 @@ use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::{InternalError, InvalidInputs};
 use hashi_guardian_shared::*;
 use serde::Serialize;
-use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 use tracing::info;
@@ -20,8 +20,10 @@ mod getters;
 mod init;
 mod s3_logger;
 mod setup;
+mod withdraw;
 
 use crate::s3_logger::S3Logger;
+use crate::withdraw::{delayed_withdraw, immediate_withdraw};
 use getters::*;
 use init::operator_init;
 use init::provisioner_init;
@@ -32,7 +34,7 @@ pub struct Enclave {
     /// Immutable config (set once during init)
     pub config: EnclaveConfig,
     /// Mutable state
-    pub state: Mutex<EnclaveState>,
+    pub state: EnclaveState,
     /// Initialization scratchpad
     pub scratchpad: Scratchpad,
 }
@@ -49,13 +51,17 @@ pub struct EnclaveConfig {
     pub btc_network: OnceLock<Network>,
     /// Hashi BTC public key used to derive child keys
     pub hashi_btc_master_pubkey: OnceLock<XOnlyPublicKey>,
+    /// Withdraw related config's
+    pub withdrawal_config: OnceLock<WithdrawalConfig>,
+    // TODO: Add rate limiter
 }
 
 /// Mutable state that changes during operation
-/// TODO: Add withdrawal related state
 pub struct EnclaveState {
     /// Hashi bls pk's
-    pub hashi_committee_info: HashiCommitteeInfo,
+    pub hashi_committee_info: RwLock<Arc<HashiCommitteeInfo>>,
+    /// Withdrawal-related state
+    pub withdraw_state: Mutex<WithdrawalState>,
 }
 
 /// Scratchpad used only during initialization.
@@ -111,6 +117,8 @@ async fn main() -> Result<()> {
     } else {
         // Normal mode
         app.route("/provisioner_init", post(provisioner_init))
+            .route("/immediate_withdraw", post(immediate_withdraw))
+            .route("/delayed_withdraw", post(delayed_withdraw))
     };
 
     let app = app.with_state(enclave);
@@ -134,6 +142,7 @@ impl EnclaveConfig {
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
+            withdrawal_config: OnceLock::new(),
         }
     }
 }
@@ -147,9 +156,10 @@ impl Enclave {
     pub fn new(signing_keys: SigningKey, encryption_keys: EncKeyPair) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
-            state: Mutex::new(EnclaveState {
-                hashi_committee_info: HashiCommitteeInfo::default(),
-            }),
+            state: EnclaveState {
+                hashi_committee_info: RwLock::new(Arc::new(HashiCommitteeInfo::default())),
+                withdraw_state: Mutex::new(WithdrawalState::default()),
+            },
             scratchpad: Scratchpad::default(),
         }
     }
@@ -205,20 +215,21 @@ impl Enclave {
         self.config.eph_keys.signing_keys.verification_key()
     }
 
-    pub fn sign<T: Serialize + SigningIntent>(&self, data: T) -> Signed<T> {
+    pub fn sign<T: Serialize + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
         let kp = self.signing_keypair();
         let timestamp = SystemTime::now();
-        Signed::new(data, kp, timestamp)
+        GuardianSigned::new(data, kp, timestamp)
     }
 
     // ========================================================================
     // Bitcoin Configuration
     // ========================================================================
 
-    pub fn bitcoin_network(&self) -> GuardianResult<&Network> {
+    pub fn bitcoin_network(&self) -> GuardianResult<Network> {
         self.config
             .btc_network
             .get()
+            .copied()
             .ok_or(InvalidInputs("Network is uninitialized".into()))
     }
 
@@ -258,10 +269,36 @@ impl Enclave {
     }
 
     // ========================================================================
+    // Withdrawal Configuration
+    // ========================================================================
+
+    pub fn withdrawal_config(&self) -> GuardianResult<&WithdrawalConfig> {
+        self.config
+            .withdrawal_config
+            .get()
+            .ok_or(InternalError("WithdrawalConfig is not initialized".into()))
+    }
+
+    pub fn set_withdrawal_config(&self, config: WithdrawalConfig) -> GuardianResult<()> {
+        self.config
+            .withdrawal_config
+            .set(config)
+            .map_err(|_| InternalError("WithdrawControlsConfig already set".into()))
+    }
+
+    pub fn min_delay(&self) -> GuardianResult<Duration> {
+        Ok(self.withdrawal_config()?.min_delay)
+    }
+
+    pub fn max_delay(&self) -> GuardianResult<Duration> {
+        Ok(self.withdrawal_config()?.max_delay)
+    }
+
+    // ========================================================================
     // S3 Logger
     // ========================================================================
 
-    pub fn s3_logger(&self) -> GuardianResult<&S3Logger> {
+    fn s3_logger(&self) -> GuardianResult<&S3Logger> {
         self.config
             .s3_logger
             .get()
@@ -292,12 +329,62 @@ impl Enclave {
         self.s3_logger()?.log(timestamped).await
     }
 
+    /// Does a prior LogMessage::ImmediateWithdrawal log with the provided counter value exist?
+    /// iwlog stands for ImmediateWithdrawal log
+    pub async fn iwlog_exists(&self, _counter: u64) -> GuardianResult<bool> {
+        todo!()
+    }
+
     // ========================================================================
     // Runtime State
     // ========================================================================
 
-    pub async fn state(&self) -> MutexGuard<'_, EnclaveState> {
-        self.state.lock().await
+    pub async fn get_withdraw_state(&self) -> MutexGuard<'_, WithdrawalState> {
+        self.state.withdraw_state.lock().await
+    }
+
+    pub async fn set_state(
+        &self,
+        committee: HashiCommitteeInfo,
+        withdrawal_state: WithdrawalState,
+    ) -> GuardianResult<()> {
+        {
+            let mut x = self
+                .state
+                .hashi_committee_info
+                .write()
+                .map_err(|_| InternalError("unable to acquire lock".into()))?;
+            *x = Arc::new(committee);
+        } // drop the RwLock guard which is not Send before calling await
+
+        {
+            let mut y = self.get_withdraw_state().await;
+            *y = withdrawal_state;
+        }
+
+        Ok(())
+    }
+
+    /// Get the current hashi committee. The read lock is held very briefly only to clone the Arc.
+    pub fn get_committee(&self) -> Arc<HashiCommitteeInfo> {
+        let x = &self
+            .state
+            .hashi_committee_info
+            .read()
+            .expect("rwlock should never throw an error");
+        // Note: read() or write() return an error if there's a panic while holding the write guard.
+        //       we only write in update_committee which can never panic.
+        Arc::clone(x)
+    }
+
+    /// Update committee. Expected to be called sporadically, e.g., once a day or so.
+    pub async fn set_committee(&self, new_committee: HashiCommitteeInfo) {
+        let mut state = self
+            .state
+            .hashi_committee_info
+            .write()
+            .expect("rwlock should never throw an error");
+        *state = Arc::new(new_committee);
     }
 
     // ========================================================================
