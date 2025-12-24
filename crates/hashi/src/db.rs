@@ -131,8 +131,43 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::committee::EncryptionPrivateKey;
+    use crate::committee::EncryptionPublicKey;
+    use crate::dkg::EncryptionGroupElement;
+    use fastcrypto_tbls::nodes::Node;
+    use fastcrypto_tbls::nodes::Nodes;
+    use fastcrypto_tbls::threshold_schnorr::avss;
+    use sui_sdk_types::Address;
 
     use super::Database;
+
+    fn create_test_nodes(count: u16) -> Nodes<EncryptionGroupElement> {
+        let nodes: Vec<_> = (0..count)
+            .map(|i| {
+                let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+                let public_key = EncryptionPublicKey::from_private_key(&private_key);
+                Node {
+                    id: i,
+                    pk: public_key,
+                    weight: 1,
+                }
+            })
+            .collect();
+        Nodes::new(nodes).unwrap()
+    }
+
+    fn create_test_message() -> avss::Message {
+        // Need n >= 2*max_faulty + threshold, so 5 >= 2*1 + 3 = 5
+        let nodes = create_test_nodes(5);
+        let dealer = avss::Dealer::new(
+            None,
+            nodes,
+            3, // threshold
+            1, // max_faulty
+            b"test-session".to_vec(),
+        )
+        .unwrap();
+        dealer.create_message(&mut rand::thread_rng()).unwrap()
+    }
 
     #[test]
     fn test_encryption_key() {
@@ -161,5 +196,53 @@ mod tests {
             db.get_encryption_key(Some(100)).unwrap().unwrap()
         );
         assert!(db.get_encryption_key(Some(101)).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_dealer_messages() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path());
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let message1 = create_test_message();
+        let message2 = create_test_message();
+
+        // Initially empty
+        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_none());
+
+        // Store and retrieve
+        db.store_dealer_message(1, &dealer1, &message1).unwrap();
+        let retrieved = db.get_dealer_message(1, &dealer1).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&message1).unwrap(),
+            bcs::to_bytes(&retrieved).unwrap()
+        );
+
+        // Different epoch, same dealer - should be empty
+        assert!(db.get_dealer_message(2, &dealer1).unwrap().is_none());
+
+        // Same epoch, different dealer - should be empty
+        assert!(db.get_dealer_message(1, &dealer2).unwrap().is_none());
+
+        // Store multiple messages in same epoch
+        db.store_dealer_message(1, &dealer2, &message2).unwrap();
+        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_some());
+        assert!(db.get_dealer_message(1, &dealer2).unwrap().is_some());
+
+        // Store in different epoch
+        db.store_dealer_message(2, &dealer1, &message1).unwrap();
+
+        // Clear epoch 1 - should only clear epoch 1
+        db.clear_dealer_messages(1).unwrap();
+        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_none());
+        assert!(db.get_dealer_message(1, &dealer2).unwrap().is_none());
+        assert!(db.get_dealer_message(2, &dealer1).unwrap().is_some());
+
+        // Verify persistence across reopen
+        drop(db);
+        let db = Database::open(tmpdir.path());
+        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_none());
+        assert!(db.get_dealer_message(2, &dealer1).unwrap().is_some());
     }
 }
