@@ -1228,6 +1228,27 @@ pub struct GetPublicDkgOutputResponse {
     #[prost(uint32, optional, tag = "3")]
     pub threshold: ::core::option::Option<u32>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotationComplainRequest {
+    /// The epoch for this rotation instance.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
+    /// The hex-encoded Sui address of the dealer who sent invalid shares.
+    #[prost(string, optional, tag = "2")]
+    pub dealer: ::core::option::Option<::prost::alloc::string::String>,
+    /// The share index for which the complaint is being made.
+    #[prost(uint32, optional, tag = "3")]
+    pub share_index: ::core::option::Option<u32>,
+    /// The complaint containing proof of invalid shares.
+    #[prost(message, optional, tag = "4")]
+    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotationComplainResponse {
+    /// The complaint response containing the correct shares.
+    #[prost(message, optional, tag = "1")]
+    pub response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
 /// Generated client implementations.
 pub mod key_rotation_service_client {
     #![allow(
@@ -1409,6 +1430,36 @@ pub mod key_rotation_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Send a complaint about invalid shares for a specific share index and receive the correct shares.
+        pub async fn rotation_complain(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RotationComplainRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotationComplainResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.KeyRotationService/RotationComplain",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.KeyRotationService",
+                        "RotationComplain",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1446,6 +1497,14 @@ pub mod key_rotation_service_server {
             request: tonic::Request<super::GetPublicDkgOutputRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetPublicDkgOutputResponse>,
+            tonic::Status,
+        >;
+        /// Send a complaint about invalid shares for a specific share index and receive the correct shares.
+        async fn rotation_complain(
+            &self,
+            request: tonic::Request<super::RotationComplainRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotationComplainResponse>,
             tonic::Status,
         >;
     }
@@ -1661,6 +1720,55 @@ pub mod key_rotation_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetPublicDkgOutputSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.KeyRotationService/RotationComplain" => {
+                    #[allow(non_camel_case_types)]
+                    struct RotationComplainSvc<T: KeyRotationService>(pub Arc<T>);
+                    impl<
+                        T: KeyRotationService,
+                    > tonic::server::UnaryService<super::RotationComplainRequest>
+                    for RotationComplainSvc<T> {
+                        type Response = super::RotationComplainResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RotationComplainRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyRotationService>::rotation_complain(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RotationComplainSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

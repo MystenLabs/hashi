@@ -6,6 +6,8 @@ use crate::dkg::RetrieveMessageRequest;
 use crate::dkg::RetrieveMessageResponse;
 use crate::dkg::RetrieveRotationMessagesRequest;
 use crate::dkg::RetrieveRotationMessagesResponse;
+use crate::dkg::RotationComplainRequest;
+use crate::dkg::RotationComplainResponse;
 use crate::dkg::SendMessageRequest;
 use crate::dkg::SendMessageResponse;
 use crate::dkg::SendRotationMessagesRequest;
@@ -54,6 +56,12 @@ pub trait P2PChannel: Send + Sync {
         party: &Address,
         request: &ComplainRequest,
     ) -> ChannelResult<ComplainResponse>;
+
+    async fn rotation_complain(
+        &self,
+        party: &Address,
+        request: &RotationComplainRequest,
+    ) -> ChannelResult<RotationComplainResponse>;
 
     async fn send_rotation_messages(
         &self,

@@ -166,6 +166,18 @@ pub struct ComplainResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationComplainRequest {
+    pub dealer: Address,
+    pub share_index: ShareIndex,
+    pub complaint: complaint::Complaint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationComplainResponse {
+    pub response: complaint::ComplaintResponse<avss::SharesForNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgDealerMessageHash {
     pub dealer_address: Address,
     pub message_hash: MessageHash,

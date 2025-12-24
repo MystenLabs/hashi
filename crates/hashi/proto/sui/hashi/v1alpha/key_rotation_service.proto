@@ -13,6 +13,9 @@ service KeyRotationService {
 
   // Get public DKG output for an epoch.
   rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
+
+  // Send a complaint about invalid shares for a specific share index and receive the correct shares.
+  rpc RotationComplain(RotationComplainRequest) returns (RotationComplainResponse);
 }
 
 message RotationMessage {
@@ -71,4 +74,23 @@ message GetPublicDkgOutputResponse {
 
   // The threshold used for this DKG.
   optional uint32 threshold = 3;
+}
+
+message RotationComplainRequest {
+  // The epoch for this rotation instance.
+  optional uint64 epoch = 1;
+
+  // The hex-encoded Sui address of the dealer who sent invalid shares.
+  optional string dealer = 2;
+
+  // The share index for which the complaint is being made.
+  optional uint32 share_index = 3;
+
+  // The complaint containing proof of invalid shares.
+  optional sui.rpc.v2.Bcs complaint = 4;
+}
+
+message RotationComplainResponse {
+  // The complaint response containing the correct shares.
+  optional sui.rpc.v2.Bcs response = 1;
 }
