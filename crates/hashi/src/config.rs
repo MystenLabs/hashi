@@ -26,12 +26,6 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_address: Option<Address>,
 
-    /// Directory for storing persistent data (DKG messages, etc.)
-    ///
-    /// This field is required and must be explicitly set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_dir: Option<PathBuf>,
-
     /// Configure the address to listen on for https
     ///
     /// Defaults to `0.0.0.0:443` if not specified.
@@ -193,10 +187,9 @@ impl Config {
         })
     }
 
-    pub fn data_dir(&self) -> PathBuf {
-        self.data_dir.clone().expect("data_dir must be configured")
-    }
-
+    // Creates a new config suitable for testing. In particular this config will:
+    // - have randomly generated private key material
+    // - localhost only listen addresses using available ports
     pub fn new_for_testing() -> Self {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         use std::ops::Deref;
@@ -220,12 +213,6 @@ impl Config {
         config.http_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
         config.metrics_http_address =
             Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
-
-        // Use a temp directory for testing. The directory is leaked (not cleaned up)
-        // but this is acceptable for tests.
-        let temp_dir = std::env::temp_dir().join(format!("hashi-test-{}", std::process::id()));
-        std::fs::create_dir_all(&temp_dir).expect("failed to create temp data dir");
-        config.data_dir = Some(temp_dir);
 
         config
     }
