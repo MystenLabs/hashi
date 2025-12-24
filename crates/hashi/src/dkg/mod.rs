@@ -359,7 +359,10 @@ impl DkgManager {
             .filter(|addr| *addr != self.address)
             .collect();
         let request = SendMessageRequest { message };
-        let results = send_dkg_message_to_many(p2p_channel, &recipients, &request).await;
+        let results = send_to_many(&recipients, request, |addr, req| async move {
+            p2p_channel.send_dkg_message(&addr, &req).await
+        })
+        .await;
         for (addr, result) in results {
             match result {
                 Ok(response) => {
@@ -492,7 +495,10 @@ impl DkgManager {
         let request = SendRotationMessagesRequest {
             messages: rotation_messages.clone(),
         };
-        let results = send_rotation_messages_to_many(p2p_channel, &recipients, &request).await;
+        let results = send_to_many(&recipients, request, |addr, req| async move {
+            p2p_channel.send_rotation_messages(&addr, &req).await
+        })
+        .await;
         for (addr, result) in results {
             match result {
                 Ok(response) => {
@@ -1167,32 +1173,22 @@ fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
     Blake2b256::digest(&bytes).into()
 }
 
-async fn send_dkg_message_to_many(
-    p2p_channel: &impl P2PChannel,
+async fn send_to_many<Req, Resp, F, Fut>(
     recipients: &[Address],
-    request: &SendMessageRequest,
-) -> Vec<(Address, ChannelResult<SendMessageResponse>)> {
-    join_all(recipients.iter().map(|addr| {
-        let addr = *addr;
+    request: Req,
+    send: F,
+) -> Vec<(Address, ChannelResult<Resp>)>
+where
+    Req: Clone + Send + Sync,
+    Resp: Send,
+    F: Fn(Address, Req) -> Fut + Clone + Send + Sync,
+    Fut: Future<Output = ChannelResult<Resp>> + Send,
+{
+    join_all(recipients.iter().map(|&addr| {
+        let req = request.clone();
+        let send = send.clone();
         async move {
-            let result =
-                with_timeout_and_retry(|| p2p_channel.send_dkg_message(&addr, request)).await;
-            (addr, result)
-        }
-    }))
-    .await
-}
-
-async fn send_rotation_messages_to_many(
-    p2p_channel: &impl P2PChannel,
-    recipients: &[Address],
-    request: &SendRotationMessagesRequest,
-) -> Vec<(Address, ChannelResult<SendRotationMessagesResponse>)> {
-    join_all(recipients.iter().map(|addr| {
-        let addr = *addr;
-        async move {
-            let result =
-                with_timeout_and_retry(|| p2p_channel.send_rotation_messages(&addr, request)).await;
+            let result = with_timeout_and_retry(|| send(addr, req.clone())).await;
             (addr, result)
         }
     }))
