@@ -98,7 +98,7 @@ impl P2PChannel for RpcP2PChannel {
         _party: &Address,
         _request: &RotationComplainRequest,
     ) -> ChannelResult<RotationComplainResponse> {
-        // TODO: Implement when RPC is available
+        // TODO: Implement when `KeyRotationRpcClient` is available
         Err(ChannelError::Other(
             "rotation complain not yet implemented".to_string(),
         ))
