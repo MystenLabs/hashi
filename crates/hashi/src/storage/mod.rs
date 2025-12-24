@@ -1,6 +1,6 @@
 mod epoch_public_messages_store;
-mod traits;
+mod interfaces;
 
 pub use epoch_public_messages_store::EpochPublicMessagesStore;
-pub use traits::PublicMessagesStore;
-pub use traits::SecretsStore;
+pub use interfaces::PublicMessagesStore;
+pub use interfaces::SecretsStore;
