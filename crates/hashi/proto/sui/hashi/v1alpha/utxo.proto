@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+message UtxoId {
+  optional bytes txid = 1;
+  optional uint32 vout = 2;
+}
+
+message Utxo {
+  optional UtxoId id = 1;
+  optional uint64 amount = 2;
+  optional bytes derivation_path = 3;
+}
