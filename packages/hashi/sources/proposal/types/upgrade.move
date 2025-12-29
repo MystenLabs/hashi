@@ -47,5 +47,8 @@ public fun execute(hashi: &mut Hashi, self: Proposal<Upgrade>): UpgradeTicket {
 
 public fun finalize_upgrade(hashi: &mut Hashi, receipt: UpgradeReceipt) {
     hashi.config().assert_version_enabled();
+    let upgrade_package = receipt.package();
     hashi.config_mut().commit_upgrade(receipt);
+    let version = hashi.config().upgrade_cap().version();
+    hashi::proposal_events::emit_package_upgraded_event(upgrade_package, version);
 }

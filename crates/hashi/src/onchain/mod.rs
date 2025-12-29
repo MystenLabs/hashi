@@ -39,6 +39,7 @@ mod watcher;
 #[derive(Clone, Debug)]
 pub struct OnchainState(Arc<Inner>);
 
+//TODO should we just send a HashiEvent here?
 #[derive(Clone, Debug)]
 pub enum Notification {
     ValidatorInfoUpdated(Address),
@@ -118,6 +119,13 @@ impl OnchainState {
 
     fn update_latest_checkpoint(&self, checkpoint: u64) {
         self.0.checkpoint.send_replace(checkpoint);
+    }
+
+    fn add_package_version(&self, version: u64, package_id: Address) {
+        let mut state = self.state_mut();
+        //TODO should we assert that this version is exactly the next one?
+        state.package_versions.insert(version, package_id);
+        state.package_ids.insert(package_id);
     }
 }
 

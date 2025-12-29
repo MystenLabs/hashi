@@ -16,6 +16,7 @@ pub enum HashiEvent {
     ProposalDeletedEvent(ProposalDeletedEvent),
     ProposalExecutedEvent(ProposalExecutedEvent),
     QuorumReachedEvent(QuorumReachedEvent),
+    PackageUpgradedEvent(PackageUpgradedEvent),
 }
 
 impl HashiEvent {
@@ -162,5 +163,22 @@ impl MoveType for QuorumReachedEvent {
 impl From<QuorumReachedEvent> for HashiEvent {
     fn from(value: QuorumReachedEvent) -> Self {
         Self::QuorumReachedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct PackageUpgradedEvent {
+    pub package: Address,
+    pub version: u64,
+}
+
+impl MoveType for PackageUpgradedEvent {
+    const MODULE: &'static str = "proposal_events";
+    const NAME: &'static str = "PackageUpgradedEvent";
+}
+
+impl From<PackageUpgradedEvent> for HashiEvent {
+    fn from(value: PackageUpgradedEvent) -> Self {
+        Self::PackageUpgradedEvent(value)
     }
 }

@@ -127,3 +127,7 @@ public(package) fun create(): Config {
 public(package) fun set_upgrade_cap(self: &mut Config, upgrade_cap: UpgradeCap) {
     self.upgrade_cap.fill(upgrade_cap);
 }
+
+public(package) fun upgrade_cap(self: &Config): &UpgradeCap {
+    self.upgrade_cap.borrow()
+}

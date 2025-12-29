@@ -110,6 +110,12 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
             HashiEvent::ProposalDeletedEvent(_) => {}
             HashiEvent::ProposalExecutedEvent(_) => {}
             HashiEvent::QuorumReachedEvent(_) => {}
+            HashiEvent::PackageUpgradedEvent(package_upgraded_event) => {
+                state.add_package_version(
+                    package_upgraded_event.version,
+                    package_upgraded_event.package,
+                );
+            }
         }
     }
 
