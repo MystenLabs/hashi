@@ -1,12 +1,16 @@
+use std::collections::BTreeSet;
+
 use futures::StreamExt;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
-use sui_sdk_types::Address;
 
+use crate::onchain::Notification;
 use crate::onchain::OnchainState;
+use crate::onchain::events::HashiEvent;
+use crate::onchain::scrape_member_info;
 
 pub async fn watcher(mut client: Client, state: OnchainState) {
     let subscription_read_mask = FieldMask::from_paths([
@@ -54,37 +58,69 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
 
             let ckpt = checkpoint.cursor();
             tracing::debug!("recieved checkpoint {ckpt}");
-            state.state().update_latest_checkpoint(ckpt);
 
-            for txn in checkpoint.checkpoint().transactions() {
-                // Skip txns that were not successful
-                if !txn.effects().status().success() {
-                    continue;
-                }
+            let mut events = Vec::new();
+            {
+                let state = state.state();
 
-                for event in txn.events().events() {
-                    let Some(type_package_id) = peel_address(event.contents().name()) else {
-                        tracing::debug!("parsing address off type failed");
-                        continue;
-                    };
-
-                    // If this isn't from a package we care about we can skip
-                    if !state.state().package_ids.contains(&type_package_id) {
+                for txn in checkpoint.checkpoint().transactions() {
+                    // Skip txns that were not successful
+                    if !txn.effects().status().success() {
                         continue;
                     }
 
-                    tracing::debug!("found event {}", event.contents().name());
-                    //TODO define and do something with the events
+                    for event in txn.events().events() {
+                        match HashiEvent::try_parse(&state.package_ids, event.contents()) {
+                            Ok(Some(event)) => {
+                                tracing::debug!("found event {:?}", event);
+                                events.push(event);
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("unable to parse event: {e}"),
+                        }
+                    }
                 }
             }
+
+            handle_events(&client, &state, &events).await;
+
+            // Finally update the latest checkpoint
+            state.update_latest_checkpoint(ckpt);
         }
     }
 }
 
-fn peel_address(ty: &str) -> Option<Address> {
-    if let Some((addr, _)) = ty.split_once("::") {
-        addr.parse().ok()
-    } else {
-        None
+async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEvent]) {
+    if events.is_empty() {
+        return;
+    }
+
+    let mut validator_updates = BTreeSet::new();
+
+    for event in events {
+        match event {
+            HashiEvent::ValidatorRegistered(validator_registered) => {
+                validator_updates.insert(validator_registered.validator);
+            }
+            HashiEvent::ValidatorUpdated(validator_updated) => {
+                validator_updates.insert(validator_updated.validator);
+            }
+            HashiEvent::VoteCastEvent(_) => {}
+            HashiEvent::VoteRemovedEvent(_) => {}
+            HashiEvent::ProposalDeletedEvent(_) => {}
+            HashiEvent::ProposalExecutedEvent(_) => {}
+            HashiEvent::QuorumReachedEvent(_) => {}
+        }
+    }
+
+    let members_id = state.state().hashi().committees.members_id();
+    for validator in validator_updates {
+        match scrape_member_info(client.clone(), members_id, validator).await {
+            Ok(info) => {
+                state.state_mut().hashi.committees.update_validator(info);
+                state.notify(Notification::ValidatorInfoUpdated(validator));
+            }
+            Err(e) => tracing::error!("unable to query validator {validator}'s info: {e}"),
+        }
     }
 }

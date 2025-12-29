@@ -55,6 +55,10 @@ impl CommitteeSet {
         }
     }
 
+    pub fn members_id(&self) -> Address {
+        self.members_id
+    }
+
     pub fn members(&self) -> &BTreeMap<Address, MemberInfo> {
         &self.members
     }
@@ -127,6 +131,45 @@ impl CommitteeSet {
                 Some((validator, client))
             })
             .collect();
+    }
+
+    pub fn update_validator(&mut self, info: MemberInfo) {
+        let validator = info.validator_address;
+        let info_entry = self.members.entry(validator);
+
+        // remove old tls public key mapping
+        if let std::collections::btree_map::Entry::Occupied(entry) = &info_entry
+            && let Some(tls_public_key) = &entry.get().tls_public_key
+        {
+            self.tls_public_key_to_address
+                .remove(tls_public_key.as_bytes());
+        }
+
+        // insert new tls public key mapping
+        if let Some(tls_public_key) = &info.tls_public_key {
+            self.tls_public_key_to_address
+                .insert(*tls_public_key.as_bytes(), validator);
+        }
+
+        // update client
+        self.clients.remove(&validator);
+        if let Some(https_address) = &info.https_address
+            && let Some(tls_public_key) = &info.tls_public_key
+        {
+            let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
+                crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
+            } else {
+                crate::tls::make_client_config(tls_public_key)
+            };
+            if let Ok(client) = Client::new(https_address, tls_config)
+                .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
+            {
+                self.clients.insert(validator, client);
+            }
+        }
+
+        // replace info
+        info_entry.insert_entry(info);
     }
 
     pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {

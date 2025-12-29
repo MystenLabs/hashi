@@ -216,7 +216,29 @@ mod tests {
         assert_eq!(state.state().hashi().treasury.metadata_caps.len(), 1);
         assert!(state.state().hashi().treasury.coins.is_empty());
 
-        // println!("{state:#?}");
+        // Validate subscribing to checkpoints functions
+        let ckpt = state.latest_checkpoint();
+        let mut checkpoint_subscriber = state.subscribe_checkpoint();
+        checkpoint_subscriber.changed().await.unwrap();
+        assert!(*checkpoint_subscriber.borrow_and_update() > ckpt);
+
+        // Validate subscribing works by just updating a validator's onchain info
+        let mut reciever = state.subscribe();
+
+        let client = test_networks.sui_network().client.clone();
+        let v1_config = &test_networks.hashi_network().nodes()[0].0.config;
+        super::hashi_network::update_tls_public_key(client, v1_config)
+            .await
+            .unwrap();
+
+        #[allow(irrefutable_let_patterns)]
+        if let hashi::onchain::Notification::ValidatorInfoUpdated(validator) =
+            reciever.recv().await.unwrap()
+        {
+            assert_eq!(validator, v1_config.validator_address().unwrap());
+        } else {
+            panic!("unexpected notification");
+        }
 
         Ok(())
     }

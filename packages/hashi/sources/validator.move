@@ -3,6 +3,7 @@ module hashi::validator;
 
 use hashi::hashi::Hashi;
 use std::string::String;
+use sui::event;
 
 public fun register(
     self: &mut Hashi,
@@ -22,6 +23,10 @@ public fun register(
             encryption_public_key,
             ctx,
         );
+
+    event::emit(ValidatorRegistered {
+        validator: ctx.sender(),
+    });
 }
 
 public fun update_next_epoch_public_key(
@@ -32,7 +37,6 @@ public fun update_next_epoch_public_key(
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
-
     self
         .committee_set_mut()
         .set_next_epoch_public_key(
@@ -40,7 +44,9 @@ public fun update_next_epoch_public_key(
             next_epoch_public_key,
             proof_of_possession_signature,
             ctx,
-        )
+        );
+
+    event::emit(ValidatorUpdated { validator });
 }
 
 public fun update_operator_address(
@@ -50,8 +56,9 @@ public fun update_operator_address(
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
-
     self.committee_set_mut().set_operator_address(validator, operator, ctx);
+
+    event::emit(ValidatorUpdated { validator });
 }
 
 public fun update_https_address(
@@ -61,8 +68,9 @@ public fun update_https_address(
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
-
     self.committee_set_mut().set_https_address(validator, https_address, ctx);
+
+    event::emit(ValidatorUpdated { validator });
 }
 
 public fun update_tls_public_key(
@@ -72,8 +80,9 @@ public fun update_tls_public_key(
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
-
     self.committee_set_mut().set_tls_public_key(validator, tls_public_key, ctx);
+
+    event::emit(ValidatorUpdated { validator });
 }
 
 public fun update_next_epoch_encryption_public_key(
@@ -86,4 +95,14 @@ public fun update_next_epoch_encryption_public_key(
     self
         .committee_set_mut()
         .set_next_epoch_encryption_public_key(validator, next_epoch_encryption_public_key, ctx);
+
+    event::emit(ValidatorUpdated { validator });
+}
+
+public struct ValidatorRegistered has copy, drop {
+    validator: address,
+}
+
+public struct ValidatorUpdated has copy, drop {
+    validator: address,
 }

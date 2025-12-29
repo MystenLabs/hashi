@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
-use std::sync::atomic::AtomicU64;
+use std::sync::RwLockWriteGuard;
 use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
@@ -19,8 +19,10 @@ use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
+use sui_sdk_types::bcs::ToBcs;
 use tap::Pipe;
 use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 use crate::committee::Committee;
 use crate::committee::CommitteeMember;
@@ -29,6 +31,7 @@ use crate::dkg::fallback_encryption_public_key;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
+mod events;
 mod move_types;
 pub mod types;
 mod watcher;
@@ -36,19 +39,23 @@ mod watcher;
 #[derive(Clone, Debug)]
 pub struct OnchainState(Arc<Inner>);
 
+#[derive(Clone, Debug)]
+pub enum Notification {
+    ValidatorInfoUpdated(Address),
+}
+
 #[derive(Debug)]
 struct Inner {
     #[allow(unused)]
     ids: HashiIds,
-    #[allow(unused)]
-    sender: broadcast::Sender<()>,
+    sender: broadcast::Sender<Notification>,
+    /// The checkpoint height that this state is recent to
+    checkpoint: watch::Sender<u64>,
     state: RwLock<State>,
 }
 
 #[derive(Debug)]
 pub struct State {
-    /// The checkpoint height that this state is recent to
-    checkpoint: AtomicU64,
     package_versions: BTreeMap<u64, Address>,
     package_ids: BTreeSet<Address>,
     hashi: types::Hashi,
@@ -62,27 +69,55 @@ impl OnchainState {
     ) -> Result<Self> {
         let client = Client::new(sui_rpc_url)?;
 
-        let (sender, _) = broadcast::channel::<()>(BROADCAST_CHANNEL_CAPACITY);
-
-        let mut state = State::scrape(client.clone(), ids).await?.pipe(RwLock::new);
+        let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
         if let Some(tls_private_key) = tls_private_key {
-            state
-                .get_mut()
-                .unwrap()
-                .hashi
-                .committees
-                .set_tls_private_key(tls_private_key);
+            state.hashi.committees.set_tls_private_key(tls_private_key);
         }
 
-        let state = Inner { ids, sender, state }.pipe(Arc::new).pipe(Self);
+        let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (checkpoint, _) = watch::channel(checkpoint);
+        let state = Inner {
+            ids,
+            sender,
+            checkpoint,
+            state: RwLock::new(state),
+        }
+        .pipe(Arc::new)
+        .pipe(Self);
 
         tokio::spawn(watcher::watcher(client, state.clone()));
 
         Ok(state)
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
+        self.0.sender.subscribe()
+    }
+
+    fn notify(&self, notification: Notification) {
+        let _ = self.0.sender.send(notification);
+    }
+
     pub fn state(&self) -> RwLockReadGuard<'_, State> {
         self.0.state.read().unwrap()
+    }
+
+    // NOTE: This function must remain private to this module so that only this module and its
+    // submodules are able to update the state
+    fn state_mut(&self) -> RwLockWriteGuard<'_, State> {
+        self.0.state.write().unwrap()
+    }
+
+    pub fn subscribe_checkpoint(&self) -> watch::Receiver<u64> {
+        self.0.checkpoint.subscribe()
+    }
+
+    pub fn latest_checkpoint(&self) -> u64 {
+        *self.0.checkpoint.borrow()
+    }
+
+    fn update_latest_checkpoint(&self, checkpoint: u64) {
+        self.0.checkpoint.send_replace(checkpoint);
     }
 }
 
@@ -95,7 +130,7 @@ impl State {
         &self.hashi
     }
 
-    async fn scrape(client: Client, ids: HashiIds) -> Result<Self> {
+    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, u64)> {
         let (package_versions, (checkpoint, hashi)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id),
@@ -103,21 +138,14 @@ impl State {
 
         let package_ids = package_versions.values().cloned().collect();
 
-        Ok(State {
-            checkpoint: AtomicU64::new(checkpoint),
-            package_versions,
-            package_ids,
-            hashi,
-        })
-    }
-
-    pub fn latest_checkpoint(&self) -> u64 {
-        self.checkpoint.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn update_latest_checkpoint(&self, checkpoint: u64) {
-        self.checkpoint
-            .store(checkpoint, std::sync::atomic::Ordering::Relaxed)
+        Ok((
+            State {
+                package_versions,
+                package_ids,
+                hashi,
+            },
+            checkpoint,
+        ))
     }
 }
 
@@ -172,7 +200,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
     } = response.get_ref().object().contents().deserialize()?;
 
     let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(
-        scrape_member_info(client.clone(), committees.members.id),
+        scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
@@ -288,7 +316,7 @@ async fn scrape_treasury(
     })
 }
 
-async fn scrape_member_info(
+async fn scrape_all_member_info(
     client: Client,
     member_info_id: Address,
 ) -> Result<BTreeMap<Address, types::MemberInfo>> {
@@ -340,6 +368,57 @@ async fn scrape_member_info(
         .try_collect()
         .await?;
     Ok(member_info)
+}
+
+async fn scrape_member_info(
+    mut client: Client,
+    member_info_id: Address,
+    validator: Address,
+) -> Result<types::MemberInfo> {
+    let field_id =
+        member_info_id.derive_dynamic_child_id(&TypeTag::Address, &validator.to_bcs().unwrap());
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().owner().finish(),
+                Object::path_builder().contents().finish(),
+                Object::path_builder().object_id(),
+                Object::path_builder().version(),
+            ])),
+        )
+        .await?
+        .into_inner();
+
+    let field: move_types::Field<Address, move_types::MemberInfo> = response
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| tonic::Status::from_error(e.into()))?;
+
+    let move_types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key,
+        https_address,
+        tls_public_key,
+        next_epoch_encryption_public_key,
+    } = field.value;
+
+    let info = types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
+        https_address: https_address.try_into().ok(),
+        tls_public_key: tls_public_key.as_slice().try_into().ok(),
+        next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+            next_epoch_encryption_public_key.as_slice(),
+        )
+        .map(Into::into)
+        .ok(),
+    };
+    Ok(info)
 }
 
 async fn scrape_committees(
@@ -487,6 +566,13 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
     };
 
     Ok(pool)
+}
+
+pub trait MoveType {
+    const PACKAGE_VERSION: u64 = 1;
+    const MODULE: &'static str;
+    const NAME: &'static str;
+    const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
 }
 
 #[cfg(test)]

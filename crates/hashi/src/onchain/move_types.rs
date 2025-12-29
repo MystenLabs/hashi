@@ -4,6 +4,8 @@
 
 use sui_sdk_types::Address;
 
+use crate::onchain::MoveType;
+
 /// Rust version of the Move hashi::hashi::Hashi type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Hashi {
@@ -34,6 +36,13 @@ pub struct Bag {
 
 /// Rust version of the Move sui::object_bag::ObjectBag type.
 pub type ObjectBag = Bag;
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Field<N, V> {
+    pub id: Address,
+    pub name: N,
+    pub value: V,
+}
 
 /// Rust version of the Move hashi::proposal_set::ProposalSet type.
 #[derive(Debug, serde_derive::Deserialize)]
@@ -79,6 +88,11 @@ pub struct MemberInfo {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Vec<u8>,
+}
+
+impl MoveType for MemberInfo {
+    const MODULE: &'static str = "committee_set";
+    const NAME: &'static str = "MemberInfo";
 }
 
 /// Rust version of the Move hashi::committee::CommitteeMember type.
