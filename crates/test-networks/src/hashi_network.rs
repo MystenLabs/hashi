@@ -38,7 +38,7 @@ impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();
-        let hashi_instance = Hashi::new_with_registry(server_version, config, None, &registry);
+        let hashi_instance = Hashi::new_with_registry(server_version, config, &registry);
         Ok(Self(hashi_instance))
     }
 
@@ -109,7 +109,6 @@ impl HashiNetworkBuilder {
     ) -> Result<HashiNetwork> {
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();
-
         let mut configs = Vec::with_capacity(self.num_nodes);
         for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
             let mut config = HashiConfig::new_for_testing();

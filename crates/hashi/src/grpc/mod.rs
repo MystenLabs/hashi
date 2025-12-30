@@ -90,10 +90,7 @@ impl HttpService {
     }
 
     pub fn dkg_manager(&self) -> &std::sync::Mutex<crate::dkg::DkgManager> {
-        self.inner
-            .dkg_manager
-            .as_ref()
-            .expect("DkgManager not initialized")
+        self.inner.dkg_manager()
     }
 }
 
