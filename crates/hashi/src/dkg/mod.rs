@@ -53,7 +53,6 @@ pub use types::RetrieveRotationMessagesRequest;
 pub use types::RetrieveRotationMessagesResponse;
 pub use types::RotationComplainRequest;
 pub use types::RotationComplainResponse;
-pub use types::RotationMessage;
 pub use types::RotationMessages;
 pub use types::RotationShareComplaint;
 pub use types::RotationShareComplaintResponse;
@@ -69,7 +68,7 @@ const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed"
 
 struct RotationComplainContext {
     request: RotationComplainRequest,
-    share_contexts: HashMap<ShareIndex, (avss::Receiver, RotationMessage)>,
+    share_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)>,
 }
 
 // DKG protocol
@@ -326,9 +325,7 @@ impl DkgManager {
         let mut responses = Vec::with_capacity(request.complaints.len());
         for share_complaint in &request.complaints {
             let rotation_message = rotation_messages
-                .messages
-                .iter()
-                .find(|m| m.share_index == share_complaint.share_index)
+                .get(share_complaint.share_index)
                 .ok_or_else(|| {
                     DkgError::ProtocolFailed(format!(
                         "No rotation message for share index {}",
@@ -346,9 +343,8 @@ impl DkgManager {
                 })?;
             let commitment = previous_dkg_output
                 .commitments
-                .iter()
-                .find(|c| c.index == share_complaint.share_index)
-                .map(|c| c.value);
+                .get(&share_complaint.share_index)
+                .copied();
             let session_id = self
                 .session_id
                 .rotation_session_id(&request.dealer, share_complaint.share_index);
@@ -361,7 +357,7 @@ impl DkgManager {
                 self.encryption_key.clone(),
             );
             let response = receiver.handle_complaint(
-                &rotation_message.message,
+                rotation_message,
                 &share_complaint.complaint,
                 partial_output,
             )?;
@@ -805,8 +801,7 @@ impl DkgManager {
             .get(dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?
             .clone();
-        for rotation_message in &rotation_messages.messages {
-            let share_index = rotation_message.share_index;
+        for (&share_index, message) in rotation_messages.iter() {
             if self.rotation_outputs.contains_key(&share_index)
                 || self
                     .rotation_complaints_to_process
@@ -814,14 +809,8 @@ impl DkgManager {
             {
                 continue;
             }
-            let session_id = self
-                .session_id
-                .rotation_session_id(dealer, rotation_message.share_index);
-            let commitment = previous_dkg_output
-                .commitments
-                .iter()
-                .find(|c| c.index == rotation_message.share_index)
-                .map(|c| c.value);
+            let session_id = self.session_id.rotation_session_id(dealer, share_index);
+            let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
                 self.dkg_config.nodes.clone(),
                 self.party_id,
@@ -830,14 +819,13 @@ impl DkgManager {
                 commitment,
                 self.encryption_key.clone(),
             );
-            match receiver.process_message(&rotation_message.message)? {
+            match receiver.process_message(message)? {
                 avss::ProcessedMessage::Valid(output) => {
-                    self.rotation_outputs
-                        .insert(rotation_message.share_index, output);
+                    self.rotation_outputs.insert(share_index, output);
                 }
                 avss::ProcessedMessage::Complaint(complaint) => {
                     self.rotation_complaints_to_process
-                        .insert((*dealer, rotation_message.share_index), complaint);
+                        .insert((*dealer, share_index), complaint);
                 }
             }
         }
@@ -875,7 +863,11 @@ impl DkgManager {
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
-            commitments: combined_output.commitments,
+            commitments: combined_output
+                .commitments
+                .into_iter()
+                .map(|c| (c.index, c.value))
+                .collect(),
             threshold,
         })
     }
@@ -1088,7 +1080,7 @@ impl DkgManager {
                     for share_index in pending_shares.clone() {
                         let responses = all_responses.get(&share_index).unwrap();
                         let (receiver, message) = share_contexts.get(&share_index).unwrap();
-                        match receiver.recover(&message.message, responses.clone()) {
+                        match receiver.recover(message, responses.clone()) {
                             Ok(partial_output) => {
                                 self.rotation_outputs.insert(share_index, partial_output);
                                 self.rotation_complaints_to_process
@@ -1142,16 +1134,12 @@ impl DkgManager {
         if complaints.is_empty() {
             return Ok(None);
         }
-        let mut share_contexts: HashMap<ShareIndex, (avss::Receiver, RotationMessage)> =
+        let mut share_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)> =
             HashMap::new();
         for share_complaint in &complaints {
             let share_index = share_complaint.share_index;
             let session_id = self.session_id.rotation_session_id(dealer, share_index);
-            let commitment = previous_dkg_output
-                .commitments
-                .iter()
-                .find(|c| c.index == share_index)
-                .map(|c| c.value);
+            let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
                 self.dkg_config.nodes.clone(),
                 self.party_id,
@@ -1161,9 +1149,7 @@ impl DkgManager {
                 self.encryption_key.clone(),
             );
             let message = rotation_messages
-                .messages
-                .iter()
-                .find(|m| m.share_index == share_index)
+                .get(share_index)
                 .ok_or_else(|| {
                     DkgError::ProtocolFailed(format!(
                         "No rotation message for share index {}",
@@ -1207,13 +1193,10 @@ impl DkgManager {
                 let message = dealer
                     .create_message(rng)
                     .expect(EXPECT_THRESHOLD_VALIDATED);
-                RotationMessage {
-                    share_index: share.index,
-                    message,
-                }
+                (share.index, message)
             })
             .collect();
-        RotationMessages { messages }
+        RotationMessages::new(messages)
     }
 
     fn try_sign_rotation_messages(
@@ -1243,37 +1226,22 @@ impl DkgManager {
             })?
             .into_iter()
             .collect();
-        let mut outputs = Vec::with_capacity(rotation_messages.messages.len());
-        let mut seen_indices = HashSet::new();
-        for rotation_message in &rotation_messages.messages {
-            if !dealer_share_indices.contains(&rotation_message.share_index) {
+        let mut outputs = Vec::with_capacity(rotation_messages.len());
+        for (&share_index, message) in rotation_messages.iter() {
+            if !dealer_share_indices.contains(&share_index) {
                 return Err(DkgError::InvalidMessage {
                     sender: dealer,
-                    reason: format!(
-                        "Share index {} does not belong to dealer",
-                        rotation_message.share_index
-                    ),
+                    reason: format!("Share index {} does not belong to dealer", share_index),
                 });
             }
-            let share_index = rotation_message.share_index;
             if self.rotation_outputs.contains_key(&share_index) {
                 return Err(DkgError::InvalidMessage {
                     sender: dealer,
                     reason: format!("Share index {} already processed", share_index),
                 });
             }
-            if !seen_indices.insert(share_index) {
-                return Err(DkgError::InvalidMessage {
-                    sender: dealer,
-                    reason: format!("Duplicate share index {} in bundle", share_index),
-                });
-            }
             let session_id = self.session_id.rotation_session_id(&dealer, share_index);
-            let commitment = previous_dkg_output
-                .commitments
-                .iter()
-                .find(|c| c.index == share_index)
-                .map(|c| c.value);
+            let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
                 self.dkg_config.nodes.clone(),
                 self.party_id,
@@ -1282,7 +1250,7 @@ impl DkgManager {
                 commitment,
                 self.encryption_key.clone(),
             );
-            match receiver.process_message(&rotation_message.message)? {
+            match receiver.process_message(message)? {
                 avss::ProcessedMessage::Valid(output) => {
                     outputs.push((share_index, output));
                 }
@@ -1343,7 +1311,11 @@ impl DkgManager {
         Ok(DkgOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
-            commitments: combined.commitments,
+            commitments: combined
+                .commitments
+                .into_iter()
+                .map(|c| (c.index, c.value))
+                .collect(),
             threshold: self.dkg_config.threshold,
         })
     }
@@ -5139,7 +5111,7 @@ mod tests {
         share_index: ShareIndex,
         corrupt_party_id: u16,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> RotationMessage {
+    ) -> (ShareIndex, avss::Message) {
         use fastcrypto::groups::secp256k1::ProjectivePoint;
         type S = <ProjectivePoint as fastcrypto::groups::GroupElement>::ScalarType;
 
@@ -5201,10 +5173,7 @@ mod tests {
 
         let message = bcs::from_bytes::<avss::Message>(&combined).unwrap_or(template_message);
 
-        RotationMessage {
-            share_index,
-            message,
-        }
+        (share_index, message)
     }
 
     fn create_dealer_message_and_complaint(
@@ -5677,7 +5646,7 @@ mod tests {
         let rotation_outputs_after = receiver_manager.rotation_outputs.len();
         assert_eq!(
             rotation_outputs_after - rotation_outputs_before,
-            rotation_messages.messages.len(),
+            rotation_messages.len(),
             "All rotation outputs should be stored"
         );
 
@@ -5687,20 +5656,31 @@ mod tests {
             rotation_setup.create_receiver_with_completed_dkg(2);
 
         // Tamper with one message in the bundle to make it invalid
-        // We swap the share_index of the first message to make the commitment check fail.
+        // We swap the messages between two share indices to make the commitment check fail.
         // The commitment for share_index X won't match the message created for share_index Y.
-        let mut tampered_messages = rotation_messages.clone();
-        if tampered_messages.messages.len() >= 2 {
-            // Swap share indices of the first two messages
-            // Message 0 will have share_index of message 1, but content from message 0
-            // This will cause commitment mismatch during validation
-            let original_index = tampered_messages.messages[0].share_index;
-            tampered_messages.messages[0].share_index = tampered_messages.messages[1].share_index;
-            tampered_messages.messages[1].share_index = original_index;
-        } else if !tampered_messages.messages.is_empty() {
+        let tampered_messages = if rotation_messages.len() >= 2 {
+            // Get two share indices and their messages
+            let mut iter = rotation_messages.iter();
+            let (&idx1, msg1) = iter.next().unwrap();
+            let (&idx2, msg2) = iter.next().unwrap();
+            // Swap: idx1 now maps to msg2, idx2 now maps to msg1
+            let mut tampered: BTreeMap<ShareIndex, avss::Message> = rotation_messages
+                .iter()
+                .filter(|(idx, _)| **idx != idx1 && **idx != idx2)
+                .map(|(&idx, msg)| (idx, msg.clone()))
+                .collect();
+            tampered.insert(idx1, msg2.clone());
+            tampered.insert(idx2, msg1.clone());
+            RotationMessages::new(tampered)
+        } else if !rotation_messages.is_empty() {
             // If only one message, use a non-existent share index
-            tampered_messages.messages[0].share_index = std::num::NonZeroU16::new(9999).unwrap();
-        }
+            let (&_orig_idx, msg) = rotation_messages.iter().next().unwrap();
+            let mut tampered = BTreeMap::new();
+            tampered.insert(std::num::NonZeroU16::new(9999).unwrap(), msg.clone());
+            RotationMessages::new(tampered)
+        } else {
+            rotation_messages.clone()
+        };
 
         let rotation_outputs_before = receiver_manager2.rotation_outputs.len();
         let result = receiver_manager2.try_sign_rotation_messages(
@@ -5768,57 +5748,6 @@ mod tests {
     }
 
     #[test]
-    fn test_try_sign_rotation_messages_rejects_duplicate_share_index_in_bundle() {
-        let rotation_setup = RotationTestSetup::new();
-
-        // Create receiver (party 2 with weight=4)
-        let (mut receiver_manager, receiver_dkg_output) =
-            rotation_setup.create_receiver_with_completed_dkg(2);
-
-        // Create rotation dealer (party 0 with weight=3, creates 3 rotation messages)
-        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
-        let rotation_dealer_addr = rotation_setup.setup.address(0);
-
-        // Tamper with bundle to have duplicate share_index
-        let mut tampered_messages = rotation_messages.clone();
-        assert!(
-            tampered_messages.messages.len() >= 2,
-            "Need at least 2 messages for this test"
-        );
-
-        // Set second message's share_index to same as first
-        tampered_messages.messages[1].share_index = tampered_messages.messages[0].share_index;
-
-        let result = receiver_manager.try_sign_rotation_messages(
-            &receiver_dkg_output,
-            rotation_dealer_addr,
-            &tampered_messages,
-        );
-
-        assert!(
-            result.is_err(),
-            "Should reject duplicate share index in bundle"
-        );
-        let err = result.unwrap_err();
-        match err {
-            DkgError::InvalidMessage { reason, .. } => {
-                assert!(
-                    reason.contains("Duplicate share index"),
-                    "Error should mention duplicate: {}",
-                    reason
-                );
-            }
-            _ => panic!("Expected InvalidMessage error, got: {:?}", err),
-        }
-
-        // Verify no outputs were stored (all-or-nothing semantics)
-        assert!(
-            receiver_manager.rotation_outputs.is_empty(),
-            "No rotation outputs should be stored when validation fails"
-        );
-    }
-
-    #[test]
     fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
         let rotation_setup = RotationTestSetup::new();
 
@@ -5830,10 +5759,12 @@ mod tests {
         let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
         let rotation_dealer_addr = rotation_setup.setup.address(0);
 
-        // Tamper with bundle: change share_index to one that belongs to party 2 (index 6)
+        // Tamper with bundle: add a message with a share_index that belongs to party 2 (index 6)
         let mut tampered_messages = rotation_messages.clone();
         let stolen_share_index = std::num::NonZeroU16::new(6).unwrap(); // Belongs to party 2, not party 0
-        tampered_messages.messages[0].share_index = stolen_share_index;
+        // Use any message as the content - the validation will fail on share_index ownership
+        let any_message = rotation_messages.iter().next().unwrap().1.clone();
+        tampered_messages.insert(stolen_share_index, any_message);
 
         let result = receiver_manager.try_sign_rotation_messages(
             &receiver_dkg_output,
@@ -6003,7 +5934,7 @@ mod tests {
         let rotation_dealer_addr = rotation_setup.setup.address(0);
 
         assert!(
-            rotation_messages.messages.len() >= 3,
+            rotation_messages.len() >= 3,
             "Need at least 3 rotation messages for this test"
         );
 
@@ -6025,9 +5956,11 @@ mod tests {
         // - Share 1: Keep output (should be skipped - already processed)
         // - Share 2: Remove output (should be re-processed)
         // - Share 3: Remove output, add complaint (should be skipped - pending complaint)
-        let share1_index = rotation_messages.messages[0].share_index;
-        let share2_index = rotation_messages.messages[1].share_index;
-        let share3_index = rotation_messages.messages[2].share_index;
+        let mut share_indices: Vec<_> = rotation_messages.keys().copied().collect();
+        share_indices.sort();
+        let share1_index = share_indices[0];
+        let share2_index = share_indices[1];
+        let share3_index = share_indices[2];
 
         let share1_original_output = receiver_manager
             .rotation_outputs
@@ -6069,7 +6002,7 @@ mod tests {
             None,
             receiver_manager.encryption_key.clone(),
         );
-        let complaint = match receiver.process_message(&cheating_msg.message).unwrap() {
+        let complaint = match receiver.process_message(&cheating_msg.1).unwrap() {
             avss::ProcessedMessage::Complaint(c) => c,
             _ => panic!("Expected complaint from corrupted share"),
         };
@@ -6145,7 +6078,7 @@ mod tests {
         dealer_manager.previous_dkg_output = Some(dealer_dkg_output.clone());
 
         // Get the share index and value for the first rotation message
-        let first_share_index = valid_rotation_messages.messages[0].share_index;
+        let first_share_index = *valid_rotation_messages.keys().next().unwrap();
         let share_value = dealer_dkg_output
             .key_shares
             .shares
@@ -6156,7 +6089,7 @@ mod tests {
 
         // Create a cheating rotation message that corrupts the share for test_party_idx
         // Use the test_manager's session_id which is the base session_id for rotation
-        let cheating_rotation_message = create_cheating_rotation_message(
+        let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
             &rotation_setup.setup,
             &test_manager.session_id,
             &dealer_addr,
@@ -6168,7 +6101,7 @@ mod tests {
 
         // Create rotation messages with the cheating message replacing the first valid one
         let mut cheating_messages = valid_rotation_messages.clone();
-        cheating_messages.messages[0] = cheating_rotation_message;
+        cheating_messages.insert(cheating_share_index, cheating_message.clone());
 
         // Store the cheating messages in test manager
         test_manager
@@ -6187,10 +6120,7 @@ mod tests {
             None, // No expected commitment
             test_manager.encryption_key.clone(),
         );
-        let valid_complaint = match receiver
-            .process_message(&cheating_messages.messages[0].message)
-            .unwrap()
-        {
+        let valid_complaint = match receiver.process_message(&cheating_message).unwrap() {
             avss::ProcessedMessage::Complaint(c) => c,
             _ => panic!("Expected complaint from corrupted share"),
         };
@@ -6299,7 +6229,7 @@ mod tests {
         let dealer_addr = rotation_setup.setup.address(dealer_idx);
 
         // Get share info for the first rotation message
-        let first_share_index = valid_rotation_messages.messages[0].share_index;
+        let first_share_index = *valid_rotation_messages.keys().next().unwrap();
         let share_value = dealer_dkg_output
             .key_shares
             .shares
@@ -6309,7 +6239,7 @@ mod tests {
             .unwrap();
 
         // Create a cheating rotation message that corrupts the share for victim
-        let cheating_rotation_message = create_cheating_rotation_message(
+        let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
             &rotation_setup.setup,
             &victim_manager.session_id,
             &dealer_addr,
@@ -6321,7 +6251,7 @@ mod tests {
 
         // Create rotation messages with the cheating message
         let mut cheating_messages = valid_rotation_messages.clone();
-        cheating_messages.messages[0] = cheating_rotation_message;
+        cheating_messages.insert(cheating_share_index, cheating_message.clone());
 
         // Victim processes cheating message and generates a complaint
         let session_id = victim_manager
@@ -6329,9 +6259,8 @@ mod tests {
             .rotation_session_id(&dealer_addr, first_share_index);
         let commitment = victim_dkg_output
             .commitments
-            .iter()
-            .find(|c| c.index == first_share_index)
-            .map(|c| c.value);
+            .get(&first_share_index)
+            .copied();
         let receiver = avss::Receiver::new(
             victim_manager.dkg_config.nodes.clone(),
             victim_manager.party_id,
@@ -6340,10 +6269,7 @@ mod tests {
             commitment,
             victim_manager.encryption_key.clone(),
         );
-        let complaint = match receiver
-            .process_message(&cheating_messages.messages[0].message)
-            .unwrap()
-        {
+        let complaint = match receiver.process_message(&cheating_message).unwrap() {
             avss::ProcessedMessage::Complaint(c) => c,
             _ => panic!("Expected complaint from corrupted share"),
         };

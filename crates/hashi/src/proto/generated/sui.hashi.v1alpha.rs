@@ -1162,23 +1162,14 @@ pub mod guardian_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RotationMessage {
-    /// The share index being reshared.
-    #[prost(uint32, optional, tag = "1")]
-    pub share_index: ::core::option::Option<u32>,
-    /// The AVSS message for this share.
-    #[prost(message, optional, tag = "2")]
-    pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SendRotationMessagesRequest {
     /// The epoch for this rotation instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    /// The bundle of rotation messages (one per share the dealer holds).
-    #[prost(message, repeated, tag = "2")]
-    pub messages: ::prost::alloc::vec::Vec<RotationMessage>,
+    /// The rotation messages keyed by share index.
+    #[prost(map = "uint32, message", tag = "2")]
+    pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendRotationMessagesResponse {
@@ -1197,9 +1188,9 @@ pub struct RetrieveRotationMessagesRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveRotationMessagesResponse {
-    /// The bundle of rotation messages.
-    #[prost(message, repeated, tag = "1")]
-    pub messages: ::prost::alloc::vec::Vec<RotationMessage>,
+    /// The rotation messages keyed by share index.
+    #[prost(map = "uint32, message", tag = "1")]
+    pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPublicDkgOutputRequest {
