@@ -184,6 +184,7 @@ pub struct DepositRequestQueue {
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequest {
+    pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
 }

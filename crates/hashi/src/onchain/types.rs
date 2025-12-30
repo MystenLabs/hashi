@@ -313,6 +313,7 @@ impl DepositRequestQueue {
 
 #[derive(Debug)]
 pub struct DepositRequest {
+    pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
 }
