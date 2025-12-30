@@ -166,15 +166,26 @@ pub struct ComplainResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationComplainRequest {
-    pub dealer: Address,
+pub struct RotationShareComplaint {
     pub share_index: ShareIndex,
     pub complaint: complaint::Complaint,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationComplainResponse {
+pub struct RotationComplainRequest {
+    pub dealer: Address,
+    pub complaints: Vec<RotationShareComplaint>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationShareComplaintResponse {
+    pub share_index: ShareIndex,
     pub response: complaint::ComplaintResponse<avss::SharesForNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationComplainResponse {
+    pub responses: Vec<RotationShareComplaintResponse>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

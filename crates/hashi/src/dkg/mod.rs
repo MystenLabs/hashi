@@ -55,6 +55,8 @@ pub use types::RotationComplainRequest;
 pub use types::RotationComplainResponse;
 pub use types::RotationMessage;
 pub use types::RotationMessages;
+pub use types::RotationShareComplaint;
+pub use types::RotationShareComplaintResponse;
 pub use types::SendMessageRequest;
 pub use types::SendMessageResponse;
 pub use types::SendRotationMessagesRequest;
@@ -64,6 +66,11 @@ pub use types::SessionId;
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed";
+
+struct RotationComplainContext {
+    request: RotationComplainRequest,
+    share_contexts: HashMap<ShareIndex, (avss::Receiver, RotationMessage)>,
+}
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -92,8 +99,7 @@ pub struct DkgManager {
     pub rotation_dealer_messages: HashMap<Address, RotationMessages>,
     pub rotation_message_responses: HashMap<Address, SendRotationMessagesResponse>,
     pub rotation_complaints_to_process: HashMap<(Address, ShareIndex), complaint::Complaint>,
-    pub rotation_complaint_responses:
-        HashMap<(Address, ShareIndex), complaint::ComplaintResponse<avss::SharesForNode>>,
+    pub rotation_complaint_responses: HashMap<Address, Vec<RotationShareComplaintResponse>>,
     previous_dkg_output: Option<DkgOutput>,
 }
 
@@ -302,64 +308,71 @@ impl DkgManager {
         &mut self,
         request: &RotationComplainRequest,
     ) -> DkgResult<RotationComplainResponse> {
-        let cache_key = (request.dealer, request.share_index);
         // It is safe to return a response from cache since we already know that dealer was malicious.
-        if let Some(cached_response) = self.rotation_complaint_responses.get(&cache_key) {
+        if let Some(cached_responses) = self.rotation_complaint_responses.get(&request.dealer) {
             return Ok(RotationComplainResponse {
-                response: cached_response.clone(),
+                responses: cached_responses.clone(),
             });
         }
         let rotation_messages = self
             .rotation_dealer_messages
             .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages from dealer".into()))?;
-        let rotation_message = rotation_messages
-            .messages
-            .iter()
-            .find(|m| m.share_index == request.share_index)
-            .ok_or_else(|| {
-                DkgError::ProtocolFailed(format!(
-                    "No rotation message for share index {}",
-                    request.share_index
-                ))
-            })?;
-        let partial_output = self
-            .rotation_outputs
-            .get(&request.share_index)
-            .ok_or_else(|| {
-                DkgError::ProtocolFailed(format!(
-                    "No output for share index {}",
-                    request.share_index
-                ))
-            })?;
+            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages from dealer".into()))?
+            .clone();
         let previous_dkg_output = self
             .previous_dkg_output
             .as_ref()
             .expect("previous_dkg_output must be set during key rotation");
-        let commitment = previous_dkg_output
-            .commitments
-            .iter()
-            .find(|c| c.index == request.share_index)
-            .map(|c| c.value);
-        let session_id = self
-            .session_id
-            .rotation_session_id(&request.dealer, request.share_index);
-        let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
-            session_id.to_vec(),
-            commitment,
-            self.encryption_key.clone(),
-        );
-        let response = receiver.handle_complaint(
-            &rotation_message.message,
-            &request.complaint,
-            partial_output,
-        )?;
+        let mut responses = Vec::with_capacity(request.complaints.len());
+        for share_complaint in &request.complaints {
+            let rotation_message = rotation_messages
+                .messages
+                .iter()
+                .find(|m| m.share_index == share_complaint.share_index)
+                .ok_or_else(|| {
+                    DkgError::ProtocolFailed(format!(
+                        "No rotation message for share index {}",
+                        share_complaint.share_index
+                    ))
+                })?;
+            let partial_output = self
+                .rotation_outputs
+                .get(&share_complaint.share_index)
+                .ok_or_else(|| {
+                    DkgError::ProtocolFailed(format!(
+                        "No output for share index {}",
+                        share_complaint.share_index
+                    ))
+                })?;
+            let commitment = previous_dkg_output
+                .commitments
+                .iter()
+                .find(|c| c.index == share_complaint.share_index)
+                .map(|c| c.value);
+            let session_id = self
+                .session_id
+                .rotation_session_id(&request.dealer, share_complaint.share_index);
+            let receiver = avss::Receiver::new(
+                self.dkg_config.nodes.clone(),
+                self.party_id,
+                self.dkg_config.threshold,
+                session_id.to_vec(),
+                commitment,
+                self.encryption_key.clone(),
+            );
+            let response = receiver.handle_complaint(
+                &rotation_message.message,
+                &share_complaint.complaint,
+                partial_output,
+            )?;
+            responses.push(RotationShareComplaintResponse {
+                share_index: share_complaint.share_index,
+                response,
+            });
+        }
         self.rotation_complaint_responses
-            .insert(cache_key, response.clone());
-        Ok(RotationComplainResponse { response })
+            .insert(request.dealer, responses.clone());
+        Ok(RotationComplainResponse { responses })
     }
 
     // TODO: Consider making dealer and party flows concurrent
@@ -684,7 +697,6 @@ impl DkgManager {
                         .expect("certificate verified above");
                     self.recover_rotation_shares_via_complaints(
                         &dealer,
-                        &dealer_share_indices,
                         previous,
                         signers,
                         p2p_channel,
@@ -1003,46 +1015,137 @@ impl DkgManager {
             .dealer_messages
             .get(dealer)
             .expect("cannot have complaint without message");
-        let partial_output = collect_responses_and_recover(
-            signers,
-            complaint_request,
-            |addr, req| async move { p2p_channel.complain(&addr, &req).await },
-            |r: ComplainResponse| r.response,
-            &receiver,
-            message,
-            "DKG complaint",
-        )
-        .await?;
-        self.dealer_outputs.insert(*dealer, partial_output);
-        self.complaints_to_process.remove(dealer);
-        Ok(())
+        let mut responses = Vec::new();
+        for signer in signers {
+            let response =
+                match with_timeout_and_retry(|| p2p_channel.complain(&signer, &complaint_request))
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::info!("Complaint to {:?} failed: {}", signer, e);
+                        continue;
+                    }
+                };
+            responses.push(response.response);
+            match receiver.recover(message, responses.clone()) {
+                Ok(partial_output) => {
+                    self.dealer_outputs.insert(*dealer, partial_output);
+                    self.complaints_to_process.remove(dealer);
+                    return Ok(());
+                }
+                Err(FastCryptoError::InputTooShort(_)) => {
+                    continue;
+                }
+                Err(e) => {
+                    let error_msg = format!("Share recovery failed for dealer {:?}: {}", dealer, e);
+                    tracing::error!("{}", error_msg);
+                    return Err(DkgError::CryptoError(error_msg));
+                }
+            }
+        }
+        Err(DkgError::ProtocolFailed(format!(
+            "Not enough valid complaint responses for dealer {:?}",
+            dealer
+        )))
     }
 
     async fn recover_rotation_shares_via_complaints(
         &mut self,
         dealer: &Address,
-        share_indices: &[ShareIndex],
         previous_dkg_output: &DkgOutput,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
     ) -> DkgResult<()> {
+        let Some(RotationComplainContext {
+            request,
+            share_contexts,
+        }) = self.prepare_rotation_complain_request(dealer, previous_dkg_output)?
+        else {
+            return Ok(());
+        };
+        let mut all_responses: HashMap<
+            ShareIndex,
+            Vec<complaint::ComplaintResponse<avss::SharesForNode>>,
+        > = HashMap::new();
+        let mut pending_shares: HashSet<ShareIndex> = HashSet::new();
+        for &share_index in share_contexts.keys() {
+            all_responses.insert(share_index, Vec::new());
+            pending_shares.insert(share_index);
+        }
+        for signer in &signers {
+            if pending_shares.is_empty() {
+                break;
+            }
+            match p2p_channel.rotation_complain(signer, &request).await {
+                Ok(response) => {
+                    for share_response in response.responses {
+                        if let Some(responses) = all_responses.get_mut(&share_response.share_index)
+                        {
+                            responses.push(share_response.response);
+                        }
+                    }
+                    for share_index in pending_shares.clone() {
+                        let responses = all_responses.get(&share_index).unwrap();
+                        let (receiver, message) = share_contexts.get(&share_index).unwrap();
+                        match receiver.recover(&message.message, responses.clone()) {
+                            Ok(partial_output) => {
+                                self.rotation_outputs.insert(share_index, partial_output);
+                                self.rotation_complaints_to_process
+                                    .remove(&(*dealer, share_index));
+                                pending_shares.remove(&share_index);
+                            }
+                            Err(FastCryptoError::InputTooShort(_)) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                let error_msg = format!(
+                                    "Share recovery failed for dealer {:?} with share {}: {}",
+                                    dealer, share_index, e
+                                );
+                                tracing::error!("{}", error_msg);
+                                return Err(DkgError::CryptoError(error_msg));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::info!(
+                        "Failed to get rotation complaint response from {}: {}",
+                        signer,
+                        e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_rotation_complain_request(
+        &self,
+        dealer: &Address,
+        previous_dkg_output: &DkgOutput,
+    ) -> DkgResult<Option<RotationComplainContext>> {
         let rotation_messages = self
             .rotation_dealer_messages
             .get(dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?;
-        let mut tasks = Vec::new();
-        for &share_index in share_indices {
-            let Some(complaint) = self
-                .rotation_complaints_to_process
-                .get(&(*dealer, share_index))
-            else {
-                continue;
-            };
-            let complaint_request = RotationComplainRequest {
-                dealer: *dealer,
-                share_index,
+        let complaints: Vec<_> = self
+            .rotation_complaints_to_process
+            .iter()
+            .filter(|((d, _), _)| d == dealer)
+            .map(|((_, share_index), complaint)| RotationShareComplaint {
+                share_index: *share_index,
                 complaint: complaint.clone(),
-            };
+            })
+            .collect();
+        if complaints.is_empty() {
+            return Ok(None);
+        }
+        let mut share_contexts: HashMap<ShareIndex, (avss::Receiver, RotationMessage)> =
+            HashMap::new();
+        for share_complaint in &complaints {
+            let share_index = share_complaint.share_index;
             let session_id = self.session_id.rotation_session_id(dealer, share_index);
             let commitment = previous_dkg_output
                 .commitments
@@ -1067,40 +1170,17 @@ impl DkgManager {
                         share_index
                     ))
                 })?
-                .message
                 .clone();
-            tasks.push((share_index, complaint_request, receiver, message));
+            share_contexts.insert(share_index, (receiver, message));
         }
-        if tasks.is_empty() {
-            return Ok(());
-        }
-        let futures: Vec<_> = tasks
-            .into_iter()
-            .map(|(idx, req, receiver, msg)| {
-                let signers = signers.clone();
-                async move {
-                    let result = collect_responses_and_recover(
-                        signers,
-                        req,
-                        |addr, r| async move { p2p_channel.rotation_complain(&addr, &r).await },
-                        |r: RotationComplainResponse| r.response,
-                        &receiver,
-                        &msg,
-                        "Rotation complaint",
-                    )
-                    .await;
-                    (idx, result)
-                }
-            })
-            .collect();
-        let mut stream: FuturesUnordered<_> = futures.into_iter().collect();
-        while let Some((share_index, result)) = stream.next().await {
-            let partial_output = result?;
-            self.rotation_outputs.insert(share_index, partial_output);
-            self.rotation_complaints_to_process
-                .remove(&(*dealer, share_index));
-        }
-        Ok(())
+        let request = RotationComplainRequest {
+            dealer: *dealer,
+            complaints,
+        };
+        Ok(Some(RotationComplainContext {
+            request,
+            share_contexts,
+        }))
     }
 
     fn create_rotation_messages(
@@ -1346,63 +1426,6 @@ where
         }
     }))
     .await
-}
-
-/// Send complaint requests to signers in parallel and tries to recover shares
-/// as responses arrive. Return early when recovery succeeds.
-async fn collect_responses_and_recover<Request, Response, ExtractFn, FetchFn, FetchFuture>(
-    signers: impl IntoIterator<Item = Address>,
-    request: Request,
-    fetch: FetchFn,
-    extract: ExtractFn,
-    receiver: &avss::Receiver,
-    message: &avss::Message,
-    context: &'static str,
-) -> DkgResult<avss::PartialOutput>
-where
-    Request: Clone + Send + Sync,
-    Response: Send,
-    ExtractFn: Fn(Response) -> complaint::ComplaintResponse<avss::SharesForNode> + Clone + Send,
-    FetchFn: Fn(Address, Request) -> FetchFuture + Clone + Send + Sync,
-    FetchFuture: Future<Output = ChannelResult<Response>> + Send,
-{
-    let futures: Vec<_> = signers
-        .into_iter()
-        .map(|addr| {
-            let req = request.clone();
-            let fetch = fetch.clone();
-            async move {
-                let result = with_timeout_and_retry(|| fetch(addr, req.clone())).await;
-                (addr, result)
-            }
-        })
-        .collect();
-    let mut stream: FuturesUnordered<_> = futures.into_iter().collect();
-    let mut responses = Vec::new();
-    while let Some((addr, result)) = stream.next().await {
-        match result {
-            Ok(response) => {
-                responses.push(extract(response));
-                match receiver.recover(message, responses.clone()) {
-                    Ok(partial_output) => return Ok(partial_output),
-                    Err(FastCryptoError::InputTooShort(_)) => continue,
-                    Err(e) => {
-                        let error_msg = format!("{} recovery failed: {}", context, e);
-                        tracing::error!("{}", error_msg);
-                        return Err(DkgError::CryptoError(error_msg));
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::info!("{} to {:?} failed: {}", context, addr, e);
-                continue;
-            }
-        }
-    }
-    Err(DkgError::ProtocolFailed(format!(
-        "Not enough valid {} responses",
-        context
-    )))
 }
 
 fn validate_retrieved<T>(
@@ -6229,7 +6252,6 @@ mod tests {
         let result = test_manager
             .recover_rotation_shares_via_complaints(
                 &dealer_addr,
-                &[first_share_index],
                 &test_dkg_output,
                 signers,
                 &mock_p2p,
@@ -6342,11 +6364,13 @@ mod tests {
             .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &cheating_messages)
             .unwrap();
 
-        // Create the complaint request
+        // Create the complaint request with batched complaints
         let request = RotationComplainRequest {
             dealer: dealer_addr,
-            share_index: first_share_index,
-            complaint,
+            complaints: vec![RotationShareComplaint {
+                share_index: first_share_index,
+                complaint,
+            }],
         };
 
         // Handle the complaint request
@@ -6357,12 +6381,15 @@ mod tests {
             "Should successfully handle complaint: {:?}",
             result.err()
         );
+        let response = result.unwrap();
+        assert_eq!(response.responses.len(), 1);
+        assert_eq!(response.responses[0].share_index, first_share_index);
 
-        // Verify response is cached
+        // Verify response is cached by dealer
         assert!(
             responder_manager
                 .rotation_complaint_responses
-                .contains_key(&(dealer_addr, first_share_index)),
+                .contains_key(&dealer_addr),
             "Response should be cached"
         );
     }
