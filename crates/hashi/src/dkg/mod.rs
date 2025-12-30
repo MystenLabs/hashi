@@ -332,6 +332,15 @@ impl DkgManager {
                     request.share_index
                 ))
             })?;
+        let previous_dkg_output = self
+            .previous_dkg_output
+            .as_ref()
+            .expect("previous_dkg_output must be set during key rotation");
+        let commitment = previous_dkg_output
+            .commitments
+            .iter()
+            .find(|c| c.index == request.share_index)
+            .map(|c| c.value);
         let session_id = self
             .session_id
             .rotation_session_id(&request.dealer, request.share_index);
@@ -340,7 +349,7 @@ impl DkgManager {
             self.party_id,
             self.dkg_config.threshold,
             session_id.to_vec(),
-            None,
+            commitment,
             self.encryption_key.clone(),
         );
         let response = receiver.handle_complaint(
@@ -6248,6 +6257,113 @@ mod tests {
                 .rotation_outputs
                 .contains_key(&first_share_index),
             "Output should be created for recovered share"
+        );
+    }
+
+    #[test]
+    fn test_handle_rotation_complain_request_success() {
+        let rotation_setup = RotationTestSetup::new();
+        let mut rng = rand::thread_rng();
+
+        // Create victim party (validator 2, weight=4) who will generate a complaint
+        let victim_idx = 2;
+        let (victim_manager, victim_dkg_output) =
+            rotation_setup.create_receiver_with_memory_store(victim_idx);
+
+        // Create rotation dealer (validator 0, weight=3)
+        let dealer_idx = 0;
+        let (_, dealer_dkg_output, valid_rotation_messages) =
+            rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        // Get share info for the first rotation message
+        let first_share_index = valid_rotation_messages.messages[0].share_index;
+        let share_value = dealer_dkg_output
+            .key_shares
+            .shares
+            .iter()
+            .find(|s| s.index == first_share_index)
+            .map(|s| s.value)
+            .unwrap();
+
+        // Create a cheating rotation message that corrupts the share for victim
+        let cheating_rotation_message = create_cheating_rotation_message(
+            &rotation_setup.setup,
+            &victim_manager.session_id,
+            &dealer_addr,
+            share_value,
+            first_share_index,
+            victim_idx as u16,
+            &mut rng,
+        );
+
+        // Create rotation messages with the cheating message
+        let mut cheating_messages = valid_rotation_messages.clone();
+        cheating_messages.messages[0] = cheating_rotation_message;
+
+        // Victim processes cheating message and generates a complaint
+        let session_id = victim_manager
+            .session_id
+            .rotation_session_id(&dealer_addr, first_share_index);
+        let commitment = victim_dkg_output
+            .commitments
+            .iter()
+            .find(|c| c.index == first_share_index)
+            .map(|c| c.value);
+        let receiver = avss::Receiver::new(
+            victim_manager.dkg_config.nodes.clone(),
+            victim_manager.party_id,
+            victim_manager.dkg_config.threshold,
+            session_id.to_vec(),
+            commitment,
+            victim_manager.encryption_key.clone(),
+        );
+        let complaint = match receiver
+            .process_message(&cheating_messages.messages[0].message)
+            .unwrap()
+        {
+            avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint from corrupted share"),
+        };
+
+        // Create responder party (validator 1) who can handle the complaint
+        let responder_idx = 1;
+        let (mut responder_manager, responder_dkg_output) =
+            rotation_setup.create_receiver_with_memory_store(responder_idx);
+        responder_manager.previous_dkg_output = Some(responder_dkg_output.clone());
+
+        // Responder stores the cheating messages
+        responder_manager
+            .rotation_dealer_messages
+            .insert(dealer_addr, cheating_messages.clone());
+
+        // Responder processes and gets valid outputs (their shares are not corrupted)
+        responder_manager
+            .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &cheating_messages)
+            .unwrap();
+
+        // Create the complaint request
+        let request = RotationComplainRequest {
+            dealer: dealer_addr,
+            share_index: first_share_index,
+            complaint,
+        };
+
+        // Handle the complaint request
+        let result = responder_manager.handle_rotation_complain_request(&request);
+
+        assert!(
+            result.is_ok(),
+            "Should successfully handle complaint: {:?}",
+            result.err()
+        );
+
+        // Verify response is cached
+        assert!(
+            responder_manager
+                .rotation_complaint_responses
+                .contains_key(&(dealer_addr, first_share_index)),
+            "Response should be cached"
         );
     }
 }
