@@ -92,10 +92,6 @@ impl HttpService {
     pub fn dkg_manager(&self) -> &std::sync::Mutex<crate::dkg::DkgManager> {
         self.inner.dkg_manager()
     }
-
-    pub fn tls_registry(&self) -> &crate::dkg::rpc::TlsRegistry {
-        self.inner.tls_registry()
-    }
 }
 
 async fn health() -> impl axum::response::IntoResponse {

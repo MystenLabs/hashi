@@ -1,6 +1,5 @@
 use crate::dkg::types;
 use crate::grpc::HttpService;
-use crate::onchain::types::CommitteeSet;
 use crate::proto::ComplainRequest;
 use crate::proto::ComplainResponse;
 use crate::proto::RetrieveMessageRequest;
@@ -8,39 +7,9 @@ use crate::proto::RetrieveMessageResponse;
 use crate::proto::SendMessageRequest;
 use crate::proto::SendMessageResponse;
 use crate::proto::dkg_service_server::DkgService;
-use ed25519_dalek::VerifyingKey;
-use std::collections::HashMap;
 use sui_sdk_types::Address;
 use tonic::Status;
 
-/// Maps TLS public keys to validator addresses.
-pub struct TlsRegistry {
-    key_to_address: HashMap<[u8; 32], Address>,
-}
-
-impl TlsRegistry {
-    pub fn new(key_to_address: HashMap<[u8; 32], Address>) -> Self {
-        Self { key_to_address }
-    }
-
-    pub fn from_committee_set(committee_set: &CommitteeSet) -> Self {
-        let key_to_address: HashMap<[u8; 32], Address> = committee_set
-            .members()
-            .values()
-            .filter_map(|member| {
-                member
-                    .tls_public_key
-                    .as_ref()
-                    .map(|pk| (*pk.as_bytes(), member.validator_address))
-            })
-            .collect();
-        Self::new(key_to_address)
-    }
-
-    pub fn lookup(&self, public_key: &VerifyingKey) -> Option<Address> {
-        self.key_to_address.get(public_key.as_bytes()).copied()
-    }
-}
 #[tonic::async_trait]
 impl DkgService for HttpService {
     #[tracing::instrument(skip(self, request))]

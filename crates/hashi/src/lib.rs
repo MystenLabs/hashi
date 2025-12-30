@@ -28,7 +28,6 @@ pub struct Hashi {
     onchain_state: OnceLock<onchain::OnchainState>,
     // TODO: Replace `DkgManager` by `MpcManager`
     dkg_manager: OnceLock<Mutex<dkg::DkgManager>>,
-    tls_registry: OnceLock<dkg::rpc::TlsRegistry>,
 }
 
 impl Hashi {
@@ -43,7 +42,6 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
-            tls_registry: OnceLock::new(),
         })
     }
 
@@ -61,7 +59,6 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
-            tls_registry: OnceLock::new(),
         })
     }
 
@@ -81,12 +78,6 @@ impl Hashi {
         self.dkg_manager.get().expect("DkgManager not initialized")
     }
 
-    pub fn tls_registry(&self) -> &dkg::rpc::TlsRegistry {
-        self.tls_registry
-            .get()
-            .expect("TlsRegistry not initialized")
-    }
-
     async fn initialize_onchain_state(&self) {
         let onchain_state = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
@@ -101,7 +92,6 @@ impl Hashi {
     fn initialize_dkg(&self) -> anyhow::Result<()> {
         let state = self.onchain_state().state();
         let committee_set = &state.hashi().committees;
-        let tls_registry = dkg::rpc::TlsRegistry::from_committee_set(committee_set);
         let session_id = dkg::SessionId::new(
             self.config.sui_chain_id(),
             committee_set.epoch(),
@@ -127,9 +117,6 @@ impl Hashi {
         self.dkg_manager
             .set(Mutex::new(dkg_manager))
             .map_err(|_| anyhow::anyhow!("DkgManager already initialized"))?;
-        self.tls_registry
-            .set(tls_registry)
-            .map_err(|_| anyhow::anyhow!("TlsRegistry already initialized"))?;
         Ok(())
     }
 
