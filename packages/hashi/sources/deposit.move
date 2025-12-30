@@ -18,12 +18,15 @@ public fun deposit(
     assert!(hashi.config().deposit_fee() == fee.value());
     hashi.treasury_mut().deposit_fee(fee);
 
+    // Check that the provided UTXO doesn't already exist in the system
+    assert!(!hashi.utxo_pool().contains(request.utxo().id()));
+
     hashi.deposit_queue_mut().insert(request);
 }
 
 public fun confirm_deposit(
     hashi: &mut Hashi,
-    utxo_id: hashi::utxo::UtxoId,
+    request_id: address,
     // cert: Cert
     ctx: &mut TxContext,
 ) {
@@ -32,7 +35,7 @@ public fun confirm_deposit(
     // Check if state is PAUSED
     assert!(!hashi.config().paused());
 
-    let request = hashi.deposit_queue_mut().remove(utxo_id);
+    let request = hashi.deposit_queue_mut().remove(request_id);
 
     // verify cert over the request
     // cert.verify(&request)

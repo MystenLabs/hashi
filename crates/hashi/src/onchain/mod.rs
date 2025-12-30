@@ -514,10 +514,23 @@ async fn scrape_deposit_requests(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(deposit_request)
         })
-        .map_ok(|move_types::DepositRequest { utxo, timestamp_ms }| {
-            let utxo = convert_move_utxo(utxo);
-            (utxo.id, types::DepositRequest { utxo, timestamp_ms })
-        })
+        .map_ok(
+            |move_types::DepositRequest {
+                 id,
+                 utxo,
+                 timestamp_ms,
+             }| {
+                let utxo = convert_move_utxo(utxo);
+                (
+                    utxo.id,
+                    types::DepositRequest {
+                        id,
+                        utxo,
+                        timestamp_ms,
+                    },
+                )
+            },
+        )
         .try_collect()
         .await?;
 
