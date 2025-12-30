@@ -49,6 +49,10 @@ public(package) fun id(self: &DepositRequest): address {
     self.id
 }
 
+public(package) fun timestamp_ms(self: &DepositRequest): u64 {
+    self.timestamp_ms
+}
+
 public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
     DepositRequestQueue {
         requests: sui::bag::new(ctx),

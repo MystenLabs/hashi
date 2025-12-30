@@ -1,10 +1,13 @@
 #![allow(unused)]
 
+use crate::onchain::move_types::UtxoId;
+
 use super::MoveType;
 use std::collections::BTreeSet;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
 use sui_sdk_types::StructTag;
+use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::FromBcs;
 
 #[derive(Debug)]
@@ -17,6 +20,10 @@ pub enum HashiEvent {
     ProposalExecutedEvent(ProposalExecutedEvent),
     QuorumReachedEvent(QuorumReachedEvent),
     PackageUpgradedEvent(PackageUpgradedEvent),
+    MintEvent(MintEvent),
+    BurnEvent(BurnEvent),
+    DepositRequestedEvent(DepositRequestedEvent),
+    DepositConfirmedEvent(DepositConfirmedEvent),
 }
 
 impl HashiEvent {
@@ -43,6 +50,14 @@ impl HashiEvent {
                 ProposalExecutedEvent::from_bcs(bcs.value())?.into()
             }
             QuorumReachedEvent::MODULE_NAME => QuorumReachedEvent::from_bcs(bcs.value())?.into(),
+            MintEvent::MODULE_NAME => MintEvent::new(&event_type, bcs.value())?.into(),
+            BurnEvent::MODULE_NAME => BurnEvent::new(&event_type, bcs.value())?.into(),
+            DepositRequestedEvent::MODULE_NAME => {
+                DepositRequestedEvent::from_bcs(bcs.value())?.into()
+            }
+            DepositConfirmedEvent::MODULE_NAME => {
+                DepositConfirmedEvent::from_bcs(bcs.value())?.into()
+            }
             _ => {
                 return Ok(None);
             }
@@ -180,5 +195,111 @@ impl MoveType for PackageUpgradedEvent {
 impl From<PackageUpgradedEvent> for HashiEvent {
     fn from(value: PackageUpgradedEvent) -> Self {
         Self::PackageUpgradedEvent(value)
+    }
+}
+
+#[derive(Debug)]
+pub struct MintEvent {
+    pub coin_type: TypeTag,
+    pub amount: u64,
+}
+
+impl MoveType for MintEvent {
+    const MODULE: &'static str = "treasury";
+    const NAME: &'static str = "MintEvent";
+}
+
+impl MintEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        if event_type.module() == Self::MODULE
+            && event_type.name() == Self::NAME
+            && let [coin_type] = event_type.type_params()
+        {
+            Ok(Self {
+                coin_type: coin_type.to_owned(),
+                amount: bcs::from_bytes(bcs)?,
+            })
+        } else {
+            Err(anyhow::anyhow!("invalid MintEvent"))
+        }
+    }
+}
+
+impl From<MintEvent> for HashiEvent {
+    fn from(value: MintEvent) -> Self {
+        Self::MintEvent(value)
+    }
+}
+
+#[derive(Debug)]
+pub struct BurnEvent {
+    pub coin_type: TypeTag,
+    pub amount: u64,
+}
+
+impl MoveType for BurnEvent {
+    const MODULE: &'static str = "treasury";
+    const NAME: &'static str = "BurnEvent";
+}
+
+impl BurnEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        if event_type.module() == Self::MODULE
+            && event_type.name() == Self::NAME
+            && let [coin_type] = event_type.type_params()
+        {
+            Ok(Self {
+                coin_type: coin_type.to_owned(),
+                amount: bcs::from_bytes(bcs)?,
+            })
+        } else {
+            Err(anyhow::anyhow!("invalid BurnEvent"))
+        }
+    }
+}
+
+impl From<BurnEvent> for HashiEvent {
+    fn from(value: BurnEvent) -> Self {
+        Self::BurnEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct DepositRequestedEvent {
+    pub request_id: Address,
+    pub utxo_id: UtxoId,
+    pub amount: u64,
+    pub derivation_path: Option<Address>,
+    pub timestamp_ms: u64,
+}
+
+impl MoveType for DepositRequestedEvent {
+    const MODULE: &'static str = "deposit";
+    const NAME: &'static str = "DepositRequestedEvent";
+}
+
+impl From<DepositRequestedEvent> for HashiEvent {
+    fn from(value: DepositRequestedEvent) -> Self {
+        Self::DepositRequestedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct DepositConfirmedEvent {
+    pub request_id: Address,
+    pub utxo_id: UtxoId,
+    pub amount: u64,
+    pub derivation_path: Option<Address>,
+    // signature: XXX
+}
+
+impl MoveType for DepositConfirmedEvent {
+    const MODULE: &'static str = "deposit";
+    const NAME: &'static str = "DepositConfirmedEvent";
+}
+
+impl From<DepositConfirmedEvent> for HashiEvent {
+    fn from(value: DepositConfirmedEvent) -> Self {
+        Self::DepositConfirmedEvent(value)
     }
 }

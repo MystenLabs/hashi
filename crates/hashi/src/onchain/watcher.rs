@@ -11,6 +11,7 @@ use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use crate::onchain::events::HashiEvent;
 use crate::onchain::scrape_member_info;
+use crate::onchain::types::DepositRequest;
 
 pub async fn watcher(mut client: Client, state: OnchainState) {
     let subscription_read_mask = FieldMask::from_paths([
@@ -115,6 +116,66 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     package_upgraded_event.version,
                     package_upgraded_event.package,
                 );
+                // TODO notify
+            }
+            HashiEvent::MintEvent(mint) => {
+                if let Some(treasury) = state
+                    .state_mut()
+                    .hashi
+                    .treasury
+                    .treasury_caps
+                    .get_mut(&mint.coin_type)
+                {
+                    treasury.supply += mint.amount;
+                }
+            }
+            HashiEvent::BurnEvent(burn) => {
+                if let Some(treasury) = state
+                    .state_mut()
+                    .hashi
+                    .treasury
+                    .treasury_caps
+                    .get_mut(&burn.coin_type)
+                {
+                    treasury.supply -= burn.amount;
+                }
+            }
+            HashiEvent::DepositRequestedEvent(deposit_requested_event) => {
+                let deposit_request = DepositRequest {
+                    id: deposit_requested_event.request_id,
+                    utxo: super::types::Utxo {
+                        id: super::types::UtxoId {
+                            txid: deposit_requested_event.utxo_id.txid,
+                            vout: deposit_requested_event.utxo_id.vout,
+                        },
+                        amount: deposit_requested_event.amount,
+                        derivation_path: deposit_requested_event.derivation_path,
+                    },
+                    timestamp_ms: deposit_requested_event.timestamp_ms,
+                };
+                state
+                    .state_mut()
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .insert(deposit_request.utxo.id, deposit_request);
+                // TODO notify
+            }
+            HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
+                let mut state = state.state_mut();
+
+                let utxo = super::types::Utxo {
+                    id: super::types::UtxoId {
+                        txid: deposit_confirmed_event.utxo_id.txid,
+                        vout: deposit_confirmed_event.utxo_id.vout,
+                    },
+                    amount: deposit_confirmed_event.amount,
+                    derivation_path: deposit_confirmed_event.derivation_path,
+                };
+
+                state.hashi.deposit_queue.requests.remove(&utxo.id);
+                state.hashi.utxo_pool.utxos.insert(utxo.id, utxo);
+                // TODO notify
             }
         }
     }

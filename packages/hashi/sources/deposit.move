@@ -1,7 +1,7 @@
 /// Module: deposit
 module hashi::deposit;
 
-use hashi::{btc::BTC, hashi::Hashi};
+use hashi::{btc::BTC, hashi::Hashi, utxo::UtxoId};
 use sui::{coin::Coin, sui::SUI};
 
 public fun deposit(
@@ -21,7 +21,16 @@ public fun deposit(
     // Check that the provided UTXO doesn't already exist in the system
     assert!(!hashi.utxo_pool().contains(request.utxo().id()));
 
+    let deposit_requested_event = DepositRequestedEvent {
+        request_id: request.id(),
+        utxo_id: request.utxo().id(),
+        amount: request.utxo().amount(),
+        derivation_path: request.utxo().derivation_path(),
+        timestamp_ms: request.timestamp_ms(),
+    };
+
     hashi.deposit_queue_mut().insert(request);
+    sui::event::emit(deposit_requested_event);
 }
 
 public fun confirm_deposit(
@@ -36,6 +45,14 @@ public fun confirm_deposit(
     assert!(!hashi.config().paused());
 
     let request = hashi.deposit_queue_mut().remove(request_id);
+
+    let deposit_confirmed_event = DepositConfirmedEvent {
+        request_id: request.id(),
+        utxo_id: request.utxo().id(),
+        amount: request.utxo().amount(),
+        derivation_path: request.utxo().derivation_path(),
+        // signature: XXX
+    };
 
     // verify cert over the request
     // cert.verify(&request)
@@ -52,4 +69,21 @@ public fun confirm_deposit(
     };
 
     hashi.utxo_pool_mut().insert(utxo);
+    sui::event::emit(deposit_confirmed_event);
+}
+
+public struct DepositRequestedEvent has copy, drop {
+    request_id: address,
+    utxo_id: UtxoId,
+    amount: u64,
+    derivation_path: Option<address>,
+    timestamp_ms: u64,
+}
+
+public struct DepositConfirmedEvent has copy, drop {
+    request_id: address,
+    utxo_id: UtxoId,
+    amount: u64,
+    derivation_path: Option<address>,
+    // signature: XXX
 }
