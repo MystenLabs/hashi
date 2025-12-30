@@ -312,14 +312,14 @@ impl DepositRequestQueue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, serde_derive::Serialize)]
 pub struct DepositRequest {
     pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis
@@ -328,7 +328,7 @@ pub struct Utxo {
 }
 
 /// txid:vout
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde_derive::Serialize)]
 pub struct UtxoId {
     // a 32 byte sha256 of the transaction
     pub txid: Address,

@@ -9,7 +9,11 @@ sui-crypto = { version = "0.1", features = ["ed25519", "secp256k1", "secp256r1",
 sui-rpc = { version = "0.1" }
 sui-http = "0.1.0"
 
-# dependencies for the protobuf definitions
+# Bitcoin dependencies
+bitcoin = "0.32.7"
+hashi-btc = { path = "../hashi-btc" }
+
+# Dependencies for the protobuf definitions
 tonic = { version = "0.14", features = ["zstd", "transport", "tls-webpki-roots"] }
 tonic-prost = "0.14"
 prost = "0.14"

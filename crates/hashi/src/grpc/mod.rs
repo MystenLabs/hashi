@@ -98,6 +98,10 @@ impl HttpService {
     pub fn dkg_manager(&self) -> &std::sync::Mutex<crate::dkg::DkgManager> {
         self.inner.dkg_manager()
     }
+
+    pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
+        self.inner.btc_monitor()
+    }
 }
 
 async fn health() -> impl axum::response::IntoResponse {
