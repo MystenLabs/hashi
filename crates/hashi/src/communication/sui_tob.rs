@@ -51,12 +51,11 @@ pub enum TobError {
     WrongEpoch { expected: u64, got: u64 },
 }
 
-// This will be irrelevant after the trait `OrderedBroadcastChannel` is removed.
 impl From<TobError> for ChannelError {
     fn from(e: TobError) -> Self {
         match e {
-            TobError::RpcError(msg) => ChannelError::Other(msg),
-            TobError::TransactionFailed(msg) => ChannelError::Other(msg),
+            TobError::RpcError(msg) => ChannelError::RequestFailed(msg),
+            TobError::TransactionFailed(msg) => ChannelError::RequestFailed(msg),
             _ => ChannelError::Other(e.to_string()),
         }
     }
@@ -310,14 +309,13 @@ impl SuiTobChannel {
         _dealer: Address,
         dkg_cert: DkgCertV1,
     ) -> Result<Certificate, TobError> {
-        let message = MpcMessageV1::Dkg(DkgDealerMessageHash {
-            dealer_address: dkg_cert.message.dealer_address,
-            message_hash: dkg_cert
-                .message
-                .message_hash
-                .try_into()
-                .map_err(|_| TobError::InvalidCertificate("invalid message_hash length".into()))?,
-        });
+        let message =
+            MpcMessageV1::Dkg(DkgDealerMessageHash {
+                dealer_address: dkg_cert.message.dealer_address,
+                message_hash: dkg_cert.message.message_hash.try_into().map_err(|_| {
+                    TobError::InvalidCertificate("invalid message_hash length".into())
+                })?,
+            });
         Certificate::from_parts(
             self.epoch,
             message,
