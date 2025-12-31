@@ -23,6 +23,8 @@ const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 //
 
 const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
+const WITHDRAWAL_FEE_KEY: vector<u8> = b"withdrawal_fee";
+const WITHDRAWAL_MINIMUM_KEY: vector<u8> = b"withdrawal_minimum";
 const PAUSED_KEY: vector<u8> = b"paused";
 
 public struct Config has store {
@@ -60,6 +62,22 @@ public(package) fun deposit_fee(self: &Config): u64 {
 
 public(package) fun set_deposit_fee(self: &mut Config, fee: u64) {
     self.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(fee))
+}
+
+public(package) fun withdrawal_fee(self: &Config): u64 {
+    self.get(WITHDRAWAL_FEE_KEY).as_u64()
+}
+
+public(package) fun set_withdrawal_fee(self: &mut Config, fee: u64) {
+    self.upsert(WITHDRAWAL_FEE_KEY, config_value::new_u64(fee))
+}
+
+public(package) fun withdrawal_minimum(self: &Config): u64 {
+    self.get(WITHDRAWAL_MINIMUM_KEY).as_u64()
+}
+
+public(package) fun set_withdrawal_minimum(self: &mut Config, fee: u64) {
+    self.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(fee))
 }
 
 public(package) fun paused(self: &Config): bool {

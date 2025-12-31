@@ -9,6 +9,7 @@ module hashi::test_utils;
 use hashi::{
     committee::{Self, CommitteeMember},
     deposit_queue,
+    withdrawal_queue,
     disable_version,
     enable_version,
     hashi::Hashi,
@@ -132,6 +133,9 @@ public fun create_hashi_with_weighted_committee(
     // Create deposit queue
     let deposit_queue = deposit_queue::create(ctx);
 
+    // Create withdrawal queue
+    let withdrawal_queue = withdrawal_queue::create(ctx);
+
     // Create utxo pool
     let utxo_pool = utxo_pool::create(ctx);
 
@@ -146,6 +150,7 @@ public fun create_hashi_with_weighted_committee(
         config,
         treasury,
         deposit_queue,
+        withdrawal_queue,
         utxo_pool,
         proposals,
         tob,

@@ -7,7 +7,8 @@ use hashi::{
     config::Config,
     deposit_queue::DepositRequestQueue,
     treasury::Treasury,
-    utxo_pool::UtxoPool
+    utxo_pool::UtxoPool,
+    withdrawal_queue::WithdrawalRequestQueue
 };
 use sui::bag::{Self, Bag};
 
@@ -17,6 +18,7 @@ public struct Hashi has key {
     config: Config,
     treasury: Treasury,
     deposit_queue: DepositRequestQueue,
+    withdrawal_queue: WithdrawalRequestQueue,
     utxo_pool: UtxoPool,
     proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
@@ -31,6 +33,7 @@ fun init(ctx: &mut TxContext) {
         config: hashi::config::create(),
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
+        withdrawal_queue: hashi::withdrawal_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: bag::new(ctx),
         tob: bag::new(ctx),
@@ -123,6 +126,18 @@ public(package) fun deposit_queue_mut(
     &mut self.deposit_queue
 }
 
+public(package) fun withdrawal_queue(
+    self: &Hashi,
+): &hashi::withdrawal_queue::WithdrawalRequestQueue {
+    &self.withdrawal_queue
+}
+
+public(package) fun withdrawal_queue_mut(
+    self: &mut Hashi,
+): &mut hashi::withdrawal_queue::WithdrawalRequestQueue {
+    &mut self.withdrawal_queue
+}
+
 public(package) fun utxo_pool(self: &Hashi): &hashi::utxo_pool::UtxoPool {
     &self.utxo_pool
 }
@@ -156,6 +171,7 @@ public fun create_for_testing(
     config: Config,
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
+    withdrawal_queue: WithdrawalRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: Bag,
     tob: Bag,
@@ -167,6 +183,7 @@ public fun create_for_testing(
         config,
         treasury,
         deposit_queue,
+        withdrawal_queue,
         utxo_pool,
         proposals,
         tob,

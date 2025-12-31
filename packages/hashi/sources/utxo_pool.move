@@ -1,7 +1,7 @@
 #[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo_pool;
 
-use hashi::{committee_set::CommitteeSet, utxo::{Utxo, UtxoId}};
+use hashi::utxo::{Utxo, UtxoId};
 use sui::bag::Bag;
 
 public struct UtxoPool has store {
@@ -26,8 +26,8 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
 }
 
 /// Remove a UTXO from active and mark it as spent
-public(package) fun spend(self: &mut UtxoPool, utxo_id: UtxoId, committee_set: &CommitteeSet) {
+public(package) fun spend(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64): Utxo {
     let utxo: Utxo = self.active_utxos.remove(utxo_id);
-    utxo.delete();
-    self.spent_utxos.add(utxo_id, committee_set.epoch());
+    self.spent_utxos.add(utxo_id, epoch);
+    utxo
 }

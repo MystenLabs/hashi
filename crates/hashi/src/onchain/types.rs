@@ -22,6 +22,8 @@ pub struct Hashi {
     pub config: Config,
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
+    // TODO create a withdrawal queue and populate
+    // pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
     pub proposals: Proposals,
     pub tob_id: Address,

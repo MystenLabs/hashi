@@ -24,6 +24,7 @@ pub struct Hashi {
     pub config: Config,
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
+    pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
     pub proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
@@ -185,6 +186,13 @@ pub struct Coin {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequestQueue {
     pub requests: Bag,
+}
+
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestQueue type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalRequestQueue {
+    pub requests: Bag,
+    pub peending_withdrawals: Bag,
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.

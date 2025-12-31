@@ -344,6 +344,7 @@ async fn scrape_hashi(
         config,
         treasury,
         deposit_queue,
+        withdrawal_queue: _,
         utxo_pool,
         proposals,
         tob,
