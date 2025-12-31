@@ -69,9 +69,11 @@ pub struct SuiTobChannel {
     /// Cached certificates not yet returned
     pending_certs: VecDeque<Certificate>,
     committee: Committee,
-    /// Threshold for certificate verification
-    threshold: u64,
 }
+
+/// Threshold is computed as 2/3 of total committee weight, matching the Move contract.
+const THRESHOLD_NUMERATOR: u64 = 2;
+const THRESHOLD_DENOMINATOR: u64 = 3;
 
 impl SuiTobChannel {
     pub fn new(
@@ -81,7 +83,6 @@ impl SuiTobChannel {
         epoch: u64,
         signer: Ed25519PrivateKey,
         committee: Committee,
-        threshold: u64,
     ) -> Self {
         Self {
             client,
@@ -92,8 +93,13 @@ impl SuiTobChannel {
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
             committee,
-            threshold,
         }
+    }
+
+    /// Compute the threshold required for certificate verification.
+    /// This matches the Move contract's threshold computation.
+    fn threshold(&self) -> u64 {
+        self.committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
     }
 
     async fn build_certificate_submission_transaction(
@@ -200,16 +206,10 @@ impl SuiTobChannel {
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
                 },
-                Input::Pure {
-                    value: self
-                        .threshold
-                        .to_bcs()
-                        .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
             ],
             commands: vec![Command::MoveCall(MoveCall {
                 package: self.package_id,
-                module: Identifier::new("hashi").unwrap(),
+                module: Identifier::new("cert_submission").unwrap(),
                 function: Identifier::new("submit_dkg_cert").unwrap(),
                 type_arguments: vec![],
                 arguments: vec![
@@ -219,7 +219,6 @@ impl SuiTobChannel {
                     Argument::Input(3),
                     Argument::Input(4),
                     Argument::Input(5),
-                    Argument::Input(6),
                 ],
             })],
         })
@@ -325,7 +324,7 @@ impl SuiTobChannel {
             &dkg_cert.signature,
             &dkg_cert.signers_bitmap,
             &self.committee,
-            self.threshold,
+            self.threshold(),
         )
         .map_err(|e| TobError::InvalidCertificate(e.to_string()))
     }
@@ -345,7 +344,6 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
             committee: self.committee.clone(),
-            threshold: self.threshold,
         };
         let tx = channel
             .build_certificate_submission_transaction(&cert)
