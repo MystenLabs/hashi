@@ -32,7 +32,7 @@ use crate::dkg::fallback_encryption_public_key;
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
 mod events;
-mod move_types;
+pub(crate) mod move_types;
 pub mod types;
 mod watcher;
 

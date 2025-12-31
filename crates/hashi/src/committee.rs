@@ -773,4 +773,85 @@ mod test {
                 .is_err()
         );
     }
+
+    #[proptest]
+    fn test_from_parts(private_keys: [Bls12381PrivateKey; 4], message: Vec<u8>) {
+        // Skip cases where we have the same keys
+        {
+            let mut pks: Vec<BLS12381PublicKey> =
+                private_keys.iter().map(|key| key.public_key()).collect();
+            pks.sort();
+            pks.dedup();
+            if pks.len() != 4 {
+                return Ok(());
+            }
+        }
+
+        let epoch = 7;
+        let threshold = 3u16;
+
+        let addresses = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Address::new([i as u8; 32]))
+            .collect::<Vec<_>>();
+
+        let members = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| BlsCommitteeMember {
+                address: addresses[i],
+                public_key: key.public_key(),
+                weight: 1,
+            })
+            .collect();
+        let committee = BlsCommittee::new(members, epoch);
+
+        // Create a certificate via aggregator
+        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        aggregator
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .unwrap();
+
+        let original_cert = aggregator.finish().unwrap();
+
+        // Extract parts
+        let signature_bytes = original_cert.signature_bytes();
+        let bitmap_bytes = original_cert.signers_bitmap_bytes();
+
+        // Reconstruct from parts
+        let reconstructed = CommitteeSignature::from_parts(
+            epoch,
+            message.clone(),
+            signature_bytes,
+            bitmap_bytes,
+            &committee,
+            threshold,
+        )
+        .unwrap();
+
+        // Verify reconstructed certificate matches original
+        assert_eq!(reconstructed.epoch(), original_cert.epoch());
+        assert_eq!(
+            reconstructed.signature_bytes(),
+            original_cert.signature_bytes()
+        );
+        assert_eq!(
+            reconstructed.signers_bitmap_bytes(),
+            original_cert.signers_bitmap_bytes()
+        );
+        assert_eq!(reconstructed.weight(&committee).unwrap(), 3);
+
+        // Verify signers match
+        assert!(reconstructed.is_signer(&addresses[0], &committee).unwrap());
+        assert!(reconstructed.is_signer(&addresses[1], &committee).unwrap());
+        assert!(reconstructed.is_signer(&addresses[2], &committee).unwrap());
+        assert!(!reconstructed.is_signer(&addresses[3], &committee).unwrap());
+    }
 }

@@ -211,3 +211,44 @@ pub struct UtxoId {
 pub struct UtxoPool {
     pub utxos: Bag,
 }
+
+/// Rust version of the Move hashi::hashi::EpochCertsKey type.
+/// Used as the dynamic field key for storing EpochCerts on the Hashi object.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct EpochCertsKey {
+    pub epoch: u64,
+}
+
+/// Rust version of the Move hashi::tob::EpochCerts type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct EpochCerts {
+    pub epoch: u64,
+    /// LinkedTable<address, DkgCertV1>
+    pub dkg_certs: LinkedTable<Address>,
+}
+
+/// Rust version of the Move sui::linked_table::LinkedTable type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct LinkedTable<K> {
+    pub id: Address,
+    pub size: u64,
+    pub head: Option<K>,
+    pub tail: Option<K>,
+}
+
+/// Rust version of the Move sui::linked_table::Node type.
+/// This is the value stored in each dynamic field entry of a LinkedTable.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct LinkedTableNode<K, V> {
+    pub prev: Option<K>,
+    pub next: Option<K>,
+    pub value: V,
+}
+
+/// Rust version of the Move hashi::tob::DkgCertV1 type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct DkgCertV1 {
+    pub message_hash: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub signers_bitmap: Vec<u8>,
+}

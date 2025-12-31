@@ -1727,6 +1727,10 @@ mod tests {
         fn published_count(&self) -> usize {
             self.published.lock().unwrap().len()
         }
+
+        fn pending_messages(&self) -> Option<usize> {
+            Some(self.certificates.lock().unwrap().len())
+        }
     }
 
     #[async_trait::async_trait]

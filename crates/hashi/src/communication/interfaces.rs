@@ -11,7 +11,6 @@ use crate::dkg::SendMessageResponse;
 use crate::dkg::SendRotationMessagesRequest;
 use crate::dkg::SendRotationMessagesResponse;
 use async_trait::async_trait;
-use std::time::Duration;
 use sui_sdk_types::Address;
 use thiserror::Error;
 
@@ -82,12 +81,6 @@ where
 
     /// Receive the next message in the total order
     async fn receive(&mut self) -> ChannelResult<M>;
-
-    async fn try_receive_timeout(&mut self, timeout: Duration) -> ChannelResult<Option<M>>;
-
-    fn pending_messages(&self) -> Option<usize> {
-        None
-    }
 
     /// The total weight of certificates already available on the channel
     fn existing_certificate_weight(&self) -> u32 {
