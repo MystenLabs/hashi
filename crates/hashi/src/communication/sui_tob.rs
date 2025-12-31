@@ -46,6 +46,7 @@ use super::OrderedBroadcastChannel;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GAS_BUDGET: u64 = 50_000_000;
+const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 // TODO: Read threshold from on-chain config once it is made configurable.
 const THRESHOLD_NUMERATOR: u64 = 2;
@@ -370,7 +371,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
                 ExecuteTransactionRequest::new(tx.into())
                     .with_signatures(vec![signature.into()])
                     .with_read_mask(FieldMask::from_paths(["effects.status"])),
-                Duration::from_secs(30),
+                TX_CONFIRMATION_TIMEOUT,
             )
             .await
             .map_err(|e| ChannelError::Other(e.to_string()))?
