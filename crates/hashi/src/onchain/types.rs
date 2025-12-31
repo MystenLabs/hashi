@@ -3,12 +3,16 @@
 //! Usable definitions of the onchain state of hashi
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
-use sui_sdk_types::{Address, TypeTag};
+use sui_sdk_types::Address;
+use sui_sdk_types::TypeTag;
 
-use crate::{bls::BlsCommittee, grpc::Client};
+use crate::committee::Committee;
+use crate::committee::EncryptionPublicKey;
+use crate::grpc::Client;
 
 #[derive(Debug)]
 pub struct Hashi {
@@ -32,7 +36,7 @@ pub struct CommitteeSet {
     epoch: u64,
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
-    committees: BTreeMap<u64, BlsCommittee>,
+    committees: BTreeMap<u64, Committee>,
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     clients: BTreeMap<Address, Client>,
@@ -52,16 +56,26 @@ impl CommitteeSet {
         }
     }
 
+    pub fn members_id(&self) -> Address {
+        self.members_id
+    }
+
     pub fn members(&self) -> &BTreeMap<Address, MemberInfo> {
         &self.members
     }
 
-    pub fn committees(&self) -> &BTreeMap<u64, BlsCommittee> {
+    pub fn committees(&self) -> &BTreeMap<u64, Committee> {
         &self.committees
     }
 
-    pub fn current_committee(&self) -> Option<&BlsCommittee> {
+    pub fn current_committee(&self) -> Option<&Committee> {
         self.committees().get(&self.epoch())
+    }
+
+    pub fn previous_committee(&self) -> Option<&Committee> {
+        self.epoch
+            .checked_sub(1)
+            .and_then(|e| self.committees().get(&e))
     }
 
     pub fn epoch(&self) -> u64 {
@@ -120,12 +134,51 @@ impl CommitteeSet {
             .collect();
     }
 
+    pub fn update_validator(&mut self, info: MemberInfo) {
+        let validator = info.validator_address;
+        let info_entry = self.members.entry(validator);
+
+        // remove old tls public key mapping
+        if let std::collections::btree_map::Entry::Occupied(entry) = &info_entry
+            && let Some(tls_public_key) = &entry.get().tls_public_key
+        {
+            self.tls_public_key_to_address
+                .remove(tls_public_key.as_bytes());
+        }
+
+        // insert new tls public key mapping
+        if let Some(tls_public_key) = &info.tls_public_key {
+            self.tls_public_key_to_address
+                .insert(*tls_public_key.as_bytes(), validator);
+        }
+
+        // update client
+        self.clients.remove(&validator);
+        if let Some(https_address) = &info.https_address
+            && let Some(tls_public_key) = &info.tls_public_key
+        {
+            let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
+                crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
+            } else {
+                crate::tls::make_client_config(tls_public_key)
+            };
+            if let Ok(client) = Client::new(https_address, tls_config)
+                .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
+            {
+                self.clients.insert(validator, client);
+            }
+        }
+
+        // replace info
+        info_entry.insert_entry(info);
+    }
+
     pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {
         self.epoch = epoch;
         self
     }
 
-    pub fn set_committees(&mut self, committees: BTreeMap<u64, BlsCommittee>) -> &mut Self {
+    pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
         self.committees = committees;
         self
     }
@@ -151,7 +204,7 @@ pub struct MemberInfo {
     /// bls12381 public key to be used in the next epoch.
     ///
     /// The public key for this node which is active in the current epoch can
-    /// be found in the `BlsCommittee` struct.
+    /// be found in the `Committee` struct.
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
@@ -175,8 +228,7 @@ pub struct MemberInfo {
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
-    pub next_epoch_encryption_public_key:
-        Option<fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>>,
+    pub next_epoch_encryption_public_key: Option<EncryptionPublicKey>,
 }
 
 impl MemberInfo {
@@ -200,9 +252,7 @@ impl MemberInfo {
         self.https_address.as_ref()
     }
 
-    pub fn next_epoch_encryption_public_key(
-        &self,
-    ) -> Option<&fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>> {
+    pub fn next_epoch_encryption_public_key(&self) -> Option<&EncryptionPublicKey> {
         self.next_epoch_encryption_public_key.as_ref()
     }
 }
@@ -217,6 +267,16 @@ pub struct ProposalSet {
 #[derive(Debug)]
 pub struct Config {
     pub config: BTreeMap<String, ConfigValue>,
+    pub enabled_versions: BTreeSet<u64>,
+    pub upgrade_cap: Option<UpgradeCap>,
+}
+
+#[derive(Debug)]
+pub struct UpgradeCap {
+    pub id: Address,
+    pub package: Address,
+    pub version: u64,
+    pub policy: u8,
 }
 
 #[derive(Debug)]
@@ -254,6 +314,7 @@ impl DepositRequestQueue {
 
 #[derive(Debug)]
 pub struct DepositRequest {
+    pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
 }

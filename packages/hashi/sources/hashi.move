@@ -1,18 +1,14 @@
-#[allow(unused_function, unused_field, unused_use)]
 /// Module: hashi
 module hashi::hashi;
 
 use hashi::{
-    btc::BTC,
     committee::Committee,
     committee_set::CommitteeSet,
     config::Config,
     proposal_set::{Self, ProposalSet},
-    tob::EpochCerts,
     treasury::Treasury
 };
-use std::string::String;
-use sui::{bag::{Self, Bag}, coin::Coin, sui::SUI};
+use sui::bag::{Self, Bag};
 
 public struct Hashi has key {
     id: UID,
@@ -24,53 +20,6 @@ public struct Hashi has key {
     proposals: ProposalSet,
     /// TOB certificates by epoch (epoch -> EpochCerts)
     tob: Bag,
-}
-
-public fun deposit(
-    hashi: &mut Hashi,
-    request: hashi::deposit_queue::DepositRequest,
-    fee: Coin<SUI>,
-) {
-    hashi.config.assert_version();
-
-    // Check if state is PAUSED
-    assert!(!hashi.config.paused());
-
-    // Check that the fee is sufficient
-    assert!(hashi.config.deposit_fee() == fee.value());
-    hashi.treasury.deposit_fee(fee);
-
-    hashi.deposit_queue.insert(request);
-}
-
-public fun confirm_deposit(
-    hashi: &mut Hashi,
-    utxo_id: hashi::utxo::UtxoId,
-    // cert: Cert
-    ctx: &mut TxContext,
-) {
-    hashi.config.assert_version();
-
-    // Check if state is PAUSED
-    assert!(!hashi.config.paused());
-
-    let request = hashi.deposit_queue.remove(utxo_id);
-
-    // verify cert over the request
-    // cert.verify(&request)
-
-    let utxo = request.into_utxo();
-    let derivation_path = utxo.derivation_path();
-
-    if (derivation_path.is_some()) {
-        let recipient = derivation_path.destroy_some();
-        let amount = utxo.amount();
-        // XXX Do we want to check an inflow limit here?
-        let btc = hashi.treasury.mint<BTC>(amount, ctx);
-        sui::transfer::public_transfer(btc, recipient);
-    };
-
-    hashi.utxo_pool.insert(utxo);
 }
 
 #[allow(unused_function)]
@@ -94,7 +43,7 @@ entry fun register_btc(
     coin_registry: &mut sui::coin_registry::CoinRegistry,
     ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
@@ -106,55 +55,13 @@ entry fun register_upgrade_cap(
     upgrade_cap: sui::package::UpgradeCap,
     _ctx: &mut TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     let this_package_id = std::type_name::original_id<Hashi>().to_id();
     // Ensure that the provided cap is for this package
     assert!(upgrade_cap.package() == this_package_id);
 
-    sui::dynamic_object_field::add(&mut self.id, b"TODO figure out key", upgrade_cap);
-}
-
-// TODO move most/all of these functions to their own module for better orginization
-public fun register_validator(
-    self: &mut Hashi,
-    sui_system: &sui_system::sui_system::SuiSystemState,
-    public_key: vector<u8>,
-    proof_of_possession_signature: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version();
-    self.committee_set.new_member(sui_system, public_key, proof_of_possession_signature, ctx);
-}
-
-//TODO require the validator address passed in to better support operator address
-public fun update_https_address(self: &mut Hashi, https_address: String, ctx: &mut TxContext) {
-    self.config.assert_version();
-
-    self.committee_set.set_https_address(ctx.sender(), https_address, ctx);
-}
-
-//TODO require the validator address passed in to better support operator address
-public fun update_tls_public_key(
-    self: &mut Hashi,
-    tls_public_key: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version();
-
-    self.committee_set.set_tls_public_key(ctx.sender(), tls_public_key, ctx);
-}
-
-//TODO require the validator address passed in to better support operator address
-public fun update_next_epoch_encryption_public_key(
-    self: &mut Hashi,
-    next_epoch_encryption_public_key: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version();
-    self
-        .committee_set
-        .set_next_epoch_encryption_public_key(ctx.sender(), next_epoch_encryption_public_key, ctx);
+    self.config_mut().set_upgrade_cap(upgrade_cap);
 }
 
 entry fun bootstrap(
@@ -162,7 +69,7 @@ entry fun bootstrap(
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
 ) {
-    self.config.assert_version();
+    self.config.assert_version_enabled();
 
     assert!(self.committee_set.epoch() == 0);
     assert!(!self.committee_set.has_committee(ctx.epoch()));
@@ -186,6 +93,10 @@ public(package) fun committee_set(self: &Hashi): &CommitteeSet {
     &self.committee_set
 }
 
+public(package) fun committee_set_mut(self: &mut Hashi): &mut CommitteeSet {
+    &mut self.committee_set
+}
+
 public(package) fun current_committee(self: &Hashi): &Committee {
     self.committee_set.current_committee()
 }
@@ -198,37 +109,35 @@ public(package) fun proposals_mut(self: &mut Hashi): &mut ProposalSet {
     &mut self.proposals
 }
 
-entry fun submit_dkg_cert(
+public(package) fun deposit_queue(self: &Hashi): &hashi::deposit_queue::DepositRequestQueue {
+    &self.deposit_queue
+}
+
+public(package) fun deposit_queue_mut(
+    self: &mut Hashi,
+): &mut hashi::deposit_queue::DepositRequestQueue {
+    &mut self.deposit_queue
+}
+
+public(package) fun utxo_pool(self: &Hashi): &hashi::utxo_pool::UtxoPool {
+    &self.utxo_pool
+}
+
+public(package) fun utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::UtxoPool {
+    &mut self.utxo_pool
+}
+
+public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
+    &mut self.tob
+}
+
+public(package) fun epoch_certs_and_committee(
     self: &mut Hashi,
     epoch: u64,
-    dealer: address,
-    message_hash: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    threshold: u16,
     ctx: &mut TxContext,
-) {
-    self.config.assert_version();
-    assert!(epoch == self.committee_set.epoch());
+): (&mut hashi::tob::EpochCerts, &Committee) {
     if (!self.tob.contains(epoch)) {
         self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };
-    let epoch_certs: &mut EpochCerts = self.tob.borrow_mut(epoch);
-    hashi::tob::submit_dkg_cert(
-        epoch_certs,
-        self.committee_set.current_committee(),
-        epoch,
-        dealer,
-        message_hash,
-        signature,
-        signers_bitmap,
-        threshold,
-    );
-}
-
-entry fun destroy_all_dkg_certs(self: &mut Hashi, epoch: u64) {
-    self.config.assert_version();
-    let current_epoch = self.committee_set.epoch();
-    let epoch_certs: EpochCerts = self.tob.remove(epoch);
-    hashi::tob::destroy_all(epoch_certs, current_epoch);
+    (self.tob.borrow_mut(epoch), self.committee_set.current_committee())
 }

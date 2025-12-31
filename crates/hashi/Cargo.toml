@@ -43,6 +43,8 @@ blst = { version = "0.3.13" }
 rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }
 
+fjall = { version = "3.0.0-rc.6", features = ["bytes_1"] }
+
 # DKG dependencies
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
 fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa", features = ["experimental"] }
@@ -52,9 +54,11 @@ hex = "0.4"
 bcs = "0.1.6"
 rand = "0.8"
 tap = "1.0.1"
+backon = "1"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tracing-test = "0.2"
+tempfile = "3.0"

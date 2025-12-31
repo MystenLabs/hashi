@@ -1,6 +1,5 @@
-use crate::dkg::EncryptionGroupElement;
+use crate::committee::EncryptionPrivateKey;
 use anyhow::Result;
-use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
 
@@ -24,10 +23,10 @@ pub trait SecretsStore: Send + Sync {
     ///
     /// Fails if called more than once.
     // TODO: Apply at node initialization
-    fn store_encryption_key(&mut self, key: &PrivateKey<EncryptionGroupElement>) -> Result<()>;
+    fn store_encryption_key(&mut self, key: &EncryptionPrivateKey) -> Result<()>;
 
     /// Retrieve encryption private key
-    fn get_encryption_key(&self) -> Result<Option<PrivateKey<EncryptionGroupElement>>>;
+    fn get_encryption_key(&self) -> Result<Option<EncryptionPrivateKey>>;
 
     /// Clear all secrets (called at epoch transitions)
     fn clear(&mut self) -> Result<()>;

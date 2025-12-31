@@ -4,6 +4,8 @@
 
 use sui_sdk_types::Address;
 
+use crate::onchain::MoveType;
+
 /// Rust version of the Move hashi::hashi::Hashi type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Hashi {
@@ -36,6 +38,13 @@ pub struct Bag {
 /// Rust version of the Move sui::object_bag::ObjectBag type.
 pub type ObjectBag = Bag;
 
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Field<N, V> {
+    pub id: Address,
+    pub name: N,
+    pub value: V,
+}
+
 /// Rust version of the Move hashi::proposal_set::ProposalSet type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct ProposalSet {
@@ -55,7 +64,7 @@ pub struct MemberInfo {
     /// bls12381 public key to be used in the next epoch.
     ///
     /// The public key for this node which is active in the current epoch can
-    /// be found in the `BlsCommittee` struct.
+    /// be found in the `Committee` struct.
     ///
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
@@ -82,12 +91,17 @@ pub struct MemberInfo {
     pub next_epoch_encryption_public_key: Vec<u8>,
 }
 
+impl MoveType for MemberInfo {
+    const MODULE: &'static str = "committee_set";
+    const NAME: &'static str = "MemberInfo";
+}
+
 /// Rust version of the Move hashi::committee::CommitteeMember type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct CommitteeMember {
     pub validator_address: Address,
     pub public_key: Vec<u8>, //Element<UncompressedG1>,
-    pub encryption_key: Vec<u8>,
+    pub encryption_public_key: Vec<u8>,
     pub weight: u16,
 }
 
@@ -109,6 +123,17 @@ pub struct Committee {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Config {
     pub config: Vec<(String, ConfigValue)>,
+    pub enabled_versions: VecSet<u64>,
+    pub upgrade_cap: Option<UpgradeCap>,
+}
+
+/// Rust version of the Move sui::package::UpgradeCap type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct UpgradeCap {
+    pub id: Address,
+    pub package: Address,
+    pub version: u64,
+    pub policy: u8,
 }
 
 /// Rust version of the Move hashi::config_value::Value type.
@@ -120,6 +145,12 @@ pub enum ConfigValue {
     Bool(bool),
     Bytes(Vec<u8>),
     // Dynamic(TypeName, vector<u8>)
+}
+
+/// Rust version of the Move sui::vec_set::VecSet type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct VecSet<T> {
+    pub contents: Vec<T>,
 }
 
 /// Rust version of the Move hashi::treasury::Treasury type.
@@ -154,6 +185,7 @@ pub struct DepositRequestQueue {
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequest {
+    pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
 }

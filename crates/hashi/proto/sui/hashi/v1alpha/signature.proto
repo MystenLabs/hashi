@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+message Committee {
+  optional uint64 epoch = 1;
+  repeated CommitteeMember members = 2;
+  optional uint64 total_weight = 3;
+}
+
+message CommitteeMember {
+  optional string address = 1;
+  optional bytes public_key = 2;
+  optional bytes encryption_public_key = 3;
+  optional uint64 weight = 4;
+}
+
+message MemberSignature {
+  optional uint64 epoch = 1;
+  optional string address = 2;
+  optional bytes public_key = 3;
+  optional bytes signature = 4;
+}
+
+message CommitteeSignature {
+  optional uint64 epoch = 1;
+  optional bytes signature = 2;
+  optional bytes bitmap = 3;
+}

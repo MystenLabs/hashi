@@ -1,5 +1,10 @@
-use crate::GuardianError::{InternalError, InvalidInputs};
+use crate::bitcoin_utils::BTC_LIB;
+use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
+use crate::Signed;
+use crate::SigningIntent;
+use ed25519_consensus::SigningKey;
+use ed25519_consensus::VerificationKey;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
@@ -7,13 +12,19 @@ use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::{Field, PrimeField};
-use k256::{FieldBytes, ProjectivePoint, Scalar};
-use rand_core::{CryptoRng, RngCore};
+use k256::elliptic_curve::Field;
+use k256::elliptic_curve::PrimeField;
+use k256::CompressedPoint;
+use k256::FieldBytes;
+use k256::ProjectivePoint;
+use k256::Scalar;
+use rand_core::CryptoRng;
+use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::num::NonZeroU16;
-
+use std::time::SystemTime;
+use tracing::info;
 // ---------------------------------
 //      Crypto Structs & Types
 // ---------------------------------
@@ -170,7 +181,8 @@ pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
 }
 
 /// Combine secret shares to a secp256k1 secret key
-pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::SecretKey> {
+/// Throws an error if duplicate share IDs exist or <t shares are input
+pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Keypair> {
     // Validation: ensure no duplicates
     let mut seen_ids = std::collections::HashSet::new();
     for share in shares {
@@ -211,11 +223,14 @@ pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Se
         result = result.add(&share.value.mul(&lagrange_basis));
     }
 
+    info!("Bitcoin key created with fingerprint {:x}", exp_g(&result));
+
     // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
     //       use big-endian representation. We are juggling between two libraries because secp256k1
     //       does not expose the arithmetic tools needed to implement secret-sharing.
-    bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
-        .map_err(|e| InternalError(format!("Failed to cast to secret key: {}", e)))
+    let sk = bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
+        .expect("casting secret key into secp256k1 failed");
+    Ok(bitcoin::secp256k1::Keypair::from_secret_key(&BTC_LIB, &sk))
 }
 
 /// Create a commitment (hash) for a share
@@ -256,6 +271,45 @@ pub fn decrypt_share(
         }),
         None => Err(InvalidInputs("Failed to deserialize share".into())),
     }
+}
+
+// ---------------------------------
+//    Signing utilities
+// ---------------------------------
+
+/// Methods for `Signed<T>` wrapper - signing and verification
+impl<T: Serialize + SigningIntent> Signed<T> {
+    /// Create a new signed payload (used by enclave)
+    /// Includes intent byte for domain separation to prevent cross-type signature attacks
+    pub fn new(data: T, signing_key: &SigningKey, timestamp: SystemTime) -> Self {
+        let tuple = (T::INTENT, &data, timestamp);
+        let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
+        let signature = signing_key.sign(&signing_payload);
+        Self {
+            data,
+            timestamp,
+            signature,
+        }
+    }
+
+    /// Verify signature and extract payload
+    /// Checks intent byte to ensure signature is for the correct type
+    pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
+        let tuple = (T::INTENT, &self.data, self.timestamp);
+        let msg_bytes = bcs::to_bytes(&tuple).expect("serialization should not fail");
+        pub_key
+            .verify(&self.signature, &msg_bytes)
+            .map_err(|_| InvalidInputs("signature invalid".into()))?;
+        Ok(self.data)
+    }
+}
+
+pub fn fingerprint(sk: &k256::SecretKey) -> CompressedPoint {
+    exp_g(&Scalar::from(sk.as_scalar_primitive()))
+}
+
+pub fn exp_g(scalar: &Scalar) -> CompressedPoint {
+    (ProjectivePoint::GENERATOR * scalar).to_bytes()
 }
 
 #[cfg(test)]

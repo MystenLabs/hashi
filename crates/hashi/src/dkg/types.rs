@@ -1,14 +1,17 @@
 //! Core types for the DKG protocol
 
-use crate::bls::{BLS12381Signature, CommitteeSignature};
+use crate::committee::BLS12381Signature;
+use crate::committee::SignedMessage;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::{
-    polynomial::Eval,
-    random_oracle::RandomOracle,
-    threshold_schnorr::{G, avss, complaint},
-};
-use serde::{Deserialize, Serialize};
+use fastcrypto_tbls::polynomial::Eval;
+use fastcrypto_tbls::random_oracle::RandomOracle;
+use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::complaint;
+use fastcrypto_tbls::types::ShareIndex;
+use serde::Deserialize;
+use serde::Serialize;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
@@ -82,6 +85,11 @@ impl SessionId {
         SessionId(oracle.evaluate(&dealer))
     }
 
+    pub fn rotation_session_id(&self, dealer: &Address, share_index: ShareIndex) -> SessionId {
+        let oracle = RandomOracle::new(&hex::encode(self.0));
+        SessionId(oracle.evaluate(&(dealer, share_index.get())))
+    }
+
     pub fn to_vec(&self) -> Vec<u8> {
         self.0.to_vec()
     }
@@ -92,6 +100,38 @@ pub struct DkgOutput {
     pub public_key: Secp256k1Point,
     pub key_shares: avss::SharesForNode,
     pub commitments: Vec<Eval<G>>,
+    pub threshold: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationMessage {
+    pub share_index: ShareIndex,
+    pub message: avss::Message,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationMessages {
+    pub messages: Vec<RotationMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendRotationMessagesRequest {
+    pub messages: RotationMessages,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendRotationMessagesResponse {
+    pub signature: BLS12381Signature,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrieveRotationMessagesRequest {
+    pub dealer: Address,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrieveRotationMessagesResponse {
+    pub messages: RotationMessages,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,13 +171,20 @@ pub struct DkgDealerMessageHash {
     pub message_hash: MessageHash,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationDealerMessagesHash {
+    pub dealer_address: Address,
+    pub messages_hash: MessageHash,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MpcMessageV1 {
     Dkg(DkgDealerMessageHash),
+    Rotation(RotationDealerMessagesHash),
 }
 
-pub type Certificate = CommitteeSignature<MpcMessageV1>;
+pub type Certificate = SignedMessage<MpcMessageV1>;
 
 pub type DkgResult<T> = Result<T, DkgError>;
 
@@ -176,6 +223,9 @@ pub enum DkgError {
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
 
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     #[error("Protocol failed: {0}")]
     ProtocolFailed(String),
 }
@@ -195,20 +245,25 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastcrypto::groups::ristretto255::RistrettoPoint;
-    use fastcrypto_tbls::ecies_v1::{PrivateKey, PublicKey};
+    use crate::committee::EncryptionPrivateKey;
+    use crate::committee::EncryptionPublicKey;
     use fastcrypto_tbls::nodes::Node;
+    use std::num::NonZeroU16;
+
+    const EXPECT_DKG_MESSAGE: &str = "expected Dkg message";
 
     impl MpcMessageV1 {
         pub fn as_dkg_message(&self) -> &DkgDealerMessageHash {
             match self {
                 MpcMessageV1::Dkg(msg) => msg,
+                MpcMessageV1::Rotation(_) => panic!("{}", EXPECT_DKG_MESSAGE),
             }
         }
 
         pub fn as_mut_dkg_message(&mut self) -> &mut DkgDealerMessageHash {
             match self {
                 MpcMessageV1::Dkg(msg) => msg,
+                MpcMessageV1::Rotation(_) => panic!("{}", EXPECT_DKG_MESSAGE),
             }
         }
     }
@@ -217,8 +272,8 @@ mod tests {
         party_id: u16,
         weight: u16,
     ) -> (Address, Node<EncryptionGroupElement>) {
-        let private_key = PrivateKey::<RistrettoPoint>::new(&mut rand::thread_rng());
-        let public_key = PublicKey::from_private_key(&private_key);
+        let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let public_key = EncryptionPublicKey::from_private_key(&private_key);
         let address = Address::new([party_id as u8; 32]);
         let node = Node {
             id: party_id,
@@ -365,5 +420,18 @@ mod tests {
         // Same dealer should produce same session ID
         let dealer1_session2 = sid.dealer_session_id(&dealer1);
         assert_eq!(dealer1_session, dealer1_session2);
+    }
+
+    #[test]
+    fn test_rotation_session_id() {
+        let sid = SessionId::new("testnet", 100, &ProtocolType::KeyRotation);
+        let dealer = Address::new([1; 32]);
+        let share1 = NonZeroU16::new(1).unwrap();
+        let share2 = NonZeroU16::new(2).unwrap();
+
+        // Different share indices should have different session IDs
+        let session_d1_s1 = sid.rotation_session_id(&dealer, share1);
+        let session_d1_s2 = sid.rotation_session_id(&dealer, share2);
+        assert_ne!(session_d1_s1, session_d1_s2);
     }
 }

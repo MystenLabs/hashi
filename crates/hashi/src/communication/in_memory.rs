@@ -1,8 +1,10 @@
 //! In-memory channel implementations for testing
 
-use crate::communication::interfaces::{ChannelResult, OrderedBroadcastChannel};
+use crate::communication::interfaces::ChannelResult;
+use crate::communication::interfaces::OrderedBroadcastChannel;
 use async_trait::async_trait;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;

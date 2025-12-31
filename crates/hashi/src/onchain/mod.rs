@@ -2,52 +2,63 @@ use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use futures::TryStreamExt;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::RwLockWriteGuard;
+use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
+use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
-use sui_rpc::{
-    Client,
-    proto::sui::rpc::v2::{GetObjectRequest, ListPackageVersionsRequest, Object},
-};
+use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
+use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
+use sui_sdk_types::bcs::ToBcs;
 use tap::Pipe;
 use tokio::sync::broadcast;
+use tokio::sync::watch;
 
-use crate::bls::BlsCommittee;
-use crate::bls::BlsCommitteeMember;
+use crate::committee::Committee;
+use crate::committee::CommitteeMember;
 use crate::config::HashiIds;
+use crate::dkg::fallback_encryption_public_key;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
+mod events;
 pub(crate) mod move_types;
 pub mod types;
+mod watcher;
 
 #[derive(Clone, Debug)]
 pub struct OnchainState(Arc<Inner>);
+
+//TODO should we just send a HashiEvent here?
+#[derive(Clone, Debug)]
+pub enum Notification {
+    ValidatorInfoUpdated(Address),
+}
 
 #[derive(Debug)]
 struct Inner {
     #[allow(unused)]
     ids: HashiIds,
-    #[allow(unused)]
-    sender: broadcast::Sender<()>,
+    sender: broadcast::Sender<Notification>,
+    /// The checkpoint height that this state is recent to
+    checkpoint: watch::Sender<u64>,
     state: RwLock<State>,
 }
 
 #[derive(Debug)]
 pub struct State {
-    /// The checkpoint height that this state is recent to
-    #[allow(unused)]
-    checkpoint: u64,
     package_versions: BTreeMap<u64, Address>,
+    package_ids: BTreeSet<Address>,
     hashi: types::Hashi,
 }
 
@@ -59,28 +70,62 @@ impl OnchainState {
     ) -> Result<Self> {
         let client = Client::new(sui_rpc_url)?;
 
-        let (sender, _) = broadcast::channel::<()>(BROADCAST_CHANNEL_CAPACITY);
-
-        let mut state = State::scrape(client.clone(), ids).await?.pipe(RwLock::new);
+        let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
         if let Some(tls_private_key) = tls_private_key {
-            state
-                .get_mut()
-                .unwrap()
-                .hashi
-                .committees
-                .set_tls_private_key(tls_private_key);
+            state.hashi.committees.set_tls_private_key(tls_private_key);
         }
 
-        //TODO spawn watcher and enable partial updates and notifications
+        let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (checkpoint, _) = watch::channel(checkpoint);
+        let state = Inner {
+            ids,
+            sender,
+            checkpoint,
+            state: RwLock::new(state),
+        }
+        .pipe(Arc::new)
+        .pipe(Self);
 
-        Inner { ids, sender, state }
-            .pipe(Arc::new)
-            .pipe(Self)
-            .pipe(Ok)
+        tokio::spawn(watcher::watcher(client, state.clone()));
+
+        Ok(state)
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
+        self.0.sender.subscribe()
+    }
+
+    fn notify(&self, notification: Notification) {
+        let _ = self.0.sender.send(notification);
     }
 
     pub fn state(&self) -> RwLockReadGuard<'_, State> {
         self.0.state.read().unwrap()
+    }
+
+    // NOTE: This function must remain private to this module so that only this module and its
+    // submodules are able to update the state
+    fn state_mut(&self) -> RwLockWriteGuard<'_, State> {
+        self.0.state.write().unwrap()
+    }
+
+    pub fn subscribe_checkpoint(&self) -> watch::Receiver<u64> {
+        self.0.checkpoint.subscribe()
+    }
+
+    pub fn latest_checkpoint(&self) -> u64 {
+        *self.0.checkpoint.borrow()
+    }
+
+    fn update_latest_checkpoint(&self, checkpoint: u64) {
+        self.0.checkpoint.send_replace(checkpoint);
+    }
+
+    fn add_package_version(&self, version: u64, package_id: Address) {
+        let mut state = self.state_mut();
+        //TODO should we assert that this version is exactly the next one?
+        state.package_versions.insert(version, package_id);
+        state.package_ids.insert(package_id);
     }
 }
 
@@ -93,17 +138,22 @@ impl State {
         &self.hashi
     }
 
-    async fn scrape(client: Client, ids: HashiIds) -> Result<Self> {
+    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, u64)> {
         let (package_versions, (checkpoint, hashi)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id),
         )?;
 
-        Ok(State {
+        let package_ids = package_versions.values().cloned().collect();
+
+        Ok((
+            State {
+                package_versions,
+                package_ids,
+                hashi,
+            },
             checkpoint,
-            package_versions,
-            hashi,
-        })
+        ))
     }
 }
 
@@ -159,7 +209,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
     } = response.get_ref().object().contents().deserialize()?;
 
     let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(
-        scrape_member_info(client.clone(), committees.members.id),
+        scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
@@ -195,6 +245,8 @@ fn convert_move_config(config: move_types::Config) -> types::Config {
             .into_iter()
             .map(|(key, value)| (key, convert_move_config_value(value)))
             .collect(),
+        enabled_versions: config.enabled_versions.contents.into_iter().collect(),
+        upgrade_cap: config.upgrade_cap.map(convert_move_upgrade_cap),
     }
 }
 
@@ -205,6 +257,15 @@ fn convert_move_config_value(value: move_types::ConfigValue) -> types::ConfigVal
         move_types::ConfigValue::String(s) => types::ConfigValue::String(s),
         move_types::ConfigValue::Bool(b) => types::ConfigValue::Bool(b),
         move_types::ConfigValue::Bytes(bytes) => types::ConfigValue::Bytes(bytes),
+    }
+}
+
+fn convert_move_upgrade_cap(cap: move_types::UpgradeCap) -> types::UpgradeCap {
+    types::UpgradeCap {
+        id: cap.id,
+        package: cap.package,
+        version: cap.version,
+        policy: cap.policy,
     }
 }
 
@@ -265,7 +326,7 @@ async fn scrape_treasury(
     })
 }
 
-async fn scrape_member_info(
+async fn scrape_all_member_info(
     client: Client,
     member_info_id: Address,
 ) -> Result<BTreeMap<Address, types::MemberInfo>> {
@@ -319,11 +380,62 @@ async fn scrape_member_info(
     Ok(member_info)
 }
 
+async fn scrape_member_info(
+    mut client: Client,
+    member_info_id: Address,
+    validator: Address,
+) -> Result<types::MemberInfo> {
+    let field_id =
+        member_info_id.derive_dynamic_child_id(&TypeTag::Address, &validator.to_bcs().unwrap());
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().owner().finish(),
+                Object::path_builder().contents().finish(),
+                Object::path_builder().object_id(),
+                Object::path_builder().version(),
+            ])),
+        )
+        .await?
+        .into_inner();
+
+    let field: move_types::Field<Address, move_types::MemberInfo> = response
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| tonic::Status::from_error(e.into()))?;
+
+    let move_types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key,
+        https_address,
+        tls_public_key,
+        next_epoch_encryption_public_key,
+    } = field.value;
+
+    let info = types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
+        https_address: https_address.try_into().ok(),
+        tls_public_key: tls_public_key.as_slice().try_into().ok(),
+        next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+            next_epoch_encryption_public_key.as_slice(),
+        )
+        .map(Into::into)
+        .ok(),
+    };
+    Ok(info)
+}
+
 async fn scrape_committees(
     client: Client,
     committees_id: Address,
-) -> Result<BTreeMap<u64, BlsCommittee>> {
-    let committees: BTreeMap<u64, BlsCommittee> = client
+) -> Result<BTreeMap<u64, Committee>> {
+    let committees: BTreeMap<u64, Committee> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(committees_id)
@@ -347,7 +459,7 @@ async fn scrape_committees(
                 .into_iter()
                 .map(convert_move_committee_member)
                 .collect();
-            let committee = BlsCommittee::new(members, move_committee.epoch);
+            let committee = Committee::new(members, move_committee.epoch);
             (move_committee.epoch, committee)
         })
         .try_collect()
@@ -360,13 +472,18 @@ fn convert_move_committee_member(
     move_types::CommitteeMember {
         validator_address,
         public_key,
-        encryption_key: _,
+        encryption_public_key,
         weight,
     }: move_types::CommitteeMember,
-) -> BlsCommitteeMember {
-    BlsCommitteeMember::new(
+) -> CommitteeMember {
+    CommitteeMember::new(
         validator_address,
         convert_move_uncompressed_g1_pubkey(&public_key),
+        // Use fallback key for nodes without valid encryption key.
+        // These nodes cannot decrypt shares but still count toward thresholds.
+        crate::dkg::EncryptionGroupElement::try_from(encryption_public_key.as_slice())
+            .map(Into::into)
+            .unwrap_or_else(|_| fallback_encryption_public_key()),
         weight.into(),
     )
 }
@@ -399,10 +516,23 @@ async fn scrape_deposit_requests(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(deposit_request)
         })
-        .map_ok(|move_types::DepositRequest { utxo, timestamp_ms }| {
-            let utxo = convert_move_utxo(utxo);
-            (utxo.id, types::DepositRequest { utxo, timestamp_ms })
-        })
+        .map_ok(
+            |move_types::DepositRequest {
+                 id,
+                 utxo,
+                 timestamp_ms,
+             }| {
+                let utxo = convert_move_utxo(utxo);
+                (
+                    utxo.id,
+                    types::DepositRequest {
+                        id,
+                        utxo,
+                        timestamp_ms,
+                    },
+                )
+            },
+        )
         .try_collect()
         .await?;
 
@@ -459,4 +589,73 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
     };
 
     Ok(pool)
+}
+
+pub trait MoveType {
+    const PACKAGE_VERSION: u64 = 1;
+    const MODULE: &'static str;
+    const NAME: &'static str;
+    const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
+}
+
+#[cfg(test)]
+mod tests {
+    use fastcrypto::serde_helpers::ToFromByteArray;
+    use fastcrypto::traits::KeyPair;
+    use fastcrypto::traits::ToFromBytes;
+
+    use crate::dkg::EncryptionGroupElement;
+
+    use super::*;
+
+    #[test]
+    fn test_convert_move_committee_member() {
+        let mut rng = rand::thread_rng();
+        let validator_address =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
+        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let encryption_private_key =
+            fastcrypto_tbls::ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let encryption_public_key =
+            fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&encryption_private_key);
+
+        let move_committee_member = move_types::CommitteeMember {
+            validator_address,
+            public_key: signing_keypair.public().as_bytes().to_owned(),
+            encryption_public_key: encryption_public_key.as_element().to_byte_array().into(),
+            weight: 1,
+        };
+        let committee_member = convert_move_committee_member(move_committee_member);
+
+        assert_eq!(committee_member.validator_address(), validator_address);
+        assert_eq!(committee_member.public_key(), signing_keypair.public());
+        assert_eq!(
+            committee_member.encryption_public_key().as_element(),
+            encryption_public_key.as_element()
+        );
+        assert_eq!(committee_member.weight(), 1);
+    }
+
+    #[test]
+    fn test_convert_move_committee_member_uses_fallback_key() {
+        let mut rng = rand::thread_rng();
+        let validator_address =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
+        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let mut encryption_key_vec = vec![0u8; 32];
+        encryption_key_vec[0] = 1;
+
+        let move_committee_member = move_types::CommitteeMember {
+            validator_address,
+            public_key: signing_keypair.public().as_bytes().to_owned(),
+            encryption_public_key: encryption_key_vec,
+            weight: 1,
+        };
+        let committee_member = convert_move_committee_member(move_committee_member);
+
+        assert_eq!(
+            *committee_member.encryption_public_key(),
+            fallback_encryption_public_key()
+        )
+    }
 }
