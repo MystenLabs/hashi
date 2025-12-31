@@ -788,7 +788,7 @@ mod test {
         }
 
         let epoch = 7;
-        let threshold = 3u16;
+        let threshold = 3u64;
 
         let addresses = private_keys
             .iter()
@@ -796,16 +796,24 @@ mod test {
             .map(|(i, _)| Address::new([i as u8; 32]))
             .collect::<Vec<_>>();
 
+        let mut rng = rand::thread_rng();
+        let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
+            .iter()
+            .enumerate()
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
         let members = private_keys
             .iter()
             .enumerate()
-            .map(|(i, key)| BlsCommitteeMember {
+            .map(|(i, key)| CommitteeMember {
                 address: addresses[i],
                 public_key: key.public_key(),
+                encryption_public_key: encryption_public_keys[i].clone(),
                 weight: 1,
             })
             .collect();
-        let committee = BlsCommittee::new(members, epoch);
+        let committee = Committee::new(members, epoch);
 
         // Create a certificate via aggregator
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
@@ -826,7 +834,7 @@ mod test {
         let bitmap_bytes = original_cert.signers_bitmap_bytes();
 
         // Reconstruct from parts
-        let reconstructed = CommitteeSignature::from_parts(
+        let reconstructed = SignedMessage::from_parts(
             epoch,
             message.clone(),
             signature_bytes,
