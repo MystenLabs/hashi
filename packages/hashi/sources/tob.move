@@ -61,16 +61,9 @@ public(package) fun submit_dkg_cert(
     if (epoch_certs.dkg_certs.contains(dealer)) {
         return
     };
-    let message = hashi::committee::new_message(
-        epoch,
-        DkgDealerMessageHash { dealer_address: dealer, message_hash },
-    );
-    committee.verify_certificate(
-        &signature,
-        &signers_bitmap,
-        message,
-        threshold,
-    );
+    let message = DkgDealerMessageHash { dealer_address: dealer, message_hash };
+    let sig = hashi::committee::new_committee_signature(epoch, signature, signers_bitmap);
+    committee.verify_certificate(message, sig, threshold);
     let cert = DkgCertV1 {
         message_hash,
         signature,
