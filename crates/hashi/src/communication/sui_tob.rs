@@ -332,8 +332,8 @@ impl SuiTobChannel {
 #[async_trait]
 impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
     async fn publish(&self, cert: Certificate) -> ChannelResult<()> {
-        // Clone needed because sui_rpc::Client methods require &mut self,
-        // but OrderedBroadcastChannel::publish takes &self.
+        // Clone needed because `sui_rpc::Client` methods require `&mut self`,
+        // but `OrderedBroadcastChannel::publish` takes `&self`.
         let mut channel = SuiTobChannel {
             client: self.client.clone(),
             package_id: self.package_id,
