@@ -151,7 +151,6 @@ public(package) fun verify_proposal(
 /// The `weight_verification_type` is the type of weight verification to perform,
 /// either check that the signers forms a quorum or includes at least one correct node.
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
-#[allow(unused_function)]
 public(package) fun verify_certificate<T>(
     self: &Committee,
     message: T,
@@ -264,7 +263,7 @@ public fun new_committee_signature(
     }
 }
 
-public struct CertifiedMessage<T> has drop {
+public struct CertifiedMessage<T> has copy, drop, store {
     message: T,
     signature: CommitteeSignature,
     stake_support: u16,

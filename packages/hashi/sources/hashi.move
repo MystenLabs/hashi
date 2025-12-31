@@ -6,7 +6,6 @@ use hashi::{
     committee_set::CommitteeSet,
     config::Config,
     proposal_set::{Self, ProposalSet},
-    tob::EpochCerts,
     treasury::Treasury
 };
 use sui::bag::{Self, Bag};
@@ -128,37 +127,17 @@ public(package) fun utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::Utxo
     &mut self.utxo_pool
 }
 
-entry fun submit_dkg_cert(
+public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
+    &mut self.tob
+}
+
+public(package) fun epoch_certs_and_committee(
     self: &mut Hashi,
     epoch: u64,
-    dealer: address,
-    message_hash: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    threshold: u16,
     ctx: &mut TxContext,
-) {
-    self.config.assert_version_enabled();
-    assert!(epoch == self.committee_set.epoch());
+): (&mut hashi::tob::EpochCerts, &Committee) {
     if (!self.tob.contains(epoch)) {
         self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };
-    let epoch_certs: &mut EpochCerts = self.tob.borrow_mut(epoch);
-    hashi::tob::submit_dkg_cert(
-        epoch_certs,
-        self.committee_set.current_committee(),
-        epoch,
-        dealer,
-        message_hash,
-        signature,
-        signers_bitmap,
-        threshold,
-    );
-}
-
-entry fun destroy_all_dkg_certs(self: &mut Hashi, epoch: u64) {
-    self.config.assert_version_enabled();
-    let current_epoch = self.committee_set.epoch();
-    let epoch_certs: EpochCerts = self.tob.remove(epoch);
-    hashi::tob::destroy_all(epoch_certs, current_epoch);
+    (self.tob.borrow_mut(epoch), self.committee_set.current_committee())
 }
