@@ -223,8 +223,8 @@ pub struct EpochCertsKey {
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCerts {
     pub epoch: u64,
-    /// LinkedTable<address, CertifiedMessage<DkgDealerMessageHash>>
-    pub dkg_certs: LinkedTable<Address>,
+    /// LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>
+    pub dkg_certs_v1: LinkedTable<Address>,
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.
@@ -245,9 +245,9 @@ pub struct LinkedTableNode<K, V> {
     pub value: V,
 }
 
-/// Rust version of the Move hashi::tob::DkgDealerMessageHash type.
+/// Rust version of the Move hashi::tob::DkgDealerMessageHashV1 type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct DkgDealerMessageHash {
+pub struct DkgDealerMessageHashV1 {
     pub dealer_address: Address,
     pub message_hash: Vec<u8>,
 }
@@ -268,4 +268,4 @@ pub struct CertifiedMessage<T> {
     pub stake_support: u16,
 }
 
-pub type DkgCertV1 = CertifiedMessage<DkgDealerMessageHash>;
+pub type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;

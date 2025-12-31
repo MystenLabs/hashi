@@ -1,6 +1,8 @@
 //! Sui-backed Total Order Broadcast (TOB) Channel
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,23 +10,40 @@ use futures::TryStreamExt;
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
-use sui_rpc::field::{FieldMask, FieldMaskUtil};
-use sui_rpc::proto::sui::rpc::v2::{
-    DynamicField, ExecuteTransactionRequest, ListDynamicFieldsRequest,
-};
+use sui_rpc::field::FieldMask;
+use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::DynamicField;
+use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
+use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
+use sui_sdk_types::Address;
+use sui_sdk_types::Argument;
+use sui_sdk_types::Command;
+use sui_sdk_types::GasPayment;
+use sui_sdk_types::Identifier;
+use sui_sdk_types::Input;
+use sui_sdk_types::MoveCall;
+use sui_sdk_types::ObjectReference;
+use sui_sdk_types::ProgrammableTransaction;
+use sui_sdk_types::StructTag;
+use sui_sdk_types::Transaction;
+use sui_sdk_types::TransactionExpiration;
+use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
-use sui_sdk_types::{
-    Address, Argument, Command, GasPayment, Identifier, Input, MoveCall, ObjectReference,
-    ProgrammableTransaction, StructTag, Transaction, TransactionExpiration, TransactionKind,
-};
 use tap::Pipe;
 use thiserror::Error;
 
 use crate::committee::Committee;
-use crate::dkg::types::{Certificate, DkgDealerMessageHash, MpcMessageV1};
-use crate::onchain::move_types::{DkgCertV1, EpochCerts, EpochCertsKey, LinkedTableNode};
+use crate::dkg::types::Certificate;
+use crate::dkg::types::DkgDealerMessageHash;
+use crate::dkg::types::MpcMessageV1;
+use crate::onchain::move_types::DkgCertV1;
+use crate::onchain::move_types::EpochCerts;
+use crate::onchain::move_types::EpochCertsKey;
+use crate::onchain::move_types::LinkedTableNode;
 
-use super::{ChannelError, ChannelResult, OrderedBroadcastChannel};
+use super::ChannelError;
+use super::ChannelResult;
+use super::OrderedBroadcastChannel;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GAS_BUDGET: u64 = 50_000_000;
@@ -260,7 +279,7 @@ impl SuiTobChannel {
             Some(certs) => certs,
             None => return Ok(vec![]),
         };
-        let Some(head) = epoch_certs.dkg_certs.head else {
+        let Some(head) = epoch_certs.dkg_certs_v1.head else {
             return Ok(vec![]);
         };
         let mut nodes: HashMap<Address, LinkedTableNode<Address, DkgCertV1>> = HashMap::new();
@@ -268,7 +287,7 @@ impl SuiTobChannel {
             .client
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.dkg_certs.id)
+                    .with_parent(epoch_certs.dkg_certs_v1.id)
                     .with_page_size(u32::MAX)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -297,18 +316,14 @@ impl SuiTobChannel {
             let Some(node) = nodes.remove(&dealer) else {
                 break; // Shouldn't happen, but handle gracefully
             };
-            let cert = self.convert_to_internal_cert(dealer, node.value)?;
+            let cert = self.convert_to_internal_cert(node.value)?;
             certificates.push((dealer, cert));
             current = node.next;
         }
         Ok(certificates)
     }
 
-    fn convert_to_internal_cert(
-        &self,
-        _dealer: Address,
-        dkg_cert: DkgCertV1,
-    ) -> Result<Certificate, TobError> {
+    fn convert_to_internal_cert(&self, dkg_cert: DkgCertV1) -> Result<Certificate, TobError> {
         let message =
             MpcMessageV1::Dkg(DkgDealerMessageHash {
                 dealer_address: dkg_cert.message.dealer_address,
