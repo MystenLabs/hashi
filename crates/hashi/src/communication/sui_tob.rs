@@ -20,7 +20,7 @@ use sui_sdk_types::{
 use tap::Pipe;
 use thiserror::Error;
 
-use crate::bls::BlsCommittee;
+use crate::committee::Committee;
 use crate::dkg::types::{Certificate, DkgDealerMessageHash, MpcMessageV1};
 use crate::onchain::move_types::{DkgCertV1, EpochCerts, EpochCertsKey, LinkedTableNode};
 
@@ -28,6 +28,10 @@ use super::{ChannelError, ChannelResult, OrderedBroadcastChannel};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GAS_BUDGET: u64 = 50_000_000;
+
+// TODO: Read threshold from on-chain config once it is made configurable.
+const THRESHOLD_NUMERATOR: u64 = 2;
+const THRESHOLD_DENOMINATOR: u64 = 3;
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -68,9 +72,7 @@ pub struct SuiTobChannel {
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
     pending_certs: VecDeque<Certificate>,
-    bls_committee: BlsCommittee,
-    /// Threshold for certificate verification
-    threshold: u16,
+    committee: Committee,
 }
 
 impl SuiTobChannel {
@@ -80,8 +82,7 @@ impl SuiTobChannel {
         hashi_id: Address,
         epoch: u64,
         signer: Ed25519PrivateKey,
-        bls_committee: BlsCommittee,
-        threshold: u16,
+        committee: Committee,
     ) -> Self {
         Self {
             client,
@@ -91,9 +92,13 @@ impl SuiTobChannel {
             signer,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
-            bls_committee,
-            threshold,
+            committee,
         }
+    }
+
+    // This matches the Move contract's threshold computation.
+    fn threshold(&self) -> u64 {
+        self.committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
     }
 
     async fn build_certificate_submission_transaction(
@@ -106,6 +111,11 @@ impl SuiTobChannel {
                 dealer_address,
                 message_hash,
             }) => (*dealer_address, message_hash.to_vec()),
+            MpcMessageV1::Rotation(_) => {
+                return Err(TobError::InvalidCertificate(
+                    "Rotation certificates not supported yet".into(),
+                ));
+            }
         };
         let epoch = cert.epoch();
         let signature = cert.signature_bytes().to_vec();
@@ -133,7 +143,7 @@ impl SuiTobChannel {
             .await
             .map_err(|e| TobError::RpcError(e.to_string()))?
             .into_inner();
-        let pt = self.build_submit_dkg_cert_ptb(
+        let pt = self.build_dkg_cert_submission_ptb(
             hashi_obj.object().owner().version(),
             epoch,
             dealer,
@@ -154,7 +164,7 @@ impl SuiTobChannel {
         })
     }
 
-    fn build_submit_dkg_cert_ptb(
+    fn build_dkg_cert_submission_ptb(
         &self,
         hashi_initial_shared_version: u64,
         epoch: u64,
@@ -195,16 +205,10 @@ impl SuiTobChannel {
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
                 },
-                Input::Pure {
-                    value: self
-                        .threshold
-                        .to_bcs()
-                        .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
             ],
             commands: vec![Command::MoveCall(MoveCall {
                 package: self.package_id,
-                module: Identifier::new("hashi").unwrap(),
+                module: Identifier::new("cert_submission").unwrap(),
                 function: Identifier::new("submit_dkg_cert").unwrap(),
                 type_arguments: vec![],
                 arguments: vec![
@@ -214,7 +218,6 @@ impl SuiTobChannel {
                     Argument::Input(3),
                     Argument::Input(4),
                     Argument::Input(5),
-                    Argument::Input(6),
                 ],
             })],
         })
@@ -319,8 +322,8 @@ impl SuiTobChannel {
             message,
             &dkg_cert.signature,
             &dkg_cert.signers_bitmap,
-            &self.bls_committee,
-            self.threshold,
+            &self.committee,
+            self.threshold(),
         )
         .map_err(|e| TobError::InvalidCertificate(e.to_string()))
     }
@@ -329,8 +332,8 @@ impl SuiTobChannel {
 #[async_trait]
 impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
     async fn publish(&self, cert: Certificate) -> ChannelResult<()> {
-        // TODO: Change `build_submit_certificate_transaction()` to take &self instead of &mut self,
-        // then remove this unnecessary clone.
+        // Clone needed because `sui_rpc::Client` methods require `&mut self`,
+        // but `OrderedBroadcastChannel::publish` takes `&self`.
         let mut channel = SuiTobChannel {
             client: self.client.clone(),
             package_id: self.package_id,
@@ -339,8 +342,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
             signer: self.signer.clone(),
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
-            bls_committee: self.bls_committee.clone(),
-            threshold: self.threshold,
+            committee: self.committee.clone(),
         };
         let tx = channel
             .build_certificate_submission_transaction(&cert)
@@ -395,7 +397,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
     fn existing_certificate_weight(&self) -> u32 {
         self.seen_dealers
             .iter()
-            .filter_map(|dealer| self.bls_committee.weight_of(dealer).ok())
+            .filter_map(|dealer| self.committee.weight_of(dealer).ok())
             .map(|w| w as u32)
             .sum()
     }

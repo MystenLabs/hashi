@@ -255,6 +255,21 @@ pub struct CommitteeSignature {
 }
 
 impl CommitteeSignature {
+    /// Get the epoch of this signature.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Get the raw signature bytes.
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.as_bytes()
+    }
+
+    /// Get the raw signers bitmap bytes.
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signers_bitmap.as_bytes()
+    }
+
     /// Verify that the committee could be used to verify this certificate, e.g., that the epoch and
     /// the number of signers match.
     fn verify_committee(&self, committee: &Committee) -> Result<(), SignatureError> {
@@ -301,46 +316,6 @@ impl CommitteeSignature {
             .ok_or_else(|| SignatureError::from_source(format!("unknown address {address}")))?;
         Ok(self.signers_bitmap.contains(*index))
     }
-
-    pub fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
-    pub fn signature_bytes(&self) -> &[u8] {
-        self.signature.as_bytes()
-    }
-
-    pub fn signers_bitmap_bytes(&self) -> &[u8] {
-        self.signers_bitmap.as_bytes()
-    }
-
-    pub fn message(&self) -> &T {
-        &self.message
-    }
-
-    pub fn from_parts(
-        epoch: u64,
-        message: T,
-        signature_bytes: &[u8],
-        signers_bitmap_bytes: &[u8],
-        committee: &BlsCommittee,
-        threshold: u16,
-    ) -> Result<Self, SignatureError>
-    where
-        T: Serialize,
-    {
-        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
-            .map_err(SignatureError::from_source)?;
-        let signers_bitmap = BitMap::from_bytes(committee.members.len(), signers_bitmap_bytes);
-        let cert = Self {
-            epoch,
-            signature,
-            signers_bitmap,
-            message,
-        };
-        committee.verify_signature_and_weight(&cert, threshold as u64)?;
-        Ok(cert)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -350,6 +325,22 @@ pub struct SignedMessage<T> {
 }
 
 impl<T> SignedMessage<T> {
+    pub fn epoch(&self) -> u64 {
+        self.signature.epoch()
+    }
+
+    pub fn message(&self) -> &T {
+        &self.message
+    }
+
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.signature_bytes()
+    }
+
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signature.signers_bitmap_bytes()
+    }
+
     /// The committee members included in this signature.
     pub fn signers(&self, committee: &Committee) -> Result<Vec<Address>, SignatureError> {
         self.signature.signers(committee)
@@ -367,6 +358,32 @@ impl<T> SignedMessage<T> {
         committee: &Committee,
     ) -> Result<bool, SignatureError> {
         self.signature.is_signer(address, committee)
+    }
+}
+
+impl<T: Serialize> SignedMessage<T> {
+    pub fn from_parts(
+        epoch: u64,
+        message: T,
+        signature_bytes: &[u8],
+        signers_bitmap_bytes: &[u8],
+        committee: &Committee,
+        threshold: u64,
+    ) -> Result<Self, SignatureError> {
+        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
+            .map_err(SignatureError::from_source)?;
+        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
+        let committee_signature = CommitteeSignature {
+            epoch,
+            signature,
+            signers_bitmap,
+        };
+        let signed_message = SignedMessage {
+            signature: committee_signature,
+            message,
+        };
+        committee.verify_signature_and_weight(&signed_message, threshold)?;
+        Ok(signed_message)
     }
 }
 
@@ -484,6 +501,16 @@ impl BitMap {
         Self { bitmap: Vec::new() }
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bitmap
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            bitmap: bytes.to_vec(),
+        }
+    }
+
     /// Set the given index in the bitmap and return the previous value.
     fn insert(&mut self, b: usize) -> Result<bool, SignatureError> {
         let byte_index = b / 8;
@@ -516,17 +543,6 @@ impl BitMap {
         let bit_index = b % 8;
         let bit_mask = 1 << (7 - bit_index);
         byte_index < self.bitmap.len() && (self.bitmap[byte_index] & bit_mask != 0)
-    }
-
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        &self.bitmap
-    }
-
-    pub(crate) fn from_bytes(size: usize, bytes: &[u8]) -> Self {
-        Self {
-            size,
-            bitmap: bytes.to_vec(),
-        }
     }
 }
 
@@ -758,7 +774,7 @@ mod test {
         }
 
         let epoch = 7;
-        let threshold = 3u16;
+        let threshold = 3u64;
 
         let addresses = private_keys
             .iter()
@@ -766,16 +782,24 @@ mod test {
             .map(|(i, _)| Address::new([i as u8; 32]))
             .collect::<Vec<_>>();
 
+        let mut rng = rand::thread_rng();
+        let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
+            .iter()
+            .enumerate()
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
         let members = private_keys
             .iter()
             .enumerate()
-            .map(|(i, key)| BlsCommitteeMember {
+            .map(|(i, key)| CommitteeMember {
                 address: addresses[i],
                 public_key: key.public_key(),
+                encryption_public_key: encryption_public_keys[i].clone(),
                 weight: 1,
             })
             .collect();
-        let committee = BlsCommittee::new(members, epoch);
+        let committee = Committee::new(members, epoch);
 
         // Create a certificate via aggregator
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
@@ -796,7 +820,7 @@ mod test {
         let bitmap_bytes = original_cert.signers_bitmap_bytes();
 
         // Reconstruct from parts
-        let reconstructed = CommitteeSignature::from_parts(
+        let reconstructed = SignedMessage::from_parts(
             epoch,
             message.clone(),
             signature_bytes,
