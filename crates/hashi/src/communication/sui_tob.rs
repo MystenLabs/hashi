@@ -38,7 +38,6 @@ use crate::dkg::types::DkgDealerMessageHash;
 use crate::dkg::types::MpcMessageV1;
 use crate::onchain::move_types::DkgCertV1;
 use crate::onchain::move_types::EpochCerts;
-use crate::onchain::move_types::EpochCertsKey;
 use crate::onchain::move_types::LinkedTableNode;
 
 use super::ChannelError;
@@ -242,9 +241,8 @@ impl SuiTobChannel {
     }
 
     async fn fetch_epoch_certs(&self) -> Result<Option<EpochCerts>, TobError> {
-        let epoch_key = EpochCertsKey { epoch: self.epoch };
         let epoch_key_bcs =
-            bcs::to_bytes(&epoch_key).map_err(|e| TobError::SerializationError(e.to_string()))?;
+            bcs::to_bytes(&self.epoch).map_err(|e| TobError::SerializationError(e.to_string()))?;
         let mut stream = self
             .client
             .list_dynamic_fields(

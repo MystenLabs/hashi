@@ -212,13 +212,6 @@ pub struct UtxoPool {
     pub utxos: Bag,
 }
 
-/// Rust version of the Move hashi::hashi::EpochCertsKey type.
-/// Used as the dynamic field key for storing EpochCerts on the Hashi object.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct EpochCertsKey {
-    pub epoch: u64,
-}
-
 /// Rust version of the Move hashi::tob::EpochCerts type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCerts {
