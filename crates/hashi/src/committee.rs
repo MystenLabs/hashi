@@ -255,6 +255,21 @@ pub struct CommitteeSignature {
 }
 
 impl CommitteeSignature {
+    /// Get the epoch of this signature.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Get the raw signature bytes.
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.as_bytes()
+    }
+
+    /// Get the raw signers bitmap bytes.
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signers_bitmap.as_bytes()
+    }
+
     /// Verify that the committee could be used to verify this certificate, e.g., that the epoch and
     /// the number of signers match.
     fn verify_committee(&self, committee: &Committee) -> Result<(), SignatureError> {
@@ -310,6 +325,26 @@ pub struct SignedMessage<T> {
 }
 
 impl<T> SignedMessage<T> {
+    /// Get the epoch of this signed message.
+    pub fn epoch(&self) -> u64 {
+        self.signature.epoch()
+    }
+
+    /// Get a reference to the message.
+    pub fn message(&self) -> &T {
+        &self.message
+    }
+
+    /// Get the raw signature bytes.
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.signature_bytes()
+    }
+
+    /// Get the raw signers bitmap bytes.
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signature.signers_bitmap_bytes()
+    }
+
     /// The committee members included in this signature.
     pub fn signers(&self, committee: &Committee) -> Result<Vec<Address>, SignatureError> {
         self.signature.signers(committee)
@@ -327,6 +362,40 @@ impl<T> SignedMessage<T> {
         committee: &Committee,
     ) -> Result<bool, SignatureError> {
         self.signature.is_signer(address, committee)
+    }
+}
+
+impl<T: Serialize> SignedMessage<T> {
+    /// Construct a SignedMessage from raw parts and verify the signature.
+    ///
+    /// This is used when reconstructing a certificate from on-chain data.
+    pub fn from_parts(
+        epoch: u64,
+        message: T,
+        signature_bytes: &[u8],
+        signers_bitmap_bytes: &[u8],
+        committee: &Committee,
+        threshold: u64,
+    ) -> Result<Self, SignatureError> {
+        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
+            .map_err(SignatureError::from_source)?;
+        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
+
+        let committee_signature = CommitteeSignature {
+            epoch,
+            signature,
+            signers_bitmap,
+        };
+
+        let signed_message = SignedMessage {
+            signature: committee_signature,
+            message,
+        };
+
+        // Verify the signature
+        committee.verify_signature_and_weight(&signed_message, threshold)?;
+
+        Ok(signed_message)
     }
 }
 
@@ -442,6 +511,18 @@ pub(crate) struct BitMap {
 impl BitMap {
     fn new() -> Self {
         Self { bitmap: Vec::new() }
+    }
+
+    /// Get the raw bytes of this bitmap.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bitmap
+    }
+
+    /// Create a BitMap from raw bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            bitmap: bytes.to_vec(),
+        }
     }
 
     /// Set the given index in the bitmap and return the previous value.
