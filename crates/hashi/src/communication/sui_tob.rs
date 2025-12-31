@@ -72,6 +72,7 @@ pub struct SuiTobChannel {
 }
 
 /// Threshold is computed as 2/3 of total committee weight, matching the Move contract.
+// TODO: Read threshold from on-chain config once Move contract makes it configurable.
 const THRESHOLD_NUMERATOR: u64 = 2;
 const THRESHOLD_DENOMINATOR: u64 = 3;
 
