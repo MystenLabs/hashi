@@ -307,12 +307,13 @@ impl SuiTobChannel {
 
     fn convert_to_internal_cert(
         &self,
-        dealer: Address,
+        _dealer: Address,
         dkg_cert: DkgCertV1,
     ) -> Result<Certificate, TobError> {
         let message = MpcMessageV1::Dkg(DkgDealerMessageHash {
-            dealer_address: dealer,
+            dealer_address: dkg_cert.message.dealer_address,
             message_hash: dkg_cert
+                .message
                 .message_hash
                 .try_into()
                 .map_err(|_| TobError::InvalidCertificate("invalid message_hash length".into()))?,
@@ -320,8 +321,8 @@ impl SuiTobChannel {
         Certificate::from_parts(
             self.epoch,
             message,
-            &dkg_cert.signature,
-            &dkg_cert.signers_bitmap,
+            &dkg_cert.signature.signature,
+            &dkg_cert.signature.signers_bitmap,
             &self.committee,
             self.threshold(),
         )

@@ -255,17 +255,14 @@ pub struct CommitteeSignature {
 }
 
 impl CommitteeSignature {
-    /// Get the epoch of this signature.
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
 
-    /// Get the raw signature bytes.
     pub fn signature_bytes(&self) -> &[u8] {
         self.signature.as_bytes()
     }
 
-    /// Get the raw signers bitmap bytes.
     pub fn signers_bitmap_bytes(&self) -> &[u8] {
         self.signers_bitmap.as_bytes()
     }
