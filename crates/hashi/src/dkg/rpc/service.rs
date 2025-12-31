@@ -2,11 +2,18 @@ use crate::dkg::types;
 use crate::grpc::HttpService;
 use crate::proto::ComplainRequest;
 use crate::proto::ComplainResponse;
+use crate::proto::GetPublicDkgOutputRequest;
+use crate::proto::GetPublicDkgOutputResponse;
 use crate::proto::RetrieveMessageRequest;
 use crate::proto::RetrieveMessageResponse;
+use crate::proto::RetrieveRotationMessagesRequest;
+use crate::proto::RetrieveRotationMessagesResponse;
 use crate::proto::SendMessageRequest;
 use crate::proto::SendMessageResponse;
+use crate::proto::SendRotationMessagesRequest;
+use crate::proto::SendRotationMessagesResponse;
 use crate::proto::dkg_service_server::DkgService;
+use crate::proto::key_rotation_service_server::KeyRotationService;
 use sui_sdk_types::Address;
 use tonic::Status;
 
@@ -63,6 +70,39 @@ impl DkgService for HttpService {
             .handle_complain_request(&internal_request)
             .map_err(dkg_error_to_status)?;
         Ok(tonic::Response::new(ComplainResponse::from(&response)))
+    }
+}
+
+#[tonic::async_trait]
+impl KeyRotationService for HttpService {
+    #[tracing::instrument(skip(self, _request))]
+    async fn send_rotation_messages(
+        &self,
+        _request: tonic::Request<SendRotationMessagesRequest>,
+    ) -> Result<tonic::Response<SendRotationMessagesResponse>, Status> {
+        Err(Status::unimplemented(
+            "send_rotation_messages not yet implemented",
+        ))
+    }
+
+    #[tracing::instrument(skip(self, _request))]
+    async fn retrieve_rotation_messages(
+        &self,
+        _request: tonic::Request<RetrieveRotationMessagesRequest>,
+    ) -> Result<tonic::Response<RetrieveRotationMessagesResponse>, Status> {
+        Err(Status::unimplemented(
+            "retrieve_rotation_messages not yet implemented",
+        ))
+    }
+
+    #[tracing::instrument(skip(self, _request))]
+    async fn get_public_dkg_output(
+        &self,
+        _request: tonic::Request<GetPublicDkgOutputRequest>,
+    ) -> Result<tonic::Response<GetPublicDkgOutputResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_public_dkg_output not yet implemented",
+        ))
     }
 }
 

@@ -1201,6 +1201,33 @@ pub struct RetrieveRotationMessagesResponse {
     #[prost(message, repeated, tag = "1")]
     pub messages: ::prost::alloc::vec::Vec<RotationMessage>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPublicDkgOutputRequest {
+    /// The epoch for which to retrieve the public DKG output.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ShareCommitment {
+    /// The share index (1-based).
+    #[prost(uint32, optional, tag = "1")]
+    pub index: ::core::option::Option<u32>,
+    /// The commitment value.
+    #[prost(message, optional, tag = "2")]
+    pub value: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPublicDkgOutputResponse {
+    /// The aggregated public key.
+    #[prost(message, optional, tag = "1")]
+    pub public_key: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    /// The commitments for each share index.
+    #[prost(message, repeated, tag = "2")]
+    pub commitments: ::prost::alloc::vec::Vec<ShareCommitment>,
+    /// The threshold used for this DKG.
+    #[prost(uint32, optional, tag = "3")]
+    pub threshold: ::core::option::Option<u32>,
+}
 /// Generated client implementations.
 pub mod key_rotation_service_client {
     #![allow(
@@ -1352,6 +1379,36 @@ pub mod key_rotation_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Get public DKG output for an epoch.
+        pub async fn get_public_dkg_output(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPublicDkgOutputRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPublicDkgOutputResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.KeyRotationService/GetPublicDkgOutput",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.KeyRotationService",
+                        "GetPublicDkgOutput",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1381,6 +1438,14 @@ pub mod key_rotation_service_server {
             request: tonic::Request<super::RetrieveRotationMessagesRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RetrieveRotationMessagesResponse>,
+            tonic::Status,
+        >;
+        /// Get public DKG output for an epoch.
+        async fn get_public_dkg_output(
+            &self,
+            request: tonic::Request<super::GetPublicDkgOutputRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPublicDkgOutputResponse>,
             tonic::Status,
         >;
     }
@@ -1547,6 +1612,55 @@ pub mod key_rotation_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RetrieveRotationMessagesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.KeyRotationService/GetPublicDkgOutput" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPublicDkgOutputSvc<T: KeyRotationService>(pub Arc<T>);
+                    impl<
+                        T: KeyRotationService,
+                    > tonic::server::UnaryService<super::GetPublicDkgOutputRequest>
+                    for GetPublicDkgOutputSvc<T> {
+                        type Response = super::GetPublicDkgOutputResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetPublicDkgOutputRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyRotationService>::get_public_dkg_output(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetPublicDkgOutputSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

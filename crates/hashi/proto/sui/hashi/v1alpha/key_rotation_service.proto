@@ -10,6 +10,9 @@ service KeyRotationService {
 
   // Retrieve a dealer's rotation messages from the certificate signers.
   rpc RetrieveRotationMessages(RetrieveRotationMessagesRequest) returns (RetrieveRotationMessagesResponse);
+
+  // Get public DKG output for an epoch.
+  rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
 }
 
 message RotationMessage {
@@ -44,4 +47,28 @@ message RetrieveRotationMessagesRequest {
 message RetrieveRotationMessagesResponse {
   // The bundle of rotation messages.
   repeated RotationMessage messages = 1;
+}
+
+message GetPublicDkgOutputRequest {
+  // The epoch for which to retrieve the public DKG output.
+  optional uint64 epoch = 1;
+}
+
+message ShareCommitment {
+  // The share index (1-based).
+  optional uint32 index = 1;
+
+  // The commitment value.
+  optional sui.rpc.v2.Bcs value = 2;
+}
+
+message GetPublicDkgOutputResponse {
+  // The aggregated public key.
+  optional sui.rpc.v2.Bcs public_key = 1;
+
+  // The commitments for each share index.
+  repeated ShareCommitment commitments = 2;
+
+  // The threshold used for this DKG.
+  optional uint32 threshold = 3;
 }
