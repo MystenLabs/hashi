@@ -1,7 +1,7 @@
 //! Core types for the DKG protocol
 
 use crate::committee::BLS12381Signature;
-use crate::committee::CommitteeSignature;
+use crate::committee::SignedMessage;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::polynomial::Eval;
@@ -184,7 +184,7 @@ pub enum MpcMessageV1 {
     Rotation(RotationDealerMessagesHash),
 }
 
-pub type Certificate = CommitteeSignature<MpcMessageV1>;
+pub type Certificate = SignedMessage<MpcMessageV1>;
 
 pub type DkgResult<T> = Result<T, DkgError>;
 

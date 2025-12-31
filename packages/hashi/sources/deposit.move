@@ -1,7 +1,7 @@
 /// Module: deposit
 module hashi::deposit;
 
-use hashi::{btc::BTC, hashi::Hashi, utxo::UtxoId};
+use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, utxo::UtxoId};
 use sui::{coin::Coin, sui::SUI};
 
 public fun deposit(
@@ -36,7 +36,8 @@ public fun deposit(
 public fun confirm_deposit(
     hashi: &mut Hashi,
     request_id: address,
-    // cert: Cert
+    // Committe signature over the deposit request
+    signature: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
@@ -51,11 +52,14 @@ public fun confirm_deposit(
         utxo_id: request.utxo().id(),
         amount: request.utxo().amount(),
         derivation_path: request.utxo().derivation_path(),
-        // signature: XXX
+        // signature,
     };
 
-    // verify cert over the request
-    // cert.verify(&request)
+    // verify the Certificate over the request
+    let request = hashi
+        .current_committee()
+        .verify_certificate(request, signature, 6667 /* TODO fill in real value */)
+        .into_message();
 
     let utxo = request.into_utxo();
     let derivation_path = utxo.derivation_path();
@@ -85,5 +89,5 @@ public struct DepositConfirmedEvent has copy, drop {
     utxo_id: UtxoId,
     amount: u64,
     derivation_path: Option<address>,
-    // signature: XXX
+    // signature: CommitteeSignature,
 }

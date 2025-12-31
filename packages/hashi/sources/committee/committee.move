@@ -128,7 +128,11 @@ public(package) fun to_vec_map(self: &Committee): VecMap<address, u16> {
 }
 
 #[allow(unused_function)]
-fun verify_proposal(self: &Committee, signers: sui::vec_set::VecSet<address>, threshold: u16): u16 {
+public(package) fun verify_proposal(
+    self: &Committee,
+    signers: sui::vec_set::VecSet<address>,
+    threshold: u16,
+): u16 {
     // Compute the total signed weight
     let mut aggregate_weight = 0;
     signers.keys().do_ref!(|validator_address| {
@@ -148,14 +152,13 @@ fun verify_proposal(self: &Committee, signers: sui::vec_set::VecSet<address>, th
 /// either check that the signers forms a quorum or includes at least one correct node.
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
 #[allow(unused_function)]
-fun verify_certificate<T>(
+public(package) fun verify_certificate<T>(
     self: &Committee,
-    signature: &vector<u8>,
-    signers_bitmap: &vector<u8>,
-    message: Message<T>,
+    message: T,
+    signature: CommitteeSignature,
     threshold: u16, //XXX threshold could be lookedup by type in the config
 ): CertifiedMessage<T> {
-    assert!(message.epoch == self.epoch());
+    assert!(signature.epoch == self.epoch());
 
     // Use the signers_bitmap to construct the key and the weights.
     let mut non_signer_aggregate_weight = 0;
@@ -166,13 +169,13 @@ fun verify_certificate<T>(
 
     // The signers bitmap must not be longer than necessary to hold all members.
     // It may be shorter, in which case the excluded members are treated as non-signers.
-    assert!(signers_bitmap.length() <= max_bitmap_len_bytes, EInvalidBitmap);
+    assert!(signature.signers_bitmap.length() <= max_bitmap_len_bytes, EInvalidBitmap);
 
     // Iterate over the signers bitmap and check if each member is a signer.
     max_bitmap_len_bytes.do!(|i| {
         // Get the current byte or 0 if we've reached the end of the bitmap.
-        let byte = if (i < signers_bitmap.length()) {
-            signers_bitmap[i]
+        let byte = if (i < signature.signers_bitmap.length()) {
+            signature.signers_bitmap[i]
         } else {
             0
         };
@@ -222,43 +225,59 @@ fun verify_certificate<T>(
 
     // Verify the signature
     let pub_key_bytes = group_ops::bytes(&aggregate_key);
-    let message_bytes = bcs::to_bytes(&message);
+
+    // Signing message is always prefixed with the epoch
+    let mut message_bytes = bcs::to_bytes(&signature.epoch);
+    message_bytes.append(bcs::to_bytes(&message));
+
     assert!(
         bls12381_min_pk_verify(
-            signature,
+            &signature.signature,
             pub_key_bytes,
             &message_bytes,
         ),
         ESigVerification,
     );
 
-    let Message {
-        epoch,
-        message,
-    } = message;
-
     CertifiedMessage {
-        epoch,
         message,
+        signature,
         stake_support: aggregate_weight as u16,
     }
 }
 
-public struct Message<T> has drop {
+public struct CommitteeSignature has copy, drop, store {
     epoch: u64,
-    message: T,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+}
+
+public fun new_committee_signature(
+    epoch: u64,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+): CommitteeSignature {
+    CommitteeSignature {
+        epoch,
+        signature,
+        signers_bitmap,
+    }
 }
 
 public struct CertifiedMessage<T> has drop {
-    epoch: u64,
     message: T,
+    signature: CommitteeSignature,
     stake_support: u16,
 }
 
 // === Accessors for CertifiedMessage ===
 
 public(package) fun cert_epoch<T>(self: &CertifiedMessage<T>): u64 {
-    self.epoch
+    self.signature.epoch
+}
+
+public(package) fun cert_signature<T>(self: &CertifiedMessage<T>): &CommitteeSignature {
+    &self.signature
 }
 
 public(package) fun stake_support<T>(self: &CertifiedMessage<T>): u16 {
@@ -271,8 +290,8 @@ public(package) fun message<T>(self: &CertifiedMessage<T>): &T {
 
 public(package) fun into_message<T>(self: CertifiedMessage<T>): T {
     let CertifiedMessage {
-        epoch: _,
         message,
+        signature: _,
         stake_support: _,
     } = self;
 
