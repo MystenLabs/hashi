@@ -103,6 +103,33 @@ pub struct DkgOutput {
     pub threshold: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicDkgOutput {
+    pub public_key: Secp256k1Point,
+    pub commitments: Vec<Eval<G>>,
+    pub threshold: u16,
+}
+
+impl PublicDkgOutput {
+    pub fn from_dkg_output(output: &DkgOutput) -> Self {
+        Self {
+            public_key: output.public_key,
+            commitments: output.commitments.clone(),
+            threshold: output.threshold,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetPublicDkgOutputRequest {
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetPublicDkgOutputResponse {
+    pub output: PublicDkgOutput,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RotationMessage {
     pub share_index: ShareIndex,

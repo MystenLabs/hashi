@@ -1,9 +1,10 @@
 use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
-use crate::dkg::rpc::DkgRpcClient;
 use crate::dkg::types::ComplainRequest;
 use crate::dkg::types::ComplainResponse;
+use crate::dkg::types::GetPublicDkgOutputRequest;
+use crate::dkg::types::GetPublicDkgOutputResponse;
 use crate::dkg::types::RetrieveMessageRequest;
 use crate::dkg::types::RetrieveMessageResponse;
 use crate::dkg::types::RetrieveRotationMessagesRequest;
@@ -12,22 +13,23 @@ use crate::dkg::types::SendMessageRequest;
 use crate::dkg::types::SendMessageResponse;
 use crate::dkg::types::SendRotationMessagesRequest;
 use crate::dkg::types::SendRotationMessagesResponse;
+use crate::grpc::Client;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 
 // TODO: Centralize client management in `OnchainState` to handle TLS key/address rotation.
 pub struct RpcP2PChannel {
-    clients: HashMap<Address, DkgRpcClient>,
+    clients: HashMap<Address, Client>,
     epoch: u64,
 }
 
 impl RpcP2PChannel {
-    pub fn new(clients: HashMap<Address, DkgRpcClient>, epoch: u64) -> Self {
+    pub fn new(clients: HashMap<Address, Client>, epoch: u64) -> Self {
         Self { clients, epoch }
     }
 
-    fn get_client(&self, address: &Address) -> ChannelResult<&DkgRpcClient> {
+    fn get_client(&self, address: &Address) -> ChannelResult<&Client> {
         self.clients.get(address).ok_or_else(|| {
             ChannelError::RequestFailed(format!("no client for address {}", address))
         })
@@ -89,5 +91,16 @@ impl P2PChannel for RpcP2PChannel {
         Err(ChannelError::Other(
             "rotation not yet implemented".to_string(),
         ))
+    }
+
+    async fn get_public_dkg_output(
+        &self,
+        party: &Address,
+        request: &GetPublicDkgOutputRequest,
+    ) -> ChannelResult<GetPublicDkgOutputResponse> {
+        self.get_client(party)?
+            .get_public_dkg_output(request)
+            .await
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 }

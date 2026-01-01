@@ -5,10 +5,19 @@ use tonic::Response;
 use tonic_rustls::Channel;
 use tonic_rustls::Endpoint;
 
+use crate::dkg::types::ComplainRequest;
+use crate::dkg::types::ComplainResponse;
+use crate::dkg::types::GetPublicDkgOutputRequest;
+use crate::dkg::types::GetPublicDkgOutputResponse;
+use crate::dkg::types::RetrieveMessageRequest;
+use crate::dkg::types::RetrieveMessageResponse;
+use crate::dkg::types::SendMessageRequest;
+use crate::dkg::types::SendMessageResponse;
 use crate::proto::GetServiceInfoRequest;
 use crate::proto::GetServiceInfoResponse;
 use crate::proto::bridge_service_client::BridgeServiceClient;
 use crate::proto::dkg_service_client::DkgServiceClient;
+use crate::proto::key_rotation_service_client::KeyRotationServiceClient;
 use crate::tls::make_client_config_no_verification;
 
 type Result<T, E = tonic::Status> = std::result::Result<T, E>;
@@ -66,9 +75,65 @@ impl Client {
         DkgServiceClient::new(self.channel.clone())
     }
 
+    pub fn key_rotation_service_client(&self) -> KeyRotationServiceClient<Channel> {
+        KeyRotationServiceClient::new(self.channel.clone())
+    }
+
     pub async fn get_service_info(&self) -> Result<Response<GetServiceInfoResponse>> {
         self.bridge_service_client()
             .get_service_info(GetServiceInfoRequest::default())
             .await
+    }
+
+    pub async fn send_message(
+        &self,
+        epoch: u64,
+        request: &SendMessageRequest,
+    ) -> Result<SendMessageResponse> {
+        let proto_request = request.to_proto(epoch);
+        let response = self
+            .dkg_service_client()
+            .send_message(proto_request)
+            .await?;
+        SendMessageResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    pub async fn retrieve_message(
+        &self,
+        epoch: u64,
+        request: &RetrieveMessageRequest,
+    ) -> Result<RetrieveMessageResponse> {
+        let proto_request = request.to_proto(epoch);
+        let response = self
+            .dkg_service_client()
+            .retrieve_message(proto_request)
+            .await?;
+        RetrieveMessageResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    pub async fn complain(
+        &self,
+        epoch: u64,
+        request: &ComplainRequest,
+    ) -> Result<ComplainResponse> {
+        let proto_request = request.to_proto(epoch);
+        let response = self.dkg_service_client().complain(proto_request).await?;
+        ComplainResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    pub async fn get_public_dkg_output(
+        &self,
+        request: &GetPublicDkgOutputRequest,
+    ) -> Result<GetPublicDkgOutputResponse> {
+        let proto_request = request.to_proto();
+        let response = self
+            .key_rotation_service_client()
+            .get_public_dkg_output(proto_request)
+            .await?;
+        GetPublicDkgOutputResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 }

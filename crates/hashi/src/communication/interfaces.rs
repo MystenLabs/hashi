@@ -2,6 +2,8 @@
 
 use crate::dkg::ComplainRequest;
 use crate::dkg::ComplainResponse;
+use crate::dkg::GetPublicDkgOutputRequest;
+use crate::dkg::GetPublicDkgOutputResponse;
 use crate::dkg::RetrieveMessageRequest;
 use crate::dkg::RetrieveMessageResponse;
 use crate::dkg::RetrieveRotationMessagesRequest;
@@ -66,6 +68,12 @@ pub trait P2PChannel: Send + Sync {
         party: &Address,
         request: &RetrieveRotationMessagesRequest,
     ) -> ChannelResult<RetrieveRotationMessagesResponse>;
+
+    async fn get_public_dkg_output(
+        &self,
+        party: &Address,
+        request: &GetPublicDkgOutputRequest,
+    ) -> ChannelResult<GetPublicDkgOutputResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages

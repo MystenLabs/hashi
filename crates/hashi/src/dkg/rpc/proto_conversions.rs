@@ -178,3 +178,87 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplainResponse {
         Ok(Self { response })
     }
 }
+
+//
+// GetPublicDkgOutputRequest
+//
+
+impl types::GetPublicDkgOutputRequest {
+    pub fn to_proto(&self) -> proto::GetPublicDkgOutputRequest {
+        proto::GetPublicDkgOutputRequest {
+            epoch: Some(self.epoch),
+        }
+    }
+}
+
+impl TryFrom<&proto::GetPublicDkgOutputRequest> for types::GetPublicDkgOutputRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::GetPublicDkgOutputRequest) -> Result<Self, Self::Error> {
+        let epoch = required(value.epoch, "epoch")?;
+        Ok(Self { epoch })
+    }
+}
+
+//
+// GetPublicDkgOutputResponse
+//
+
+impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputResponse {
+    fn from(value: &types::GetPublicDkgOutputResponse) -> Self {
+        Self {
+            public_key: Some(serialize_bcs(&value.output.public_key)),
+            commitments: value
+                .output
+                .commitments
+                .iter()
+                .map(|eval| proto::ShareCommitment {
+                    index: Some(eval.index.get() as u32),
+                    value: Some(serialize_bcs(&eval.value)),
+                })
+                .collect(),
+            threshold: Some(value.output.threshold as u32),
+        }
+    }
+}
+
+impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::GetPublicDkgOutputResponse) -> Result<Self, Self::Error> {
+        use fastcrypto_tbls::polynomial::Eval;
+        use fastcrypto_tbls::threshold_schnorr::G;
+        use fastcrypto_tbls::types::ShareIndex;
+
+        let public_key = deserialize_bcs(
+            required(value.public_key.as_ref(), "public_key")?,
+            "public_key",
+        )?;
+
+        let mut commitments = Vec::with_capacity(value.commitments.len());
+        for commitment in &value.commitments {
+            let index = required(commitment.index, "commitment.index")?;
+            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
+                TryFromProtoError::invalid("commitment.index", "index must be non-zero")
+            })?;
+            let eval_value: G = deserialize_bcs(
+                required(commitment.value.as_ref(), "commitment.value")?,
+                "commitment.value",
+            )?;
+            commitments.push(Eval {
+                index: share_index,
+                value: eval_value,
+            });
+        }
+
+        let threshold = required(value.threshold, "threshold")? as u16;
+
+        Ok(Self {
+            output: types::PublicDkgOutput {
+                public_key,
+                commitments,
+                threshold,
+            },
+        })
+    }
+}

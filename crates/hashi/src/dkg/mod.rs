@@ -46,7 +46,10 @@ pub use types::DkgError;
 pub use types::DkgOutput;
 pub use types::DkgResult;
 pub use types::EncryptionGroupElement;
+pub use types::GetPublicDkgOutputRequest;
+pub use types::GetPublicDkgOutputResponse;
 pub use types::MessageHash;
+pub use types::PublicDkgOutput;
 pub use types::RetrieveMessageRequest;
 pub use types::RetrieveMessageResponse;
 pub use types::RetrieveRotationMessagesRequest;
@@ -290,6 +293,33 @@ impl DkgManager {
         Ok(ComplainResponse { response })
     }
 
+    /// RPC endpoint handler for `GetPublicDkgOutputRequest`
+    pub fn handle_get_public_dkg_output_request(
+        &self,
+        request: &GetPublicDkgOutputRequest,
+    ) -> DkgResult<GetPublicDkgOutputResponse> {
+        let previous_epoch = self
+            .dkg_config
+            .epoch
+            .checked_sub(1)
+            .ok_or_else(|| DkgError::InvalidConfig("no previous epoch exists".to_string()))?;
+        if request.epoch != previous_epoch {
+            return Err(DkgError::NotFound(format!(
+                "no DKG output for epoch {} (current epoch is {})",
+                request.epoch, self.dkg_config.epoch
+            )));
+        }
+        let output = self.previous_dkg_output.as_ref().ok_or_else(|| {
+            DkgError::NotFound(format!(
+                "DKG output for epoch {} not yet available",
+                request.epoch
+            ))
+        })?;
+        Ok(GetPublicDkgOutputResponse {
+            output: PublicDkgOutput::from_dkg_output(output),
+        })
+    }
+
     // TODO: Consider making dealer and party flows concurrent
     pub async fn run(
         &mut self,
@@ -316,17 +346,21 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<DkgOutput> {
-        let previous = self.reconstruct_previous_dkg_output(dkg_certificates)?;
+        let (previous, is_existing_member) = self
+            .prepare_previous_dkg_output(dkg_certificates, p2p_channel)
+            .await?;
         self.previous_dkg_output = Some(previous.clone());
-        // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
-        if let Err(e) = self
-            .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
-            .await
-        {
-            tracing::error!(
-                "Rotation dealer phase failed: {}. Continuing as party only.",
-                e
-            );
+        if is_existing_member {
+            // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
+            if let Err(e) = self
+                .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
+                .await
+            {
+                tracing::error!(
+                    "Rotation dealer phase failed: {}. Continuing as party only.",
+                    e
+                );
+            }
         }
         self.run_key_rotation_as_party(&previous, p2p_channel, ordered_broadcast_channel)
             .await
@@ -1146,6 +1180,86 @@ impl DkgManager {
         }
         self.complete_dkg(certified_dealers.into_keys())
     }
+
+    pub async fn fetch_public_dkg_output_from_quorum(
+        &self,
+        p2p_channel: &impl P2PChannel,
+    ) -> DkgResult<PublicDkgOutput> {
+        let previous_committee = self
+            .previous_committee
+            .as_ref()
+            .expect("key rotation requires previous committee");
+        let epoch = self
+            .dkg_config
+            .epoch
+            .checked_sub(1)
+            .expect("key rotation requires epoch > 0");
+        let threshold = self.dkg_config.threshold as u64;
+        let request = types::GetPublicDkgOutputRequest { epoch };
+        let mut futures: FuturesUnordered<_> = previous_committee
+            .members()
+            .iter()
+            .map(|member| {
+                let addr = member.validator_address();
+                let weight = member.weight();
+                let req = request.clone();
+                async move {
+                    let result = p2p_channel.get_public_dkg_output(&addr, &req).await;
+                    (addr, weight, result)
+                }
+            })
+            .collect();
+        let mut responses: HashMap<[u8; 32], (PublicDkgOutput, u64)> = HashMap::new();
+        while let Some((addr, weight, result)) = futures.next().await {
+            match result {
+                Ok(response) => {
+                    let hash = hash_public_dkg_output(&response.output);
+                    let (output, weight_sum) = responses
+                        .entry(hash)
+                        .or_insert((response.output.clone(), 0));
+                    *weight_sum += weight;
+                    if *weight_sum > threshold {
+                        return Ok(output.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::info!("Failed to get public DKG output from {}: {}", addr, e);
+                }
+            }
+        }
+        let max_weight = responses.values().map(|(_, w)| *w).max().unwrap_or(0);
+        Err(DkgError::NotEnoughApprovals {
+            needed: (threshold + 1) as usize,
+            got: max_weight as usize,
+        })
+    }
+
+    async fn prepare_previous_dkg_output(
+        &mut self,
+        dkg_certificates: &[Certificate],
+        p2p_channel: &impl P2PChannel,
+    ) -> DkgResult<(DkgOutput, bool)> {
+        let is_existing_member = self
+            .previous_committee
+            .as_ref()
+            .and_then(|c| c.index_of(&self.address))
+            .is_some();
+        let previous = if is_existing_member {
+            self.reconstruct_previous_dkg_output(dkg_certificates)?
+        } else {
+            tracing::debug!("New committee member: fetching public DKG output from quorum");
+            let public_output = self
+                .fetch_public_dkg_output_from_quorum(p2p_channel)
+                .await?;
+            DkgOutput {
+                public_key: public_output.public_key,
+                key_shares: avss::SharesForNode { shares: vec![] },
+                commitments: public_output.commitments,
+                threshold: public_output.threshold,
+            }
+        };
+        Ok((previous, is_existing_member))
+    }
 }
 
 pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
@@ -1163,6 +1277,11 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
     let bytes = bcs::to_bytes(bundle).expect(EXPECT_SERIALIZATION_SUCCESS);
+    Blake2b256::digest(&bytes).into()
+}
+
+fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
+    let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
     Blake2b256::digest(&bytes).into()
 }
 
@@ -1692,6 +1811,29 @@ mod tests {
                 })?;
             Ok(response)
         }
+
+        async fn get_public_dkg_output(
+            &self,
+            party: &Address,
+            request: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(party).ok_or_else(|| {
+                crate::communication::ChannelError::RequestFailed(format!(
+                    "Party {:?} not found",
+                    party
+                ))
+            })?;
+            let response = manager
+                .handle_get_public_dkg_output_request(request)
+                .map_err(|e| {
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
+                })?;
+            Ok(response)
+        }
     }
 
     struct MockOrderedBroadcastChannel {
@@ -1835,6 +1977,16 @@ mod tests {
                 self.error_message.clone(),
             ))
         }
+
+        async fn get_public_dkg_output(
+            &self,
+            _party: &Address,
+            _request: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            Err(crate::communication::ChannelError::RequestFailed(
+                self.error_message.clone(),
+            ))
+        }
     }
 
     struct SucceedingP2PChannel {
@@ -1906,6 +2058,14 @@ mod tests {
             _request: &RetrieveRotationMessagesRequest,
         ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             unimplemented!("SucceedingP2PChannel does not implement retrieve_rotation_messages")
+        }
+
+        async fn get_public_dkg_output(
+            &self,
+            _party: &Address,
+            _request: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            unimplemented!("SucceedingP2PChannel does not implement get_public_dkg_output")
         }
     }
 
@@ -2005,6 +2165,14 @@ mod tests {
                 "PartiallyFailingP2PChannel does not implement retrieve_rotation_messages"
             )
         }
+
+        async fn get_public_dkg_output(
+            &self,
+            _party: &Address,
+            _request: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            unimplemented!("PartiallyFailingP2PChannel does not implement get_public_dkg_output")
+        }
     }
 
     /// P2P channel that returns pre-collected complaint responses.
@@ -2068,6 +2236,14 @@ mod tests {
             _request: &RetrieveRotationMessagesRequest,
         ) -> ChannelResult<RetrieveRotationMessagesResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement retrieve_rotation_messages")
+        }
+
+        async fn get_public_dkg_output(
+            &self,
+            _party: &Address,
+            _request: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            unimplemented!("PreCollectedP2PChannel does not implement get_public_dkg_output")
         }
     }
 
@@ -5616,5 +5792,129 @@ mod tests {
             }
             _ => panic!("Expected rotation certificate"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_previous_dkg_output_for_new_member() {
+        let rotation_setup = RotationTestSetup::new();
+        // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+
+        // Create existing members (validators 0-4) with completed DKG and previous_dkg_output set
+        let mut existing_managers_map = HashMap::new();
+        for i in 0..5 {
+            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager.previous_dkg_output = Some(output);
+            existing_managers_map.insert(rotation_setup.setup.address(i), manager);
+        }
+
+        // Get the expected public DKG output from an existing member
+        let expected_output = existing_managers_map
+            .values()
+            .next()
+            .unwrap()
+            .previous_dkg_output
+            .as_ref()
+            .unwrap();
+        let expected_public_key = expected_output.public_key;
+        let expected_threshold = expected_output.threshold;
+        let expected_commitments_len = expected_output.commitments.len();
+
+        // Create a new member that's in the current committee but NOT in previous
+        let mut rng = rand::thread_rng();
+        let new_member_addr = Address::new([99u8; 32]);
+        let new_member_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let new_member_signing_key = Bls12381PrivateKey::generate(&mut rng);
+
+        let epoch = rotation_setup.setup.committee_set.epoch();
+
+        // Build committee set: previous has 5 members, current has 6 (includes new member)
+        let current_members: Vec<_> = rotation_setup
+            .setup
+            .committee()
+            .members()
+            .iter()
+            .cloned()
+            .chain(std::iter::once(CommitteeMember::new(
+                new_member_addr,
+                new_member_signing_key.public_key(),
+                EncryptionPublicKey::from_private_key(&new_member_encryption_key),
+                2,
+            )))
+            .collect();
+        let new_current_committee = Committee::new(current_members, epoch);
+        let previous_committee = rotation_setup
+            .setup
+            .committee_set
+            .previous_committee()
+            .unwrap()
+            .clone();
+
+        let mut committees = BTreeMap::new();
+        committees.insert(epoch - 1, previous_committee);
+        committees.insert(epoch, new_current_committee);
+
+        let mut new_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        new_committee_set
+            .set_epoch(epoch)
+            .set_committees(committees);
+
+        // Create new member's DkgManager
+        let session_id = SessionId::new("testchain", epoch, &ProtocolType::DkgKeyGeneration);
+        let mut new_member_manager = DkgManager::new(
+            new_member_addr,
+            &new_committee_set,
+            session_id,
+            new_member_encryption_key,
+            new_member_signing_key,
+            Box::new(InMemoryPublicMessagesStore::new()),
+        )
+        .unwrap();
+
+        // Verify new member is NOT in previous committee
+        assert!(
+            new_member_manager
+                .previous_committee
+                .as_ref()
+                .unwrap()
+                .index_of(&new_member_addr)
+                .is_none(),
+            "New member should not be in previous committee"
+        );
+
+        // Create mock P2P channel with existing members
+        let mock_p2p = MockP2PChannel::new(existing_managers_map, new_member_addr);
+
+        // Call prepare_previous_dkg_output for new member
+        let (previous_output, is_existing_member) = new_member_manager
+            .prepare_previous_dkg_output(&[], &mock_p2p)
+            .await
+            .unwrap();
+
+        // Verify is_existing_member is false
+        assert!(
+            !is_existing_member,
+            "New member should not be identified as existing member"
+        );
+
+        // Verify the output was fetched from quorum (has correct public data)
+        assert_eq!(
+            previous_output.public_key, expected_public_key,
+            "Public key should match"
+        );
+        assert_eq!(
+            previous_output.threshold, expected_threshold,
+            "Threshold should match"
+        );
+        assert_eq!(
+            previous_output.commitments.len(),
+            expected_commitments_len,
+            "Commitments count should match"
+        );
+
+        // Verify key_shares is empty (new member has no previous shares)
+        assert!(
+            previous_output.key_shares.shares.is_empty(),
+            "New member should have empty key_shares"
+        );
     }
 }
