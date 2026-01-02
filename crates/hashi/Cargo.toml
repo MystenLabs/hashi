@@ -43,7 +43,7 @@ blst = { version = "0.3.13" }
 rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }
 
-fjall = { version = "3.0.0-rc.6", features = ["bytes_1"] }
+fjall = { version = "3.0.0", features = ["bytes_1"] }
 
 # DKG dependencies
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
