@@ -36,9 +36,12 @@ use crate::committee::Committee;
 use crate::dkg::types::Certificate;
 use crate::dkg::types::DkgDealerMessageHash;
 use crate::dkg::types::MpcMessageV1;
-use crate::onchain::move_types::DkgCertV1;
-use crate::onchain::move_types::EpochCerts;
+use crate::onchain::move_types::CertifiedMessage;
+use crate::onchain::move_types::DkgDealerMessageHashV1;
+use crate::onchain::move_types::EpochCertsV1;
 use crate::onchain::move_types::LinkedTableNode;
+
+type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;
 
 use super::ChannelError;
 use super::ChannelResult;
@@ -226,8 +229,8 @@ impl SuiTobChannel {
             ],
             commands: vec![Command::MoveCall(MoveCall {
                 package: self.package_id,
-                module: Identifier::new("cert_submission").unwrap(),
-                function: Identifier::new("submit_dkg_cert").unwrap(),
+                module: Identifier::from_static("cert_submission"),
+                function: Identifier::from_static("submit_dkg_cert"),
                 type_arguments: vec![],
                 arguments: vec![
                     Argument::Input(0),
@@ -241,7 +244,7 @@ impl SuiTobChannel {
         })
     }
 
-    async fn fetch_epoch_certs(&self) -> Result<Option<EpochCerts>, TobError> {
+    async fn fetch_epoch_certs(&self) -> Result<Option<EpochCertsV1>, TobError> {
         let epoch_key_bcs =
             bcs::to_bytes(&self.epoch).map_err(|e| TobError::SerializationError(e.to_string()))?;
         let mut stream = self
@@ -262,7 +265,7 @@ impl SuiTobChannel {
             .map_err(|e| TobError::RpcError(e.to_string()))?
         {
             if field.name().value() == epoch_key_bcs.as_slice() {
-                let epoch_certs: EpochCerts = field
+                let epoch_certs: EpochCertsV1 = field
                     .value()
                     .deserialize()
                     .map_err(|e| TobError::SerializationError(e.to_string()))?;
@@ -278,7 +281,7 @@ impl SuiTobChannel {
             Some(certs) => certs,
             None => return Ok(vec![]),
         };
-        let Some(head) = epoch_certs.dkg_certs_v1.head else {
+        let Some(head) = epoch_certs.dkg_certs.head else {
             return Ok(vec![]);
         };
         let mut nodes: HashMap<Address, LinkedTableNode<Address, DkgCertV1>> = HashMap::new();
@@ -286,7 +289,7 @@ impl SuiTobChannel {
             .client
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.dkg_certs_v1.id)
+                    .with_parent(epoch_certs.dkg_certs.id)
                     .with_page_size(u32::MAX)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -330,7 +333,7 @@ impl SuiTobChannel {
                     TobError::InvalidCertificate("invalid message_hash length".into())
                 })?,
             });
-        Certificate::from_parts(
+        Certificate::try_from_parts(
             self.epoch,
             message,
             &dkg_cert.signature.signature,

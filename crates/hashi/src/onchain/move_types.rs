@@ -212,12 +212,12 @@ pub struct UtxoPool {
     pub utxos: Bag,
 }
 
-/// Rust version of the Move hashi::tob::EpochCerts type.
+/// Rust version of the Move hashi::tob::EpochCertsV1 type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct EpochCerts {
+pub struct EpochCertsV1 {
     pub epoch: u64,
     /// LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>
-    pub dkg_certs_v1: LinkedTable<Address>,
+    pub dkg_certs: LinkedTable<Address>,
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.
@@ -260,5 +260,3 @@ pub struct CertifiedMessage<T> {
     pub signature: CommitteeSignature,
     pub stake_support: u16,
 }
-
-pub type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;

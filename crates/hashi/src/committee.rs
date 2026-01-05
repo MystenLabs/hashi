@@ -359,7 +359,7 @@ impl<T> SignedMessage<T> {
 }
 
 impl<T: Serialize> SignedMessage<T> {
-    pub fn from_parts(
+    pub fn try_from_parts(
         epoch: u64,
         message: T,
         signature_bytes: &[u8],
@@ -817,7 +817,7 @@ mod test {
         let bitmap_bytes = original_cert.signers_bitmap_bytes();
 
         // Reconstruct from parts
-        let reconstructed = SignedMessage::from_parts(
+        let reconstructed = SignedMessage::try_from_parts(
             epoch,
             message.clone(),
             signature_bytes,
