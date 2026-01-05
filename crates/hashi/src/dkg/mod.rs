@@ -1380,7 +1380,11 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     hasher.finalize().into()
 }
 
-/// TODO: Make `ComplaintResponse::create()` in `fastcrypto-tbls` public, and use it instead.
+// TODO: Expose a public constructor for `ComplaintResponse` in `fastcrypto-tbls`.
+// `ComplaintResponse` fields are `pub(crate)` in fastcrypto-tbls, so we can't construct
+// it directly from outside the crate. We use BCS as a workaround: serialize a tuple
+// `(responder_id, shares)` and deserialize it as `ComplaintResponse` since BCS uses
+// the same layout for tuples and structs with fields in declaration order.
 fn create_complaint_response(
     responder_id: PartyId,
     shares: avss::SharesForNode,
