@@ -346,11 +346,11 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<DkgOutput> {
-        let (previous, is_existing_member) = self
+        let (previous, is_member_of_previous_committee) = self
             .prepare_previous_dkg_output(dkg_certificates, p2p_channel)
             .await?;
         self.previous_dkg_output = Some(previous.clone());
-        if is_existing_member {
+        if is_member_of_previous_committee {
             // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
             if let Err(e) = self
                 .run_key_rotation_as_dealer(&previous, p2p_channel, ordered_broadcast_channel, rng)
@@ -1184,6 +1184,7 @@ impl DkgManager {
     pub async fn fetch_public_dkg_output_from_quorum(
         &self,
         p2p_channel: &impl P2PChannel,
+        previous_committee_threshold: u64,
     ) -> DkgResult<PublicDkgOutput> {
         let previous_committee = self
             .previous_committee
@@ -1194,7 +1195,6 @@ impl DkgManager {
             .epoch
             .checked_sub(1)
             .expect("key rotation requires epoch > 0");
-        let threshold = self.dkg_config.threshold as u64;
         let request = types::GetPublicDkgOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
@@ -1218,7 +1218,7 @@ impl DkgManager {
                         .entry(hash)
                         .or_insert((response.output.clone(), 0));
                     *weight_sum += weight;
-                    if *weight_sum > threshold {
+                    if *weight_sum >= previous_committee_threshold {
                         return Ok(output.clone());
                     }
                 }
@@ -1229,7 +1229,7 @@ impl DkgManager {
         }
         let max_weight = responses.values().map(|(_, w)| *w).max().unwrap_or(0);
         Err(DkgError::NotEnoughApprovals {
-            needed: (threshold + 1) as usize,
+            needed: (previous_committee_threshold + 1) as usize,
             got: max_weight as usize,
         })
     }
@@ -1239,24 +1239,22 @@ impl DkgManager {
         dkg_certificates: &[Certificate],
         p2p_channel: &impl P2PChannel,
     ) -> DkgResult<(DkgOutput, bool)> {
-        let is_existing_member = self
+        let is_member_of_previous_committee = self
             .previous_committee
             .as_ref()
             .and_then(|c| c.index_of(&self.address))
             .is_some();
-        let previous = if is_existing_member {
+        let previous = if is_member_of_previous_committee {
             self.reconstruct_previous_dkg_output(dkg_certificates)?
         } else {
             tracing::debug!("New committee member: fetching public DKG output from quorum");
-            let public_output = self
-                .fetch_public_dkg_output_from_quorum(p2p_channel)
-                .await?;
             let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
                 DkgError::InvalidConfig("Key rotation requires previous nodes".into())
             })?;
-            let total_weight = previous_nodes.total_weight();
-            let max_faulty = (total_weight - 1) / 3;
-            let threshold = max_faulty + 1;
+            let threshold = compute_bft_threshold(previous_nodes.total_weight());
+            let public_output = self
+                .fetch_public_dkg_output_from_quorum(p2p_channel, threshold as u64)
+                .await?;
             DkgOutput {
                 public_key: public_output.public_key,
                 key_shares: avss::SharesForNode { shares: vec![] },
@@ -1264,7 +1262,7 @@ impl DkgManager {
                 threshold,
             }
         };
-        Ok((previous, is_existing_member))
+        Ok((previous, is_member_of_previous_committee))
     }
 }
 
@@ -1279,6 +1277,10 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
     hasher.finalize().into()
+}
+
+fn compute_bft_threshold(total_weight: u16) -> u16 {
+    (total_weight - 1) / 3 + 1
 }
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
@@ -5891,14 +5893,14 @@ mod tests {
         let mock_p2p = MockP2PChannel::new(existing_managers_map, new_member_addr);
 
         // Call prepare_previous_dkg_output for new member
-        let (previous_output, is_existing_member) = new_member_manager
+        let (previous_output, is_member_of_previous_committee) = new_member_manager
             .prepare_previous_dkg_output(&[], &mock_p2p)
             .await
             .unwrap();
 
-        // Verify is_existing_member is false
+        // Verify is_member_of_previous_committee is false
         assert!(
-            !is_existing_member,
+            !is_member_of_previous_committee,
             "New member should not be identified as existing member"
         );
 

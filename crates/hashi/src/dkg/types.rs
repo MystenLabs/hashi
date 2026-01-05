@@ -15,7 +15,6 @@ use serde::Serialize;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-pub type Secp256k1Point = fastcrypto::groups::secp256k1::ProjectivePoint;
 pub type MessageHash = [u8; 32];
 
 // Domain separation constants for RandomOracle
@@ -97,7 +96,7 @@ impl SessionId {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgOutput {
-    pub public_key: Secp256k1Point,
+    pub public_key: G,
     pub key_shares: avss::SharesForNode,
     pub commitments: Vec<Eval<G>>,
     pub threshold: u16,
@@ -105,7 +104,7 @@ pub struct DkgOutput {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicDkgOutput {
-    pub public_key: Secp256k1Point,
+    pub public_key: G,
     pub commitments: Vec<Eval<G>>,
 }
 
