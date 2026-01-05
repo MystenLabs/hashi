@@ -1,20 +1,15 @@
 //! Sui-backed Total Order Broadcast (TOB) Channel
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
-use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
-use sui_rpc::proto::sui::rpc::v2::DynamicField;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
-use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
 use sui_sdk_types::Address;
 use sui_sdk_types::Argument;
 use sui_sdk_types::Command;
@@ -29,17 +24,15 @@ use sui_sdk_types::Transaction;
 use sui_sdk_types::TransactionExpiration;
 use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
-use tap::Pipe;
 use thiserror::Error;
 
 use crate::committee::Committee;
 use crate::dkg::types::Certificate;
 use crate::dkg::types::DkgDealerMessageHash;
 use crate::dkg::types::MpcMessageV1;
+use crate::onchain::OnchainState;
 use crate::onchain::move_types::CertifiedMessage;
 use crate::onchain::move_types::DkgDealerMessageHashV1;
-use crate::onchain::move_types::EpochCertsV1;
-use crate::onchain::move_types::LinkedTableNode;
 
 type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;
 
@@ -71,6 +64,9 @@ pub enum TobError {
 
     #[error("Wrong epoch: expected {expected}, got {got}")]
     WrongEpoch { expected: u64, got: u64 },
+
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
 }
 
 impl From<TobError> for ChannelError {
@@ -84,9 +80,7 @@ impl From<TobError> for ChannelError {
 }
 
 pub struct SuiTobChannel {
-    client: Client,
-    package_id: Address,
-    hashi_id: Address,
+    onchain_state: OnchainState,
     epoch: u64,
     signer: Ed25519PrivateKey,
     /// Dealers we've already returned certificates for
@@ -98,17 +92,13 @@ pub struct SuiTobChannel {
 
 impl SuiTobChannel {
     pub fn new(
-        client: Client,
-        package_id: Address,
-        hashi_id: Address,
+        onchain_state: OnchainState,
         epoch: u64,
         signer: Ed25519PrivateKey,
         committee: Committee,
     ) -> Self {
         Self {
-            client,
-            package_id,
-            hashi_id,
+            onchain_state,
             epoch,
             signer,
             seen_dealers: HashSet::new(),
@@ -141,24 +131,23 @@ impl SuiTobChannel {
         let epoch = cert.epoch();
         let signature = cert.signature_bytes().to_vec();
         let signers_bitmap = cert.signers_bitmap_bytes().to_vec();
-        let price = self
-            .client
+        let mut client = self.onchain_state.client();
+        let hashi_id = self.onchain_state.hashi_id();
+        let price = client
             .get_reference_gas_price()
             .await
             .map_err(|e| TobError::RpcError(e.to_string()))?;
-        let gas_objects = self
-            .client
+        let gas_objects = client
             .select_coins(&sender, &StructTag::sui().into(), GAS_BUDGET, &[])
             .await
             .map_err(|e| TobError::RpcError(e.to_string()))?;
         let gas_object: ObjectReference = (&gas_objects[0].object_reference())
             .try_into()
             .map_err(|e| TobError::RpcError(format!("{e:?}")))?;
-        let hashi_obj = self
-            .client
+        let hashi_obj = client
             .ledger_client()
             .get_object(
-                sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&self.hashi_id)
+                sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&hashi_id)
                     .with_read_mask(FieldMask::from_paths(["object_id", "owner"])),
             )
             .await
@@ -194,10 +183,15 @@ impl SuiTobChannel {
         signature: Vec<u8>,
         signers_bitmap: Vec<u8>,
     ) -> Result<ProgrammableTransaction, TobError> {
+        let hashi_id = self.onchain_state.hashi_id();
+        let package_id = self
+            .onchain_state
+            .package_id()
+            .ok_or_else(|| TobError::InvalidState("no package id available".into()))?;
         Ok(ProgrammableTransaction {
             inputs: vec![
                 Input::Shared {
-                    object_id: self.hashi_id,
+                    object_id: hashi_id,
                     initial_shared_version: hashi_initial_shared_version,
                     mutable: true,
                 },
@@ -228,7 +222,7 @@ impl SuiTobChannel {
                 },
             ],
             commands: vec![Command::MoveCall(MoveCall {
-                package: self.package_id,
+                package: package_id,
                 module: Identifier::from_static("cert_submission"),
                 function: Identifier::from_static("submit_dkg_cert"),
                 type_arguments: vec![],
@@ -244,83 +238,17 @@ impl SuiTobChannel {
         })
     }
 
-    async fn fetch_epoch_certs(&self) -> Result<Option<EpochCertsV1>, TobError> {
-        let epoch_key_bcs =
-            bcs::to_bytes(&self.epoch).map_err(|e| TobError::SerializationError(e.to_string()))?;
-        let mut stream = self
-            .client
-            .list_dynamic_fields(
-                ListDynamicFieldsRequest::default()
-                    .with_parent(self.hashi_id)
-                    .with_page_size(u32::MAX)
-                    .with_read_mask(FieldMask::from_paths([
-                        DynamicField::path_builder().name().finish(),
-                        DynamicField::path_builder().value().finish(),
-                    ])),
-            )
-            .pipe(Box::pin);
-        while let Some(field) = stream
-            .try_next()
-            .await
-            .map_err(|e| TobError::RpcError(e.to_string()))?
-        {
-            if field.name().value() == epoch_key_bcs.as_slice() {
-                let epoch_certs: EpochCertsV1 = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| TobError::SerializationError(e.to_string()))?;
-                return Ok(Some(epoch_certs));
-            }
-        }
-        Ok(None)
-    }
-
     /// Fetches all certificates in insertion order by following the LinkedTable's linked list.
     async fn fetch_all_certificates(&self) -> Result<Vec<(Address, Certificate)>, TobError> {
-        let epoch_certs = match self.fetch_epoch_certs().await? {
-            Some(certs) => certs,
-            None => return Ok(vec![]),
-        };
-        let Some(head) = epoch_certs.dkg_certs.head else {
-            return Ok(vec![]);
-        };
-        let mut nodes: HashMap<Address, LinkedTableNode<Address, DkgCertV1>> = HashMap::new();
-        let mut stream = self
-            .client
-            .list_dynamic_fields(
-                ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.dkg_certs.id)
-                    .with_page_size(u32::MAX)
-                    .with_read_mask(FieldMask::from_paths([
-                        DynamicField::path_builder().name().finish(),
-                        DynamicField::path_builder().value().finish(),
-                    ])),
-            )
-            .pipe(Box::pin);
-        while let Some(field) = stream
-            .try_next()
+        let raw_certs = self
+            .onchain_state
+            .fetch_dkg_certs(self.epoch)
             .await
-            .map_err(|e| TobError::RpcError(e.to_string()))?
-        {
-            let dealer: Address = field
-                .name()
-                .deserialize()
-                .map_err(|e| TobError::SerializationError(e.to_string()))?;
-            let node: LinkedTableNode<Address, DkgCertV1> = field
-                .value()
-                .deserialize()
-                .map_err(|e| TobError::SerializationError(e.to_string()))?;
-            nodes.insert(dealer, node);
-        }
-        let mut certificates = Vec::with_capacity(nodes.len());
-        let mut current = Some(head);
-        while let Some(dealer) = current {
-            let Some(node) = nodes.remove(&dealer) else {
-                break; // Shouldn't happen, but handle gracefully
-            };
-            let cert = self.convert_to_internal_cert(node.value)?;
+            .map_err(|e| TobError::RpcError(e.to_string()))?;
+        let mut certificates = Vec::with_capacity(raw_certs.len());
+        for (dealer, dkg_cert) in raw_certs {
+            let cert = self.convert_to_internal_cert(dkg_cert)?;
             certificates.push((dealer, cert));
-            current = node.next;
         }
         Ok(certificates)
     }
@@ -351,9 +279,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
         // Clone needed because `sui_rpc::Client` methods require `&mut self`,
         // but `OrderedBroadcastChannel::publish` takes `&self`.
         let mut channel = SuiTobChannel {
-            client: self.client.clone(),
-            package_id: self.package_id,
-            hashi_id: self.hashi_id,
+            onchain_state: self.onchain_state.clone(),
             epoch: self.epoch,
             signer: self.signer.clone(),
             seen_dealers: HashSet::new(),
@@ -368,8 +294,8 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
             .signer
             .sign_transaction(&tx)
             .map_err(|e| ChannelError::Other(e.to_string()))?;
-        let response = channel
-            .client
+        let mut client = self.onchain_state.client();
+        let response = client
             .execute_transaction_and_wait_for_checkpoint(
                 ExecuteTransactionRequest::new(tx.into())
                     .with_signatures(vec![signature.into()])
