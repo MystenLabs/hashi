@@ -217,7 +217,6 @@ impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputRespo
                     value: Some(serialize_bcs(&eval.value)),
                 })
                 .collect(),
-            threshold: Some(value.output.threshold as u32),
         }
     }
 }
@@ -251,13 +250,10 @@ impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputRe
             });
         }
 
-        let threshold = required(value.threshold, "threshold")? as u16;
-
         Ok(Self {
             output: types::PublicDkgOutput {
                 public_key,
                 commitments,
-                threshold,
             },
         })
     }

@@ -68,7 +68,4 @@ message GetPublicDkgOutputResponse {
 
   // The commitments for each share index.
   repeated ShareCommitment commitments = 2;
-
-  // The threshold used for this DKG.
-  optional uint32 threshold = 3;
 }

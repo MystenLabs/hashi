@@ -107,7 +107,6 @@ pub struct DkgOutput {
 pub struct PublicDkgOutput {
     pub public_key: Secp256k1Point,
     pub commitments: Vec<Eval<G>>,
-    pub threshold: u16,
 }
 
 impl PublicDkgOutput {
@@ -115,7 +114,6 @@ impl PublicDkgOutput {
         Self {
             public_key: output.public_key,
             commitments: output.commitments.clone(),
-            threshold: output.threshold,
         }
     }
 }

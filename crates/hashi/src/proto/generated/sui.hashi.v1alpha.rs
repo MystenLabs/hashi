@@ -1224,9 +1224,6 @@ pub struct GetPublicDkgOutputResponse {
     /// The commitments for each share index.
     #[prost(message, repeated, tag = "2")]
     pub commitments: ::prost::alloc::vec::Vec<ShareCommitment>,
-    /// The threshold used for this DKG.
-    #[prost(uint32, optional, tag = "3")]
-    pub threshold: ::core::option::Option<u32>,
 }
 /// Generated client implementations.
 pub mod key_rotation_service_client {

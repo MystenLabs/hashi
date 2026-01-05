@@ -1251,11 +1251,17 @@ impl DkgManager {
             let public_output = self
                 .fetch_public_dkg_output_from_quorum(p2p_channel)
                 .await?;
+            let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+                DkgError::InvalidConfig("Key rotation requires previous nodes".into())
+            })?;
+            let total_weight = previous_nodes.total_weight();
+            let max_faulty = (total_weight - 1) / 3;
+            let threshold = max_faulty + 1;
             DkgOutput {
                 public_key: public_output.public_key,
                 key_shares: avss::SharesForNode { shares: vec![] },
                 commitments: public_output.commitments,
-                threshold: public_output.threshold,
+                threshold,
             }
         };
         Ok((previous, is_existing_member))
