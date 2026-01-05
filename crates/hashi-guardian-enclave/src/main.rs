@@ -25,11 +25,8 @@ mod getters;
 mod init;
 mod s3_logger;
 mod setup;
-mod withdraw;
 
 use crate::s3_logger::S3Logger;
-use crate::withdraw::delayed_withdraw;
-use crate::withdraw::immediate_withdraw;
 use getters::*;
 use init::operator_init;
 use init::provisioner_init;
@@ -123,8 +120,6 @@ async fn main() -> Result<()> {
     } else {
         // Normal mode
         app.route("/provisioner_init", post(provisioner_init))
-            .route("/immediate_withdraw", post(immediate_withdraw))
-            .route("/delayed_withdraw", post(delayed_withdraw))
     };
 
     let app = app.with_state(enclave);

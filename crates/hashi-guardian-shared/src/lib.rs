@@ -4,12 +4,8 @@ pub mod errors;
 
 pub use crypto::*;
 pub use errors::*;
-use std::collections::HashMap;
 
-use crate::bitcoin_utils::ExternalOutputUTXO;
-use crate::bitcoin_utils::TxUTXOs;
 use crate::GuardianError::*;
-use bitcoin::taproot::Signature as BitcoinSignature;
 use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
@@ -124,36 +120,6 @@ pub struct GetAttestationResponse {
     pub attestation: Attestation,
 }
 
-/// An "immediate withdrawal" request. `HashiNodeSigned<T>.`
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ImmediateWithdrawalRequest {
-    /// Unique withdrawal ID assigned by Hashi
-    wid: WithdrawalID,
-    /// Hashi-assigned timestamp
-    timestamp_secs: HashiTime,
-    /// BTC transaction input and output utxos
-    all_utxos: TxUTXOs,
-    /// Was delayed_withdraw previously called for this withdrawal?
-    is_delayed: bool,
-}
-
-/// `EnclaveSigned<T>`
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ImmediateWithdrawalResponse {
-    pub enclave_signatures: Vec<BitcoinSignature>,
-}
-
-/// A "delayed withdrawal" request. `HashiNodeSigned<T>`.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct DelayedWithdrawalRequest {
-    /// Unique withdrawal ID assigned by Hashi
-    wid: WithdrawalID,
-    /// Hashi-assigned timestamp
-    timestamp_secs: HashiTime,
-    /// External output utxos
-    external_output_utxos: Vec<ExternalOutputUTXO>,
-}
-
 // ---------------------------------
 //          Log Messages
 // ---------------------------------
@@ -181,14 +147,6 @@ pub enum LogMessage {
     },
     /// Threshold reached - enclave fully initialized (happens once)
     EnclaveFullyInitialized,
-    /// Delayed withdraw
-    DelayedWithdrawal(DelayedWithdrawalRequest),
-    /// Immediate withdraw
-    ImmediateWithdrawal {
-        request: ImmediateWithdrawalRequest,
-        response: ImmediateWithdrawalResponse,
-        withdraw_count: u64,
-    },
 }
 
 // ---------------------------------
@@ -216,9 +174,6 @@ pub type WithdrawalID = u64;
 /// Unix timestamp in seconds
 pub type HashiTime = u64;
 
-/// Max allowed gap between hashi-assigned timestamp and enclave's time (5 mins).
-const HASHI_GUARDIAN_DELTA_SECS: u64 = 5 * 60;
-
 /// All the withdrawal config
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WithdrawalConfig {
@@ -233,9 +188,6 @@ pub struct WithdrawalConfig {
 pub struct WithdrawalState {
     /// Total number of withdrawals processed till now
     pub num_withdrawals: u64,
-    /// Pending delayed withdrawals
-    /// TODO: implement pruning
-    pub pending_delayed_withdrawals: HashMap<WithdrawalID, DelayedWithdrawalRequest>,
 }
 
 // ---------------------------------
@@ -248,10 +200,6 @@ impl SigningIntent for LogMessage {
 
 impl SigningIntent for SetupNewKeyResponse {
     const INTENT: IntentType = IntentType::SetupNewKeyResponse;
-}
-
-impl SigningIntent for ImmediateWithdrawalResponse {
-    const INTENT: IntentType = IntentType::ImmediateWithdrawalResponse;
 }
 
 impl<T> HashiNodeSigned<T> {
@@ -338,14 +286,11 @@ impl OperatorInitRequest {
         self.network
     }
 }
+
 impl ProvisionerInitRequestState {
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(self).expect("Failed to serialize");
         Blake2b::<U32>::digest(bytes).into()
-    }
-
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        self.withdrawal_state.validate(network)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -394,127 +339,6 @@ impl ProvisionerInitRequest {
 
     pub fn into_state(self) -> ProvisionerInitRequestState {
         self.state
-    }
-}
-
-impl DelayedWithdrawalRequest {
-    pub fn new(
-        wid: WithdrawalID,
-        timestamp_secs: HashiTime,
-        external_output_utxos: Vec<ExternalOutputUTXO>,
-    ) -> GuardianResult<Self> {
-        let r = Self {
-            wid,
-            timestamp_secs,
-            external_output_utxos,
-        };
-        r.validate_invariants()?;
-        Ok(r)
-    }
-
-    pub fn wid(&self) -> WithdrawalID {
-        self.wid
-    }
-
-    pub fn timestamp(&self) -> HashiTime {
-        self.timestamp_secs
-    }
-
-    pub fn external_outs(&self) -> &[ExternalOutputUTXO] {
-        &self.external_output_utxos
-    }
-
-    /// Validate the request is valid for the given network.
-    /// Called from two places: `delayed_withdraw()` & `provisioner_init()`.
-    /// `fresh_withdrawal` is true for calls from `delayed_withdraw()` and false for `provisioner_init()`.
-    pub fn validate(&self, network: Network, fresh_withdrawal: bool) -> GuardianResult<()> {
-        self.validate_invariants()?;
-
-        // verify timestamp is latest for a delayed_withdraw(); skip for provisioner_init()
-        if fresh_withdrawal {
-            validate_time(self.timestamp_secs)?;
-        }
-
-        self.external_output_utxos
-            .iter()
-            .try_for_each(|utxo| utxo.validate(network))
-    }
-
-    fn validate_invariants(&self) -> GuardianResult<()> {
-        if self.external_output_utxos.is_empty() {
-            return Err(InvalidInputs("output utxo list is empty".into()));
-        }
-
-        Ok(())
-    }
-}
-
-impl ImmediateWithdrawalRequest {
-    pub fn new(
-        wid: WithdrawalID,
-        timestamp_secs: HashiTime,
-        tx_utxos: TxUTXOs,
-        is_delayed: bool,
-    ) -> Self {
-        Self {
-            wid,
-            timestamp_secs,
-            all_utxos: tx_utxos,
-            is_delayed,
-        }
-    }
-
-    pub fn wid(&self) -> WithdrawalID {
-        self.wid
-    }
-
-    pub fn is_delayed(&self) -> bool {
-        self.is_delayed
-    }
-
-    pub fn all_utxos(&self) -> &TxUTXOs {
-        &self.all_utxos
-    }
-
-    pub fn timestamp(&self) -> HashiTime {
-        self.timestamp_secs
-    }
-
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        validate_time(self.timestamp_secs)?;
-        self.all_utxos.validate(network)
-    }
-}
-
-fn validate_time_with_now(request_time: u64, now: u64) -> GuardianResult<()> {
-    if request_time > now {
-        return Err(InvalidInputs("request is in the future".into()));
-    }
-
-    let time_gap = now - request_time;
-    if time_gap > HASHI_GUARDIAN_DELTA_SECS {
-        return Err(InvalidInputs(format!(
-            "request is too old ({}s ago, max {}s)",
-            time_gap, HASHI_GUARDIAN_DELTA_SECS
-        )));
-    }
-
-    Ok(())
-}
-
-fn validate_time(request_time: HashiTime) -> GuardianResult<()> {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("SystemTime can't be before UNIX EPOCH!")
-        .as_secs();
-    validate_time_with_now(request_time, now)
-}
-
-impl WithdrawalState {
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        self.pending_delayed_withdrawals
-            .values()
-            .try_for_each(|request| request.validate(network, false))
     }
 }
 

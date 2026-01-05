@@ -100,10 +100,7 @@ pub async fn provisioner_init(
         // shouldn't reach inside as we must've panicked elsewhere
         unreachable!("Provisioner init partially complete.");
     }
-    let network = enclave
-        .bitcoin_network()
-        .expect("network should be initialized in operator_init");
-    request.state().validate(network)?;
+    // TODO: Validate enclave state after adding withdrawal related fields
     info!("Request and enclave state validated.");
 
     let sk = enclave.encryption_secret_key();
