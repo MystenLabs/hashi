@@ -34,8 +34,6 @@ pub enum IntentType {
     LogMessage = 0,
     /// Intent for SetupNewKeyResponse
     SetupNewKeyResponse = 1,
-    /// Intent for ImmediateWithdrawalResponse
-    ImmediateWithdrawalResponse = 2,
 }
 
 /// Trait for types that can be signed, providing domain separation via an intent.
@@ -168,12 +166,6 @@ pub struct S3Config {
 pub struct HashiCommitteeInfo {}
 
 // TODO: Align types with hashi
-/// Unique identifier for a withdrawal request
-pub type WithdrawalID = u64;
-
-/// Unix timestamp in seconds
-pub type HashiTime = u64;
-
 /// All the withdrawal config
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WithdrawalConfig {
