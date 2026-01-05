@@ -12,6 +12,7 @@ use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::BatchGetObjectsRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_sdk_types::Address;
 use sui_sdk_types::Argument;
 use sui_sdk_types::GasPayment;
@@ -109,6 +110,14 @@ impl HashiNetworkBuilder {
     ) -> Result<HashiNetwork> {
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();
+        let service_info = sui
+            .client
+            .clone()
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+
         let mut configs = Vec::with_capacity(self.num_nodes);
         for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
             let mut config = HashiConfig::new_for_testing();
@@ -119,9 +128,11 @@ impl HashiNetworkBuilder {
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
             config.db = Some(dir.join(validator_address.to_string()));
 
-            //TODO fill in chain ids
-            config.sui_chain_id = None;
-            config.bitcoin_chain_id = None;
+            config.sui_chain_id = service_info.chain_id.clone();
+            // Bitcoin regtest chain id, from https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki
+            config.bitcoin_chain_id = Some(
+                "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206".to_string(),
+            );
 
             configs.push(config);
         }

@@ -1,6 +1,12 @@
 //! Configuration for the Bitcoin monitor.
 
-use bitcoin::Network;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+pub use bitcoin::BlockHash;
+pub use bitcoin::Network;
+use bitcoin::blockdata::constants::genesis_block;
+pub use bitcoincore_rpc;
 
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
@@ -21,6 +27,9 @@ pub struct MonitorConfig {
 
     /// bitcoind JSON-RPC server auth config
     pub bitcoind_rpc_auth: bitcoincore_rpc::Auth,
+
+    /// Directory for storing BTC light client data
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for MonitorConfig {
@@ -32,6 +41,7 @@ impl Default for MonitorConfig {
             start_height: 800_000,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
             bitcoind_rpc_auth: bitcoincore_rpc::Auth::None,
+            data_dir: None,
         }
     }
 }
@@ -52,6 +62,7 @@ pub struct MonitorConfigBuilder {
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
     bitcoind_rpc_auth: Option<bitcoincore_rpc::Auth>,
+    data_dir: Option<PathBuf>,
 }
 
 impl MonitorConfigBuilder {
@@ -86,6 +97,12 @@ impl MonitorConfigBuilder {
         self
     }
 
+    /// Set the directory for storing BTC light client data.
+    pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(path.into());
+        self
+    }
+
     pub fn build(self) -> MonitorConfig {
         let default = MonitorConfig::default();
 
@@ -102,6 +119,66 @@ impl MonitorConfigBuilder {
             start_height: self.start_height,
             bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
             bitcoind_rpc_auth: self.bitcoind_rpc_auth.unwrap_or(default.bitcoind_rpc_auth),
+            data_dir: self.data_dir,
         }
+    }
+}
+
+/// Wrapper around bitcoincore_rpc::Auth that we can serialize/deserialize from configs
+#[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub enum BtcRpcAuth {
+    None,
+    UserPass(String, String),
+    CookieFile(PathBuf),
+}
+
+impl BtcRpcAuth {
+    pub fn to_bitcoincore_rpc_auth(&self) -> bitcoincore_rpc::Auth {
+        match self {
+            BtcRpcAuth::None => bitcoincore_rpc::Auth::None,
+            BtcRpcAuth::UserPass(user, pass) => {
+                bitcoincore_rpc::Auth::UserPass(user.clone(), pass.clone())
+            }
+            BtcRpcAuth::CookieFile(path) => bitcoincore_rpc::Auth::CookieFile(path.clone()),
+        }
+    }
+}
+
+pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
+    let hash = BlockHash::from_str(chain_id).ok()?;
+
+    [
+        Network::Bitcoin,
+        Network::Testnet,
+        Network::Signet,
+        Network::Regtest,
+    ]
+    .into_iter()
+    .find(|&net| genesis_block(net).block_hash() == hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mainnet_genesis_mapping() {
+        let mainnet_id = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+        let network = network_from_chain_id(mainnet_id);
+        assert_eq!(network, Some(Network::Bitcoin));
+    }
+
+    #[test]
+    fn test_testnet_genesis_mapping() {
+        let mainnet_id = "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943";
+        let network = network_from_chain_id(mainnet_id);
+        assert_eq!(network, Some(Network::Testnet));
+    }
+
+    #[test]
+    fn test_regtest_genesis_mapping() {
+        let mainnet_id = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
+        let network = network_from_chain_id(mainnet_id);
+        assert_eq!(network, Some(Network::Regtest));
     }
 }

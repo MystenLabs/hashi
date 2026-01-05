@@ -33,6 +33,33 @@ pub struct GetServiceInfoResponse {
     #[prost(string, optional, tag = "8")]
     pub server: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// This maps to crate::onchain::types::DepositRequest
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignDepositConfirmationRequest {
+    /// Deposit request id (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub id: ::prost::bytes::Bytes,
+    /// Bitcoin tx id (32 bytes).
+    #[prost(bytes = "bytes", tag = "2")]
+    pub txid: ::prost::bytes::Bytes,
+    /// Bitcoin tx output index.
+    #[prost(uint32, tag = "3")]
+    pub vout: u32,
+    /// Bitcoin deposit amount in satoshis
+    #[prost(uint64, tag = "4")]
+    pub amount: u64,
+    /// Sui deposit address (32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub derivation_path: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Timestamp of the deposit request
+    #[prost(uint64, tag = "6")]
+    pub timestamp_ms: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignDepositConfirmationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
 /// Generated client implementations.
 pub mod bridge_service_client {
     #![allow(
@@ -151,6 +178,36 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Sign a deposit confirmation, confirming that bitcoin has been deposited into hashi
+        pub async fn sign_deposit_confirmation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignDepositConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignDepositConfirmationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignDepositConfirmation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignDepositConfirmation",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -172,6 +229,14 @@ pub mod bridge_service_server {
             request: tonic::Request<super::GetServiceInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetServiceInfoResponse>,
+            tonic::Status,
+        >;
+        /// Sign a deposit confirmation, confirming that bitcoin has been deposited into hashi
+        async fn sign_deposit_confirmation(
+            &self,
+            request: tonic::Request<super::SignDepositConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignDepositConfirmationResponse>,
             tonic::Status,
         >;
     }
@@ -282,6 +347,57 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetServiceInfoSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignDepositConfirmation" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignDepositConfirmationSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SignDepositConfirmationRequest>
+                    for SignDepositConfirmationSvc<T> {
+                        type Response = super::SignDepositConfirmationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignDepositConfirmationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_deposit_confirmation(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignDepositConfirmationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

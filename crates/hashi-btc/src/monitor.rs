@@ -28,7 +28,7 @@ pub struct Monitor {
 impl Monitor {
     /// Run a BTC monitor with the given configuration.
     pub fn run(config: MonitorConfig) -> Result<MonitorClient> {
-        let (kyoto_node, mut kyoto_client) = kyoto::NodeBuilder::new(config.network)
+        let mut node_builder = kyoto::NodeBuilder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
             // TODO: should we set this higher than default?
             // .required_peers(num_peers)
@@ -40,8 +40,11 @@ impl Monitor {
             .after_checkpoint(kyoto::HeaderCheckpoint::closest_checkpoint_below_height(
                 config.start_height,
                 config.network,
-            ))
-            .build()?;
+            ));
+        if let Some(data_dir) = &config.data_dir {
+            node_builder = node_builder.data_dir(data_dir.clone());
+        }
+        let (kyoto_node, mut kyoto_client) = node_builder.build()?;
 
         let bitcoind_rpc = bitcoincore_rpc::Client::new(
             config.bitcoind_rpc_url.as_str(),

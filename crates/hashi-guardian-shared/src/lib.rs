@@ -10,8 +10,7 @@ use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
-
-use ed25519_consensus::Signature;
+use ed25519_consensus::Signature as GuardianSignature;
 use ed25519_consensus::VerificationKey;
 use hpke::Deserializable;
 use hpke::Serializable;
@@ -19,6 +18,7 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
+use std::time::Duration;
 use std::time::SystemTime;
 
 // ---------------------------------
@@ -30,7 +30,7 @@ use std::time::SystemTime;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntentType {
-    /// Intent for LogMessage enum
+    /// Intent for all LogMessage's
     LogMessage = 0,
     /// Intent for SetupNewKeyResponse
     SetupNewKeyResponse = 1,
@@ -52,12 +52,19 @@ pub struct Timestamped<T> {
     pub timestamp: SystemTime,
 }
 
-/// Signed wrapper - adds timestamp and signature to any data
+/// Guardian-signed wrapper - adds timestamp and signature to any data
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Signed<T> {
+pub struct GuardianSigned<T> {
     pub data: T,
     pub timestamp: SystemTime,
-    pub signature: Signature,
+    pub signature: GuardianSignature,
+}
+
+/// Hashi-signed wrapper
+/// TODO: Add cert, intent. Align types with hashi.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HashiNodeSigned<T> {
+    pub data: T,
 }
 
 // ---------------------------------
@@ -69,9 +76,9 @@ pub struct SetupNewKeyRequest {
     key_provisioner_public_keys: Vec<Vec<u8>>,
 }
 
+/// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SetupNewKeyResponse {
-    // Signed<T>
     pub encrypted_shares: Vec<EncryptedShare>,
     pub share_commitments: Vec<ShareCommitment>,
 }
@@ -97,6 +104,10 @@ pub struct ProvisionerInitRequest {
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
     pub hashi_committee_info: HashiCommitteeInfo,
+    /// Withdrawal config
+    pub withdrawal_config: WithdrawalConfig,
+    /// Withdrawal state
+    pub withdrawal_state: WithdrawalState,
     /// Hashi BTC master key used to derive child keys for diff inputs
     pub hashi_btc_master_pubkey: XOnlyPublicKey,
 }
@@ -137,7 +148,7 @@ pub enum LogMessage {
 }
 
 // ---------------------------------
-//          Helper structs
+//      Helper types & structs
 // ---------------------------------
 
 pub type Attestation = Vec<u8>;
@@ -150,9 +161,26 @@ pub struct S3Config {
 }
 
 /// Hashi public keys used to sign messages sent to guardian
-// TODO: Add pub keys, threshold.
+// TODO: Add pub keys, threshold. Align types with hashi.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct HashiCommitteeInfo {}
+
+// TODO: Align types with hashi
+/// All the withdrawal config
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WithdrawalConfig {
+    /// The min delay after which any withdrawal is approved
+    pub delayed_withdrawals_min_delay: Duration,
+    /// The max delay after which pending withdrawals are cleaned up
+    pub delayed_withdrawals_timeout: Duration,
+}
+
+/// Withdrawal state - all that is needed to restart the enclave
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct WithdrawalState {
+    /// Total number of withdrawals processed till now
+    pub num_withdrawals: u64,
+}
 
 // ---------------------------------
 //          Helper impl's
@@ -164,6 +192,13 @@ impl SigningIntent for LogMessage {
 
 impl SigningIntent for SetupNewKeyResponse {
     const INTENT: IntentType = IntentType::SetupNewKeyResponse;
+}
+
+impl<T> HashiNodeSigned<T> {
+    pub fn verify_cert(self, _committee: &HashiCommitteeInfo) -> GuardianResult<T> {
+        // TODO: Validate sig with committee
+        Ok(self.data)
+    }
 }
 
 impl SetupNewKeyRequest {
@@ -243,6 +278,7 @@ impl OperatorInitRequest {
         self.network
     }
 }
+
 impl ProvisionerInitRequestState {
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(self).expect("Failed to serialize");
@@ -256,6 +292,11 @@ impl ProvisionerInitRequestState {
 
         let kp = create_keypair(&TEST_HASHI_SK);
         ProvisionerInitRequestState {
+            withdrawal_config: WithdrawalConfig {
+                delayed_withdrawals_min_delay: Duration::from_secs(10),
+                delayed_withdrawals_timeout: Duration::from_secs(60),
+            },
+            withdrawal_state: WithdrawalState::default(),
             hashi_committee_info: HashiCommitteeInfo::default(),
             hashi_btc_master_pubkey: kp.x_only_public_key().0,
         }
