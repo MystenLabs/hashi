@@ -58,23 +58,29 @@ pub struct InputUTXO {
     leaf_hash: TapLeafHash,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ExternalOutputUTXO {
+    /// Bitcoin address to withdraw to
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct InternalOutputUTXO {
+    /// The derivation path
+    pub derivation_path: DerivationPath,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
 /// Withdrawal destination and amount.
 /// External amounts count towards rate limits whereas internal amounts don't.
 /// Internal address is derived inside the enclave to ensure that it is actually internal.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum OutputUTXO {
-    External {
-        /// Bitcoin address to withdraw to
-        address: BitcoinAddress<NetworkUnchecked>,
-        /// Amount in satoshis
-        amount: Amount,
-    },
-    Internal {
-        /// The derivation path
-        derivation_path: DerivationPath,
-        /// Amount in satoshis
-        amount: Amount,
-    },
+    External(ExternalOutputUTXO),
+    Internal(InternalOutputUTXO),
 }
 
 /// All the UTXOs associated with a withdrawal transaction
@@ -91,7 +97,6 @@ pub struct TxUTXOs {
 // ---------------------------------
 
 /// Validates that an unchecked address is appropriate for `network`.
-/// This returns a `Result` (rather than a `bool`) so callers can surface useful error context.
 pub fn validate_address_for_network(
     address: &BitcoinAddress<NetworkUnchecked>,
     network: Network,
@@ -178,6 +183,13 @@ impl InputUTXO {
     }
 }
 
+impl ExternalOutputUTXO {
+    pub fn validate(&self, network: Network) -> GuardianResult<()> {
+        // TODO: Validate amount > 0
+        validate_address_for_network(&self.address, network)
+    }
+}
+
 /// Represents an output destination for a withdrawal.
 ///
 /// Outputs can be **external** (to a user-provided address) or **internal** (change, derived inside enclave).
@@ -185,8 +197,8 @@ impl OutputUTXO {
     /// Validates this value, including external addresses against `network`.
     pub fn validate(&self, network: Network) -> GuardianResult<()> {
         // TODO: Validate amount > 0 (and optionally enforce dust rules for External outputs).
-        if let OutputUTXO::External { address, .. } = self {
-            validate_address_for_network(address, network)?
+        if let OutputUTXO::External(x) = self {
+            x.validate(network)?
         }
         Ok(())
     }
@@ -194,8 +206,8 @@ impl OutputUTXO {
     /// Returns the output amount in satoshis.
     pub fn amount(&self) -> Amount {
         match self {
-            OutputUTXO::External { amount, .. } => *amount,
-            OutputUTXO::Internal { amount, .. } => *amount,
+            OutputUTXO::External(ExternalOutputUTXO { amount, .. }) => *amount,
+            OutputUTXO::Internal(InternalOutputUTXO { amount, .. }) => *amount,
         }
     }
 
@@ -204,12 +216,12 @@ impl OutputUTXO {
     /// Requires that `validate(network)` has been called; panics if address doesn't match `network`.
     pub fn to_txout(
         &self,
-        enclave_pubkey: XOnlyPublicKey,
-        hashi_pubkey: XOnlyPublicKey,
+        enclave_pubkey: &XOnlyPublicKey,
+        hashi_pubkey: &XOnlyPublicKey,
         network: Network,
     ) -> TxOut {
         match self {
-            OutputUTXO::External { address, amount } => TxOut {
+            OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
                 value: *amount,
                 script_pubkey: address
                     .clone()
@@ -217,10 +229,10 @@ impl OutputUTXO {
                     .expect("address should be validated before calling compute_all_outputs")
                     .script_pubkey(),
             },
-            OutputUTXO::Internal {
+            OutputUTXO::Internal(InternalOutputUTXO {
                 derivation_path,
                 amount,
-            } => {
+            }) => {
                 let scripts =
                     compute_taproot_artifacts(enclave_pubkey, hashi_pubkey, derivation_path);
                 TxOut {
@@ -297,14 +309,34 @@ impl TxUTXOs {
     /// Requires that `validate(network)` has been called.
     pub fn compute_all_outputs(
         &self,
-        enclave_pubkey: XOnlyPublicKey,
-        hashi_pubkey: XOnlyPublicKey,
+        enclave_pubkey: &XOnlyPublicKey,
+        hashi_pubkey: &XOnlyPublicKey,
         network: Network,
     ) -> Vec<TxOut> {
         self.outputs
             .iter()
             .map(|utxo| utxo.to_txout(enclave_pubkey, hashi_pubkey, network))
             .collect()
+    }
+
+    pub fn external_outs(&self) -> Vec<&ExternalOutputUTXO> {
+        self.outputs
+            .iter()
+            .filter_map(|utxo| match utxo {
+                OutputUTXO::External(x) => Some(x),
+                OutputUTXO::Internal(_) => None,
+            })
+            .collect::<Vec<_>>()
+    }
+
+    pub fn external_out_amount(&self) -> Amount {
+        self.outputs
+            .iter()
+            .filter_map(|utxo| match utxo {
+                OutputUTXO::External(x) => Some(x.amount),
+                OutputUTXO::Internal(_) => None,
+            })
+            .sum()
     }
 
     fn fees(&self) -> GuardianResult<Amount> {
@@ -346,10 +378,10 @@ pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
 /// Requires that `tx_info.validate(network)` has been called.
 pub fn construct_signing_messages(
     tx_info: &TxUTXOs,
-    enclave_pubkey: XOnlyPublicKey,
-    hashi_pubkey: XOnlyPublicKey,
+    enclave_pubkey: &XOnlyPublicKey,
+    hashi_pubkey: &XOnlyPublicKey,
     network: Network,
-) -> GuardianResult<Vec<Message>> {
+) -> Vec<Message> {
     let inputs = tx_info.get_inputs();
 
     // Construct tx
@@ -375,9 +407,9 @@ pub fn construct_signing_messages(
                     TapSighashType::Default,
                 )
                 .expect("sighash failed unexpectedly");
-            Ok(Message::from_digest(*sighash.as_byte_array()))
+            Message::from_digest(*sighash.as_byte_array())
         })
-        .collect::<GuardianResult<Vec<Message>>>()
+        .collect::<Vec<Message>>()
 }
 
 /// Constructs a Bitcoin transaction with the given inputs and outputs.
@@ -404,8 +436,8 @@ fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 /// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
 /// 3. Place the tapscript as the sole leaf with a NUMS internal key
 pub fn compute_taproot_descriptor(
-    enclave_pubkey: XOnlyPublicKey,
-    hashi_master_pubkey: XOnlyPublicKey,
+    enclave_pubkey: &XOnlyPublicKey,
+    hashi_master_pubkey: &XOnlyPublicKey,
     hashi_derivation_path: &DerivationPath,
 ) -> Tr<XOnlyPublicKey> {
     let derived_hashi_pubkey = get_derived_pubkey(hashi_master_pubkey, hashi_derivation_path);
@@ -431,8 +463,8 @@ pub fn compute_taproot_descriptor(
 
 /// Computes both the address and leaf script for a given derivation path and network.
 fn compute_taproot_artifacts(
-    enclave_pubkey: XOnlyPublicKey,
-    hashi_master_pubkey: XOnlyPublicKey,
+    enclave_pubkey: &XOnlyPublicKey,
+    hashi_master_pubkey: &XOnlyPublicKey,
     hashi_derivation_path: &DerivationPath,
 ) -> (ScriptBuf, TapLeafHash) {
     let desc =
@@ -452,7 +484,7 @@ fn compute_taproot_artifacts(
 ///
 /// Uses the provided derivation path to compute a new public key.
 fn get_derived_pubkey(
-    parent_pubkey: XOnlyPublicKey,
+    parent_pubkey: &XOnlyPublicKey,
     derivation_path: &DerivationPath,
 ) -> XOnlyPublicKey {
     // Get x-only public key bytes (32 bytes)
@@ -536,8 +568,8 @@ mod bitcoin_tests {
     }
 
     fn create_taproot_artifacts_for_test(
-        enclave_pubkey: XOnlyPublicKey,
-        hashi_master_pubkey: XOnlyPublicKey,
+        enclave_pubkey: &XOnlyPublicKey,
+        hashi_master_pubkey: &XOnlyPublicKey,
         hashi_derivation_path: &DerivationPath,
         network: Network,
     ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
@@ -601,7 +633,7 @@ mod bitcoin_tests {
         let hashi_pk = hashi_keypair.x_only_public_key().0;
 
         let (address, control_block, tap_script) =
-            create_taproot_artifacts_for_test(enclave_pk, hashi_pk, &[0u8; 32], Network::Regtest);
+            create_taproot_artifacts_for_test(&enclave_pk, &hashi_pk, &[0u8; 32], Regtest);
         println!("\n=== 2-of-2 Multisig Address ===");
         println!("Address: {}", address);
         println!("Enclave pubkey: {}", enclave_pk);
@@ -619,7 +651,7 @@ mod bitcoin_tests {
                 .unwrap(),
             vout: 1,
         };
-        let (_, leaf_hash) = compute_taproot_artifacts(enclave_pk, hashi_pk, &[0u8; 32]);
+        let (_, leaf_hash) = compute_taproot_artifacts(&enclave_pk, &hashi_pk, &[0u8; 32]);
 
         let input_amount = Amount::from_sat(100000000); // 1.0 BTC
         let input_utxo = InputUTXO::new(
@@ -634,23 +666,22 @@ mod bitcoin_tests {
         let tx_info = TxUTXOs::new(
             vec![input_utxo.clone()],
             vec![
-                OutputUTXO::External {
+                OutputUTXO::External(ExternalOutputUTXO {
                     address: dest_address.as_unchecked().clone(),
                     amount: Amount::from_sat(100), // 100 sats is sent
-                },
-                OutputUTXO::Internal {
+                }),
+                OutputUTXO::Internal(InternalOutputUTXO {
                     derivation_path: [0; 32],
                     amount: input_amount - Amount::from_sat(1000),
-                },
+                }),
             ],
         )
         .unwrap();
 
         // Validate early (fail fast)
-        tx_info.validate(Network::Regtest).unwrap();
+        tx_info.validate(Regtest).unwrap();
 
-        let messages =
-            construct_signing_messages(&tx_info, enclave_pk, hashi_pk, Network::Regtest).unwrap();
+        let messages = construct_signing_messages(&tx_info, &enclave_pk, &hashi_pk, Regtest);
         let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair);
 
         // D) Hashi signs the transaction.
@@ -670,7 +701,7 @@ mod bitcoin_tests {
         let mut input_txin = input_utxo.txin();
         input_txin.witness = witness;
 
-        let all_outputs = tx_info.compute_all_outputs(enclave_pk, hashi_pk, Regtest);
+        let all_outputs = tx_info.compute_all_outputs(&enclave_pk, &hashi_pk, Regtest);
         let signed_tx = construct_tx(vec![input_txin], all_outputs);
         println!("Signed TX: {:#?}", signed_tx);
         println!("TXID: {}", signed_tx.compute_txid());

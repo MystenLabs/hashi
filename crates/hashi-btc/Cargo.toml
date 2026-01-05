@@ -8,13 +8,16 @@ description = "Bitcoin management library for the Hashi system"
 # Bitcoin libraries
 bitcoin = "0.32.7"
 bitcoincore-rpc = "0.19.0"
+
+anyhow = "1.0.98"
 bdk_chain = "0.23.1"
 bdk_core = "0.6.1"
-kyoto-cbf = "0.13.2"
-tokio = { version = "1.46.1", features = ["full"] }
-anyhow = "1.0.98"
-tracing = "0.1.41"
 clap = { version = "4.5", features = ["derive"] }
+kyoto-cbf = "0.13.2"
+serde = "1.0.219"
+serde_derive = "1.0.219"
+tokio = { version = "1.46.1", features = ["full"] }
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 [[example]]

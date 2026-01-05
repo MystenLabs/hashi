@@ -1,7 +1,7 @@
 use crate::bitcoin_utils::BTC_LIB;
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
-use crate::Signed;
+use crate::GuardianSigned;
 use crate::SigningIntent;
 use ed25519_consensus::SigningKey;
 use ed25519_consensus::VerificationKey;
@@ -278,7 +278,7 @@ pub fn decrypt_share(
 // ---------------------------------
 
 /// Methods for `Signed<T>` wrapper - signing and verification
-impl<T: Serialize + SigningIntent> Signed<T> {
+impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
     pub fn new(data: T, signing_key: &SigningKey, timestamp: SystemTime) -> Self {

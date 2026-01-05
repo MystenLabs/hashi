@@ -2,10 +2,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
+use anyhow::anyhow;
+
 pub mod committee;
 pub mod communication;
 pub mod config;
 pub mod db;
+pub mod deposits;
 pub mod dkg;
 pub mod grpc;
 pub mod metrics;
@@ -28,6 +31,7 @@ pub struct Hashi {
     onchain_state: OnceLock<onchain::OnchainState>,
     // TODO: Replace `DkgManager` by `MpcManager`
     dkg_manager: OnceLock<Mutex<dkg::DkgManager>>,
+    btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
 
 impl Hashi {
@@ -42,6 +46,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            btc_monitor: OnceLock::new(),
         })
     }
 
@@ -59,6 +64,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            btc_monitor: OnceLock::new(),
         })
     }
 
@@ -76,6 +82,10 @@ impl Hashi {
 
     pub fn dkg_manager(&self) -> &Mutex<dkg::DkgManager> {
         self.dkg_manager.get().expect("DkgManager not initialized")
+    }
+
+    pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
+        self.btc_monitor.get().expect("BtcMonitor not initialized")
     }
 
     async fn initialize_onchain_state(&self) {
@@ -101,7 +111,7 @@ impl Hashi {
         let signing_key = self
             .config
             .protocol_private_key()
-            .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
+            .ok_or_else(|| anyhow!("no protocol_private_key configured"))?;
         let store = Box::new(storage::EpochPublicMessagesStore::new(
             self.db.clone(),
             committee_set.epoch(),
@@ -116,7 +126,33 @@ impl Hashi {
         )?;
         self.dkg_manager
             .set(Mutex::new(dkg_manager))
-            .map_err(|_| anyhow::anyhow!("DkgManager already initialized"))?;
+            .map_err(|_| anyhow!("DkgManager already initialized"))?;
+        Ok(())
+    }
+
+    fn initialize_btc_monitor(&self) -> anyhow::Result<()> {
+        let monitor_config = hashi_btc::config::MonitorConfig::builder()
+            .network(self.config.bitcoin_network())
+            .confirmation_threshold(self.config.bitcoin_confirmation_threshold())
+            .start_height(self.config.bitcoin_start_height())
+            .bitcoind_rpc_config(
+                self.config.bitcoin_rpc().to_string(),
+                self.config.bitcoin_rpc_auth(),
+            )
+            .data_dir(
+                self.config
+                    .db
+                    .as_deref()
+                    .expect("Db path is not set")
+                    .join("btc-monitor"),
+            )
+            .build();
+        self.btc_monitor
+            .set(
+                hashi_btc::monitor::Monitor::run(monitor_config)
+                    .expect("Failed to start BtcMonitor"),
+            )
+            .map_err(|_| anyhow!("BtcMonitor already initialized"))?;
         Ok(())
     }
 
@@ -125,6 +161,9 @@ impl Hashi {
             self.initialize_onchain_state().await;
             if let Err(e) = self.initialize_dkg() {
                 tracing::error!("Failed to initialize DKG: {e}");
+            }
+            if let Err(e) = self.initialize_btc_monitor() {
+                tracing::error!("Failed to initialize BtcMonitor: {e}");
             }
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
