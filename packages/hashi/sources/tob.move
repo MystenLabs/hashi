@@ -9,10 +9,10 @@ const EWrongEpoch: u64 = 0;
 const ETooEarlyToDestroy: u64 = 1;
 
 /// Certificates for a single epoch.
-public struct EpochCerts has store {
+public struct EpochCertsV1 has store {
     epoch: u64,
-    /// DKG certificates v1 indexed by dealer address (first-cert-wins).
-    dkg_certs_v1: LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>,
+    /// DKG certificates indexed by dealer address (first-cert-wins).
+    dkg_certs: LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>,
 }
 
 public struct DkgDealerMessageHashV1 has copy, drop, store {
@@ -20,26 +20,26 @@ public struct DkgDealerMessageHashV1 has copy, drop, store {
     message_hash: vector<u8>,
 }
 
-public(package) fun create(epoch: u64, ctx: &mut TxContext): EpochCerts {
-    EpochCerts {
+public(package) fun create(epoch: u64, ctx: &mut TxContext): EpochCertsV1 {
+    EpochCertsV1 {
         epoch,
-        dkg_certs_v1: linked_table::new(ctx),
+        dkg_certs: linked_table::new(ctx),
     }
 }
 
-/// Remove all DKG certificates and destroy the EpochCerts in one transaction.
+/// Remove all DKG certificates and destroy the EpochCertsV1 in one transaction.
 /// Can only be called when current_epoch >= epoch + 2.
-public(package) fun destroy_all(epoch_certs: EpochCerts, current_epoch: u64) {
-    let EpochCerts { epoch, mut dkg_certs_v1 } = epoch_certs;
+public(package) fun destroy_all(epoch_certs: EpochCertsV1, current_epoch: u64) {
+    let EpochCertsV1 { epoch, mut dkg_certs } = epoch_certs;
     assert!(current_epoch >= epoch + 2, ETooEarlyToDestroy);
-    while (!dkg_certs_v1.is_empty()) {
-        let (_, _) = dkg_certs_v1.pop_front();
+    while (!dkg_certs.is_empty()) {
+        let (_, _) = dkg_certs.pop_front();
     };
-    dkg_certs_v1.destroy_empty();
+    dkg_certs.destroy_empty();
 }
 
 public(package) fun submit_dkg_cert(
-    epoch_certs: &mut EpochCerts,
+    epoch_certs: &mut EpochCertsV1,
     committee: &Committee,
     epoch: u64,
     dealer: address,
@@ -49,11 +49,11 @@ public(package) fun submit_dkg_cert(
     threshold: u16,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
-    if (epoch_certs.dkg_certs_v1.contains(dealer)) {
+    if (epoch_certs.dkg_certs.contains(dealer)) {
         return
     };
     let message = DkgDealerMessageHashV1 { dealer_address: dealer, message_hash };
     let sig = hashi::committee::new_committee_signature(epoch, signature, signers_bitmap);
     let cert = committee.verify_certificate(message, sig, threshold);
-    epoch_certs.dkg_certs_v1.push_back(dealer, cert);
+    epoch_certs.dkg_certs.push_back(dealer, cert);
 }

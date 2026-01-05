@@ -18,7 +18,7 @@ public struct Hashi has key {
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: ProposalSet,
-    /// TOB certificates by epoch (epoch -> EpochCerts)
+    /// TOB certificates by epoch (epoch -> EpochCertsV1)
     tob: Bag,
 }
 
@@ -135,7 +135,7 @@ public(package) fun epoch_certs_and_committee(
     self: &mut Hashi,
     epoch: u64,
     ctx: &mut TxContext,
-): (&mut hashi::tob::EpochCerts, &Committee) {
+): (&mut hashi::tob::EpochCertsV1, &Committee) {
     if (!self.tob.contains(epoch)) {
         self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };

@@ -35,6 +35,6 @@ entry fun submit_dkg_cert(
 entry fun destroy_all_dkg_certs(hashi: &mut Hashi, epoch: u64) {
     hashi.config().assert_version_enabled();
     let current_epoch = hashi.committee_set().epoch();
-    let epoch_certs: hashi::tob::EpochCerts = hashi.tob_mut().remove(epoch);
+    let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(epoch);
     hashi::tob::destroy_all(epoch_certs, current_epoch);
 }
