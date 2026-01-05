@@ -182,15 +182,10 @@ pub struct ComplainResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationShareComplaint {
-    pub share_index: ShareIndex,
-    pub complaint: complaint::Complaint,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RotationComplainRequest {
     pub dealer: Address,
-    pub complaints: Vec<RotationShareComplaint>,
+    pub share_index: ShareIndex,
+    pub complaint: complaint::Complaint,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

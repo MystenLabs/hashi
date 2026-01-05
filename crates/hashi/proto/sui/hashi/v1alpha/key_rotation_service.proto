@@ -68,14 +68,6 @@ message GetPublicDkgOutputResponse {
   optional uint32 threshold = 3;
 }
 
-message RotationShareComplaint {
-  // The share index for which the complaint is being made.
-  optional uint32 share_index = 1;
-
-  // The complaint containing proof of invalid share.
-  optional sui.rpc.v2.Bcs complaint = 2;
-}
-
 message RotationComplainRequest {
   // The epoch for this rotation instance.
   optional uint64 epoch = 1;
@@ -83,19 +75,23 @@ message RotationComplainRequest {
   // The hex-encoded Sui address of the dealer who sent invalid shares.
   optional string dealer = 2;
 
-  // The complaints for each share index that needs recovery.
-  repeated RotationShareComplaint complaints = 3;
+  // The share index that triggered the complaint.
+  optional uint32 share_index = 3;
+
+  // The complaint containing proof of invalid share.
+  optional sui.rpc.v2.Bcs complaint = 4;
 }
 
 message RotationShareComplaintResponse {
   // The share index for which the response is provided.
   optional uint32 share_index = 1;
 
-  // The complaint response containing the correct share.
+  // The complaint response containing the responder's share.
   optional sui.rpc.v2.Bcs response = 2;
 }
 
 message RotationComplainResponse {
-  // The complaint responses for each share index.
+  // Response containing complaint responses for all shares the responder has.
+  // May not include all dealer's shares if responder is also missing some.
   repeated RotationShareComplaintResponse responses = 1;
 }

@@ -1220,15 +1220,6 @@ pub struct GetPublicDkgOutputResponse {
     pub threshold: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RotationShareComplaint {
-    /// The share index for which the complaint is being made.
-    #[prost(uint32, optional, tag = "1")]
-    pub share_index: ::core::option::Option<u32>,
-    /// The complaint containing proof of invalid share.
-    #[prost(message, optional, tag = "2")]
-    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RotationComplainRequest {
     /// The epoch for this rotation instance.
     #[prost(uint64, optional, tag = "1")]
@@ -1236,22 +1227,26 @@ pub struct RotationComplainRequest {
     /// The hex-encoded Sui address of the dealer who sent invalid shares.
     #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-    /// The complaints for each share index that needs recovery.
-    #[prost(message, repeated, tag = "3")]
-    pub complaints: ::prost::alloc::vec::Vec<RotationShareComplaint>,
+    /// The share index that triggered the complaint.
+    #[prost(uint32, optional, tag = "3")]
+    pub share_index: ::core::option::Option<u32>,
+    /// The complaint containing proof of invalid share.
+    #[prost(message, optional, tag = "4")]
+    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RotationShareComplaintResponse {
     /// The share index for which the response is provided.
     #[prost(uint32, optional, tag = "1")]
     pub share_index: ::core::option::Option<u32>,
-    /// The complaint response containing the correct share.
+    /// The complaint response containing the responder's share.
     #[prost(message, optional, tag = "2")]
     pub response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RotationComplainResponse {
-    /// The complaint responses for each share index.
+    /// Response containing complaint responses for all shares the responder has.
+    /// May not include all dealer's shares if responder is also missing some.
     #[prost(message, repeated, tag = "1")]
     pub responses: ::prost::alloc::vec::Vec<RotationShareComplaintResponse>,
 }
