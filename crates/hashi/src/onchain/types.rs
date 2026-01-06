@@ -312,14 +312,14 @@ impl DepositRequestQueue {
     }
 }
 
-#[derive(Debug, PartialEq, serde_derive::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
 pub struct DepositRequest {
     pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
 }
 
-#[derive(Debug, PartialEq, serde_derive::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis
