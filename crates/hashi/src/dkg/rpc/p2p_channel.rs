@@ -9,6 +9,8 @@ use crate::dkg::types::RetrieveMessageRequest;
 use crate::dkg::types::RetrieveMessageResponse;
 use crate::dkg::types::RetrieveRotationMessagesRequest;
 use crate::dkg::types::RetrieveRotationMessagesResponse;
+use crate::dkg::types::RotationComplainRequest;
+use crate::dkg::types::RotationComplainResponse;
 use crate::dkg::types::SendMessageRequest;
 use crate::dkg::types::SendMessageResponse;
 use crate::dkg::types::SendRotationMessagesRequest;
@@ -102,5 +104,16 @@ impl P2PChannel for RpcP2PChannel {
             .get_public_dkg_output(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+    }
+
+    async fn rotation_complain(
+        &self,
+        _party: &Address,
+        _request: &RotationComplainRequest,
+    ) -> ChannelResult<RotationComplainResponse> {
+        // TODO: Implement when `KeyRotationRpcClient` is available
+        Err(ChannelError::Other(
+            "rotation complain not yet implemented".to_string(),
+        ))
     }
 }

@@ -11,6 +11,7 @@ pub mod db;
 pub mod deposits;
 pub mod dkg;
 pub mod grpc;
+pub mod leader;
 pub mod metrics;
 pub mod onchain;
 pub mod proto;
@@ -158,14 +159,23 @@ impl Hashi {
 
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
+            // Initialize
             self.initialize_onchain_state().await;
-            if let Err(e) = self.initialize_dkg() {
+            let init_dkg_result = self.initialize_dkg();
+            if let Err(e) = init_dkg_result {
                 tracing::error!("Failed to initialize DKG: {e}");
+                return;
             }
-            if let Err(e) = self.initialize_btc_monitor() {
+            let init_btc_result = self.initialize_btc_monitor();
+            if let Err(e) = init_btc_result {
                 tracing::error!("Failed to initialize BtcMonitor: {e}");
+                return;
             }
-            let _http_server = grpc::HttpService::new(self.clone()).start().await;
+
+            // Start services
+            let http_service = grpc::HttpService::new(self.clone()).start();
+            let leader_service = leader::LeaderService::new(self.clone()).start();
+            tokio::join!(http_service, leader_service);
         });
     }
 }

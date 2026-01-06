@@ -12,6 +12,7 @@ use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
@@ -98,7 +99,7 @@ impl SessionId {
 pub struct DkgOutput {
     pub public_key: G,
     pub key_shares: avss::SharesForNode,
-    pub commitments: Vec<Eval<G>>,
+    pub commitments: BTreeMap<ShareIndex, G>,
     pub threshold: u16,
 }
 
@@ -112,7 +113,11 @@ impl PublicDkgOutput {
     pub fn from_dkg_output(output: &DkgOutput) -> Self {
         Self {
             public_key: output.public_key,
-            commitments: output.commitments.clone(),
+            commitments: output
+                .commitments
+                .iter()
+                .map(|(&index, &value)| Eval { index, value })
+                .collect(),
         }
     }
 }
@@ -128,14 +133,30 @@ pub struct GetPublicDkgOutputResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationMessage {
-    pub share_index: ShareIndex,
-    pub message: avss::Message,
+pub struct RotationMessages {
+    messages: BTreeMap<ShareIndex, avss::Message>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationMessages {
-    pub messages: Vec<RotationMessage>,
+impl RotationMessages {
+    pub fn new(messages: BTreeMap<ShareIndex, avss::Message>) -> Self {
+        Self { messages }
+    }
+
+    pub fn get(&self, share_index: ShareIndex) -> Option<&avss::Message> {
+        self.messages.get(&share_index)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ShareIndex, &avss::Message)> {
+        self.messages.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +208,24 @@ pub struct ComplainRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainResponse {
     pub response: complaint::ComplaintResponse<avss::SharesForNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationComplainRequest {
+    pub dealer: Address,
+    pub share_index: ShareIndex,
+    pub complaint: complaint::Complaint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationShareComplaintResponse {
+    pub share_index: ShareIndex,
+    pub response: complaint::ComplaintResponse<avss::SharesForNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotationComplainResponse {
+    pub responses: Vec<RotationShareComplaintResponse>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -275,6 +314,16 @@ mod tests {
     use std::num::NonZeroU16;
 
     const EXPECT_DKG_MESSAGE: &str = "expected Dkg message";
+
+    impl RotationMessages {
+        pub fn insert(&mut self, share_index: ShareIndex, message: avss::Message) {
+            self.messages.insert(share_index, message);
+        }
+
+        pub fn keys(&self) -> impl Iterator<Item = &ShareIndex> {
+            self.messages.keys()
+        }
+    }
 
     impl MpcMessageV1 {
         pub fn as_dkg_message(&self) -> &DkgDealerMessageHash {

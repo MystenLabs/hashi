@@ -50,8 +50,8 @@ base64ct = { version = "1.6.0", features = ["alloc"] }
 fjall = { version = "3.0.0", features = ["bytes_1"] }
 
 # DKG dependencies
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa", features = ["experimental"] }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2", features = ["experimental"] }
 async-trait = "0.1"
 thiserror = "1.0"
 hex = "0.4"
@@ -65,4 +65,4 @@ ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tracing-test = "0.2"
-tempfile = "3.0"
+tempfile = "3.23.0"

@@ -71,6 +71,22 @@ pub struct Config {
     /// Database path
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
+
+    /// Force validator to run as leader, or never run as leader
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_run_as_leader: Option<ForceRunAsLeader>,
+}
+
+#[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForceRunAsLeader {
+    /// Use default leader selection, taking turns
+    #[default]
+    Default,
+    /// Always run as leader
+    Always,
+    /// Never run as aleader
+    Never,
 }
 
 impl Config {
@@ -219,6 +235,10 @@ impl Config {
             package_id: Address::ZERO,
             hashi_object_id: Address::ZERO,
         })
+    }
+
+    pub fn force_run_as_leader(&self) -> ForceRunAsLeader {
+        self.force_run_as_leader.clone().unwrap_or_default()
     }
 
     // Creates a new config suitable for testing. In particular this config will:
