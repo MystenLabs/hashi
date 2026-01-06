@@ -1314,23 +1314,17 @@ pub struct GetPublicDkgOutputRequest {
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ShareCommitment {
-    /// The share index (1-based).
-    #[prost(uint32, optional, tag = "1")]
-    pub index: ::core::option::Option<u32>,
-    /// The commitment value.
-    #[prost(message, optional, tag = "2")]
-    pub value: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPublicDkgOutputResponse {
     /// The aggregated public key.
     #[prost(message, optional, tag = "1")]
     pub public_key: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// The commitments for each share index.
-    #[prost(message, repeated, tag = "2")]
-    pub commitments: ::prost::alloc::vec::Vec<ShareCommitment>,
+    /// The commitments keyed by share index.
+    #[prost(map = "uint32, message", tag = "2")]
+    pub commitments: ::std::collections::HashMap<
+        u32,
+        ::sui_rpc::proto::sui::rpc::v2::Bcs,
+    >,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RotationComplainRequest {

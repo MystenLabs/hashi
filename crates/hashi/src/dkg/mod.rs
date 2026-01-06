@@ -1497,11 +1497,7 @@ impl DkgManager {
             DkgOutput {
                 public_key: public_output.public_key,
                 key_shares: avss::SharesForNode { shares: vec![] },
-                commitments: public_output
-                    .commitments
-                    .into_iter()
-                    .map(|eval| (eval.index, eval.value))
-                    .collect(),
+                commitments: public_output.commitments,
                 threshold,
             }
         };

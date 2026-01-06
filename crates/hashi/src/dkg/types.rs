@@ -4,7 +4,6 @@ use crate::committee::BLS12381Signature;
 use crate::committee::SignedMessage;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::avss;
@@ -106,18 +105,14 @@ pub struct DkgOutput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicDkgOutput {
     pub public_key: G,
-    pub commitments: Vec<Eval<G>>,
+    pub commitments: BTreeMap<ShareIndex, G>,
 }
 
 impl PublicDkgOutput {
     pub fn from_dkg_output(output: &DkgOutput) -> Self {
         Self {
             public_key: output.public_key,
-            commitments: output
-                .commitments
-                .iter()
-                .map(|(&index, &value)| Eval { index, value })
-                .collect(),
+            commitments: output.commitments.clone(),
         }
     }
 }

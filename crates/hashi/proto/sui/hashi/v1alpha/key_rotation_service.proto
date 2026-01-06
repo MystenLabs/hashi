@@ -49,20 +49,12 @@ message GetPublicDkgOutputRequest {
   optional uint64 epoch = 1;
 }
 
-message ShareCommitment {
-  // The share index (1-based).
-  optional uint32 index = 1;
-
-  // The commitment value.
-  optional sui.rpc.v2.Bcs value = 2;
-}
-
 message GetPublicDkgOutputResponse {
   // The aggregated public key.
   optional sui.rpc.v2.Bcs public_key = 1;
 
-  // The commitments for each share index.
-  repeated ShareCommitment commitments = 2;
+  // The commitments keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> commitments = 2;
 }
 
 message RotationComplainRequest {

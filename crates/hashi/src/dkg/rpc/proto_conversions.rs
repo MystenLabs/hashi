@@ -227,10 +227,7 @@ impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputRespo
                 .output
                 .commitments
                 .iter()
-                .map(|eval| proto::ShareCommitment {
-                    index: Some(eval.index.get() as u32),
-                    value: Some(serialize_bcs(&eval.value)),
-                })
+                .map(|(&index, value)| (index.get() as u32, serialize_bcs(value)))
                 .collect(),
         }
     }
@@ -240,31 +237,22 @@ impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputRe
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::GetPublicDkgOutputResponse) -> Result<Self, Self::Error> {
-        use fastcrypto_tbls::polynomial::Eval;
         use fastcrypto_tbls::threshold_schnorr::G;
         use fastcrypto_tbls::types::ShareIndex;
+        use std::collections::BTreeMap;
 
         let public_key = deserialize_bcs(
             required(value.public_key.as_ref(), "public_key")?,
             "public_key",
         )?;
-
-        let mut commitments = Vec::with_capacity(value.commitments.len());
-        for commitment in &value.commitments {
-            let index = required(commitment.index, "commitment.index")?;
+        let mut commitments = BTreeMap::new();
+        for (&index, bcs) in &value.commitments {
             let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
-                TryFromProtoError::invalid("commitment.index", "index must be non-zero")
+                TryFromProtoError::invalid("commitments.key", "index must be non-zero")
             })?;
-            let eval_value: G = deserialize_bcs(
-                required(commitment.value.as_ref(), "commitment.value")?,
-                "commitment.value",
-            )?;
-            commitments.push(Eval {
-                index: share_index,
-                value: eval_value,
-            });
+            let commitment_value: G = deserialize_bcs(bcs, "commitments.value")?;
+            commitments.insert(share_index, commitment_value);
         }
-
         Ok(Self {
             output: types::PublicDkgOutput {
                 public_key,
