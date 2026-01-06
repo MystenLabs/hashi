@@ -8,6 +8,8 @@ use crate::proto::RetrieveMessageRequest;
 use crate::proto::RetrieveMessageResponse;
 use crate::proto::RetrieveRotationMessagesRequest;
 use crate::proto::RetrieveRotationMessagesResponse;
+use crate::proto::RotationComplainRequest;
+use crate::proto::RotationComplainResponse;
 use crate::proto::SendMessageRequest;
 use crate::proto::SendMessageResponse;
 use crate::proto::SendRotationMessagesRequest;
@@ -102,6 +104,16 @@ impl KeyRotationService for HttpService {
     ) -> Result<tonic::Response<GetPublicDkgOutputResponse>, Status> {
         Err(Status::unimplemented(
             "get_public_dkg_output not yet implemented",
+        ))
+    }
+
+    #[tracing::instrument(skip(self, _request))]
+    async fn rotation_complain(
+        &self,
+        _request: tonic::Request<RotationComplainRequest>,
+    ) -> Result<tonic::Response<RotationComplainResponse>, Status> {
+        Err(Status::unimplemented(
+            "rotation_complain not yet implemented",
         ))
     }
 }

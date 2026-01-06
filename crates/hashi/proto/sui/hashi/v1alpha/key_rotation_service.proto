@@ -13,22 +13,17 @@ service KeyRotationService {
 
   // Get public DKG output for an epoch.
   rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
-}
 
-message RotationMessage {
-  // The share index being reshared.
-  optional uint32 share_index = 1;
-
-  // The AVSS message for this share.
-  optional sui.rpc.v2.Bcs message = 2;
+  // Send a complaint about invalid shares for a specific share index and receive the correct shares.
+  rpc RotationComplain(RotationComplainRequest) returns (RotationComplainResponse);
 }
 
 message SendRotationMessagesRequest {
   // The epoch for this rotation instance.
   optional uint64 epoch = 1;
 
-  // The bundle of rotation messages (one per share the dealer holds).
-  repeated RotationMessage messages = 2;
+  // The rotation messages keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> messages = 2;
 }
 
 message SendRotationMessagesResponse {
@@ -45,8 +40,8 @@ message RetrieveRotationMessagesRequest {
 }
 
 message RetrieveRotationMessagesResponse {
-  // The bundle of rotation messages.
-  repeated RotationMessage messages = 1;
+  // The rotation messages keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> messages = 1;
 }
 
 message GetPublicDkgOutputRequest {
@@ -71,4 +66,32 @@ message GetPublicDkgOutputResponse {
 
   // The threshold used for this DKG.
   optional uint32 threshold = 3;
+}
+
+message RotationComplainRequest {
+  // The epoch for this rotation instance.
+  optional uint64 epoch = 1;
+
+  // The hex-encoded Sui address of the dealer who sent invalid shares.
+  optional string dealer = 2;
+
+  // The share index that triggered the complaint.
+  optional uint32 share_index = 3;
+
+  // The complaint containing proof of invalid share.
+  optional sui.rpc.v2.Bcs complaint = 4;
+}
+
+message RotationShareComplaintResponse {
+  // The share index for which the response is provided.
+  optional uint32 share_index = 1;
+
+  // The complaint response containing the responder's share.
+  optional sui.rpc.v2.Bcs response = 2;
+}
+
+message RotationComplainResponse {
+  // Response containing complaint responses for all shares the responder has.
+  // May not include all dealer's shares if responder is also missing some.
+  repeated RotationShareComplaintResponse responses = 1;
 }

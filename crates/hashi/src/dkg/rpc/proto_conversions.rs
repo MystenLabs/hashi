@@ -178,3 +178,94 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplainResponse {
         Ok(Self { response })
     }
 }
+
+//
+// RotationComplainRequest
+//
+
+impl types::RotationComplainRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::RotationComplainRequest {
+        proto::RotationComplainRequest {
+            epoch: Some(epoch),
+            dealer: Some(self.dealer.to_string()),
+            share_index: Some(self.share_index.get() as u32),
+            complaint: Some(serialize_bcs(&self.complaint)),
+        }
+    }
+}
+
+impl TryFrom<&proto::RotationComplainRequest> for types::RotationComplainRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RotationComplainRequest) -> Result<Self, Self::Error> {
+        let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
+        let share_index = required(value.share_index, "share_index")?;
+        let share_index = std::num::NonZeroU16::new(share_index as u16)
+            .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))?;
+        let complaint: complaint::Complaint = deserialize_bcs(
+            required(value.complaint.as_ref(), "complaint")?,
+            "complaint",
+        )?;
+        Ok(Self {
+            dealer,
+            share_index,
+            complaint,
+        })
+    }
+}
+
+//
+// RotationShareComplaintResponse
+//
+
+impl From<&types::RotationShareComplaintResponse> for proto::RotationShareComplaintResponse {
+    fn from(value: &types::RotationShareComplaintResponse) -> Self {
+        Self {
+            share_index: Some(value.share_index.get() as u32),
+            response: Some(serialize_bcs(&value.response)),
+        }
+    }
+}
+
+impl TryFrom<&proto::RotationShareComplaintResponse> for types::RotationShareComplaintResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RotationShareComplaintResponse) -> Result<Self, Self::Error> {
+        let share_index = required(value.share_index, "share_index")?;
+        let share_index = std::num::NonZeroU16::new(share_index as u16)
+            .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))?;
+        let response: complaint::ComplaintResponse<avss::SharesForNode> =
+            deserialize_bcs(required(value.response.as_ref(), "response")?, "response")?;
+        Ok(Self {
+            share_index,
+            response,
+        })
+    }
+}
+
+//
+// RotationComplainResponse
+//
+
+impl From<&types::RotationComplainResponse> for proto::RotationComplainResponse {
+    fn from(value: &types::RotationComplainResponse) -> Self {
+        Self {
+            responses: value.responses.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::RotationComplainResponse> for types::RotationComplainResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RotationComplainResponse) -> Result<Self, Self::Error> {
+        let responses: Result<Vec<_>, _> = value
+            .responses
+            .iter()
+            .map(types::RotationShareComplaintResponse::try_from)
+            .collect();
+        Ok(Self {
+            responses: responses?,
+        })
+    }
+}
