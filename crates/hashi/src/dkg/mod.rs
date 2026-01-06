@@ -147,7 +147,7 @@ impl DkgManager {
             }
             Nodes::new(prev_nodes_vec).ok()
         });
-        Ok(Self {
+        let mut manager = Self {
             party_id,
             address,
             dkg_config,
@@ -169,7 +169,9 @@ impl DkgManager {
             rotation_complaints_to_process: HashMap::new(),
             rotation_complaint_responses: HashMap::new(),
             previous_dkg_output: None,
-        })
+        };
+        manager.load_stored_messages()?;
+        Ok(manager)
     }
 
     /// RPC endpoint handler for `SendMessageRequest`
@@ -420,8 +422,15 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
-        let message = self.create_dealer_message(rng);
-        self.store_message(self.address, &message)?;
+        // TODO(Optimization): Skip dealer phase if certificate is already on TOB
+        let message = match self.dealer_messages.get(&self.address) {
+            Some(msg) => msg.clone(),
+            None => {
+                let msg = self.create_dealer_message(rng);
+                self.store_message(self.address, &msg)?;
+                msg
+            }
+        };
         let my_signature = self
             .try_sign_message(self.address, &message)
             .expect("own message should always be valid");
@@ -1121,6 +1130,17 @@ impl DkgManager {
         Ok(())
     }
 
+    fn load_stored_messages(&mut self) -> DkgResult<()> {
+        let stored = self
+            .public_messages_store
+            .list_all_dealer_messages()
+            .map_err(|e| DkgError::StorageError(e.to_string()))?;
+        for (dealer, message) in stored {
+            self.dealer_messages.insert(dealer, message);
+        }
+        Ok(())
+    }
+
     fn prepare_rotation_complain_request(
         &self,
         dealer: &Address,
@@ -1516,6 +1536,9 @@ mod tests {
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     struct MockPublicMessagesStore;
 
@@ -1530,6 +1553,10 @@ mod tests {
 
         fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
             Ok(None)
+        }
+
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(vec![])
         }
 
         fn clear(&mut self) -> anyhow::Result<()> {
@@ -2548,6 +2575,10 @@ mod tests {
             Ok(self.stored.get(dealer).cloned())
         }
 
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(self.stored.iter().map(|(k, v)| (*k, v.clone())).collect())
+        }
+
         fn clear(&mut self) -> anyhow::Result<()> {
             self.stored.clear();
             Ok(())
@@ -2566,7 +2597,11 @@ mod tests {
         }
 
         fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
-            Ok(None)
+            Err(anyhow::anyhow!("Storage failure"))
+        }
+
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(vec![])
         }
 
         fn clear(&mut self) -> anyhow::Result<()> {
@@ -2610,12 +2645,12 @@ mod tests {
         );
 
         // Verify dealer message was persisted to storage
-        let stored_message = receiver_manager
+        let stored = receiver_manager
             .public_messages_store
-            .get_dealer_message(&dealer_address)
+            .list_all_dealer_messages()
             .unwrap();
         assert!(
-            stored_message.is_some(),
+            stored.iter().any(|(d, _)| d == &dealer_address),
             "Dealer message should be persisted to storage"
         );
     }
@@ -5469,6 +5504,286 @@ mod tests {
         assert!(
             !receiver_manager.dealer_outputs.contains_key(&dealer_addr),
             "Invalid message should not create dealer output"
+        );
+    }
+
+    /// A store that tracks calls to store_dealer_message.
+    struct TrackingPublicMessagesStore {
+        stored: HashMap<Address, avss::Message>,
+        store_count: Arc<AtomicUsize>,
+    }
+
+    impl TrackingPublicMessagesStore {
+        fn new(store_count: Arc<AtomicUsize>) -> Self {
+            Self {
+                stored: HashMap::new(),
+                store_count,
+            }
+        }
+
+        /// Pre-populate without incrementing counter (simulates data from before restart)
+        fn pre_populate(&mut self, dealer: Address, message: avss::Message) {
+            self.stored.insert(dealer, message);
+        }
+    }
+
+    impl PublicMessagesStore for TrackingPublicMessagesStore {
+        fn store_dealer_message(
+            &mut self,
+            dealer: &Address,
+            message: &avss::Message,
+        ) -> anyhow::Result<()> {
+            self.store_count.fetch_add(1, Ordering::SeqCst);
+            self.stored.insert(*dealer, message.clone());
+            Ok(())
+        }
+
+        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+            Ok(self.stored.get(dealer).cloned())
+        }
+
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+            Ok(self.stored.iter().map(|(k, v)| (*k, v.clone())).collect())
+        }
+
+        fn clear(&mut self) -> anyhow::Result<()> {
+            self.stored.clear();
+            Ok(())
+        }
+    }
+
+    /// A P2P channel that tracks retrieve_message calls.
+    struct TrackingP2PChannel {
+        inner: MockP2PChannel,
+        retrieve_count: Arc<AtomicUsize>,
+    }
+
+    impl TrackingP2PChannel {
+        fn new(inner: MockP2PChannel, retrieve_count: Arc<AtomicUsize>) -> Self {
+            Self {
+                inner,
+                retrieve_count,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::communication::P2PChannel for TrackingP2PChannel {
+        async fn send_dkg_message(
+            &self,
+            recipient: &Address,
+            request: &SendMessageRequest,
+        ) -> crate::communication::ChannelResult<SendMessageResponse> {
+            self.inner.send_dkg_message(recipient, request).await
+        }
+
+        async fn retrieve_message(
+            &self,
+            party: &Address,
+            request: &RetrieveMessageRequest,
+        ) -> crate::communication::ChannelResult<RetrieveMessageResponse> {
+            self.retrieve_count.fetch_add(1, Ordering::SeqCst);
+            self.inner.retrieve_message(party, request).await
+        }
+
+        async fn complain(
+            &self,
+            party: &Address,
+            request: &ComplainRequest,
+        ) -> crate::communication::ChannelResult<ComplainResponse> {
+            self.inner.complain(party, request).await
+        }
+
+        async fn send_rotation_messages(
+            &self,
+            recipient: &Address,
+            request: &SendRotationMessagesRequest,
+        ) -> crate::communication::ChannelResult<SendRotationMessagesResponse> {
+            self.inner.send_rotation_messages(recipient, request).await
+        }
+
+        async fn retrieve_rotation_messages(
+            &self,
+            party: &Address,
+            request: &RetrieveRotationMessagesRequest,
+        ) -> crate::communication::ChannelResult<RetrieveRotationMessagesResponse> {
+            self.inner.retrieve_rotation_messages(party, request).await
+        }
+
+        async fn rotation_complain(
+            &self,
+            party: &Address,
+            request: &RotationComplainRequest,
+        ) -> crate::communication::ChannelResult<RotationComplainResponse> {
+            self.inner.rotation_complain(party, request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_restart_dealer_reuses_stored_message() {
+        let mut rng = rand::thread_rng();
+        let num_validators = 5;
+        let setup = TestSetup::new(num_validators);
+
+        // Simulate pre-restart: dealer 0 created and stored a message
+        let original_dealer = setup.create_manager(0);
+        let dealer_address = original_dealer.address;
+        let original_message = original_dealer.create_dealer_message(&mut rng);
+        let original_hash = compute_message_hash(&original_message);
+
+        // Create tracking store with pre-populated message (simulating persistence)
+        let store_count = Arc::new(AtomicUsize::new(0));
+        let mut store = TrackingPublicMessagesStore::new(store_count.clone());
+        store.pre_populate(dealer_address, original_message);
+
+        // Simulate restart: create manager for same party with stored message
+        let mut restarted_manager = setup.create_manager_with_store(0, Box::new(store));
+
+        // Verify message was loaded
+        assert_eq!(restarted_manager.address, dealer_address);
+        let loaded = restarted_manager
+            .dealer_messages
+            .get(&dealer_address)
+            .unwrap();
+        assert_eq!(compute_message_hash(loaded), original_hash);
+
+        // Create other managers for P2P
+        let other_managers: HashMap<_, _> = (1..num_validators)
+            .map(|i| (setup.address(i), setup.create_manager(i)))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, dealer_address);
+        let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+        // Run run_as_dealer - should reuse stored message
+        let result = restarted_manager
+            .run_as_dealer(&mock_p2p, &mut mock_tob, &mut rng)
+            .await;
+        assert!(result.is_ok());
+
+        // Verify store_dealer_message was NOT called (message already existed)
+        assert_eq!(
+            store_count.load(Ordering::SeqCst),
+            0,
+            "store_dealer_message should not be called when message already exists"
+        );
+
+        // Verify the message in dealer_messages still has the same hash
+        let final_message = restarted_manager
+            .dealer_messages
+            .get(&dealer_address)
+            .unwrap();
+        assert_eq!(
+            compute_message_hash(final_message),
+            original_hash,
+            "run_as_dealer should use the pre-stored message, not create a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restart_party_uses_stored_messages_without_retrieval() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        // Create dealers with messages (simulating what happened before restart)
+        let dealer1_addr = setup.address(0);
+        let dealer1_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let dealer2_addr = setup.address(1);
+        let dealer2_mgr = setup.create_dealer_with_message(1, &mut rng);
+
+        let msg1 = dealer1_mgr
+            .dealer_messages
+            .get(&dealer1_addr)
+            .unwrap()
+            .clone();
+        let msg2 = dealer2_mgr
+            .dealer_messages
+            .get(&dealer2_addr)
+            .unwrap()
+            .clone();
+
+        // Create tracking store with pre-populated messages (simulating restart)
+        let store_count = Arc::new(AtomicUsize::new(0));
+        let mut store = TrackingPublicMessagesStore::new(store_count.clone());
+        store.pre_populate(dealer1_addr, msg1.clone());
+        store.pre_populate(dealer2_addr, msg2.clone());
+
+        // Create party (validator 3) with pre-stored messages
+        let party_addr = setup.address(3);
+        let mut party_manager = setup.create_manager_with_store(3, Box::new(store));
+
+        // Verify messages were loaded on construction
+        assert!(
+            party_manager.dealer_messages.contains_key(&dealer1_addr),
+            "dealer1 message should be loaded"
+        );
+        assert!(
+            party_manager.dealer_messages.contains_key(&dealer2_addr),
+            "dealer2 message should be loaded"
+        );
+
+        // Create certificates
+        let epoch = setup.epoch();
+        let signatures_1: Vec<MemberSignature> = (0..3)
+            .map(|i| {
+                let addr = setup.address(i);
+                let message_hash = compute_message_hash(&msg1);
+                let dkg_message = Dkg(DkgDealerMessageHash {
+                    dealer_address: dealer1_addr,
+                    message_hash,
+                });
+                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+            })
+            .collect();
+
+        let signatures_2: Vec<MemberSignature> = (0..3)
+            .map(|i| {
+                let addr = setup.address(i);
+                let message_hash = compute_message_hash(&msg2);
+                let dkg_message = Dkg(DkgDealerMessageHash {
+                    dealer_address: dealer2_addr,
+                    message_hash,
+                });
+                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+            })
+            .collect();
+
+        let cert1 =
+            create_test_certificate(setup.committee(), &msg1, dealer1_addr, signatures_1).unwrap();
+        let cert2 =
+            create_test_certificate(setup.committee(), &msg2, dealer2_addr, signatures_2).unwrap();
+
+        // Create tracking P2P channel to verify retrieve_message is NOT called
+        let retrieve_count = Arc::new(AtomicUsize::new(0));
+        let mut dealers = HashMap::new();
+        dealers.insert(dealer1_addr, dealer1_mgr);
+        dealers.insert(dealer2_addr, dealer2_mgr);
+        let inner_p2p = MockP2PChannel::new(dealers, party_addr);
+        let tracking_p2p = TrackingP2PChannel::new(inner_p2p, retrieve_count.clone());
+
+        // Create mock TOB with certificates
+        let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert1, cert2]);
+
+        // Run as party
+        let result = party_manager
+            .run_as_party(&tracking_p2p, &mut mock_tob)
+            .await;
+        assert!(result.is_ok());
+
+        // Verify retrieve_message was NOT called (messages were already in memory)
+        assert_eq!(
+            retrieve_count.load(Ordering::SeqCst),
+            0,
+            "retrieve_message should not be called when messages are pre-stored"
+        );
+
+        // Verify dealer outputs were created from stored messages
+        assert!(
+            party_manager.dealer_outputs.contains_key(&dealer1_addr),
+            "dealer1 output should be created"
+        );
+        assert!(
+            party_manager.dealer_outputs.contains_key(&dealer2_addr),
+            "dealer2 output should be created"
         );
     }
 

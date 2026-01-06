@@ -14,6 +14,9 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Returns None if no message exists for this dealer.
     fn get_dealer_message(&self, dealer: &Address) -> Result<Option<avss::Message>>;
 
+    /// List all stored dealer messages
+    fn list_all_dealer_messages(&self) -> Result<Vec<(Address, avss::Message)>>;
+
     /// Clear all stored messages (called at epoch transitions)
     fn clear(&mut self) -> Result<()>;
 }
