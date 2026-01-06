@@ -65,4 +65,4 @@ ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tracing-test = "0.2"
-tempfile = "3.0"
+tempfile = "3.23.0"
