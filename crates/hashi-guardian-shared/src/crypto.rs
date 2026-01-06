@@ -1,7 +1,10 @@
 use crate::bitcoin_utils::BTC_LIB;
 use crate::GuardianError::InvalidInputs;
-use crate::{GuardianResult, Signed, SigningIntent};
-use ed25519_consensus::{SigningKey, VerificationKey};
+use crate::GuardianResult;
+use crate::GuardianSigned;
+use crate::SigningIntent;
+use ed25519_consensus::SigningKey;
+use ed25519_consensus::VerificationKey;
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
@@ -9,9 +12,14 @@ use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::{Field, PrimeField};
-use k256::{CompressedPoint, FieldBytes, ProjectivePoint, Scalar};
-use rand_core::{CryptoRng, RngCore};
+use k256::elliptic_curve::Field;
+use k256::elliptic_curve::PrimeField;
+use k256::CompressedPoint;
+use k256::FieldBytes;
+use k256::ProjectivePoint;
+use k256::Scalar;
+use rand_core::CryptoRng;
+use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::num::NonZeroU16;
@@ -270,7 +278,7 @@ pub fn decrypt_share(
 // ---------------------------------
 
 /// Methods for `Signed<T>` wrapper - signing and verification
-impl<T: Serialize + SigningIntent> Signed<T> {
+impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
     pub fn new(data: T, signing_key: &SigningKey, timestamp: SystemTime) -> Self {

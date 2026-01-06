@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
-use crate::dkg::EncryptionGroupElement;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
-use crate::bls::Bls12381PrivateKey;
+use crate::committee::Bls12381PrivateKey;
+use crate::committee::EncryptionPrivateKey;
+use crate::committee::EncryptionPublicKey;
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -13,8 +15,7 @@ pub struct Config {
     pub protocol_private_key: Option<Bls12381PrivateKey>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_private_key:
-        Option<fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>>,
+    pub encryption_private_key: Option<EncryptionPrivateKey>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_private_key: Option<String>,
@@ -57,6 +58,19 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_rpc: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_rpc_auth: Option<hashi_btc::config::BtcRpcAuth>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_confirmation_threshold: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_start_height: Option<u32>,
+
+    /// Database path
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db: Option<PathBuf>,
 }
 
 impl Config {
@@ -100,20 +114,16 @@ impl Config {
         Ok(ed25519_dalek::VerifyingKey::from(&tls_private_key))
     }
 
-    pub fn encryption_private_key(
-        &self,
-    ) -> Result<fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>, anyhow::Error> {
+    pub fn encryption_private_key(&self) -> Result<EncryptionPrivateKey, anyhow::Error> {
         self.encryption_private_key
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no encryption_private_key configured"))
     }
 
-    pub fn encryption_public_key(
-        &self,
-    ) -> Result<fastcrypto_tbls::ecies_v1::PublicKey<EncryptionGroupElement>, anyhow::Error> {
+    pub fn encryption_public_key(&self) -> Result<EncryptionPublicKey, anyhow::Error> {
         let encryption_private_key = self.encryption_private_key()?;
 
-        Ok(fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(
+        Ok(EncryptionPublicKey::from_private_key(
             &encryption_private_key,
         ))
     }
@@ -178,6 +188,31 @@ impl Config {
             .unwrap_or("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
     }
 
+    pub fn bitcoin_network(&self) -> hashi_btc::config::Network {
+        hashi_btc::config::network_from_chain_id(self.bitcoin_chain_id()).unwrap()
+    }
+
+    pub fn bitcoin_rpc(&self) -> &str {
+        self.bitcoin_rpc
+            .as_deref()
+            .unwrap_or("http://localhost:8332")
+    }
+
+    pub fn bitcoin_confirmation_threshold(&self) -> u32 {
+        self.bitcoin_confirmation_threshold.unwrap_or(6)
+    }
+
+    pub fn bitcoin_start_height(&self) -> u32 {
+        self.bitcoin_start_height.unwrap_or(800_000)
+    }
+
+    pub fn bitcoin_rpc_auth(&self) -> hashi_btc::config::bitcoincore_rpc::Auth {
+        self.bitcoin_rpc_auth
+            .as_ref()
+            .unwrap_or(&hashi_btc::config::BtcRpcAuth::None)
+            .to_bitcoincore_rpc_auth()
+    }
+
     pub fn hashi_ids(&self) -> HashiIds {
         // TODO fill in mainnet values once published
         self.hashi_ids.unwrap_or(HashiIds {
@@ -206,9 +241,7 @@ impl Config {
         );
 
         config.protocol_private_key = Some(Bls12381PrivateKey::generate(&mut rand::thread_rng()));
-        config.encryption_private_key = Some(fastcrypto_tbls::ecies_v1::PrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        config.encryption_private_key = Some(EncryptionPrivateKey::new(&mut rand::thread_rng()));
 
         config.https_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
         config.http_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));

@@ -18,7 +18,7 @@ use tracing::info;
 pub async fn setup_new_key(
     State(enclave): State<Arc<Enclave>>,
     Json(request): Json<SetupNewKeyRequest>,
-) -> GuardianResult<Json<Signed<SetupNewKeyResponse>>> {
+) -> GuardianResult<Json<GuardianSigned<SetupNewKeyResponse>>> {
     info!("/setup_new_key - Received request.");
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
@@ -69,7 +69,6 @@ pub async fn setup_new_key(
         })
         .await?;
 
-    // TODO: Should we avoid double signing? i.e., parse the sign from sign_and_log and use it..
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
         share_commitments,
@@ -82,7 +81,9 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use axum::Json;
-    use hashi_guardian_shared::{commit_share, decrypt_share, NUM_OF_SHARES};
+    use hashi_guardian_shared::commit_share;
+    use hashi_guardian_shared::decrypt_share;
+    use hashi_guardian_shared::NUM_OF_SHARES;
 
     #[tokio::test]
     async fn test_setup_new_key() {

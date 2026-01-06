@@ -1,9 +1,11 @@
-use crate::bls::BLS12381Signature;
+use crate::committee::BLS12381Signature;
 use crate::dkg::types;
 use crate::proto;
 use fastcrypto::traits::ToFromBytes;
-use fastcrypto_tbls::threshold_schnorr::{avss, complaint};
-use serde::{Deserialize, Serialize};
+use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::complaint;
+use serde::Deserialize;
+use serde::Serialize;
 use sui_rpc::proto::TryFromProtoError;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;

@@ -27,6 +27,11 @@ public struct QuorumReachedEvent has copy, drop {
     proposal_id: ID,
 }
 
+public struct PackageUpgradedEvent has copy, drop {
+    package: ID,
+    version: u64,
+}
+
 public(package) fun emit_vote_cast_event(proposal_id: ID, voter: address) {
     event::emit(VoteCastEvent {
         proposal_id,
@@ -63,4 +68,8 @@ public(package) fun emit_proposal_executed_event(proposal_id: ID) {
 #[test_only]
 public fun proposal_id(quorum_reached_event: &QuorumReachedEvent): ID {
     quorum_reached_event.proposal_id
+}
+
+public(package) fun emit_package_upgraded_event(package: ID, version: u64) {
+    event::emit(PackageUpgradedEvent { package, version });
 }

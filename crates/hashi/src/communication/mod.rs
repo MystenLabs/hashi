@@ -7,7 +7,12 @@
 #[cfg(test)]
 pub mod in_memory;
 pub mod interfaces;
+pub mod timeout_and_retry;
 
 #[cfg(test)]
 pub use in_memory::InMemoryOrderedBroadcastChannel;
-pub use interfaces::{ChannelError, ChannelResult, OrderedBroadcastChannel, P2PChannel};
+pub use interfaces::ChannelError;
+pub use interfaces::ChannelResult;
+pub use interfaces::OrderedBroadcastChannel;
+pub use interfaces::P2PChannel;
+pub use timeout_and_retry::with_timeout_and_retry;

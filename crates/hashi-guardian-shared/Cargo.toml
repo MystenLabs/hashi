@@ -21,6 +21,9 @@ bitcoin = { version =  "0.32.7", features = ["serde"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 blake2 = "0.10"
 ed25519-consensus = "2.1"
+miniscript = "13.0.0"
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
 
 [features]
 test-utils = []

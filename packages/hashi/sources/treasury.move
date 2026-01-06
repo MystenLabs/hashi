@@ -33,10 +33,12 @@ fun balance<T>(self: &mut Treasury): &mut Coin<T> {
 }
 
 public(package) fun burn<T>(self: &mut Treasury, token: Coin<T>) {
+    sui::event::emit(BurnEvent<T> { amount: token.value() });
     self.treasury_cap<T>().burn(token);
 }
 
 public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContext): Coin<T> {
+    sui::event::emit(MintEvent<T> { amount });
     self.treasury_cap<T>().mint(amount, ctx)
 }
 
@@ -60,4 +62,16 @@ public(package) fun create(ctx: &mut TxContext): Treasury {
     Treasury {
         objects: object_bag::new(ctx),
     }
+}
+
+//
+// Events
+//
+
+public struct MintEvent<phantom T> has copy, drop {
+    amount: u64,
+}
+
+public struct BurnEvent<phantom T> has copy, drop {
+    amount: u64,
 }

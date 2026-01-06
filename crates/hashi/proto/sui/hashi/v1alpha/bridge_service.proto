@@ -3,10 +3,13 @@ syntax = "proto3";
 package sui.hashi.v1alpha;
 
 import "google/protobuf/timestamp.proto";
+import "sui/hashi/v1alpha/signature.proto";
 
 service BridgeService {
   // Query the service for general information about its current state.
   rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
+  // Sign a deposit confirmation, confirming that bitcoin has been deposited into hashi
+  rpc SignDepositConfirmation(SignDepositConfirmationRequest) returns (SignDepositConfirmationResponse);
 }
 
 message GetServiceInfoRequest {}
@@ -40,4 +43,29 @@ message GetServiceInfoResponse {
 
   // Software version of the service. Similar to the `server` http header.
   optional string server = 8;
+}
+
+// This maps to crate::onchain::types::DepositRequest
+message SignDepositConfirmationRequest {
+  // Deposit request id (32 bytes).
+  bytes id = 1;
+
+  // Bitcoin tx id (32 bytes).
+  bytes txid = 2;
+
+  // Bitcoin tx output index.
+  uint32 vout = 3;
+
+  // Bitcoin deposit amount in satoshis
+  uint64 amount = 4;
+
+  // Sui deposit address (32 bytes).
+  optional bytes derivation_path = 5;
+
+  // Timestamp of the deposit request
+  uint64 timestamp_ms = 6;
+}
+
+message SignDepositConfirmationResponse {
+  MemberSignature member_signature = 1;
 }

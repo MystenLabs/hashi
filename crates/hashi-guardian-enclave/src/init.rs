@@ -97,7 +97,7 @@ pub async fn provisioner_init(
         return Err(InvalidInputs("Provisioner init already complete".into()));
     }
     if enclave.is_provisioner_init_partially_complete() {
-        // shouldn't reach inside as we panic
+        // shouldn't reach inside as we must've panicked elsewhere
         unreachable!("Provisioner init partially complete.");
     }
     // TODO: Validate enclave state after adding withdrawal related fields
@@ -194,9 +194,19 @@ async fn finalize_init(
         .set_hashi_btc_pk(incoming_state.hashi_btc_master_pubkey)
         .expect("Unable to set hashi public key");
 
+    info!("Setting withdraw config.");
+    enclave
+        .set_withdrawal_config(incoming_state.withdrawal_config)
+        .expect("Unable to set withdraw config");
+
     info!("Setting enclave state.");
-    let mut state = enclave.state().await;
-    state.hashi_committee_info = incoming_state.hashi_committee_info;
+    enclave
+        .set_state(
+            incoming_state.hashi_committee_info,
+            incoming_state.withdrawal_state,
+        )
+        .await
+        .expect("Unable to set state");
 
     info!("Enclave initialization complete.");
 }
@@ -212,6 +222,7 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 mod tests {
     use super::*;
     use bitcoin::Network;
+    use bitcoin::XOnlyPublicKey;
     use hashi_guardian_shared::bitcoin_utils;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use k256::SecretKey;
@@ -333,8 +344,8 @@ mod tests {
 
         // Second KP tries to send with different state (different pub key)
         let mut state2 = ProvisionerInitRequestState::mock_for_testing();
-        let kp = bitcoin_utils::create_keypair(&[7u8; 32]);
-        state2.hashi_btc_master_pubkey = kp.public_key();
+        let kp = bitcoin_utils::test_utils::create_keypair(&[7u8; 32]);
+        state2.hashi_btc_master_pubkey = XOnlyPublicKey::from_keypair(&kp).0;
         assert_ne!(
             state1.hashi_btc_master_pubkey,
             state2.hashi_btc_master_pubkey

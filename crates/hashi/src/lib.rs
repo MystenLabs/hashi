@@ -1,8 +1,14 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
-pub mod bls;
+use anyhow::anyhow;
+
+pub mod committee;
 pub mod communication;
 pub mod config;
+pub mod db;
+pub mod deposits;
 pub mod dkg;
 pub mod grpc;
 pub mod metrics;
@@ -21,42 +27,44 @@ pub struct Hashi {
     pub server_version: ServerVersion,
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
-    onchain_state: std::sync::OnceLock<onchain::OnchainState>,
-    // TODO: Remove `Option` wrappers below after we are able to initialize them
+    pub db: Arc<db::Database>,
+    onchain_state: OnceLock<onchain::OnchainState>,
     // TODO: Replace `DkgManager` by `MpcManager`
-    pub dkg_manager: Option<Mutex<dkg::DkgManager>>,
+    dkg_manager: OnceLock<Mutex<dkg::DkgManager>>,
+    btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
 
 impl Hashi {
-    pub fn new(
-        server_version: ServerVersion,
-        config: config::Config,
-        dkg_manager: Option<dkg::DkgManager>,
-    ) -> Arc<Self> {
+    pub fn new(server_version: ServerVersion, config: config::Config) -> Arc<Self> {
         init_crypto_provider();
         let metrics = Arc::new(metrics::Metrics::new_default());
+        let db = db::Database::open(config.db.as_deref().unwrap());
         Arc::new(Self {
             server_version,
             config,
             metrics,
-            onchain_state: Default::default(),
-            dkg_manager: dkg_manager.map(Mutex::new),
+            db: Arc::new(db),
+            onchain_state: OnceLock::new(),
+            dkg_manager: OnceLock::new(),
+            btc_monitor: OnceLock::new(),
         })
     }
 
     pub fn new_with_registry(
         server_version: ServerVersion,
         config: config::Config,
-        dkg_manager: Option<dkg::DkgManager>,
         registry: &prometheus::Registry,
     ) -> Arc<Self> {
         init_crypto_provider();
+        let db = db::Database::open(config.db.as_deref().unwrap());
         Arc::new(Self {
             server_version,
             config,
             metrics: Arc::new(metrics::Metrics::new(registry)),
-            onchain_state: Default::default(),
-            dkg_manager: dkg_manager.map(Mutex::new),
+            db: Arc::new(db),
+            onchain_state: OnceLock::new(),
+            dkg_manager: OnceLock::new(),
+            btc_monitor: OnceLock::new(),
         })
     }
 
@@ -72,6 +80,14 @@ impl Hashi {
         self.onchain_state.get()
     }
 
+    pub fn dkg_manager(&self) -> &Mutex<dkg::DkgManager> {
+        self.dkg_manager.get().expect("DkgManager not initialized")
+    }
+
+    pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
+        self.btc_monitor.get().expect("BtcMonitor not initialized")
+    }
+
     async fn initialize_onchain_state(&self) {
         let onchain_state = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
@@ -83,9 +99,72 @@ impl Hashi {
         self.onchain_state.set(onchain_state).unwrap();
     }
 
+    fn initialize_dkg(&self) -> anyhow::Result<()> {
+        let state = self.onchain_state().state();
+        let committee_set = &state.hashi().committees;
+        let session_id = dkg::SessionId::new(
+            self.config.sui_chain_id(),
+            committee_set.epoch(),
+            &dkg::types::ProtocolType::DkgKeyGeneration,
+        );
+        let encryption_key = self.config.encryption_private_key()?;
+        let signing_key = self
+            .config
+            .protocol_private_key()
+            .ok_or_else(|| anyhow!("no protocol_private_key configured"))?;
+        let store = Box::new(storage::EpochPublicMessagesStore::new(
+            self.db.clone(),
+            committee_set.epoch(),
+        ));
+        let dkg_manager = dkg::DkgManager::new(
+            self.config.validator_address()?,
+            committee_set,
+            session_id,
+            encryption_key,
+            signing_key,
+            store,
+        )?;
+        self.dkg_manager
+            .set(Mutex::new(dkg_manager))
+            .map_err(|_| anyhow!("DkgManager already initialized"))?;
+        Ok(())
+    }
+
+    fn initialize_btc_monitor(&self) -> anyhow::Result<()> {
+        let monitor_config = hashi_btc::config::MonitorConfig::builder()
+            .network(self.config.bitcoin_network())
+            .confirmation_threshold(self.config.bitcoin_confirmation_threshold())
+            .start_height(self.config.bitcoin_start_height())
+            .bitcoind_rpc_config(
+                self.config.bitcoin_rpc().to_string(),
+                self.config.bitcoin_rpc_auth(),
+            )
+            .data_dir(
+                self.config
+                    .db
+                    .as_deref()
+                    .expect("Db path is not set")
+                    .join("btc-monitor"),
+            )
+            .build();
+        self.btc_monitor
+            .set(
+                hashi_btc::monitor::Monitor::run(monitor_config)
+                    .expect("Failed to start BtcMonitor"),
+            )
+            .map_err(|_| anyhow!("BtcMonitor already initialized"))?;
+        Ok(())
+    }
+
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
             self.initialize_onchain_state().await;
+            if let Err(e) = self.initialize_dkg() {
+                tracing::error!("Failed to initialize DKG: {e}");
+            }
+            if let Err(e) = self.initialize_btc_monitor() {
+                tracing::error!("Failed to initialize BtcMonitor: {e}");
+            }
             let _http_server = grpc::HttpService::new(self.clone()).start().await;
         });
     }
@@ -121,11 +200,13 @@ mod test {
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]
     async fn tls() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let server_version = ServerVersion::new("unknown", "unknown");
-        let config = Config::new_for_testing();
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config, None);
+        let hashi = Hashi::new(server_version, config);
 
         let http_server = crate::grpc::HttpService::new(hashi).start().await;
 
