@@ -360,7 +360,7 @@ impl DkgManager {
             let response = if share_index == request.share_index {
                 complained_response.clone()
             } else if let Some(output) = self.rotation_outputs.get(&share_index) {
-                create_complaint_response(self.party_id, output.my_shares.clone())
+                complaint::ComplaintResponse::new(self.party_id, output.my_shares.clone())
             } else {
                 continue;
             };
@@ -1398,19 +1398,6 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
     hasher.finalize().into()
-}
-
-// TODO: Expose a public constructor for `ComplaintResponse` in `fastcrypto-tbls`.
-// `ComplaintResponse` fields are `pub(crate)` in fastcrypto-tbls, so we can't construct
-// it directly from outside the crate. We use BCS as a workaround: serialize a tuple
-// `(responder_id, shares)` and deserialize it as `ComplaintResponse` since BCS uses
-// the same layout for tuples and structs with fields in declaration order.
-fn create_complaint_response(
-    responder_id: PartyId,
-    shares: avss::SharesForNode,
-) -> complaint::ComplaintResponse<avss::SharesForNode> {
-    let bytes = bcs::to_bytes(&(responder_id, shares)).expect(EXPECT_SERIALIZATION_SUCCESS);
-    bcs::from_bytes(&bytes).expect("deserialization should succeed")
 }
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
