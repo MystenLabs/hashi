@@ -1,6 +1,4 @@
 use crate::Enclave;
-use axum::extract::State;
-use axum::Json;
 use ed25519_consensus::VerificationKey;
 use hashi_guardian_shared::*;
 use std::sync::Arc;
@@ -21,13 +19,11 @@ use serde_bytes::ByteBuf;
 use tracing::error;
 
 /// Endpoint that returns an attestation committed to the enclave's signing public key
-pub async fn get_attestation(
-    State(enclave): State<Arc<Enclave>>,
-) -> GuardianResult<Json<GetAttestationResponse>> {
+pub async fn get_attestation_impl(enclave: Arc<Enclave>) -> GuardianResult<GetAttestationResponse> {
     info!("/get_attestation - Received request");
 
     get_attestation_inner(&enclave.signing_pubkey())
-        .map(|attestation| Json(GetAttestationResponse { attestation }))
+        .map(|attestation| GetAttestationResponse { attestation })
 }
 
 #[cfg(not(test))]
@@ -55,7 +51,7 @@ pub fn get_attestation_inner(signing_pk: &VerificationKey) -> GuardianResult<Att
         _ => {
             driver::nsm_exit(fd);
             error!("Unexpected response from NSM.");
-            Err(GuardianError::OpaqueError(
+            Err(GuardianError::InternalError(
                 "unexpected response".to_string(),
             ))
         }

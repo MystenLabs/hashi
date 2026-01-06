@@ -1,7 +1,4 @@
 use anyhow::Result;
-use axum::routing::get;
-use axum::routing::post;
-use axum::Router;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Network;
 use bitcoin::XOnlyPublicKey;
@@ -19,18 +16,19 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
+use tonic::transport::Server;
 use tracing::info;
 
 mod getters;
 mod init;
+mod rpc;
 mod s3_logger;
 mod setup;
 
+use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
 use getters::*;
-use init::operator_init;
-use init::provisioner_init;
-use setup::setup_new_key;
+use hashi::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
 pub struct Enclave {
@@ -107,27 +105,17 @@ async fn main() -> Result<()> {
     let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
     let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
-    let app = Router::new()
-        // Get attestation
-        .route("/get_attestation", get(get_attestation))
-        // Init enclave (operator)
-        .route("/operator_init", post(operator_init));
-
-    // Conditionally add routes based on SETUP_MODE
-    let app = if setup_mode {
-        // Setup mode
-        app.route("/setup_new_key", post(setup_new_key))
-    } else {
-        // Normal mode
-        app.route("/provisioner_init", post(provisioner_init))
+    let svc = GuardianGrpc {
+        enclave,
+        setup_mode,
     };
 
-    let app = app.with_state(enclave);
+    let addr = "0.0.0.0:3000".parse()?;
+    info!("gRPC server listening on {}.", addr);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    info!("Server listening on {}.", listener.local_addr()?);
-    info!("Waiting for operator_init.");
-    axum::serve(listener, app.into_make_service())
+    Server::builder()
+        .add_service(GuardianServiceServer::new(svc))
+        .serve(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
 }

@@ -66,8 +66,8 @@ pub type DigestBytes = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Ciphertext {
-    encapsulated_key: Vec<u8>,
-    aes_ciphertext: Vec<u8>,
+    pub encapsulated_key: Vec<u8>,
+    pub aes_ciphertext: Vec<u8>,
 }
 
 // ---------------------------------
@@ -86,15 +86,6 @@ impl EncKeyPair {
 
     pub fn public_key(&self) -> &EncPubKey {
         &self.pk
-    }
-}
-
-impl Ciphertext {
-    pub fn new(encapsulated_key: EncapsulatedKey, aes_ciphertext: Vec<u8>) -> Self {
-        Ciphertext {
-            encapsulated_key: encapsulated_key.to_bytes().to_vec(),
-            aes_ciphertext,
-        }
     }
 }
 
@@ -123,7 +114,10 @@ pub fn encrypt<R: CryptoRng + RngCore>(
             rng,
         )
         .map_err(|e| InvalidInputs(format!("Encryption failed: {}", e)))?;
-    Ok(Ciphertext::new(encapsulated_key, aes_ciphertext))
+    Ok(Ciphertext {
+        encapsulated_key: encapsulated_key.to_bytes().to_vec(),
+        aes_ciphertext,
+    })
 }
 
 /// Decrypts ciphertext. Returns InvalidInputs if aad is invalid.

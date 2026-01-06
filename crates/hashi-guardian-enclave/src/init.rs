@@ -1,8 +1,6 @@
 use crate::getters::get_attestation_inner;
 use crate::Enclave;
 use crate::S3Logger;
-use axum::extract::State;
-use axum::Json;
 use hashi_guardian_shared::crypto::combine_shares;
 use hashi_guardian_shared::crypto::commit_share;
 use hashi_guardian_shared::crypto::decrypt_share;
@@ -14,9 +12,9 @@ use GuardianError::*;
 
 /// Receives S3 API keys & share commitments.
 /// Returns an error for malformed requests / dup call & panics for the rest.
-pub async fn operator_init(
-    State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<OperatorInitRequest>,
+pub async fn operator_init_impl(
+    enclave: Arc<Enclave>,
+    request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
@@ -83,9 +81,9 @@ pub async fn operator_init(
 /// Receives btc key share and a bunch of config's ("state") from each KP.
 /// While accumulating shares, we use the state hash to compare if every KP is giving us the same state.
 /// When we have enough shares, we actually set all the state variables.
-pub async fn provisioner_init(
-    State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<ProvisionerInitRequest>,
+pub async fn provisioner_init_impl(
+    enclave: Arc<Enclave>,
+    request: ProvisionerInitRequest,
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
@@ -253,7 +251,7 @@ mod tests {
             )
             .unwrap();
 
-            let result = provisioner_init(State(enclave.clone()), Json(request)).await;
+            let result = provisioner_init_impl(enclave.clone(), request).await;
 
             // Check behavior based on whether we've reached/exceeded threshold
             if i == THRESHOLD - 1 {
@@ -319,7 +317,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = provisioner_init(State(enclave), Json(request)).await;
+        let result = provisioner_init_impl(enclave, request).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }
@@ -338,7 +336,7 @@ mod tests {
             &mut rand::thread_rng(),
         )
         .unwrap();
-        provisioner_init(State(enclave.clone()), Json(request1))
+        provisioner_init_impl(enclave.clone(), request1)
             .await
             .unwrap();
 
@@ -359,9 +357,7 @@ mod tests {
         .unwrap();
 
         // This should panic with "State hash mismatch"
-        provisioner_init(State(enclave), Json(request2))
-            .await
-            .unwrap();
+        provisioner_init_impl(enclave, request2).await.unwrap();
     }
 
     #[tokio::test]
@@ -382,7 +378,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = provisioner_init(State(enclave), Json(request)).await;
+        let result = provisioner_init_impl(enclave, request).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }
@@ -400,7 +396,7 @@ mod tests {
             &mut rand::thread_rng(),
         )
         .unwrap();
-        provisioner_init(State(enclave.clone()), Json(request1))
+        provisioner_init_impl(enclave.clone(), request1)
             .await
             .unwrap();
 
@@ -412,7 +408,7 @@ mod tests {
             &mut rand::thread_rng(),
         )
         .unwrap();
-        let result = provisioner_init(State(enclave), Json(request2)).await;
+        let result = provisioner_init_impl(enclave, request2).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }

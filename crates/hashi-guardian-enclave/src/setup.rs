@@ -1,6 +1,4 @@
 use crate::Enclave;
-use axum::extract::State;
-use axum::Json;
 use hashi_guardian_shared::crypto::commit_share;
 use hashi_guardian_shared::crypto::encrypt_share;
 use hashi_guardian_shared::crypto::split_secret;
@@ -15,24 +13,17 @@ use tracing::info;
 ///     1. KPs send their encryption pub keys to the operator
 ///     2. Operator calls setup_new_key (and optionally returns its response to all KPs)
 ///     3. KPs fetch the setup_new_key response from S3
-pub async fn setup_new_key(
-    State(enclave): State<Arc<Enclave>>,
-    Json(request): Json<SetupNewKeyRequest>,
-) -> GuardianResult<Json<GuardianSigned<SetupNewKeyResponse>>> {
+pub async fn setup_new_key_impl(
+    enclave: Arc<Enclave>,
+    request: SetupNewKeyRequest,
+) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
 
-    info!("Validating key provisioner public keys.");
-    let key_provisioner_pks = request.public_keys()?;
-    if key_provisioner_pks.len() != NUM_OF_SHARES {
-        return Err(InvalidInputs(format!(
-            "Only {} public keys provided",
-            key_provisioner_pks.len()
-        )));
-    }
-    info!("Received {} public keys.", NUM_OF_SHARES);
+    let key_provisioner_pks = request.public_keys();
+    info!("Received {} public keys.", key_provisioner_pks.len());
 
     info!("Generating new Bitcoin private key.");
     let sk = SecretKey::random(&mut rand::thread_rng());
@@ -74,13 +65,12 @@ pub async fn setup_new_key(
         share_commitments,
     });
 
-    Ok(Json(response))
+    Ok(response)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Json;
     use hashi_guardian_shared::commit_share;
     use hashi_guardian_shared::decrypt_share;
     use hashi_guardian_shared::NUM_OF_SHARES;
@@ -90,9 +80,7 @@ mod tests {
         let enclave = Enclave::create_operator_initialized_for_setup_mode().await;
         let verification_key = &enclave.signing_pubkey();
         let (request, kp_private_keys) = SetupNewKeyRequest::mock_for_testing();
-        let Json(resp) = setup_new_key(State(enclave.clone()), Json(request))
-            .await
-            .unwrap();
+        let resp = setup_new_key_impl(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
         assert_eq!(validated_resp.encrypted_shares.len(), NUM_OF_SHARES);
 

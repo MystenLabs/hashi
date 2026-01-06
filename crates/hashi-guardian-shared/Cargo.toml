@@ -10,6 +10,8 @@ tracing = "0.1.41"
 serde_json = "1.0.143"
 bcs = "0.1.6"
 
+hashi = { path = "../hashi" }
+
 # Crypto dependencies
 # Note: bitcoin v0.32.7 and k256 v0.13 both require rand_core 0.6.4
 # hpke 0.13.0 uses rand 0.9 which conflicts - must use hpke 0.12.0

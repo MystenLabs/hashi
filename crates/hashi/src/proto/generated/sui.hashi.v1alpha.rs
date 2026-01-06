@@ -966,10 +966,67 @@ pub struct GetGuardianInfoRequest {}
 pub struct GetGuardianInfoResponse {
     #[prost(bytes = "bytes", optional, tag = "7")]
     pub public_key: ::core::option::Option<::prost::bytes::Bytes>,
-    /// TODO fill in info about the guardian
+    /// TODO: fill in info about the guardian
     /// Software version of the service. Similar to the `server` http header.
     #[prost(string, optional, tag = "8")]
     pub server: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Untrusted wire DTO. Converted to a validated domain request in the server.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetupNewKeyRequest {
+    /// HPKE public keys for key provisioners (NUM_OF_SHARES entries expected).
+    #[prost(bytes = "bytes", repeated, tag = "1")]
+    pub key_provisioner_public_keys: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+}
+/// Ciphertext produced by HPKE encryption.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HpkeCiphertext {
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub encapsulated_key: ::core::option::Option<::prost::bytes::Bytes>,
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub aes_ciphertext: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// ShareID (NonZeroU16 in Rust). Validate 1 \<= id \<= 65535 in conversion.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuardianShareId {
+    #[prost(uint32, optional, tag = "1")]
+    pub id: ::core::option::Option<u32>,
+}
+/// Encrypted secret share sent to a key provisioner.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuardianShareEncrypted {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<GuardianShareId>,
+    #[prost(message, optional, tag = "2")]
+    pub ciphertext: ::core::option::Option<HpkeCiphertext>,
+}
+/// Commitment to a secret share.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuardianShareCommitment {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<GuardianShareId>,
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub digest: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Unsigned response payload.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetupNewKeyResponseData {
+    #[prost(message, repeated, tag = "1")]
+    pub encrypted_shares: ::prost::alloc::vec::Vec<GuardianShareEncrypted>,
+    #[prost(message, repeated, tag = "2")]
+    pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+}
+/// Application-layer signed response.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignedSetupNewKeyResponse {
+    #[prost(message, optional, tag = "1")]
+    pub data: ::core::option::Option<SetupNewKeyResponseData>,
+    /// Milliseconds since Unix epoch.
+    #[prost(uint64, optional, tag = "2")]
+    pub timestamp_ms: ::core::option::Option<u64>,
+    /// Signature over (intent || data || timestamp).
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Generated client implementations.
 pub mod guardian_service_client {
@@ -1092,6 +1149,33 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Setup mode only: generate a new BTC key and distribute encrypted shares.
+        pub async fn setup_new_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetupNewKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedSetupNewKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/SetupNewKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "SetupNewKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1113,6 +1197,14 @@ pub mod guardian_service_server {
             request: tonic::Request<super::GetGuardianInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Status,
+        >;
+        /// Setup mode only: generate a new BTC key and distribute encrypted shares.
+        async fn setup_new_key(
+            &self,
+            request: tonic::Request<super::SetupNewKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedSetupNewKeyResponse>,
             tonic::Status,
         >;
     }
@@ -1223,6 +1315,51 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetGuardianInfoSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/SetupNewKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetupNewKeySvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::SetupNewKeyRequest>
+                    for SetupNewKeySvc<T> {
+                        type Response = super::SignedSetupNewKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetupNewKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::setup_new_key(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetupNewKeySvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

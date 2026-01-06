@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+service GuardianService {
+  // Query the service for general information about its current state.
+  rpc GetGuardianInfo(GetGuardianInfoRequest) returns (GetGuardianInfoResponse);
+
+  // Setup mode only: generate a new BTC key and distribute encrypted shares.
+  rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
+}
+
+message GetGuardianInfoRequest {}
+
+message GetGuardianInfoResponse {
+  optional bytes public_key = 7;
+  // TODO: fill in info about the guardian
+  // Software version of the service. Similar to the `server` http header.
+  optional string server = 8;
+}
+
+// =======================
+//      SetupNewKey
+// =======================
+
+// Untrusted wire DTO. Converted to a validated domain request in the server.
+message SetupNewKeyRequest {
+  // HPKE public keys for key provisioners (NUM_OF_SHARES entries expected).
+  repeated bytes key_provisioner_public_keys = 1;
+}
+
+// Ciphertext produced by HPKE encryption.
+message HPKECiphertext {
+  optional bytes encapsulated_key = 1;
+  optional bytes aes_ciphertext = 2;
+}
+
+// ShareID (NonZeroU16 in Rust). Validate 1 <= id <= 65535 in conversion.
+message GuardianShareID {
+  optional uint32 id = 1;
+}
+
+// Encrypted secret share sent to a key provisioner.
+message GuardianShareEncrypted {
+  GuardianShareID id = 1;
+  HPKECiphertext ciphertext = 2;
+}
+
+// Commitment to a secret share.
+message GuardianShareCommitment {
+  GuardianShareID id = 1;
+  optional bytes digest = 2;
+}
+
+// Unsigned response payload.
+message SetupNewKeyResponseData {
+  repeated GuardianShareEncrypted encrypted_shares = 1;
+  repeated GuardianShareCommitment share_commitments = 2;
+}
+
+// Application-layer signed response.
+message SignedSetupNewKeyResponse {
+  SetupNewKeyResponseData data = 1;
+
+  // Milliseconds since Unix epoch.
+  optional uint64 timestamp_ms = 2;
+
+  // Signature over (intent || data || timestamp).
+  optional bytes signature = 3;
+}

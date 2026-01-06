@@ -1,6 +1,7 @@
 pub mod bitcoin_utils;
 pub mod crypto;
 pub mod errors;
+pub mod proto_conversions;
 
 pub use crypto::*;
 pub use errors::*;
@@ -10,10 +11,8 @@ use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
-use ed25519_consensus::Signature as GuardianSignature;
+pub use ed25519_consensus::Signature as GuardianSignature;
 use ed25519_consensus::VerificationKey;
-use hpke::Deserializable;
-use hpke::Serializable;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -71,9 +70,9 @@ pub struct HashiNodeSigned<T> {
 //    All requests and responses
 // ---------------------------------
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_public_keys: Vec<Vec<u8>>,
+    key_provisioner_public_keys: Vec<EncPubKey>,
 }
 
 /// `EnclaveSigned<T>`
@@ -100,6 +99,7 @@ pub struct ProvisionerInitRequest {
     state: ProvisionerInitRequestState,
 }
 
+/// Note: Serialize & Deserialize traits are needed here to compute digest
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
@@ -112,7 +112,7 @@ pub struct ProvisionerInitRequestState {
     pub hashi_btc_master_pubkey: XOnlyPublicKey,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct GetAttestationResponse {
     /// Attestation document serialized in Hex
     pub attestation: Attestation,
@@ -208,20 +208,13 @@ impl SetupNewKeyRequest {
             return Err(InvalidInputs("provide enough public keys".into()));
         }
         Ok(Self {
-            key_provisioner_public_keys: public_keys
-                .into_iter()
-                .map(|pk| pk.to_bytes().to_vec())
-                .collect(),
+            key_provisioner_public_keys: public_keys,
         })
     }
 
     /// Deserialize and return public keys
-    pub fn public_keys(&self) -> GuardianResult<Vec<EncPubKey>> {
-        self.key_provisioner_public_keys
-            .iter()
-            .map(|bytes| EncPubKey::from_bytes(bytes))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| InvalidInputs(format!("Failed to deserialize public key: {}", e)))
+    pub fn public_keys(&self) -> &[EncPubKey] {
+        &self.key_provisioner_public_keys
     }
 
     /// Generates mock key provisioner keys and SetupNewKeyRequest for testing.
