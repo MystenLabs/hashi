@@ -17,6 +17,7 @@ use crate::grpc::Client;
 #[derive(Debug)]
 pub struct Hashi {
     pub id: Address,
+    pub initial_shared_version: u64,
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,

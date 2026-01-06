@@ -8,8 +8,15 @@ use crate::proto::SignDepositConfirmationRequest;
 use crate::proto::SignDepositConfirmationResponse;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
+use prost_types::FieldMask;
 use std::sync::Arc;
+use sui_crypto::SuiSigner;
+use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_sdk_types::Address;
+use sui_transaction_builder::Function;
+use sui_transaction_builder::ObjectInput;
+use sui_transaction_builder::TransactionBuilder;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
@@ -211,6 +218,11 @@ impl LeaderService {
         deposit_request: DepositRequest,
         signatures: Vec<MemberSignature>,
     ) -> anyhow::Result<()> {
+        info!(
+            "Aggregating signatures and submitting confirmation to hashi for deposit id {:?}",
+            deposit_request.id
+        );
+
         let committee = {
             let state = self.inner.onchain_state().state();
             state
@@ -222,7 +234,8 @@ impl LeaderService {
         };
 
         // Aggregate signatures
-        let mut signature_aggregator = BlsSignatureAggregator::new(&committee, deposit_request);
+        let mut signature_aggregator =
+            BlsSignatureAggregator::new(&committee, deposit_request.clone());
         for signature in signatures {
             signature_aggregator.add_signature(signature)?;
         }
@@ -238,8 +251,109 @@ impl LeaderService {
         }
 
         // Submit onchain
-        let _aggregate_signature = signature_aggregator.finish()?;
-        todo!("Submit aggregate signature onchain")
+        let aggregate_signature = signature_aggregator.finish()?;
+        self.submit_deposit_confirmation_onchain(&deposit_request, aggregate_signature)
+            .await?;
+        info!(
+            "Successfully submitted deposit confirmation for request: {:?}",
+            deposit_request.id
+        );
+        Ok(())
+    }
+
+    async fn submit_deposit_confirmation_onchain(
+        &self,
+        deposit_request: &DepositRequest,
+        signed_message: crate::committee::SignedMessage<DepositRequest>,
+    ) -> anyhow::Result<()> {
+        use sui_sdk_types::*;
+
+        let sui_rpc_url = self
+            .inner
+            .config
+            .sui_rpc
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No sui_rpc configured"))?;
+        let mut client = sui_rpc::Client::new(sui_rpc_url)?;
+
+        let operator_private_key = self.inner.config.operator_private_key()?;
+        let sender = operator_private_key.public_key().derive_address();
+        let price = client.get_reference_gas_price().await?;
+        let gas_objects = client
+            .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
+            .await?;
+
+        let hashi_ids = self.inner.config.hashi_ids();
+        let hashi_initial_shared_version = {
+            let state = self.inner.onchain_state().state();
+            state.hashi().initial_shared_version
+        };
+        let committee_sig = signed_message.committee_signature();
+
+        // Build a PTB that:
+        // 1. Calls committee::new_committee_signature to construct the CommitteeSignature
+        // 2. Passes the result to deposit::confirm_deposit
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(sender);
+        builder.set_gas_price(price);
+        builder.set_gas_budget(1_000_000_000);
+        builder.add_gas_objects(gas_objects.iter().map(|o| {
+            ObjectInput::owned(
+                o.object_id().parse().unwrap(),
+                o.version(),
+                o.digest().parse().unwrap(),
+            )
+        }));
+
+        let request_id_arg = builder.pure(&deposit_request.id);
+        let epoch_arg = builder.pure(&committee_sig.epoch());
+        let signature_arg = builder.pure(&committee_sig.signature_bytes());
+        let bitmap_arg = builder.pure(&committee_sig.signers_bitmap_bytes());
+
+        // Call new_committee_signature to get the properly serialized CommitteeSignature
+        let committee_sig_arg = builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("committee"),
+                Identifier::from_static("new_committee_signature"),
+            ),
+            vec![epoch_arg, signature_arg, bitmap_arg],
+        );
+
+        // Call confirm deposit
+        let hashi_arg = builder.object(ObjectInput::shared(
+            hashi_ids.hashi_object_id,
+            hashi_initial_shared_version,
+            true,
+        ));
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("deposit"),
+                Identifier::from_static("confirm_deposit"),
+            ),
+            vec![hashi_arg, request_id_arg, committee_sig_arg],
+        );
+
+        let tx = builder.try_build()?;
+        let signature = operator_private_key.sign_transaction(&tx)?;
+
+        let response = client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(tx.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("*")),
+                std::time::Duration::from_secs(10),
+            )
+            .await?
+            .into_inner();
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "Transaction failed to confirm deposit for request {:?}",
+                deposit_request.id
+            );
+        }
+        Ok(())
     }
 }
 

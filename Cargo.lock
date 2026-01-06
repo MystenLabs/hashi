@@ -2600,6 +2600,7 @@ dependencies = [
  "sui-http",
  "sui-rpc",
  "sui-sdk-types",
+ "sui-transaction-builder",
  "tap",
  "tempfile",
  "test-strategy",
@@ -5066,6 +5067,21 @@ dependencies = [
  "serde_json",
  "serde_with",
  "winnow",
+]
+
+[[package]]
+name = "sui-transaction-builder"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3277b142a5af5696de0be8e0a9e679bd8e8acda9e3d0f127065e3ae390172388"
+dependencies = [
+ "async-trait",
+ "bcs",
+ "serde",
+ "serde_with",
+ "sui-rpc",
+ "sui-sdk-types",
+ "thiserror 2.0.16",
 ]
 
 [[package]]

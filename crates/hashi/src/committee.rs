@@ -356,6 +356,11 @@ impl<T> SignedMessage<T> {
     ) -> Result<bool, SignatureError> {
         self.signature.is_signer(address, committee)
     }
+
+    /// Get a reference to the committee signature.
+    pub(crate) fn committee_signature(&self) -> &CommitteeSignature {
+        &self.signature
+    }
 }
 
 impl<T: Serialize> SignedMessage<T> {

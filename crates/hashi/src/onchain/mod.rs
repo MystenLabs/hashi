@@ -310,6 +310,9 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         .checkpoint_height()
         .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
 
+    // Extract initial shared version from owner
+    let initial_shared_version = response.get_ref().object().owner().version();
+
     let move_types::Hashi {
         id,
         committees,
@@ -340,6 +343,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         checkpoint,
         types::Hashi {
             id,
+            initial_shared_version,
             committees: committee_set,
             config: convert_move_config(config),
             treasury,
