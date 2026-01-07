@@ -113,7 +113,7 @@ impl SuiTobChannel {
     }
 
     async fn build_certificate_submission_transaction(
-        &mut self,
+        &self,
         cert: &Certificate,
     ) -> Result<Transaction, TobError> {
         let sender = self.signer.public_key().derive_address();
@@ -276,17 +276,7 @@ impl SuiTobChannel {
 #[async_trait]
 impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
     async fn publish(&self, cert: Certificate) -> ChannelResult<()> {
-        // Clone needed because `sui_rpc::Client` methods require `&mut self`,
-        // but `OrderedBroadcastChannel::publish` takes `&self`.
-        let mut channel = SuiTobChannel {
-            onchain_state: self.onchain_state.clone(),
-            epoch: self.epoch,
-            signer: self.signer.clone(),
-            seen_dealers: HashSet::new(),
-            pending_certs: VecDeque::new(),
-            committee: self.committee.clone(),
-        };
-        let tx = channel
+        let tx = self
             .build_certificate_submission_transaction(&cert)
             .await
             .map_err(ChannelError::from)?;
