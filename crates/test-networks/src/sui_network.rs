@@ -20,6 +20,7 @@ use sui_sdk_types::Identifier;
 use sui_sdk_types::Input;
 use sui_sdk_types::MoveCall;
 use sui_sdk_types::ProgrammableTransaction;
+use sui_sdk_types::SharedInput;
 use sui_sdk_types::SignatureScheme;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::Transaction;
@@ -304,9 +305,7 @@ impl SuiNetworkHandle {
             .enumerate()
             .map(|(i, request)| {
                 (
-                    Input::Pure {
-                        value: request.0.to_bcs().unwrap(),
-                    },
+                    Input::Pure(request.0.to_bcs().unwrap()),
                     sui_sdk_types::Command::TransferObjects(TransferObjects {
                         objects: vec![Argument::NestedResult(0, i as u16)],
                         address: Argument::Input(i as u16),
@@ -320,9 +319,7 @@ impl SuiNetworkHandle {
             .enumerate()
             .map(|(i, request)| {
                 (
-                    Input::Pure {
-                        value: request.1.to_bcs().unwrap(),
-                    },
+                    Input::Pure(request.1.to_bcs().unwrap()),
                     Argument::Input((i + inputs.len()) as u16),
                 )
             })
@@ -387,11 +384,11 @@ impl SuiNetworkHandle {
             .await?;
 
         let pt = ProgrammableTransaction {
-            inputs: vec![Input::Shared {
-                object_id: Address::from_static("0x5"),
-                initial_shared_version: 1,
-                mutable: true,
-            }],
+            inputs: vec![Input::Shared(SharedInput::new(
+                Address::from_static("0x5"),
+                1,
+                true,
+            ))],
             commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
                 package: Address::from_static("0x3"),
                 module: Identifier::from_static("sui_system"),

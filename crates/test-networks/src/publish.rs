@@ -86,9 +86,7 @@ async fn publish_transaction(
     let gas_object = (&gas_objects[0].object_reference()).try_into()?;
 
     let pt = ProgrammableTransaction {
-        inputs: vec![Input::Pure {
-            value: sender.to_bcs()?,
-        }],
+        inputs: vec![Input::Pure(sender.to_bcs()?)],
         commands: vec![
             Command::Publish(publish),
             Command::TransferObjects(TransferObjects {
@@ -187,11 +185,11 @@ async fn publish_transaction(
             .await?
             .into_inner();
 
-        Input::Shared {
-            object_id: Address::from_static("0xc"),
-            initial_shared_version: resp.object().owner().version(),
-            mutable: true,
-        }
+        Input::Shared(SharedInput::new(
+            Address::from_static("0xc"),
+            resp.object().owner().version(),
+            true,
+        ))
     };
 
     let gas_objects = client
@@ -201,11 +199,7 @@ async fn publish_transaction(
 
     let pt = ProgrammableTransaction {
         inputs: vec![
-            Input::Shared {
-                object_id: *hashi.object_id(),
-                initial_shared_version: hashi.version(),
-                mutable: true,
-            },
+            Input::Shared(SharedInput::new(*hashi.object_id(), hashi.version(), true)),
             coin_registry,
             Input::ImmutableOrOwned(upgrade_cap),
         ],

@@ -19,6 +19,7 @@ use sui_sdk_types::Input;
 use sui_sdk_types::MoveCall;
 use sui_sdk_types::ObjectReference;
 use sui_sdk_types::ProgrammableTransaction;
+use sui_sdk_types::SharedInput;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::Transaction;
 use sui_sdk_types::TransactionExpiration;
@@ -190,36 +191,36 @@ impl SuiTobChannel {
             .ok_or_else(|| TobError::InvalidState("no package id available".into()))?;
         Ok(ProgrammableTransaction {
             inputs: vec![
-                Input::Shared {
-                    object_id: hashi_id,
-                    initial_shared_version: hashi_initial_shared_version,
-                    mutable: true,
-                },
-                Input::Pure {
-                    value: epoch
+                Input::Shared(SharedInput::new(
+                    hashi_id,
+                    hashi_initial_shared_version,
+                    true,
+                )),
+                Input::Pure(
+                    epoch
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
-                Input::Pure {
-                    value: dealer
+                ),
+                Input::Pure(
+                    dealer
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
-                Input::Pure {
-                    value: message_hash
+                ),
+                Input::Pure(
+                    message_hash
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
-                Input::Pure {
-                    value: signature
+                ),
+                Input::Pure(
+                    signature
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
-                Input::Pure {
-                    value: signers_bitmap
+                ),
+                Input::Pure(
+                    signers_bitmap
                         .to_bcs()
                         .map_err(|e| TobError::SerializationError(e.to_string()))?,
-                },
+                ),
             ],
             commands: vec![Command::MoveCall(MoveCall {
                 package: package_id,

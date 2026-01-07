@@ -20,6 +20,7 @@ use sui_sdk_types::Identifier;
 use sui_sdk_types::Input;
 use sui_sdk_types::MoveCall;
 use sui_sdk_types::ProgrammableTransaction;
+use sui_sdk_types::SharedInput;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::Transaction;
 use sui_sdk_types::TransactionExpiration;
@@ -201,46 +202,38 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let sui_system = system_objects.objects[0].object();
     let hashi_system = system_objects.objects[1].object();
 
-    let public_key_input = Input::Pure {
-        value: protocol_public_key.as_ref().to_vec().to_bcs()?,
-    };
-    let proof_of_possession = Input::Pure {
-        value: protocol_private_key
+    let public_key_input = Input::Pure(protocol_public_key.as_ref().to_vec().to_bcs()?);
+    let proof_of_possession = Input::Pure(
+        protocol_private_key
             .proof_of_possession(0, validator_address)
             .signature()
             .as_ref()
             .to_bcs()?,
-    };
-    let https_address = Input::Pure {
-        value: format!("https://{}", config.https_address()).to_bcs()?,
-    };
-    let tls_public_key = Input::Pure {
-        value: config.tls_public_key()?.as_bytes().to_vec().to_bcs()?,
-    };
-    let encryption_public_key = Input::Pure {
-        value: config
+    );
+    let https_address = Input::Pure(format!("https://{}", config.https_address()).to_bcs()?);
+    let tls_public_key = Input::Pure(config.tls_public_key()?.as_bytes().to_vec().to_bcs()?);
+    let encryption_public_key = Input::Pure(
+        config
             .encryption_public_key()?
             .as_element()
             .compress()
             .as_slice()
             .to_bcs()?,
-    };
-    let validator_address_pure = Input::Pure {
-        value: validator_address.to_bcs()?,
-    };
+    );
+    let validator_address_pure = Input::Pure(validator_address.to_bcs()?);
 
     let pt = ProgrammableTransaction {
         inputs: vec![
-            Input::Shared {
-                object_id: sui_system.object_id().parse()?,
-                initial_shared_version: sui_system.owner().version(),
-                mutable: false,
-            },
-            Input::Shared {
-                object_id: hashi_system.object_id().parse()?,
-                initial_shared_version: hashi_system.owner().version(),
-                mutable: true,
-            },
+            Input::Shared(SharedInput::new(
+                sui_system.object_id().parse()?,
+                sui_system.owner().version(),
+                false,
+            )),
+            Input::Shared(SharedInput::new(
+                hashi_system.object_id().parse()?,
+                hashi_system.owner().version(),
+                true,
+            )),
             public_key_input,
             proof_of_possession,
             https_address,
@@ -342,20 +335,16 @@ pub async fn update_tls_public_key(
         .into_inner();
     let hashi_system = system_objects.objects[1].object();
 
-    let tls_public_key = Input::Pure {
-        value: config.tls_public_key()?.as_bytes().to_vec().to_bcs()?,
-    };
-    let validator_address_pure = Input::Pure {
-        value: validator_address.to_bcs()?,
-    };
+    let tls_public_key = Input::Pure(config.tls_public_key()?.as_bytes().to_vec().to_bcs()?);
+    let validator_address_pure = Input::Pure(validator_address.to_bcs()?);
 
     let pt = ProgrammableTransaction {
         inputs: vec![
-            Input::Shared {
-                object_id: hashi_system.object_id().parse()?,
-                initial_shared_version: hashi_system.owner().version(),
-                mutable: true,
-            },
+            Input::Shared(SharedInput::new(
+                hashi_system.object_id().parse()?,
+                hashi_system.owner().version(),
+                true,
+            )),
             validator_address_pure,
             tls_public_key,
         ],
@@ -430,16 +419,16 @@ async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
 
     let pt = ProgrammableTransaction {
         inputs: vec![
-            Input::Shared {
-                object_id: sui_system.object_id().parse()?,
-                initial_shared_version: sui_system.owner().version(),
-                mutable: false,
-            },
-            Input::Shared {
-                object_id: hashi_system.object_id().parse()?,
-                initial_shared_version: hashi_system.owner().version(),
-                mutable: true,
-            },
+            Input::Shared(SharedInput::new(
+                sui_system.object_id().parse()?,
+                sui_system.owner().version(),
+                false,
+            )),
+            Input::Shared(SharedInput::new(
+                hashi_system.object_id().parse()?,
+                hashi_system.owner().version(),
+                true,
+            )),
         ],
         commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
             package: hashi_ids.package_id,
