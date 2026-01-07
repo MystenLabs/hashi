@@ -68,6 +68,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_start_height: Option<u32>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_trusted_peers: Option<Vec<String>>,
+
     /// Database path
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
@@ -227,6 +230,25 @@ impl Config {
             .as_ref()
             .unwrap_or(&hashi_btc::config::BtcRpcAuth::None)
             .to_bitcoincore_rpc_auth()
+    }
+
+    pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<hashi_btc::TrustedPeer>> {
+        let peers = self
+            .bitcoin_trusted_peers
+            .as_ref()
+            .map(|peers| {
+                peers
+                    .iter()
+                    .map(|addr| {
+                        addr.parse::<std::net::SocketAddr>()
+                            .map(hashi_btc::TrustedPeer::from)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("Failed to parse bitcoin_trusted_peers: {}", e))?
+            .unwrap_or_default();
+        Ok(peers)
     }
 
     pub fn hashi_ids(&self) -> HashiIds {

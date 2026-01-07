@@ -75,6 +75,7 @@ entry fun bootstrap(
     assert!(!self.committee_set.has_committee(ctx.epoch()));
 
     self.committee_set.bootstrap(sui_system, ctx);
+    self.config_mut().set_paused(false);
 }
 
 public(package) fun config(self: &Hashi): &Config {

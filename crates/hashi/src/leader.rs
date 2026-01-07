@@ -17,12 +17,13 @@ use sui_sdk_types::Address;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
 use x509_parser::nom::AsBytes;
 
-const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 10;
+const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 
 #[derive(Clone)]
 pub struct LeaderService {
@@ -49,7 +50,7 @@ impl LeaderService {
             let checkpoint_height = *checkpoint_rx.borrow_and_update();
 
             if self.is_current_leader(checkpoint_height) {
-                trace!("We are the leader node");
+                info!("Checkpoint {}: We are the leader node", checkpoint_height);
             } else {
                 trace!("We are not the leader node");
                 continue;
@@ -87,11 +88,13 @@ impl LeaderService {
         let num_validators = committee.members().len() as u64;
 
         let current_turn = checkpoint_height / NUM_CONSECUTIVE_LEADER_CHECKPOINTS;
-        (current_turn % num_validators) == this_validator_idx
+        let is_leader = (current_turn % num_validators) == this_validator_idx;
+
+        debug!("Node index {this_validator_idx} is leader node: {is_leader}");
+        is_leader
     }
 
     async fn process_deposit_requests(&self) {
-        trace!("Processing deposit requests");
         let mut deposit_requests: Vec<_> = {
             let state = self.inner.onchain_state().state();
             state
@@ -105,6 +108,8 @@ impl LeaderService {
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
 
+        info!("Processing {} deposit requests", deposit_requests.len());
+
         // TODO: parallelize?
         for deposit_request in deposit_requests {
             self.process_deposit_request(&deposit_request).await;
@@ -114,17 +119,21 @@ impl LeaderService {
     async fn process_deposit_request(&self, deposit_request: &DepositRequest) {
         // TODO: parallelize, and after we have a quorum of sigs, stop waiting for sigs from any
         // additional validators
-        trace!("Processing deposit request: {:?}", deposit_request);
+        info!("Processing deposit request: {:?}", deposit_request.id);
 
         // Validate deposit_request before asking for signatures
         let validate_result = self.inner.validate_deposit_request(deposit_request).await;
         if let Err(e) = validate_result {
             error!(
                 "Deposit request {:?} failed validation: {e}",
-                deposit_request
+                deposit_request.id
             );
             return;
         }
+        info!(
+            "Deposit request {:?} validated successfully",
+            deposit_request.id
+        );
 
         let proto_request = deposit_request.to_proto();
         let members = {
@@ -380,12 +389,12 @@ fn into_member_signature(
     let epoch = member_signature
         .epoch
         .ok_or(anyhow::anyhow!("No epoch in MemberSignature"))?;
-    let address = Address::from_bytes(
-        member_signature
-            .address
-            .ok_or(anyhow::anyhow!("No address in MemberSignature"))?
-            .as_bytes(),
-    )?;
+    let address_string = member_signature
+        .address
+        .ok_or(anyhow::anyhow!("No address in MemberSignature"))?;
+    let address = address_string
+        .parse::<Address>()
+        .map_err(|e| anyhow::anyhow!("Unable to parse Address: {}", e))?;
     let signature = BLS12381Signature::from_bytes(
         member_signature
             .signature
