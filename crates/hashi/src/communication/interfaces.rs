@@ -27,6 +27,9 @@ pub enum ChannelError {
     #[error("Request failed: {0}")]
     RequestFailed(String),
 
+    #[error("Client not found for address {0}")]
+    ClientNotFound(Address),
+
     #[error("Receive timeout")]
     Timeout,
 

@@ -180,6 +180,126 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplainResponse {
 }
 
 //
+// SendRotationMessagesRequest
+//
+
+impl types::SendRotationMessagesRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::SendRotationMessagesRequest {
+        proto::SendRotationMessagesRequest {
+            epoch: Some(epoch),
+            messages: self
+                .messages
+                .iter()
+                .map(|(idx, msg)| (idx.get() as u32, serialize_bcs(msg)))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::SendRotationMessagesRequest> for types::SendRotationMessagesRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::SendRotationMessagesRequest) -> Result<Self, Self::Error> {
+        use fastcrypto_tbls::types::ShareIndex;
+        use std::collections::BTreeMap;
+
+        let mut messages = BTreeMap::new();
+        for (&index, bcs) in &value.messages {
+            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
+                TryFromProtoError::invalid("messages.key", "index must be non-zero")
+            })?;
+            let message: avss::Message = deserialize_bcs(bcs, "messages.value")?;
+            messages.insert(share_index, message);
+        }
+        Ok(Self {
+            messages: types::RotationMessages::new(messages),
+        })
+    }
+}
+
+//
+// SendRotationMessagesResponse
+//
+
+impl From<&types::SendRotationMessagesResponse> for proto::SendRotationMessagesResponse {
+    fn from(value: &types::SendRotationMessagesResponse) -> Self {
+        Self {
+            signature: Some(value.signature.as_ref().to_vec().into()),
+        }
+    }
+}
+
+impl TryFrom<&proto::SendRotationMessagesResponse> for types::SendRotationMessagesResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::SendRotationMessagesResponse) -> Result<Self, Self::Error> {
+        let signature =
+            BLS12381Signature::from_bytes(required(value.signature.as_ref(), "signature")?)
+                .map_err(|e| TryFromProtoError::invalid("signature", e))?;
+        Ok(Self { signature })
+    }
+}
+
+//
+// RetrieveRotationMessagesRequest
+//
+
+impl types::RetrieveRotationMessagesRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::RetrieveRotationMessagesRequest {
+        proto::RetrieveRotationMessagesRequest {
+            epoch: Some(epoch),
+            dealer: Some(self.dealer.to_string()),
+        }
+    }
+}
+
+impl TryFrom<&proto::RetrieveRotationMessagesRequest> for types::RetrieveRotationMessagesRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RetrieveRotationMessagesRequest) -> Result<Self, Self::Error> {
+        let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
+        Ok(Self { dealer })
+    }
+}
+
+//
+// RetrieveRotationMessagesResponse
+//
+
+impl From<&types::RetrieveRotationMessagesResponse> for proto::RetrieveRotationMessagesResponse {
+    fn from(value: &types::RetrieveRotationMessagesResponse) -> Self {
+        Self {
+            messages: value
+                .messages
+                .iter()
+                .map(|(idx, msg)| (idx.get() as u32, serialize_bcs(msg)))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::RetrieveRotationMessagesResponse> for types::RetrieveRotationMessagesResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RetrieveRotationMessagesResponse) -> Result<Self, Self::Error> {
+        use fastcrypto_tbls::types::ShareIndex;
+        use std::collections::BTreeMap;
+
+        let mut messages = BTreeMap::new();
+        for (&index, bcs) in &value.messages {
+            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
+                TryFromProtoError::invalid("messages.key", "index must be non-zero")
+            })?;
+            let message: avss::Message = deserialize_bcs(bcs, "messages.value")?;
+            messages.insert(share_index, message);
+        }
+        Ok(Self {
+            messages: types::RotationMessages::new(messages),
+        })
+    }
+}
+
+//
 // GetPublicDkgOutputRequest
 //
 
