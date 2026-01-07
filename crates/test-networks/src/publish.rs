@@ -44,9 +44,17 @@ fn build_package(dir: &Path) -> Result<sui_sdk_types::Publish> {
         .arg("-p")
         .arg(hashi_package)
         .arg("build")
-        .arg("--ignore-chain") // TODO remove once 1.62 is released
+        .args(["-e", "testnet"])
         .arg("--dump-bytecode-as-base64");
     let output = cmd.output()?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "stdout: {}\n\n stderr: {}",
+            output.stdout.escape_ascii(),
+            output.stderr.escape_ascii()
+        ));
+    }
 
     let move_build_output: MoveBuildOutput = serde_json::from_slice(&output.stdout)?;
     let modules = move_build_output
