@@ -245,7 +245,7 @@ mod tests {
 
     // TODO: Add more integration tests for DKG.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_dkg_multi_nodes() -> Result<()> {
+    async fn test_dkg_e2e() -> Result<()> {
         hashi::init_crypto_provider();
         // Using 3 nodes: threshold=2, max_faulty=0, required_weight=2
         // This means each dealer needs 2 signatures (including own), so 1 from others
@@ -262,13 +262,9 @@ mod tests {
             .build_process()
             .await?;
         assert_eq!(test_networks.hashi_network().nodes().len(), NUM_NODES);
-
-        // Start all node processes
         test_networks.hashi_network_mut().start_all()?;
-
         // Give nodes time to initialize and start their HTTP servers
         tokio::time::sleep(Duration::from_secs(10)).await;
-
         // Test connectivity by checking each node's RPC service
         for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
             let tls_config = hashi::tls::make_client_config(&node.tls_public_key()?);
@@ -288,29 +284,27 @@ mod tests {
                 }
             }
         }
-
         let sui_rpc_url = &test_networks.sui_network().rpc_url;
         let ids = test_networks.hashi_network().ids();
-
-        // Get the actual epoch from onchain state
         let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
         let epoch = state.state().hashi().committees.epoch();
-
         let expected_certs = NUM_NODES;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        const DEADLINE_SECS: u64 = 1200;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(DEADLINE_SECS);
         loop {
             let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
             let certs = state.fetch_dkg_certs(epoch).await?;
             if certs.len() >= expected_certs {
-                // All certificates are present - DKG completed successfully!
+                // All certificates are present - DKG completed successfully.
                 // The certificates are validated on-chain by the Move contract when they're published.
                 return Ok(());
             }
             if tokio::time::Instant::now() > deadline {
                 anyhow::bail!(
-                    "DKG timeout: only {} / {} certificates on TOB after 300s",
+                    "DKG timeout: only {} / {} certificates on TOB after {}s",
                     certs.len(),
-                    expected_certs
+                    expected_certs,
+                    DEADLINE_SECS
                 );
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

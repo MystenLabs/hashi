@@ -185,7 +185,17 @@ impl Hashi {
                 return;
             }
             let http_service = grpc::HttpService::new(self.clone()).start().await;
-            if let Err(e) = self.run_dkg().await {
+            let committee_size = self
+                .onchain_state()
+                .state()
+                .hashi()
+                .committees
+                .current_committee()
+                .map(|c| c.members().len())
+                .unwrap_or(0);
+            if committee_size > 1
+                && let Err(e) = self.run_dkg().await
+            {
                 tracing::error!("DKG failed: {e}");
             }
             let leader_service = leader::LeaderService::new(self.clone()).start();
