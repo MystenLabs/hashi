@@ -263,33 +263,42 @@ mod tests {
             .await?;
         assert_eq!(test_networks.hashi_network().nodes().len(), NUM_NODES);
         test_networks.hashi_network_mut().start_all()?;
-        // Give nodes time to initialize and start their HTTP servers
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        // Test connectivity by checking each node's RPC service
-        for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+
+        // Build RPC clients for all nodes
+        let mut clients = Vec::with_capacity(NUM_NODES);
+        for node in test_networks.hashi_network().nodes().iter() {
             let tls_config = hashi::tls::make_client_config(&node.tls_public_key()?);
             let client = hashi::grpc::Client::new(node.https_url(), tls_config)?;
-            // Retry up to 20 times (10 seconds total) as the node may still be starting
-            for attempt in 1..=20 {
-                match client.get_service_info().await {
-                    Ok(_) => {
-                        break;
+            clients.push(client);
+        }
+
+        // Wait for all nodes to start their RPC servers
+        // Retry up to 120 times (60 seconds total) per node with 5s timeout per call
+        for (i, client) in clients.iter().enumerate() {
+            for attempt in 1..=120 {
+                let result =
+                    tokio::time::timeout(Duration::from_secs(5), client.get_service_info()).await;
+                match result {
+                    Ok(Ok(_)) => break,
+                    _ if attempt == 120 => {
+                        anyhow::bail!("Node {} failed to start after 120 attempts", i);
                     }
-                    Err(e) if attempt == 20 => {
-                        anyhow::bail!("Node {} failed to start after 20 attempts: {}", i, e);
-                    }
-                    Err(_) => {
+                    _ => {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
             }
         }
+
+        // Allow time for internal P2P connections to fully establish
+        // In CI, nodes may be slower to establish TLS connections to each other
+        tokio::time::sleep(Duration::from_secs(30)).await;
         let sui_rpc_url = &test_networks.sui_network().rpc_url;
         let ids = test_networks.hashi_network().ids();
         let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
         let epoch = state.state().hashi().committees.epoch();
         let expected_certs = NUM_NODES;
-        const DEADLINE_SECS: u64 = 3600;
+        const DEADLINE_SECS: u64 = 600;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(DEADLINE_SECS);
         loop {
             let certs = state.fetch_dkg_certs(epoch).await?;
