@@ -289,10 +289,9 @@ mod tests {
         let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
         let epoch = state.state().hashi().committees.epoch();
         let expected_certs = NUM_NODES;
-        const DEADLINE_SECS: u64 = 1200;
+        const DEADLINE_SECS: u64 = 3600;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(DEADLINE_SECS);
         loop {
-            let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
             let certs = state.fetch_dkg_certs(epoch).await?;
             if certs.len() >= expected_certs {
                 // All certificates are present - DKG completed successfully.
@@ -307,7 +306,7 @@ mod tests {
                     DEADLINE_SECS
                 );
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 

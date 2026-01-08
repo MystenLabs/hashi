@@ -15,12 +15,59 @@ use std::collections::BTreeMap;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-/// Matches Move's `vector<u8>` in BCS serialization.
-pub type MessageHash = Vec<u8>;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
     "754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959::hashi";
+
+/// A 32-byte hash that serializes as `vector<u8>` for Move/BCS compatibility.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MessageHash([u8; 32]);
+
+impl MessageHash {
+    pub fn new(hash: [u8; 32]) -> Self {
+        Self(hash)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+
+impl From<[u8; 32]> for MessageHash {
+    fn from(hash: [u8; 32]) -> Self {
+        Self(hash)
+    }
+}
+
+impl TryFrom<Vec<u8>> for MessageHash {
+    type Error = Vec<u8>;
+
+    fn try_from(vec: Vec<u8>) -> Result<Self, Self::Error> {
+        let arr: [u8; 32] = vec.try_into()?;
+        Ok(Self(arr))
+    }
+}
+
+impl Serialize for MessageHash {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.to_vec().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageHash {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let vec = Vec::<u8>::deserialize(deserializer)?;
+        let arr: [u8; 32] = vec.try_into().map_err(|v: Vec<u8>| {
+            serde::de::Error::custom(format!("expected 32 bytes, got {}", v.len()))
+        })?;
+        Ok(Self(arr))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DkgConfig {

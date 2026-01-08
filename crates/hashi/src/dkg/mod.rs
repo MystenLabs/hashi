@@ -1435,7 +1435,7 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let message_bytes = bcs::to_bytes(message).expect(EXPECT_SERIALIZATION_SUCCESS);
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
-    hasher.finalize().to_vec()
+    MessageHash::new(hasher.finalize().into())
 }
 
 fn compute_bft_threshold(total_weight: u16) -> u16 {
@@ -1444,7 +1444,7 @@ fn compute_bft_threshold(total_weight: u16) -> u16 {
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
     let bytes = bcs::to_bytes(bundle).expect(EXPECT_SERIALIZATION_SUCCESS);
-    Blake2b256::digest(&bytes).to_vec()
+    MessageHash::new(Blake2b256::digest(&bytes).into())
 }
 
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
