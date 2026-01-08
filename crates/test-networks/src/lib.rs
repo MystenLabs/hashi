@@ -243,6 +243,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    // TODO: Add more integration tests for DKG.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_dkg_multi_nodes() -> Result<()> {
         hashi::init_crypto_provider();
@@ -281,7 +282,7 @@ mod tests {
                     Err(e) if attempt == 20 => {
                         anyhow::bail!("Node {} failed to start after 20 attempts: {}", i, e);
                     }
-                    Err(e) => {
+                    Err(_) => {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
@@ -293,17 +294,7 @@ mod tests {
 
         // Get the actual epoch from onchain state
         let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
-        let (epoch, committee_size) = {
-            let hashi_state = state.state();
-            let epoch = hashi_state.hashi().committees.epoch();
-            let committee_size = hashi_state
-                .hashi()
-                .committees
-                .current_committee()
-                .map(|c| c.members().len())
-                .unwrap_or(0);
-            (epoch, committee_size)
-        };
+        let epoch = state.state().hashi().committees.epoch();
 
         let expected_certs = NUM_NODES;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(300);

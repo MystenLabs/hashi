@@ -46,7 +46,7 @@ use super::compute_message_hash;
 use super::compute_rotation_messages_hash;
 
 /// Message store for DKG - holds all state needed by RPC handlers.
-/// This struct has its own RwLock to allow concurrent message processing
+/// This struct has its own `RwLock` to allow concurrent message processing
 /// without blocking protocol execution.
 pub struct MessageStore {
     // Immutable configuration
@@ -76,7 +76,7 @@ pub struct MessageStore {
 }
 
 impl MessageStore {
-    /// Create a new message store with the given configuration.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         party_id: PartyId,
         address: Address,
@@ -108,7 +108,6 @@ impl MessageStore {
         }
     }
 
-    /// Set the previous DKG output (needed for rotation message verification).
     pub fn set_previous_dkg_output(&mut self, output: DkgOutput) {
         self.previous_dkg_output = Some(output);
     }
@@ -119,7 +118,6 @@ impl MessageStore {
         sender: Address,
         request: &SendMessageRequest,
     ) -> DkgResult<SendMessageResponse> {
-        // Check for equivocation or return cached response
         if let Some(existing_message) = self.dealer_messages.get(&sender) {
             let existing_hash = compute_message_hash(existing_message);
             let incoming_hash = compute_message_hash(&request.message);
@@ -137,8 +135,6 @@ impl MessageStore {
                 reason: "Message previously rejected due to invalid shares".to_string(),
             });
         }
-
-        // Store and process the message
         self.store_message(sender, &request.message)?;
         let signature = self.try_sign_message(sender, &request.message)?;
         let response = SendMessageResponse { signature };
@@ -165,13 +161,11 @@ impl MessageStore {
         request: &ComplainRequest,
     ) -> DkgResult<ComplainResponse> {
         let cache_key = request.dealer;
-        // Return cached response if available
         if let Some(cached_response) = self.complaint_responses.get(&cache_key) {
             return Ok(ComplainResponse {
                 response: cached_response.clone(),
             });
         }
-
         let message = self
             .dealer_messages
             .get(&request.dealer)
@@ -201,7 +195,6 @@ impl MessageStore {
         sender: Address,
         request: &SendRotationMessagesRequest,
     ) -> DkgResult<SendRotationMessagesResponse> {
-        // Check for equivocation or return cached response
         if let Some(existing_messages) = self.rotation_dealer_messages.get(&sender) {
             let existing_hash = compute_rotation_messages_hash(existing_messages);
             let incoming_hash = compute_rotation_messages_hash(&request.messages);
@@ -219,12 +212,10 @@ impl MessageStore {
                 reason: "Rotation messages previously rejected due to invalid shares".to_string(),
             });
         }
-
         let previous = self
             .previous_dkg_output
             .clone()
             .ok_or_else(|| DkgError::ProtocolFailed("Rotation not started".to_string()))?;
-
         self.rotation_dealer_messages
             .insert(sender, request.messages.clone());
         let signature = self.try_sign_rotation_messages(&previous, sender, &request.messages)?;
@@ -255,36 +246,30 @@ impl MessageStore {
         &mut self,
         request: &RotationComplainRequest,
     ) -> DkgResult<RotationComplainResponse> {
-        // Check cache first
         if let Some(cached_responses) = self.rotation_complaint_responses.get(&request.dealer) {
             return Ok(RotationComplainResponse {
                 responses: cached_responses.clone(),
             });
         }
-
         let previous = self
             .previous_dkg_output
             .as_ref()
             .ok_or_else(|| DkgError::ProtocolFailed("Rotation not started".to_string()))?;
-
         let rotation_messages = self
             .rotation_dealer_messages
             .get(&request.dealer)
             .ok_or_else(|| {
                 DkgError::NotFound(format!("Rotation messages for dealer {:?}", request.dealer))
             })?;
-
         let message = rotation_messages.get(request.share_index).ok_or_else(|| {
             DkgError::NotFound(format!(
                 "Rotation message for share index {:?}",
                 request.share_index
             ))
         })?;
-
         let rotation_session_id = self
             .session_id
             .rotation_session_id(&request.dealer, request.share_index);
-
         let receiver = avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -293,7 +278,6 @@ impl MessageStore {
             Some(previous.commitments[&request.share_index]),
             self.encryption_key.clone(),
         );
-
         let partial_output = self
             .rotation_outputs
             .get(&request.share_index)
@@ -303,20 +287,15 @@ impl MessageStore {
                     request.share_index
                 ))
             })?;
-
         let response = receiver.handle_complaint(message, &request.complaint, partial_output)?;
-
         let share_response = RotationShareComplaintResponse {
             share_index: request.share_index,
             response,
         };
-
-        // Cache for future requests
         self.rotation_complaint_responses
             .entry(request.dealer)
             .or_default()
             .push(share_response.clone());
-
         Ok(RotationComplainResponse {
             responses: vec![share_response],
         })
@@ -348,8 +327,6 @@ impl MessageStore {
             output: PublicDkgOutput::from_dkg_output(output),
         })
     }
-
-    // Internal helper methods
 
     fn store_message(&mut self, dealer: Address, message: &avss::Message) -> DkgResult<()> {
         self.dealer_messages.insert(dealer, message.clone());
@@ -400,7 +377,6 @@ impl MessageStore {
         dealer: Address,
         messages: &RotationMessages,
     ) -> DkgResult<BLS12381Signature> {
-        // Verify and process each message
         for (&share_index, message) in messages.iter() {
             let rotation_session_id = self.session_id.rotation_session_id(&dealer, share_index);
             let commitment = previous_dkg_output
@@ -410,7 +386,6 @@ impl MessageStore {
                     sender: dealer,
                     reason: format!("No commitment for share index {:?}", share_index),
                 })?;
-
             let receiver = avss::Receiver::new(
                 self.dkg_config.nodes.clone(),
                 self.party_id,
@@ -419,7 +394,6 @@ impl MessageStore {
                 Some(*commitment),
                 self.encryption_key.clone(),
             );
-
             match receiver.process_message(message)? {
                 avss::ProcessedMessage::Valid(output) => {
                     self.rotation_outputs.insert(share_index, output);
@@ -432,8 +406,6 @@ impl MessageStore {
                 }
             }
         }
-
-        // Sign the messages hash
         let messages_hash = compute_rotation_messages_hash(messages);
         let signature = self.signing_key.sign(
             self.dkg_config.epoch,
@@ -446,7 +418,6 @@ impl MessageStore {
         Ok(signature.signature().clone())
     }
 
-    /// Load stored messages from the public message store.
     pub fn load_stored_messages(&mut self) -> DkgResult<()> {
         let stored = self
             .public_messages_store

@@ -69,6 +69,8 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed";
 
+pub type MessageStoreHandle = std::sync::Arc<std::sync::RwLock<message_store::MessageStore>>;
+
 struct RotationComplainContext {
     request: RotationComplainRequest,
     recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)>,
@@ -80,8 +82,8 @@ struct RotationComplainContext {
 // 3) Once sufficient valid certificates are received, a party completes the protocol locally by aggregating the shares from the dealers.
 pub struct DkgManager {
     /// Shared message store - holds all RPC handler state.
-    /// This is wrapped in Arc<RwLock<>> to allow RPC handlers to access it
-    /// without blocking on the DkgManager mutex.
+    /// This is wrapped in `Arc<RwLock<>>` to allow RPC handlers to access it
+    /// without blocking on the `DkgManager` mutex.
     store: MessageStoreHandle,
 
     // Fields that stay in DkgManager (not accessed by RPC handlers)
@@ -91,15 +93,8 @@ pub struct DkgManager {
     pub rotation_complaints_to_process: HashMap<(Address, ShareIndex), complaint::Complaint>,
 }
 
-/// Type alias for the shared MessageStore handle.
-pub type MessageStoreHandle = std::sync::Arc<std::sync::RwLock<message_store::MessageStore>>;
-
 // TODO: Factor out common code between DKG and key rotation.
 impl DkgManager {
-    /// Create a new DkgManager and return the shared MessageStore handle.
-    ///
-    /// The MessageStore handle should be stored separately and used by RPC handlers
-    /// to process messages without blocking on the DkgManager mutex.
     pub fn new(
         address: Address,
         committee_set: &CommitteeSet,
@@ -144,8 +139,6 @@ impl DkgManager {
             }
             Nodes::new(prev_nodes_vec).ok()
         });
-
-        // Create the MessageStore with all shared state
         let mut store = message_store::MessageStore::new(
             party_id,
             address,
@@ -158,7 +151,6 @@ impl DkgManager {
         );
         store.load_stored_messages()?;
         let store_handle = std::sync::Arc::new(std::sync::RwLock::new(store));
-
         let manager = Self {
             store: store_handle.clone(),
             previous_committee,
@@ -169,12 +161,9 @@ impl DkgManager {
         Ok((manager, store_handle))
     }
 
-    /// Get a reference to the shared message store.
     pub fn store(&self) -> &MessageStoreHandle {
         &self.store
     }
-
-    // Accessor methods for protocol execution - these read from the store
 
     fn address(&self) -> Address {
         self.store.read().unwrap().address

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-/// Matches Move's vector<u8> in BCS serialization
+/// Matches Move's `vector<u8>` in BCS serialization.
 pub type MessageHash = Vec<u8>;
 
 // Domain separation constants for RandomOracle
