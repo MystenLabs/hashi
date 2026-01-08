@@ -103,7 +103,7 @@ pub struct SetupNewKeyResponse {
 
 /// Provides S3 API keys, share commitments and the BTC network to the enclave.
 /// To be called by the operator.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
     share_commitments: Vec<ShareCommitment>,
@@ -118,7 +118,6 @@ pub struct ProvisionerInitRequest {
     state: ProvisionerInitRequestState,
 }
 
-/// Note: Serialize & Deserialize traits are needed here to compute state digest
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
@@ -251,7 +250,7 @@ impl OperatorInitRequest {
         })
     }
 
-    pub fn config(&self) -> &S3Config {
+    pub fn s3_config(&self) -> &S3Config {
         &self.s3_config
     }
 

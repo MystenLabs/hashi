@@ -310,7 +310,7 @@ impl CommitteeSignature {
 #[derive(Debug, Clone)]
 pub struct SignedMessage<T> {
     signature: CommitteeSignature,
-    pub message: T,
+    pub(crate) message: T,
 }
 
 impl<T> SignedMessage<T> {

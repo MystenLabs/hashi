@@ -28,7 +28,7 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
-    let logger = S3Logger::new(request.config())
+    let logger = S3Logger::new(request.s3_config())
         .await
         .expect("Unable to create logger");
 
