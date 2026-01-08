@@ -32,6 +32,7 @@ pub struct Hashi {
     onchain_state: OnceLock<onchain::OnchainState>,
     // TODO: Replace `DkgManager` by `MpcManager`
     dkg_manager: OnceLock<Mutex<dkg::DkgManager>>,
+    message_store: OnceLock<dkg::MessageStoreHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
 
@@ -47,6 +48,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            message_store: OnceLock::new(),
             btc_monitor: OnceLock::new(),
         })
     }
@@ -65,6 +67,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            message_store: OnceLock::new(),
             btc_monitor: OnceLock::new(),
         })
     }
@@ -83,6 +86,12 @@ impl Hashi {
 
     pub fn dkg_manager(&self) -> &Mutex<dkg::DkgManager> {
         self.dkg_manager.get().expect("DkgManager not initialized")
+    }
+
+    pub fn message_store(&self) -> &dkg::MessageStoreHandle {
+        self.message_store
+            .get()
+            .expect("MessageStore not initialized")
     }
 
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
@@ -117,7 +126,7 @@ impl Hashi {
             self.db.clone(),
             committee_set.epoch(),
         ));
-        let dkg_manager = dkg::DkgManager::new(
+        let (dkg_manager, message_store) = dkg::DkgManager::new(
             self.config.validator_address()?,
             committee_set,
             session_id,
@@ -128,6 +137,9 @@ impl Hashi {
         self.dkg_manager
             .set(Mutex::new(dkg_manager))
             .map_err(|_| anyhow!("DkgManager already initialized"))?;
+        self.message_store
+            .set(message_store)
+            .map_err(|_| anyhow!("MessageStore already initialized"))?;
         Ok(())
     }
 

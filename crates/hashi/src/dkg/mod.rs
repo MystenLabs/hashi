@@ -1,5 +1,6 @@
 //! Distributed Key Generation (DKG) module
 
+pub mod message_store;
 pub mod rpc;
 pub mod types;
 
@@ -78,34 +79,27 @@ struct RotationComplainContext {
 // 2) Each party verifies the message and returns a signature. Once sufficient valid signatures are received from the parties, the dealer sends a certificate to Sui (TOB).
 // 3) Once sufficient valid certificates are received, a party completes the protocol locally by aggregating the shares from the dealers.
 pub struct DkgManager {
-    // Immutable during the epoch
-    pub party_id: PartyId,
-    pub address: Address,
-    pub dkg_config: DkgConfig,
-    pub session_id: SessionId,
-    pub encryption_key: PrivateKey<EncryptionGroupElement>,
-    pub signing_key: Bls12381PrivateKey,
-    pub committee: Committee,
+    /// Shared message store - holds all RPC handler state.
+    /// This is wrapped in Arc<RwLock<>> to allow RPC handlers to access it
+    /// without blocking on the DkgManager mutex.
+    store: MessageStoreHandle,
+
+    // Fields that stay in DkgManager (not accessed by RPC handlers)
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
-
-    // Mutable during the epoch
-    pub dealer_outputs: HashMap<Address, avss::PartialOutput>,
-    pub dealer_messages: HashMap<Address, avss::Message>,
-    pub message_responses: HashMap<Address, SendMessageResponse>,
     pub complaints_to_process: HashMap<Address, complaint::Complaint>,
-    pub complaint_responses: HashMap<Address, complaint::ComplaintResponse<avss::SharesForNode>>,
-    pub public_messages_store: Box<dyn PublicMessagesStore>,
-    pub rotation_outputs: HashMap<ShareIndex, avss::PartialOutput>,
-    pub rotation_dealer_messages: HashMap<Address, RotationMessages>,
-    pub rotation_message_responses: HashMap<Address, SendRotationMessagesResponse>,
     pub rotation_complaints_to_process: HashMap<(Address, ShareIndex), complaint::Complaint>,
-    pub rotation_complaint_responses: HashMap<Address, Vec<RotationShareComplaintResponse>>,
-    previous_dkg_output: Option<DkgOutput>,
 }
+
+/// Type alias for the shared MessageStore handle.
+pub type MessageStoreHandle = std::sync::Arc<std::sync::RwLock<message_store::MessageStore>>;
 
 // TODO: Factor out common code between DKG and key rotation.
 impl DkgManager {
+    /// Create a new DkgManager and return the shared MessageStore handle.
+    ///
+    /// The MessageStore handle should be stored separately and used by RPC handlers
+    /// to process messages without blocking on the DkgManager mutex.
     pub fn new(
         address: Address,
         committee_set: &CommitteeSet,
@@ -113,7 +107,7 @@ impl DkgManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
-    ) -> DkgResult<Self> {
+    ) -> DkgResult<(Self, MessageStoreHandle)> {
         let committee = committee_set
             .current_committee()
             .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
@@ -150,7 +144,9 @@ impl DkgManager {
             }
             Nodes::new(prev_nodes_vec).ok()
         });
-        let mut manager = Self {
+
+        // Create the MessageStore with all shared state
+        let mut store = message_store::MessageStore::new(
             party_id,
             address,
             dkg_config,
@@ -158,250 +154,54 @@ impl DkgManager {
             encryption_key,
             signing_key,
             committee,
+            public_message_store,
+        );
+        store.load_stored_messages()?;
+        let store_handle = std::sync::Arc::new(std::sync::RwLock::new(store));
+
+        let manager = Self {
+            store: store_handle.clone(),
             previous_committee,
             previous_nodes,
-            dealer_outputs: HashMap::new(),
-            dealer_messages: HashMap::new(),
-            message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
-            complaint_responses: HashMap::new(),
-            public_messages_store: public_message_store,
-            rotation_outputs: HashMap::new(),
-            rotation_dealer_messages: HashMap::new(),
-            rotation_message_responses: HashMap::new(),
             rotation_complaints_to_process: HashMap::new(),
-            rotation_complaint_responses: HashMap::new(),
-            previous_dkg_output: None,
         };
-        manager.load_stored_messages()?;
-        Ok(manager)
+        Ok((manager, store_handle))
     }
 
-    /// RPC endpoint handler for `SendMessageRequest`
-    pub fn handle_send_message_request(
-        &mut self,
-        sender: Address,
-        request: &SendMessageRequest,
-    ) -> DkgResult<SendMessageResponse> {
-        if let Some(existing_message) = self.dealer_messages.get(&sender) {
-            let existing_hash = compute_message_hash(existing_message);
-            let incoming_hash = compute_message_hash(&request.message);
-            if existing_hash != incoming_hash {
-                return Err(DkgError::InvalidMessage {
-                    sender,
-                    reason: "Dealer sent different messages".to_string(),
-                });
-            }
-            if let Some(response) = self.message_responses.get(&sender) {
-                return Ok(response.clone());
-            }
-            return Err(DkgError::InvalidMessage {
-                sender,
-                reason: "Message previously rejected due to invalid shares".to_string(),
-            });
-        }
-        self.store_message(sender, &request.message)?;
-        let signature = self.try_sign_message(sender, &request.message)?;
-        let response = SendMessageResponse { signature };
-        self.message_responses.insert(sender, response.clone());
-        Ok(response)
+    /// Get a reference to the shared message store.
+    pub fn store(&self) -> &MessageStoreHandle {
+        &self.store
     }
 
-    /// RPC endpoint handler for `RetrieveMessageRequest`
-    pub fn handle_retrieve_message_request(
-        &self,
-        request: &RetrieveMessageRequest,
-    ) -> DkgResult<RetrieveMessageResponse> {
-        let message = self
-            .dealer_messages
-            .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("Message not available".to_string()))?
-            .clone();
-        Ok(RetrieveMessageResponse { message })
+    // Accessor methods for protocol execution - these read from the store
+
+    fn address(&self) -> Address {
+        self.store.read().unwrap().address
     }
 
-    /// RPC endpoint handler for `SendRotationMessagesRequest`
-    pub fn handle_send_rotation_messages_request(
-        &mut self,
-        sender: Address,
-        request: &SendRotationMessagesRequest,
-    ) -> DkgResult<SendRotationMessagesResponse> {
-        if let Some(existing_messages) = self.rotation_dealer_messages.get(&sender) {
-            let existing_hash = compute_rotation_messages_hash(existing_messages);
-            let incoming_hash = compute_rotation_messages_hash(&request.messages);
-            if existing_hash != incoming_hash {
-                return Err(DkgError::InvalidMessage {
-                    sender,
-                    reason: "Dealer sent different rotation messages".to_string(),
-                });
-            }
-            if let Some(response) = self.rotation_message_responses.get(&sender) {
-                return Ok(response.clone());
-            }
-            return Err(DkgError::InvalidMessage {
-                sender,
-                reason: "Rotation messages previously rejected due to invalid shares".to_string(),
-            });
-        }
-        let previous = self
-            .previous_dkg_output
-            .clone()
-            .ok_or_else(|| DkgError::ProtocolFailed("Rotation not started".to_string()))?;
-        self.rotation_dealer_messages
-            .insert(sender, request.messages.clone());
-        let signature = self.try_sign_rotation_messages(&previous, sender, &request.messages)?;
-        let response = SendRotationMessagesResponse { signature };
-        self.rotation_message_responses
-            .insert(sender, response.clone());
-        Ok(response)
+    fn committee(&self) -> Committee {
+        self.store.read().unwrap().committee.clone()
     }
 
-    /// RPC endpoint handler for `RetrieveRotationMessagesRequest`
-    pub fn handle_retrieve_rotation_messages_request(
-        &self,
-        request: &RetrieveRotationMessagesRequest,
-    ) -> DkgResult<RetrieveRotationMessagesResponse> {
-        let messages = self
-            .rotation_dealer_messages
-            .get(&request.dealer)
-            .ok_or_else(|| {
-                DkgError::NotFound(format!("Rotation messages for dealer {:?}", request.dealer))
-            })?;
-        Ok(RetrieveRotationMessagesResponse {
-            messages: messages.clone(),
-        })
+    fn dkg_config(&self) -> DkgConfig {
+        self.store.read().unwrap().dkg_config.clone()
     }
 
-    /// RPC endpoint handler for `ComplainRequest`
-    pub fn handle_complain_request(
-        &mut self,
-        request: &ComplainRequest,
-    ) -> DkgResult<ComplainResponse> {
-        let cache_key = request.dealer;
-        // It is safe to return a response from cache since we already know that dealer was malicious.
-        if let Some(cached_response) = self.complaint_responses.get(&cache_key) {
-            return Ok(ComplainResponse {
-                response: cached_response.clone(),
-            });
-        }
-        let message = self
-            .dealer_messages
-            .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No message from dealer".into()))?;
-        let partial_output = self
-            .dealer_outputs
-            .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No shares for dealer".into()))?;
-        let dealer_session_id = self.session_id.dealer_session_id(&request.dealer);
-        let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
-            dealer_session_id.to_vec(),
-            None,
-            self.encryption_key.clone(),
-        );
-        let response = receiver.handle_complaint(message, &request.complaint, partial_output)?;
-        self.complaint_responses.insert(cache_key, response.clone());
-        Ok(ComplainResponse { response })
+    fn session_id(&self) -> SessionId {
+        self.store.read().unwrap().session_id.clone()
     }
 
-    /// RPC endpoint handler for `GetPublicDkgOutputRequest`
-    pub fn handle_get_public_dkg_output_request(
-        &self,
-        request: &GetPublicDkgOutputRequest,
-    ) -> DkgResult<GetPublicDkgOutputResponse> {
-        let previous_epoch = self
-            .dkg_config
-            .epoch
-            .checked_sub(1)
-            .ok_or_else(|| DkgError::InvalidConfig("no previous epoch exists".to_string()))?;
-        if request.epoch != previous_epoch {
-            return Err(DkgError::NotFound(format!(
-                "no DKG output for epoch {} (current epoch is {})",
-                request.epoch, self.dkg_config.epoch
-            )));
-        }
-        let output = self.previous_dkg_output.as_ref().ok_or_else(|| {
-            DkgError::NotFound(format!(
-                "DKG output for epoch {} not yet available",
-                request.epoch
-            ))
-        })?;
-        Ok(GetPublicDkgOutputResponse {
-            output: PublicDkgOutput::from_dkg_output(output),
-        })
+    fn party_id(&self) -> PartyId {
+        self.store.read().unwrap().party_id
     }
 
-    /// RPC endpoint handler for `RotationComplainRequest`
-    pub fn handle_rotation_complain_request(
-        &mut self,
-        request: &RotationComplainRequest,
-    ) -> DkgResult<RotationComplainResponse> {
-        // It is safe to return a response from cache since we already know that dealer was malicious.
-        if let Some(cached_responses) = self.rotation_complaint_responses.get(&request.dealer) {
-            return Ok(RotationComplainResponse {
-                responses: cached_responses.clone(),
-            });
-        }
-        let rotation_messages = self
-            .rotation_dealer_messages
-            .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages from dealer".into()))?
-            .clone();
-        let previous_dkg_output = self
-            .previous_dkg_output
-            .as_ref()
-            .expect("previous_dkg_output must be set during key rotation");
-        let complained_message = rotation_messages.get(request.share_index).ok_or_else(|| {
-            DkgError::ProtocolFailed(format!(
-                "No rotation message for share index {}",
-                request.share_index
-            ))
-        })?;
-        let complained_output =
-            self.rotation_outputs
-                .get(&request.share_index)
-                .ok_or_else(|| {
-                    DkgError::ProtocolFailed(format!(
-                        "No output for share index {}",
-                        request.share_index
-                    ))
-                })?;
-        let commitment = previous_dkg_output
-            .commitments
-            .get(&request.share_index)
-            .copied();
-        let session_id = self
-            .session_id
-            .rotation_session_id(&request.dealer, request.share_index);
-        let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
-            session_id.to_vec(),
-            commitment,
-            self.encryption_key.clone(),
-        );
-        let complained_response =
-            receiver.handle_complaint(complained_message, &request.complaint, complained_output)?;
-        let mut responses = Vec::with_capacity(rotation_messages.len());
-        for (&share_index, _) in rotation_messages.iter() {
-            let response = if share_index == request.share_index {
-                complained_response.clone()
-            } else if let Some(output) = self.rotation_outputs.get(&share_index) {
-                complaint::ComplaintResponse::new(self.party_id, output.my_shares.clone())
-            } else {
-                continue;
-            };
-            responses.push(RotationShareComplaintResponse {
-                share_index,
-                response,
-            });
-        }
-        self.rotation_complaint_responses
-            .insert(request.dealer, responses.clone());
-        Ok(RotationComplainResponse { responses })
+    fn encryption_key(&self) -> PrivateKey<EncryptionGroupElement> {
+        self.store.read().unwrap().encryption_key.clone()
+    }
+
+    fn signing_key(&self) -> Bls12381PrivateKey {
+        self.store.read().unwrap().signing_key.clone()
     }
 
     // TODO: Consider making dealer and party flows concurrent
@@ -412,7 +212,7 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<DkgOutput> {
         if ordered_broadcast_channel.existing_certificate_weight()
-            < self.dkg_config.threshold as u32
+            < self.dkg_config().threshold as u32
             && let Err(e) = self
                 .run_as_dealer(p2p_channel, ordered_broadcast_channel, rng)
                 .await
@@ -433,7 +233,10 @@ impl DkgManager {
         let (previous, is_member_of_previous_committee) = self
             .prepare_previous_dkg_output(dkg_certificates, p2p_channel)
             .await?;
-        self.previous_dkg_output = Some(previous.clone());
+        self.store
+            .write()
+            .unwrap()
+            .set_previous_dkg_output(previous.clone());
         if is_member_of_previous_committee {
             // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
             if let Err(e) = self
@@ -457,34 +260,42 @@ impl DkgManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
-        let message = match self.dealer_messages.get(&self.address) {
-            Some(msg) => msg.clone(),
+        let address = self.address();
+        let existing_msg = self
+            .store
+            .read()
+            .unwrap()
+            .dealer_messages
+            .get(&address)
+            .cloned();
+        let message = match existing_msg {
+            Some(msg) => msg,
             None => {
                 let msg = self.create_dealer_message(rng);
-                self.store_message(self.address, &msg)?;
+                self.store_message(address, &msg)?;
                 msg
             }
         };
         let my_signature = self
-            .try_sign_message(self.address, &message)
+            .try_sign_message(address, &message)
             .expect("own message should always be valid");
         let message_hash = compute_message_hash(&message);
+        let committee = self.committee();
         let mut aggregator = BlsSignatureAggregator::new(
-            &self.committee,
+            &committee,
             Dkg(DkgDealerMessageHash {
-                dealer_address: self.address,
+                dealer_address: address,
                 message_hash,
             }),
         );
         aggregator
-            .add_signature_from(self.address, my_signature)
+            .add_signature_from(address, my_signature)
             .expect("first signature should always be valid");
-        let recipients: Vec<_> = self
-            .committee
+        let recipients: Vec<_> = committee
             .members()
             .iter()
             .map(|m| m.validator_address())
-            .filter(|addr| *addr != self.address)
+            .filter(|addr| *addr != address)
             .collect();
         let request = SendMessageRequest { message };
         let results = send_to_many(&recipients, request, |addr, req| async move {
@@ -501,7 +312,8 @@ impl DkgManager {
                 Err(e) => tracing::info!("Failed to send message to {:?}: {}", addr, e),
             }
         }
-        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        let dkg_config = self.dkg_config();
+        let required_weight = dkg_config.threshold + dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
             let cert = aggregator
                 .finish()
@@ -523,8 +335,10 @@ impl DkgManager {
     ) -> DkgResult<DkgOutput> {
         let mut certified_dealers = HashSet::new();
         let mut dealer_weight_sum = 0u32;
+        let dkg_config = self.dkg_config();
+        let committee = self.committee();
         loop {
-            if dealer_weight_sum >= self.dkg_config.threshold as u32 {
+            if dealer_weight_sum >= dkg_config.threshold as u32 {
                 break;
             }
             let cert = ordered_broadcast_channel
@@ -537,14 +351,21 @@ impl DkgManager {
                     if certified_dealers.contains(&dealer) {
                         continue;
                     }
-                    if let Err(e) = self.committee.verify_signature(&cert) {
+                    if let Err(e) = committee.verify_signature(&cert) {
                         tracing::info!("Invalid certificate signature from {:?}: {}", &dealer, e);
                         continue;
                     }
-                    let needs_retrieval = match self.dealer_messages.get(&dealer) {
+                    let needs_retrieval = match self
+                        .store
+                        .read()
+                        .unwrap()
+                        .dealer_messages
+                        .get(&dealer)
+                        .cloned()
+                    {
                         None => true,
                         Some(stored_msg) => {
-                            compute_message_hash(stored_msg) != message.message_hash
+                            compute_message_hash(&stored_msg) != message.message_hash
                         }
                     };
                     if needs_retrieval {
@@ -563,7 +384,12 @@ impl DkgManager {
                                 e
                             })?;
                     }
-                    if !self.dealer_outputs.contains_key(&dealer)
+                    if !self
+                        .store
+                        .read()
+                        .unwrap()
+                        .dealer_outputs
+                        .contains_key(&dealer)
                         && !self.complaints_to_process.contains_key(&dealer)
                     {
                         self.process_certified_dealer_message(dealer)?;
@@ -571,13 +397,13 @@ impl DkgManager {
                     if self.complaints_to_process.contains_key(&dealer) {
                         self.recover_shares_via_complaint(
                             &dealer,
-                            cert.signers(&self.committee)
+                            cert.signers(&committee)
                                 .expect("certificate verified above"),
                             p2p_channel,
                         )
                         .await?;
                     }
-                    let dealer_weight = self.committee.weight_of(&dealer).map_err(|_| {
+                    let dealer_weight = committee.weight_of(&dealer).map_err(|_| {
                         DkgError::ProtocolFailed("Missing dealer weight".parse().unwrap())
                     })?;
                     dealer_weight_sum += dealer_weight as u32;
@@ -596,29 +422,33 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> DkgResult<()> {
+        let address = self.address();
+        let committee = self.committee();
         let rotation_messages = self.create_rotation_messages(previous, rng);
-        self.rotation_dealer_messages
-            .insert(self.address, rotation_messages.clone());
+        self.store
+            .write()
+            .unwrap()
+            .rotation_dealer_messages
+            .insert(address, rotation_messages.clone());
         let my_signature = self
-            .try_sign_rotation_messages(previous, self.address, &rotation_messages)
+            .try_sign_rotation_messages(previous, address, &rotation_messages)
             .expect("own rotation messages should always be valid");
         let messages_hash = compute_rotation_messages_hash(&rotation_messages);
         let mut aggregator = BlsSignatureAggregator::new(
-            &self.committee,
+            &committee,
             Rotation(RotationDealerMessagesHash {
-                dealer_address: self.address,
+                dealer_address: address,
                 messages_hash,
             }),
         );
         aggregator
-            .add_signature_from(self.address, my_signature)
+            .add_signature_from(address, my_signature)
             .expect("first signature should always be valid");
-        let recipients: Vec<_> = self
-            .committee
+        let recipients: Vec<_> = committee
             .members()
             .iter()
             .map(|m| m.validator_address())
-            .filter(|addr| *addr != self.address)
+            .filter(|addr| *addr != address)
             .collect();
         let request = SendRotationMessagesRequest {
             messages: rotation_messages.clone(),
@@ -640,7 +470,8 @@ impl DkgManager {
                 }
             }
         }
-        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        let dkg_config = self.dkg_config();
+        let required_weight = dkg_config.threshold + dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
             let cert = aggregator
                 .finish()
@@ -660,8 +491,16 @@ impl DkgManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<Certificate>,
     ) -> DkgResult<DkgOutput> {
-        let mut certified_share_indices: Vec<_> = self.rotation_outputs.keys().copied().collect();
+        let mut certified_share_indices: Vec<_> = self
+            .store
+            .read()
+            .unwrap()
+            .rotation_outputs
+            .keys()
+            .copied()
+            .collect();
         let mut certified_dealers = HashSet::new();
+        let committee = self.committee();
         loop {
             if certified_share_indices.len() >= previous.threshold as usize {
                 break;
@@ -676,7 +515,7 @@ impl DkgManager {
                     if certified_dealers.contains(&dealer) {
                         continue;
                     }
-                    if let Err(e) = self.committee.verify_signature(&cert) {
+                    if let Err(e) = committee.verify_signature(&cert) {
                         tracing::info!(
                             "Invalid rotation certificate signature from {:?}: {}",
                             &dealer,
@@ -702,10 +541,17 @@ impl DkgManager {
                             sender: dealer,
                             reason: "Dealer has no shares in previous committee".into(),
                         })?;
-                    let needs_retrieval = match self.rotation_dealer_messages.get(&dealer) {
+                    let needs_retrieval = match self
+                        .store
+                        .read()
+                        .unwrap()
+                        .rotation_dealer_messages
+                        .get(&dealer)
+                        .cloned()
+                    {
                         None => true,
                         Some(stored_msgs) => {
-                            compute_rotation_messages_hash(stored_msgs) != message.messages_hash
+                            compute_rotation_messages_hash(&stored_msgs) != message.messages_hash
                         }
                     };
                     if needs_retrieval {
@@ -724,16 +570,21 @@ impl DkgManager {
                                 e
                             })?;
                     }
-                    if dealer_share_indices.iter().any(|idx| {
-                        !self.rotation_outputs.contains_key(idx)
-                            && !self
-                                .rotation_complaints_to_process
-                                .contains_key(&(dealer, *idx))
-                    }) {
-                        self.process_certified_rotation_message(&dealer, previous)?;
+                    {
+                        let store = self.store.read().unwrap();
+                        let needs_processing = dealer_share_indices.iter().any(|idx| {
+                            !store.rotation_outputs.contains_key(idx)
+                                && !self
+                                    .rotation_complaints_to_process
+                                    .contains_key(&(dealer, *idx))
+                        });
+                        drop(store);
+                        if needs_processing {
+                            self.process_certified_rotation_message(&dealer, previous)?;
+                        }
                     }
                     let signers = cert
-                        .signers(&self.committee)
+                        .signers(&committee)
                         .expect("certificate verified above");
                     self.recover_rotation_shares_via_complaints(
                         &dealer,
@@ -755,12 +606,15 @@ impl DkgManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> avss::Message {
-        let dealer_session_id = self.session_id.dealer_session_id(&self.address);
+        let address = self.address();
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let dealer_session_id = session_id.dealer_session_id(&address);
         let dealer = avss::Dealer::new(
             None,
-            self.dkg_config.nodes.clone(),
-            self.dkg_config.threshold,
-            self.dkg_config.max_faulty,
+            dkg_config.nodes.clone(),
+            dkg_config.threshold,
+            dkg_config.max_faulty,
             dealer_session_id.to_vec(),
         )
         .expect("checked threshold above");
@@ -768,8 +622,10 @@ impl DkgManager {
     }
 
     fn store_message(&mut self, dealer: Address, message: &avss::Message) -> DkgResult<()> {
-        self.dealer_messages.insert(dealer, message.clone());
-        self.public_messages_store
+        let mut store = self.store.write().unwrap();
+        store.dealer_messages.insert(dealer, message.clone());
+        store
+            .public_messages_store
             .store_dealer_message(&dealer, message)
             .map_err(|e| DkgError::StorageError(e.to_string()))?;
         Ok(())
@@ -780,22 +636,29 @@ impl DkgManager {
         dealer: Address,
         message: &avss::Message,
     ) -> DkgResult<BLS12381Signature> {
-        let dealer_session_id = self.session_id.dealer_session_id(&dealer);
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let address = self.address();
+        let dealer_session_id = session_id.dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
+            dkg_config.nodes.clone(),
+            self.party_id(),
+            dkg_config.threshold,
             dealer_session_id.to_vec(),
             None, // commitment: None for initial DKG
-            self.encryption_key.clone(),
+            self.encryption_key(),
         );
         match receiver.process_message(message)? {
             avss::ProcessedMessage::Valid(output) => {
-                self.dealer_outputs.insert(dealer, output);
+                self.store
+                    .write()
+                    .unwrap()
+                    .dealer_outputs
+                    .insert(dealer, output);
                 let message_hash = compute_message_hash(message);
-                let signature = self.signing_key.sign(
-                    self.dkg_config.epoch,
-                    self.address,
+                let signature = self.signing_key().sign(
+                    dkg_config.epoch,
+                    address,
                     &Dkg(DkgDealerMessageHash {
                         dealer_address: dealer,
                         message_hash,
@@ -812,21 +675,31 @@ impl DkgManager {
 
     fn process_certified_dealer_message(&mut self, dealer: Address) -> DkgResult<()> {
         let message = self
+            .store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer)
+            .cloned()
             .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?;
-        let dealer_session_id = self.session_id.dealer_session_id(&dealer);
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let dealer_session_id = session_id.dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
+            dkg_config.nodes.clone(),
+            self.party_id(),
+            dkg_config.threshold,
             dealer_session_id.to_vec(),
             None,
-            self.encryption_key.clone(),
+            self.encryption_key(),
         );
-        match receiver.process_message(message)? {
+        match receiver.process_message(&message)? {
             avss::ProcessedMessage::Valid(output) => {
-                self.dealer_outputs.insert(dealer, output);
+                self.store
+                    .write()
+                    .unwrap()
+                    .dealer_outputs
+                    .insert(dealer, output);
             }
             avss::ProcessedMessage::Complaint(complaint) => {
                 self.complaints_to_process.insert(dealer, complaint);
@@ -841,31 +714,47 @@ impl DkgManager {
         previous_dkg_output: &DkgOutput,
     ) -> DkgResult<()> {
         let rotation_messages = self
+            .store
+            .read()
+            .unwrap()
             .rotation_dealer_messages
             .get(dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?
-            .clone();
+            .cloned()
+            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?;
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let party_id = self.party_id();
+        let encryption_key = self.encryption_key();
         for (&share_index, message) in rotation_messages.iter() {
-            if self.rotation_outputs.contains_key(&share_index)
+            if self
+                .store
+                .read()
+                .unwrap()
+                .rotation_outputs
+                .contains_key(&share_index)
                 || self
                     .rotation_complaints_to_process
                     .contains_key(&(*dealer, share_index))
             {
                 continue;
             }
-            let session_id = self.session_id.rotation_session_id(dealer, share_index);
+            let rotation_session_id = session_id.rotation_session_id(dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
-                self.dkg_config.nodes.clone(),
-                self.party_id,
-                self.dkg_config.threshold,
-                session_id.to_vec(),
+                dkg_config.nodes.clone(),
+                party_id,
+                dkg_config.threshold,
+                rotation_session_id.to_vec(),
                 commitment,
-                self.encryption_key.clone(),
+                encryption_key.clone(),
             );
             match receiver.process_message(message)? {
                 avss::ProcessedMessage::Valid(output) => {
-                    self.rotation_outputs.insert(share_index, output);
+                    self.store
+                        .write()
+                        .unwrap()
+                        .rotation_outputs
+                        .insert(share_index, output);
                 }
                 avss::ProcessedMessage::Complaint(complaint) => {
                     self.rotation_complaints_to_process
@@ -880,15 +769,17 @@ impl DkgManager {
         &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> DkgResult<DkgOutput> {
-        let threshold = self.dkg_config.threshold;
+        let dkg_config = self.dkg_config();
+        let committee = self.committee();
+        let store = self.store.read().unwrap();
+        let threshold = dkg_config.threshold;
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
             .map(|dealer| {
-                let dealer_party_id = self
-                    .committee
+                let dealer_party_id = committee
                     .index_of(&dealer)
                     .expect("certified dealer must be committee member")
                     as u16;
-                let output = self
+                let output = store
                     .dealer_outputs
                     .get(&dealer)
                     .ok_or_else(|| {
@@ -902,7 +793,7 @@ impl DkgManager {
             })
             .collect::<Result<_, DkgError>>()?;
         let combined_output =
-            avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
+            avss::ReceiverOutput::complete_dkg(threshold, &dkg_config.nodes, outputs)
                 .expect("checked that threshold is met");
         Ok(DkgOutput {
             public_key: combined_output.vk,
@@ -925,12 +816,14 @@ impl DkgManager {
         let request = RetrieveMessageRequest {
             dealer: message.dealer_address,
         };
+        let address = self.address();
+        let committee = self.committee();
         // TODO: Implement gradual escalation strategy for better network efficiency:
         // - Round 1: Call 1-2 random signers, wait ~2s
         // - Round 2: Call 2-3 more signers, wait ~2s
         // - and so on
         if certificate
-            .is_signer(&self.address, &self.committee)
+            .is_signer(&address, &committee)
             .map_err(|e| DkgError::CryptoError(e.to_string()))?
         {
             tracing::error!(
@@ -941,7 +834,7 @@ impl DkgManager {
                 "Self in certificate signers but message not available".to_string(),
             ));
         }
-        let signers = certificate.signers(&self.committee).map_err(|_| {
+        let signers = certificate.signers(&committee).map_err(|_| {
             DkgError::ProtocolFailed(
                 "Certificate does not match the current epoch or committee".to_string(),
             )
@@ -980,8 +873,10 @@ impl DkgManager {
         let request = RetrieveRotationMessagesRequest {
             dealer: message.dealer_address,
         };
+        let address = self.address();
+        let committee = self.committee();
         if certificate
-            .is_signer(&self.address, &self.committee)
+            .is_signer(&address, &committee)
             .map_err(|e| DkgError::CryptoError(e.to_string()))?
         {
             tracing::error!(
@@ -992,7 +887,7 @@ impl DkgManager {
                 "Self in certificate signers but rotation messages not available".to_string(),
             ));
         }
-        let signers = certificate.signers(&self.committee).map_err(|_| {
+        let signers = certificate.signers(&committee).map_err(|_| {
             DkgError::ProtocolFailed(
                 "Certificate does not match the current epoch or committee".to_string(),
             )
@@ -1013,7 +908,10 @@ impl DkgManager {
         .await;
         match result {
             Some((_, messages)) => {
-                self.rotation_dealer_messages
+                self.store
+                    .write()
+                    .unwrap()
+                    .rotation_dealer_messages
                     .insert(message.dealer_address, messages);
                 Ok(())
             }
@@ -1038,18 +936,24 @@ impl DkgManager {
             dealer: *dealer,
             complaint: complaint.clone(),
         };
-        let dealer_session_id = self.session_id.dealer_session_id(dealer);
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let dealer_session_id = session_id.dealer_session_id(dealer);
         let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
+            dkg_config.nodes.clone(),
+            self.party_id(),
+            dkg_config.threshold,
             dealer_session_id.to_vec(),
             None,
-            self.encryption_key.clone(),
+            self.encryption_key(),
         );
         let message = self
+            .store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(dealer)
+            .cloned()
             .expect("cannot have complaint without message");
         let mut responses = Vec::new();
         for signer in signers {
@@ -1064,9 +968,13 @@ impl DkgManager {
                     }
                 };
             responses.push(response.response);
-            match receiver.recover(message, responses.clone()) {
+            match receiver.recover(&message, responses.clone()) {
                 Ok(partial_output) => {
-                    self.dealer_outputs.insert(*dealer, partial_output);
+                    self.store
+                        .write()
+                        .unwrap()
+                        .dealer_outputs
+                        .insert(*dealer, partial_output);
                     self.complaints_to_process.remove(dealer);
                     return Ok(());
                 }
@@ -1126,7 +1034,11 @@ impl DkgManager {
                         let (receiver, message) = recovery_contexts.get(&share_index).unwrap();
                         match receiver.recover(message, responses.clone()) {
                             Ok(partial_output) => {
-                                self.rotation_outputs.insert(share_index, partial_output);
+                                self.store
+                                    .write()
+                                    .unwrap()
+                                    .rotation_outputs
+                                    .insert(share_index, partial_output);
                                 self.rotation_complaints_to_process
                                     .remove(&(*dealer, share_index));
                                 pending_shares.remove(&share_index);
@@ -1164,25 +1076,18 @@ impl DkgManager {
         Ok(())
     }
 
-    fn load_stored_messages(&mut self) -> DkgResult<()> {
-        let stored = self
-            .public_messages_store
-            .list_all_dealer_messages()
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        for (dealer, message) in stored {
-            self.dealer_messages.insert(dealer, message);
-        }
-        Ok(())
-    }
-
     fn prepare_rotation_complain_request(
         &self,
         dealer: &Address,
         previous_dkg_output: &DkgOutput,
     ) -> DkgResult<Option<RotationComplainContext>> {
         let rotation_messages = self
+            .store
+            .read()
+            .unwrap()
             .rotation_dealer_messages
             .get(dealer)
+            .cloned()
             .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?;
         let complained_shares: Vec<_> = self
             .rotation_complaints_to_process
@@ -1194,18 +1099,22 @@ impl DkgManager {
             return Ok(None);
         }
         let (first_share_index, first_complaint) = complained_shares.first().unwrap().clone();
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let party_id = self.party_id();
+        let encryption_key = self.encryption_key();
         let mut recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)> =
             HashMap::new();
         for (share_index, _complaint) in &complained_shares {
-            let session_id = self.session_id.rotation_session_id(dealer, *share_index);
+            let rotation_session_id = session_id.rotation_session_id(dealer, *share_index);
             let commitment = previous_dkg_output.commitments.get(share_index).copied();
             let receiver = avss::Receiver::new(
-                self.dkg_config.nodes.clone(),
-                self.party_id,
-                self.dkg_config.threshold,
-                session_id.to_vec(),
+                dkg_config.nodes.clone(),
+                party_id,
+                dkg_config.threshold,
+                rotation_session_id.to_vec(),
                 commitment,
-                self.encryption_key.clone(),
+                encryption_key.clone(),
             );
             let message = rotation_messages
                 .get(*share_index)
@@ -1235,19 +1144,20 @@ impl DkgManager {
         previous_dkg_output: &DkgOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> RotationMessages {
+        let session_id = self.session_id();
+        let address = self.address();
+        let dkg_config = self.dkg_config();
         let messages = previous_dkg_output
             .key_shares
             .shares
             .iter()
             .map(|share| {
-                let sid = self
-                    .session_id
-                    .rotation_session_id(&self.address, share.index);
+                let sid = session_id.rotation_session_id(&address, share.index);
                 let dealer = avss::Dealer::new(
                     Some(share.value),
-                    self.dkg_config.nodes.clone(),
-                    self.dkg_config.threshold,
-                    self.dkg_config.max_faulty,
+                    dkg_config.nodes.clone(),
+                    dkg_config.threshold,
+                    dkg_config.max_faulty,
                     sid.to_vec(),
                 )
                 .expect(EXPECT_THRESHOLD_VALIDATED);
@@ -1287,6 +1197,11 @@ impl DkgManager {
             })?
             .into_iter()
             .collect();
+        let session_id = self.session_id();
+        let dkg_config = self.dkg_config();
+        let party_id = self.party_id();
+        let encryption_key = self.encryption_key();
+        let address = self.address();
         let mut outputs = Vec::with_capacity(rotation_messages.len());
         for (&share_index, message) in rotation_messages.iter() {
             if !dealer_share_indices.contains(&share_index) {
@@ -1295,21 +1210,27 @@ impl DkgManager {
                     reason: format!("Share index {} does not belong to dealer", share_index),
                 });
             }
-            if self.rotation_outputs.contains_key(&share_index) {
+            if self
+                .store
+                .read()
+                .unwrap()
+                .rotation_outputs
+                .contains_key(&share_index)
+            {
                 return Err(DkgError::InvalidMessage {
                     sender: dealer,
                     reason: format!("Share index {} already processed", share_index),
                 });
             }
-            let session_id = self.session_id.rotation_session_id(&dealer, share_index);
+            let rotation_session_id = session_id.rotation_session_id(&dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
-                self.dkg_config.nodes.clone(),
-                self.party_id,
-                self.dkg_config.threshold,
-                session_id.to_vec(),
+                dkg_config.nodes.clone(),
+                party_id,
+                dkg_config.threshold,
+                rotation_session_id.to_vec(),
                 commitment,
-                self.encryption_key.clone(),
+                encryption_key.clone(),
             );
             match receiver.process_message(message)? {
                 avss::ProcessedMessage::Valid(output) => {
@@ -1323,11 +1244,11 @@ impl DkgManager {
                 }
             }
         }
-        self.rotation_outputs.extend(outputs);
+        self.store.write().unwrap().rotation_outputs.extend(outputs);
         let messages_hash = compute_rotation_messages_hash(rotation_messages);
-        let signature = self.signing_key.sign(
-            self.dkg_config.epoch,
-            self.address,
+        let signature = self.signing_key().sign(
+            dkg_config.epoch,
+            address,
             &Rotation(RotationDealerMessagesHash {
                 dealer_address: dealer,
                 messages_hash,
@@ -1342,11 +1263,12 @@ impl DkgManager {
         certified_share_indices: &[ShareIndex],
     ) -> DkgResult<DkgOutput> {
         let threshold = previous_dkg_output.threshold;
+        let store = self.store.read().unwrap();
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
             .take(threshold as usize)
             .map(|&share_index| {
-                let output = self.rotation_outputs.get(&share_index).ok_or_else(|| {
+                let output = store.rotation_outputs.get(&share_index).ok_or_else(|| {
                     DkgError::ProtocolFailed(format!(
                         "No rotation output found for share index: {}",
                         share_index
@@ -1358,10 +1280,11 @@ impl DkgManager {
                 })
             })
             .collect::<Result<_, DkgError>>()?;
+        let dkg_config = self.dkg_config();
         let combined = avss::ReceiverOutput::complete_key_rotation(
             threshold,
-            self.party_id,
-            &self.dkg_config.nodes,
+            self.party_id(),
+            &dkg_config.nodes,
             &indexed_outputs,
         )?;
         if combined.vk != previous_dkg_output.public_key {
@@ -1377,7 +1300,7 @@ impl DkgManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: self.dkg_config.threshold,
+            threshold: dkg_config.threshold,
         })
     }
 
@@ -1397,9 +1320,12 @@ impl DkgManager {
                 }
             };
             let message = self
+                .store
+                .read()
+                .unwrap()
                 .public_messages_store
                 .get_dealer_message(&dealer_address)
-                .map_err(|e| DkgError::StorageError(e.to_string()))?
+                .map_err(|e: anyhow::Error| DkgError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     DkgError::StorageError(format!(
                         "Message not found for dealer: {:?}",
@@ -1413,7 +1339,11 @@ impl DkgManager {
                     dealer_address
                 )));
             }
-            self.dealer_messages.insert(dealer_address, message);
+            self.store
+                .write()
+                .unwrap()
+                .dealer_messages
+                .insert(dealer_address, message);
             self.process_certified_dealer_message(dealer_address)?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
@@ -1430,7 +1360,7 @@ impl DkgManager {
             .as_ref()
             .expect("key rotation requires previous committee");
         let epoch = self
-            .dkg_config
+            .dkg_config()
             .epoch
             .checked_sub(1)
             .expect("key rotation requires epoch > 0");
@@ -1478,10 +1408,11 @@ impl DkgManager {
         dkg_certificates: &[Certificate],
         p2p_channel: &impl P2PChannel,
     ) -> DkgResult<(DkgOutput, bool)> {
+        let address = self.address();
         let is_member_of_previous_committee = self
             .previous_committee
             .as_ref()
-            .and_then(|c| c.index_of(&self.address))
+            .and_then(|c| c.index_of(&address))
             .is_some();
         let previous = if is_member_of_previous_committee {
             self.reconstruct_previous_dkg_output(dkg_certificates)?
@@ -1686,8 +1617,8 @@ mod tests {
         manager.store_message(dealer, message)?;
         let sig = manager.try_sign_message(dealer, message)?;
         Ok(MemberSignature::new(
-            manager.dkg_config.epoch,
-            manager.address,
+            manager.dkg_config().epoch,
+            manager.address(),
             sig,
         ))
     }
@@ -1829,7 +1760,7 @@ mod tests {
             }
         }
 
-        fn create_manager(&self, validator_index: usize) -> DkgManager {
+        fn create_manager(&self, validator_index: usize) -> (DkgManager, MessageStoreHandle) {
             self.create_manager_with_store(validator_index, Box::new(MockPublicMessagesStore))
         }
 
@@ -1837,7 +1768,7 @@ mod tests {
             &self,
             validator_index: usize,
             store: Box<dyn PublicMessagesStore>,
-        ) -> DkgManager {
+        ) -> (DkgManager, MessageStoreHandle) {
             let address = Address::new([validator_index as u8; 32]);
             let session_id = SessionId::new(
                 "testchain",
@@ -1879,12 +1810,12 @@ mod tests {
             &self,
             validator_index: usize,
             rng: &mut impl fastcrypto::traits::AllowedRng,
-        ) -> DkgManager {
-            let mut manager = self.create_manager(validator_index);
+        ) -> (DkgManager, MessageStoreHandle) {
+            let (mut manager, store) = self.create_manager(validator_index);
             let dealer_message = manager.create_dealer_message(rng);
             let address = self.address(validator_index);
             receive_dealer_message(&mut manager, &dealer_message, address).unwrap();
-            manager
+            (manager, store)
         }
 
         fn epoch(&self) -> u64 {
@@ -1892,7 +1823,8 @@ mod tests {
         }
 
         fn dkg_config(&self) -> DkgConfig {
-            self.create_manager(0).dkg_config.clone()
+            let (manager, _store) = self.create_manager(0);
+            manager.dkg_config()
         }
     }
 
@@ -1961,14 +1893,17 @@ mod tests {
             recipient: &Address,
             request: &SendMessageRequest,
         ) -> ChannelResult<SendMessageResponse> {
-            let mut managers = self.managers.lock().unwrap();
-            let manager = managers.get_mut(recipient).ok_or_else(|| {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
                     "Recipient {:?} not found",
                     recipient
                 ))
             })?;
             let response = manager
+                .store()
+                .write()
+                .unwrap()
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -1992,6 +1927,9 @@ mod tests {
                 ))
             })?;
             let response = manager
+                .store()
+                .read()
+                .unwrap()
                 .handle_retrieve_message_request(request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2007,16 +1945,24 @@ mod tests {
             party: &Address,
             request: &ComplainRequest,
         ) -> ChannelResult<ComplainResponse> {
-            let mut managers = self.managers.lock().unwrap();
-            let manager = managers.get_mut(party).ok_or_else(|| {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
                     "Party {:?} not found",
                     party
                 ))
             })?;
-            let response = manager.handle_complain_request(request).map_err(|e| {
-                crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
-            })?;
+            let response = manager
+                .store()
+                .write()
+                .unwrap()
+                .handle_complain_request(request)
+                .map_err(|e| {
+                    crate::communication::ChannelError::RequestFailed(format!(
+                        "Handler failed: {}",
+                        e
+                    ))
+                })?;
             Ok(response)
         }
 
@@ -2025,14 +1971,17 @@ mod tests {
             party: &Address,
             request: &RotationComplainRequest,
         ) -> ChannelResult<RotationComplainResponse> {
-            let mut managers = self.managers.lock().unwrap();
-            let manager = managers.get_mut(party).ok_or_else(|| {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(party).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
                     "Party {:?} not found",
                     party
                 ))
             })?;
             let response = manager
+                .store()
+                .write()
+                .unwrap()
                 .handle_rotation_complain_request(request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2048,14 +1997,17 @@ mod tests {
             recipient: &Address,
             request: &SendRotationMessagesRequest,
         ) -> ChannelResult<SendRotationMessagesResponse> {
-            let mut managers = self.managers.lock().unwrap();
-            let manager = managers.get_mut(recipient).ok_or_else(|| {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
                     "Recipient {:?} not found",
                     recipient
                 ))
             })?;
             let response = manager
+                .store()
+                .write()
+                .unwrap()
                 .handle_send_rotation_messages_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2079,6 +2031,9 @@ mod tests {
                 ))
             })?;
             let response = manager
+                .store()
+                .read()
+                .unwrap()
                 .handle_retrieve_rotation_messages_request(request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2102,6 +2057,9 @@ mod tests {
                 ))
             })?;
             let response = manager
+                .store()
+                .read()
+                .unwrap()
                 .handle_get_public_dkg_output_request(request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2188,7 +2146,7 @@ mod tests {
         num_validators: usize,
     ) -> (DkgManager, TestSetup) {
         let setup = TestSetup::new(num_validators);
-        let manager = setup.create_manager(validator_index);
+        let (manager, _store) = setup.create_manager(validator_index);
         (manager, setup)
     }
 
@@ -2290,14 +2248,17 @@ mod tests {
             recipient: &Address,
             request: &SendMessageRequest,
         ) -> ChannelResult<SendMessageResponse> {
-            let mut managers = self.managers.lock().unwrap();
-            let manager = managers.get_mut(recipient).ok_or_else(|| {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
                     "Recipient {:?} not found",
                     recipient
                 ))
             })?;
             let response = manager
+                .store()
+                .write()
+                .unwrap()
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2402,14 +2363,17 @@ mod tests {
                 ));
             }
             drop(failed); // Release the lock before calling manager
-            let mut managers = self.managers.lock().unwrap();
-            let manager = managers.get_mut(recipient).ok_or_else(|| {
+            let managers = self.managers.lock().unwrap();
+            let manager = managers.get(recipient).ok_or_else(|| {
                 crate::communication::ChannelError::RequestFailed(format!(
                     "Recipient {:?} not found",
                     recipient
                 ))
             })?;
             let response = manager
+                .store()
+                .write()
+                .unwrap()
                 .handle_send_message_request(self.current_sender, request)
                 .map_err(|e| {
                     crate::communication::ChannelError::RequestFailed(format!(
@@ -2589,7 +2553,7 @@ mod tests {
         let address = setup.address(0);
         let session_id = setup.session_id();
 
-        let manager = DkgManager::new(
+        let (manager, _store) = DkgManager::new(
             address,
             &setup.committee_set,
             session_id,
@@ -2600,13 +2564,13 @@ mod tests {
         .expect("Should create manager from CommitteeSet");
 
         // Verify party_id is assigned based on canonical ordering
-        assert_eq!(manager.party_id, 0);
-        assert_eq!(manager.address, address);
+        assert_eq!(manager.party_id(), 0);
+        assert_eq!(manager.address(), address);
 
         // Verify DkgConfig was built correctly
-        assert_eq!(manager.dkg_config.epoch, setup.epoch());
-        assert_eq!(manager.dkg_config.nodes.num_nodes(), 5);
-        assert_eq!(manager.committee.members().len(), 5);
+        assert_eq!(manager.dkg_config().epoch, setup.epoch());
+        assert_eq!(manager.dkg_config().nodes.num_nodes(), 5);
+        assert_eq!(manager.committee().members().len(), 5);
     }
 
     #[test]
@@ -2670,11 +2634,11 @@ mod tests {
     fn test_dkg_manager_new_with_weighted_committee() {
         let setup = TestSetup::with_weights(&[1, 2, 3, 4, 5]); // total = 15
 
-        let manager = setup.create_manager(0);
+        let (manager, _store) = setup.create_manager(0);
 
         // With total_weight=15: max_faulty = (15-1)/3 = 4, threshold = 5
-        assert_eq!(manager.dkg_config.threshold, 5);
-        assert_eq!(manager.dkg_config.max_faulty, 4);
+        assert_eq!(manager.dkg_config().threshold, 5);
+        assert_eq!(manager.dkg_config().max_faulty, 4);
     }
 
     #[test]
@@ -2683,16 +2647,17 @@ mod tests {
 
         // Create managers for all validators and verify their party_ids
         for i in 0..5 {
-            let manager = setup.create_manager(i);
+            let (manager, _store) = setup.create_manager(i);
 
             assert_eq!(
-                manager.party_id, i as u16,
+                manager.party_id(),
+                i as u16,
                 "Party ID should match canonical order index for validator {}",
                 i
             );
 
             // Verify the address maps to this party_id via committee
-            let expected_party_id = manager.committee.index_of(&setup.address(i));
+            let expected_party_id = manager.committee().index_of(&setup.address(i));
             assert_eq!(
                 expected_party_id,
                 Some(i),
@@ -2768,37 +2733,44 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create dealer (party 0)
-        let dealer_manager = setup.create_manager(0);
+        let (dealer_manager, _dealer_store) = setup.create_manager(0);
         let message = dealer_manager.create_dealer_message(&mut rng);
-        let dealer_address = dealer_manager.address;
+        let dealer_address = dealer_manager.address();
 
         // Create receiver (party 1) with custom storage
         let storage = InMemoryPublicMessagesStore::new();
-        let mut receiver_manager = setup.create_manager_with_store(1, Box::new(storage));
+        let (mut receiver_manager, receiver_store) =
+            setup.create_manager_with_store(1, Box::new(storage));
 
         // Receiver processes the dealer's message
         let signature =
             receive_dealer_message(&mut receiver_manager, &message, dealer_address).unwrap();
 
         // Verify signature format
-        assert_eq!(signature.address(), &receiver_manager.address);
+        assert_eq!(signature.address(), &receiver_manager.address());
 
         // Verify receiver output was stored in memory
         assert!(
-            receiver_manager
+            receiver_store
+                .read()
+                .unwrap()
                 .dealer_outputs
                 .contains_key(&dealer_address)
         );
 
         // Verify dealer message was stored in memory for signature recovery
         assert!(
-            receiver_manager
+            receiver_store
+                .read()
+                .unwrap()
                 .dealer_messages
                 .contains_key(&dealer_address)
         );
 
         // Verify dealer message was persisted to storage
-        let stored = receiver_manager
+        let stored = receiver_store
+            .read()
+            .unwrap()
             .public_messages_store
             .list_all_dealer_messages()
             .unwrap();
@@ -2814,12 +2786,12 @@ mod tests {
         let setup = TestSetup::new(4); // Need at least 4 validators for threshold
 
         // Create dealer (party 0)
-        let dealer_manager = setup.create_manager(0);
+        let (dealer_manager, _dealer_store) = setup.create_manager(0);
         let message = dealer_manager.create_dealer_message(&mut rng);
-        let dealer_address = dealer_manager.address;
+        let dealer_address = dealer_manager.address();
 
         // Create receiver with failing storage
-        let mut receiver_manager =
+        let (mut receiver_manager, _receiver_store) =
             setup.create_manager_with_store(1, Box::new(FailingPublicMessagesStore));
 
         // Receiver processes the dealer's message - should fail due to storage error
@@ -2849,18 +2821,18 @@ mod tests {
 
         // Using validators 0, 1, 4 as dealers
         let dealer_indices = [0usize, 1, 4];
-        let dealer_managers: Vec<_> = dealer_indices
+        let dealer_managers: Vec<(DkgManager, MessageStoreHandle)> = dealer_indices
             .iter()
             .map(|&i| setup.create_manager(i))
             .collect();
 
         // Create receiver (party 2 with weight=4 - will receive 4 shares!)
-        let mut receiver_manager = setup.create_manager(2);
+        let (mut receiver_manager, _receiver_store) = setup.create_manager(2);
 
         // Each dealer creates a message
         let dealer_messages: Vec<_> = dealer_managers
             .iter()
-            .map(|dm| dm.create_dealer_message(&mut rng))
+            .map(|(dm, _)| dm.create_dealer_message(&mut rng))
             .collect();
 
         // Receiver processes all dealer messages and creates certificates
@@ -2868,7 +2840,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, message)| {
-                let dealer_address = dealer_managers[i].address;
+                let dealer_address = dealer_managers[i].0.address();
                 // Receiver processes the message
                 let _sig = receive_dealer_message(&mut receiver_manager, message, dealer_address);
                 dealer_address
@@ -2890,7 +2862,7 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create a receiver manager (will not receive dealer messages)
-        let receiver_manager = setup.create_manager(0);
+        let (receiver_manager, _store) = setup.create_manager(0);
 
         // Create dealers
         let dealer_addr0 = setup.address(1);
@@ -2916,14 +2888,14 @@ mod tests {
         let setup = TestSetup::with_weights(&weights);
 
         // Create all managers
-        let mut managers: Vec<_> = (0..num_validators)
+        let mut managers: Vec<(DkgManager, MessageStoreHandle)> = (0..num_validators)
             .map(|i| setup.create_manager(i))
             .collect();
 
         // Phase 1: Pre-create all dealer messages
         let dealer_messages: Vec<_> = managers
             .iter()
-            .map(|mgr| mgr.create_dealer_message(&mut rng))
+            .map(|(mgr, _)| mgr.create_dealer_message(&mut rng))
             .collect();
 
         // Phase 2: Pre-compute all signatures and certificates
@@ -2933,7 +2905,7 @@ mod tests {
 
             // Collect signatures from all validators
             let mut signatures = Vec::new();
-            for manager in managers.iter_mut() {
+            for (manager, _) in managers.iter_mut() {
                 let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
@@ -2946,14 +2918,14 @@ mod tests {
 
         // Phase 3: Test run_as_dealer() and run_as_party() for validator 0 with mocked channels
         // Remove validator 0 from managers (it will call run_dkg)
-        let mut test_manager = managers.remove(0);
-        let threshold = test_manager.dkg_config.threshold;
+        let (mut test_manager, _test_store) = managers.remove(0);
+        let threshold = test_manager.dkg_config().threshold;
 
         // Create mock P2P channel with remaining managers (validators 1-4)
         let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .map(|(idx, (mgr, _))| (setup.address(idx + 1), mgr))
             .collect();
         let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
 
@@ -3007,7 +2979,12 @@ mod tests {
             let addr_j = setup.address(j);
             let other_mgr = other_managers.get(&addr_j).unwrap();
             assert!(
-                other_mgr.dealer_outputs.contains_key(&addr0),
+                other_mgr
+                    .store()
+                    .read()
+                    .unwrap()
+                    .dealer_outputs
+                    .contains_key(&addr0),
                 "Validator {} should have dealer output from validator 0",
                 j
             );
@@ -3027,7 +3004,7 @@ mod tests {
         let setup = TestSetup::new(num_validators);
 
         // Create all managers
-        let mut managers: Vec<_> = (0..num_validators)
+        let mut managers: Vec<(DkgManager, MessageStoreHandle)> = (0..num_validators)
             .map(|i| setup.create_manager(i))
             .collect();
 
@@ -3036,7 +3013,7 @@ mod tests {
         let dealer_messages: Vec<_> = managers
             .iter()
             .skip(1) // Skip validator 0
-            .map(|mgr| mgr.create_dealer_message(&mut rng))
+            .map(|(mgr, _)| mgr.create_dealer_message(&mut rng))
             .collect();
 
         // Create certificates for dealers 1-4
@@ -3046,7 +3023,7 @@ mod tests {
             let dealer_addr = setup.address(dealer_idx);
 
             let mut signatures = Vec::new();
-            for manager in managers.iter_mut() {
+            for (manager, _) in managers.iter_mut() {
                 let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
@@ -3057,13 +3034,13 @@ mod tests {
         }
 
         // Extract test_manager (validator 0)
-        let test_manager = managers.remove(0);
+        let (test_manager, _test_store) = managers.remove(0);
 
         // Create mock P2P with remaining managers
         let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .map(|(idx, (mgr, _))| (setup.address(idx + 1), mgr))
             .collect();
         let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
 
@@ -3159,11 +3136,14 @@ mod tests {
         let setup = TestSetup::new(num_validators);
 
         // Create manager for validator 0
-        let mut test_manager = setup.create_manager(0);
+        let (mut test_manager, test_store) = setup.create_manager(0);
 
         // Create managers for other validators
         let other_managers: HashMap<_, _> = (1..num_validators)
-            .map(|i| (setup.address(i), setup.create_manager(i)))
+            .map(|i| {
+                let (mgr, _store) = setup.create_manager(i);
+                (setup.address(i), mgr)
+            })
             .collect();
 
         let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
@@ -3179,7 +3159,13 @@ mod tests {
 
         // Verify own dealer output is stored
         let addr0 = setup.address(0);
-        assert!(test_manager.dealer_outputs.contains_key(&addr0));
+        assert!(
+            test_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&addr0)
+        );
 
         // Verify other validators received dealer message via P2P
         let other_managers = mock_p2p.managers.lock().unwrap();
@@ -3187,7 +3173,12 @@ mod tests {
             let addr = setup.address(i);
             let other_mgr = other_managers.get(&addr).unwrap();
             assert!(
-                other_mgr.dealer_outputs.contains_key(&addr0),
+                other_mgr
+                    .store()
+                    .read()
+                    .unwrap()
+                    .dealer_outputs
+                    .contains_key(&addr0),
                 "Validator {} should have dealer output from validator 0",
                 i
             );
@@ -3203,16 +3194,16 @@ mod tests {
         let setup = TestSetup::new(num_validators);
 
         // Create all managers
-        let mut managers: Vec<_> = (0..num_validators)
+        let mut managers: Vec<(DkgManager, MessageStoreHandle)> = (0..num_validators)
             .map(|i| setup.create_manager(i))
             .collect();
-        let threshold = managers[0].dkg_config.threshold;
+        let threshold = managers[0].0.dkg_config().threshold;
 
         // Pre-create dealer messages and certificates for threshold validators
         let dealer_messages: Vec<_> = managers
             .iter()
             .take(threshold as usize)
-            .map(|mgr| mgr.create_dealer_message(&mut rng))
+            .map(|(mgr, _)| mgr.create_dealer_message(&mut rng))
             .collect();
 
         let mut certificates = Vec::new();
@@ -3221,7 +3212,7 @@ mod tests {
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
-            for manager in managers.iter_mut() {
+            for (manager, _) in managers.iter_mut() {
                 let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
@@ -3236,11 +3227,11 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(certificates.clone());
 
         // Call run_as_party() for validator 0
-        let mut test_manager = managers.remove(0);
+        let (mut test_manager, _test_store) = managers.remove(0);
         let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .map(|(idx, (mgr, _))| (setup.address(idx + 1), mgr))
             .collect();
         let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
         let output = test_manager
@@ -3263,8 +3254,10 @@ mod tests {
 
         // Create dealer 0 with normal message
         let dealer_0_addr = setup.address(0);
-        let dealer_0_mgr = setup.create_dealer_with_message(0, &mut rng);
-        let dealer_0_message = dealer_0_mgr
+        let (_dealer_0_mgr, dealer_0_store) = setup.create_dealer_with_message(0, &mut rng);
+        let dealer_0_message = dealer_0_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer_0_addr)
             .unwrap()
@@ -3286,7 +3279,7 @@ mod tests {
 
         // Create party 2 manager (will have complaint for dealer 1)
         let party_addr = setup.address(2);
-        let mut party_manager = setup.create_manager(2);
+        let (mut party_manager, party_store) = setup.create_manager(2);
 
         // Party 2 successfully processes dealer 0's message
         receive_dealer_message(&mut party_manager, &dealer_0_message, dealer_0_addr).unwrap();
@@ -3308,7 +3301,7 @@ mod tests {
         let mut other_managers = HashMap::new();
         for party_id in [0usize, 1, 3, 4] {
             let addr = setup.address(party_id);
-            let mut mgr = setup.create_manager(party_id);
+            let (mut mgr, _store) = setup.create_manager(party_id);
             // They successfully process dealer 1's cheating message
             receive_dealer_message(&mut mgr, &dealer_1_message, dealer_1_addr).unwrap();
             other_managers.insert(addr, mgr);
@@ -3371,7 +3364,11 @@ mod tests {
             "Complaint should be cleared after successful recovery"
         );
         assert!(
-            party_manager.dealer_outputs.contains_key(&dealer_1_addr),
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer_1_addr),
             "Dealer output should exist for dealer 1 after recovery"
         );
 
@@ -3390,7 +3387,7 @@ mod tests {
         let threshold = setup.dkg_config().threshold as usize;
 
         // Create all managers
-        let mut managers: Vec<_> = (0..setup.num_validators())
+        let mut managers: Vec<(DkgManager, MessageStoreHandle)> = (0..setup.num_validators())
             .map(|i| setup.create_manager(i))
             .collect();
 
@@ -3398,7 +3395,7 @@ mod tests {
         let dealer_messages: Vec<_> = managers
             .iter()
             .take(threshold)
-            .map(|mgr| mgr.create_dealer_message(&mut rng))
+            .map(|(mgr, _)| mgr.create_dealer_message(&mut rng))
             .collect();
 
         let mut valid_certificates = Vec::new();
@@ -3407,7 +3404,7 @@ mod tests {
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
-            for manager in managers.iter_mut() {
+            for (manager, _) in managers.iter_mut() {
                 let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
@@ -3420,14 +3417,14 @@ mod tests {
 
         // Create certificate that will fail validation due to hash mismatch
         // (test_manager processes a DIFFERENT message than what's in the cert)
-        let invalid_dealer_msg = managers[3].create_dealer_message(&mut rng);
-        let different_dealer_msg = managers[3].create_dealer_message(&mut rng);
+        let invalid_dealer_msg = managers[3].0.create_dealer_message(&mut rng);
+        let different_dealer_msg = managers[3].0.create_dealer_message(&mut rng);
         let dealer_addr_3 = setup.address(3);
 
         // test_manager processes the DIFFERENT message
-        receive_dealer_message(&mut managers[0], &different_dealer_msg, dealer_addr_3).unwrap();
+        receive_dealer_message(&mut managers[0].0, &different_dealer_msg, dealer_addr_3).unwrap();
         // Other managers process the actual message (for cert creation)
-        for manager in managers.iter_mut().skip(1) {
+        for (manager, _) in managers.iter_mut().skip(1) {
             receive_dealer_message(manager, &invalid_dealer_msg, dealer_addr_3).unwrap();
         }
 
@@ -3435,15 +3432,15 @@ mod tests {
         let invalid_signatures: Vec<_> = managers
             .iter()
             .skip(1) // Skip test_manager who has wrong message
-            .map(|mgr| {
+            .map(|(mgr, _)| {
                 let message_hash = compute_message_hash(&invalid_dealer_msg);
                 let dkg_message = Dkg(DkgDealerMessageHash {
                     dealer_address: dealer_addr_3,
                     message_hash,
                 });
-                setup.signing_keys[mgr.party_id as usize].sign(
+                setup.signing_keys[mgr.party_id() as usize].sign(
                     setup.epoch(),
-                    mgr.address,
+                    mgr.address(),
                     &dkg_message,
                 )
             })
@@ -3473,11 +3470,11 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(all_certificates);
 
         // Call run_as_party() for validator 0
-        let mut test_manager = managers.remove(0);
+        let (mut test_manager, _test_store) = managers.remove(0);
         let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .map(|(idx, (mgr, _))| (setup.address(idx + 1), mgr))
             .collect();
         let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
         let output = test_manager
@@ -3506,7 +3503,7 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create all managers
-        let mut managers: Vec<_> = (0..setup.num_validators())
+        let mut managers: Vec<(DkgManager, MessageStoreHandle)> = (0..setup.num_validators())
             .map(|i| setup.create_manager(i))
             .collect();
 
@@ -3514,7 +3511,7 @@ mod tests {
         let dealer_messages: Vec<_> = managers
             .iter()
             .take(2)
-            .map(|mgr| mgr.create_dealer_message(&mut rng))
+            .map(|(mgr, _)| mgr.create_dealer_message(&mut rng))
             .collect();
 
         // Create certificates
@@ -3524,7 +3521,7 @@ mod tests {
 
             // All validators process dealer messages
             let mut signatures = Vec::new();
-            for manager in managers.iter_mut() {
+            for (manager, _) in managers.iter_mut() {
                 let sig = receive_dealer_message(manager, message, dealer_addr).unwrap();
                 signatures.push(sig);
             }
@@ -3545,11 +3542,11 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(tob_messages);
 
         // Call run_as_party() for validator 2
-        let mut test_manager = managers.remove(2);
+        let (mut test_manager, _test_store) = managers.remove(2);
         let other_managers: HashMap<_, _> = managers
             .into_iter()
             .enumerate()
-            .map(|(idx, mgr)| {
+            .map(|(idx, (mgr, _))| {
                 let addr_idx = if idx < 2 { idx } else { idx + 1 };
                 (setup.address(addr_idx), mgr)
             })
@@ -3595,13 +3592,13 @@ mod tests {
         let setup = TestSetup::new(5);
 
         // Create test manager (validator 0)
-        let mut test_manager = setup.create_manager(0);
+        let (mut test_manager, _test_store) = setup.create_manager(0);
 
         // Create managers for validators 1-4 to respond with valid signatures
         let other_managers: HashMap<_, _> = (1..setup.num_validators())
             .map(|i| {
                 let addr = setup.address(i);
-                let manager = setup.create_manager(i);
+                let (manager, _store) = setup.create_manager(i);
                 (addr, manager)
             })
             .collect();
@@ -3632,12 +3629,12 @@ mod tests {
         // Dealer sends to 6 others, fail 1, succeed 5
         let setup = TestSetup::new(7);
 
-        let mut test_manager = setup.create_manager(0);
+        let (mut test_manager, _test_store) = setup.create_manager(0);
 
         let other_managers: HashMap<_, _> = (1..setup.num_validators())
             .map(|i| {
                 let addr = setup.address(i);
-                let manager = setup.create_manager(i);
+                let (manager, _store) = setup.create_manager(i);
                 (addr, manager)
             })
             .collect();
@@ -3665,12 +3662,12 @@ mod tests {
         let mut rng = rand::thread_rng();
         let setup = TestSetup::new(5);
 
-        let mut test_manager = setup.create_manager(0);
+        let (mut test_manager, _test_store) = setup.create_manager(0);
 
         let other_managers: HashMap<_, _> = (1..setup.num_validators())
             .map(|i| {
                 let addr = setup.address(i);
-                let manager = setup.create_manager(i);
+                let (manager, _store) = setup.create_manager(i);
                 (addr, manager)
             })
             .collect();
@@ -3697,13 +3694,13 @@ mod tests {
 
         // Create manager for validator 0 (the dealer)
         let dealer_addr = setup.address(0);
-        let mut test_manager = setup.create_manager(0);
+        let (mut test_manager, _test_store) = setup.create_manager(0);
 
         // Create managers for other validators
         let other_managers: HashMap<_, _> = (1..setup.num_validators())
             .map(|i| {
                 let addr = setup.address(i);
-                let manager = setup.create_manager(i);
+                let (manager, _store) = setup.create_manager(i);
                 (addr, manager)
             })
             .collect();
@@ -3748,7 +3745,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_as_party_tob_receive_error() {
         let setup = TestSetup::new(5);
-        let mut test_manager = setup.create_manager(0);
+        let (mut test_manager, _test_store) = setup.create_manager(0);
 
         let mut failing_tob = FailingOrderedBroadcastChannel {
             error_message: "receive timeout".to_string(),
@@ -3787,9 +3784,9 @@ mod tests {
         // Generate dealer messages once and store them
         let dealer_messages: Vec<_> = dealer_managers
             .iter()
-            .map(|manager| {
+            .map(|(manager, _store)| {
                 let message = manager.create_dealer_message(&mut rng);
-                (manager.address, message)
+                (manager.address(), message)
             })
             .collect();
 
@@ -3855,7 +3852,7 @@ mod tests {
     ) -> (DkgResult<DkgOutput>, MockOrderedBroadcastChannel) {
         let party_addr = test_setup.setup.address(party_index);
 
-        let mut party_manager = test_setup.setup.create_manager(party_index);
+        let (mut party_manager, _store) = test_setup.setup.create_manager(party_index);
 
         // Pre-process the dealer messages so validation passes
         for (dealer_addr, message) in &test_setup.dealer_messages {
@@ -3961,7 +3958,7 @@ mod tests {
 
         // Create party manager
         let party_addr = test_setup.setup.address(0);
-        let mut party_manager = test_setup.setup.create_manager(0);
+        let (mut party_manager, _store) = test_setup.setup.create_manager(0);
 
         // Pre-process the dealer messages
         for (dealer_addr, message) in &test_setup.dealer_messages {
@@ -3997,23 +3994,27 @@ mod tests {
         let mut rng = rand::thread_rng();
         let setup = TestSetup::new(5);
 
-        // Create 3 dealers with their messages
+        // Create 2 dealers with their messages
         let dealer1_addr = setup.address(0);
-        let dealer1_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let (dealer1_mgr, dealer1_store) = setup.create_dealer_with_message(0, &mut rng);
         let dealer2_addr = setup.address(1);
-        let dealer2_mgr = setup.create_dealer_with_message(1, &mut rng);
+        let (dealer2_mgr, dealer2_store) = setup.create_dealer_with_message(1, &mut rng);
 
         // Create party (validator 3) WITHOUT pre-processing dealer messages
         let party_addr = setup.address(3);
-        let mut party_manager = setup.create_manager(3);
+        let (mut party_manager, party_store) = setup.create_manager(3);
 
         // Get the dealer messages for certificate creation
-        let msg1 = dealer1_mgr
+        let msg1 = dealer1_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer1_addr)
             .unwrap()
             .clone();
-        let msg2 = dealer2_mgr
+        let msg2 = dealer2_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer2_addr)
             .unwrap()
@@ -4051,7 +4052,7 @@ mod tests {
         let cert2 =
             create_test_certificate(setup.committee(), &msg2, dealer2_addr, signatures_2).unwrap();
 
-        // Create mock P2P channel with dealers that have messages
+        // Use the same dealer managers for the mock P2P channel
         let mut dealers = HashMap::new();
         dealers.insert(dealer1_addr, dealer1_mgr);
         dealers.insert(dealer2_addr, dealer2_mgr);
@@ -4062,16 +4063,40 @@ mod tests {
         let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
         // Verify party doesn't have any dealer messages yet
-        assert!(party_manager.dealer_messages.is_empty());
+        assert!(party_store.read().unwrap().dealer_messages.is_empty());
 
         // Run as party - should retrieve missing messages via P2P
         let result = party_manager.run_as_party(&mock_p2p, &mut mock_tob).await;
 
         assert!(result.is_ok());
-        assert!(party_manager.dealer_messages.contains_key(&dealer1_addr));
-        assert!(party_manager.dealer_messages.contains_key(&dealer2_addr));
-        assert!(party_manager.dealer_outputs.contains_key(&dealer1_addr));
-        assert!(party_manager.dealer_outputs.contains_key(&dealer2_addr));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer1_addr)
+        );
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer2_addr)
+        );
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer1_addr)
+        );
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer2_addr)
+        );
     }
 
     #[tokio::test]
@@ -4082,28 +4107,34 @@ mod tests {
 
         // Create 3 dealers with their messages
         let dealer1_addr = setup.address(0);
-        let dealer1_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let (dealer1_mgr, dealer1_store) = setup.create_dealer_with_message(0, &mut rng);
         let dealer2_addr = setup.address(1);
-        let _dealer2_mgr = setup.create_dealer_with_message(1, &mut rng);
+        let (_dealer2_mgr, dealer2_store) = setup.create_dealer_with_message(1, &mut rng);
         let dealer3_addr = setup.address(2);
-        let dealer3_mgr = setup.create_dealer_with_message(2, &mut rng);
+        let (dealer3_mgr, dealer3_store) = setup.create_dealer_with_message(2, &mut rng);
 
         // Create party (validator 3) WITHOUT pre-processing dealer messages
         let party_addr = setup.address(3);
-        let mut party_manager = setup.create_manager(3);
+        let (mut party_manager, party_store) = setup.create_manager(3);
 
         // Get the dealer messages for certificate creation
-        let msg1 = dealer1_mgr
+        let msg1 = dealer1_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer1_addr)
             .unwrap()
             .clone();
-        let msg2 = _dealer2_mgr
+        let msg2 = dealer2_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer2_addr)
             .unwrap()
             .clone();
-        let msg3 = dealer3_mgr
+        let msg3 = dealer3_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer3_addr)
             .unwrap()
@@ -4168,10 +4199,28 @@ mod tests {
         assert!(matches!(err, DkgError::PairwiseCommunicationError(_)));
 
         // Verify party has dealer1 message (processed before failure)
-        assert!(party_manager.dealer_messages.contains_key(&dealer1_addr));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer1_addr)
+        );
         // But NOT dealer2 or dealer3 (aborted before processing these)
-        assert!(!party_manager.dealer_messages.contains_key(&dealer2_addr));
-        assert!(!party_manager.dealer_messages.contains_key(&dealer3_addr));
+        assert!(
+            !party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer2_addr)
+        );
+        assert!(
+            !party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer3_addr)
+        );
     }
 
     #[tokio::test]
@@ -4181,8 +4230,10 @@ mod tests {
 
         // Create dealer 0 with a message - recovery will fail
         let dealer0_addr = setup.address(0);
-        let dealer0_mgr = setup.create_dealer_with_message(0, &mut rng);
-        let dealer0_message = dealer0_mgr
+        let (_dealer0_mgr, dealer0_store) = setup.create_dealer_with_message(0, &mut rng);
+        let dealer0_message = dealer0_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer0_addr)
             .unwrap()
@@ -4195,8 +4246,10 @@ mod tests {
 
         // Create dealer 1 - would be processed if we continued
         let dealer1_addr = setup.address(1);
-        let dealer1_mgr = setup.create_dealer_with_message(1, &mut rng);
-        let dealer1_message = dealer1_mgr
+        let (_dealer1_mgr, dealer1_store) = setup.create_dealer_with_message(1, &mut rng);
+        let dealer1_message = dealer1_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer1_addr)
             .unwrap()
@@ -4209,7 +4262,7 @@ mod tests {
 
         // Create party manager (validator 4)
         let party_addr = setup.address(4);
-        let mut party_manager = setup.create_manager(4);
+        let (mut party_manager, party_store) = setup.create_manager(4);
 
         // Setup complaint for dealer 0 (recovery will fail - no responders in P2P)
         let complaint = create_complaint_for_dealer(&setup, &dealer0_message, 4, 0, &mut rng);
@@ -4273,13 +4326,21 @@ mod tests {
 
         // Verify dealer1 was NOT processed (aborted before reaching it)
         assert!(
-            !party_manager.dealer_outputs.contains_key(&dealer1_addr),
+            !party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer1_addr),
             "Dealer1 should NOT be processed - aborted before reaching it"
         );
 
         // Dealer0 should NOT be in dealer_outputs (recovery failed, DKG aborted)
         assert!(
-            !party_manager.dealer_outputs.contains_key(&dealer0_addr),
+            !party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer0_addr),
             "Dealer0 should NOT have output - recovery failed and aborted"
         );
 
@@ -4300,11 +4361,11 @@ mod tests {
 
         // Create dealer (party 1) with its encryption key
         let dealer_address = setup.address(1);
-        let dealer_manager = setup.create_manager(1);
+        let (dealer_manager, _dealer_store) = setup.create_manager(1);
 
         // Create receiver (party 0) with its encryption key
         let receiver_address = setup.address(0);
-        let mut receiver_manager = setup.create_manager(0);
+        let (_receiver_manager, receiver_store) = setup.create_manager(0);
 
         // Dealer creates a message
         let dealer_message = dealer_manager.create_dealer_message(&mut rng);
@@ -4315,7 +4376,9 @@ mod tests {
         };
 
         // Receiver handles the request
-        let response = receiver_manager
+        let response = receiver_store
+            .write()
+            .unwrap()
             .handle_send_message_request(dealer_address, &request)
             .unwrap();
 
@@ -4331,7 +4394,7 @@ mod tests {
 
         // Create dealer (party 0)
         let dealer_address = setup.address(0);
-        let mut dealer_manager = setup.create_manager(0);
+        let (mut dealer_manager, dealer_store) = setup.create_manager(0);
 
         // Dealer creates and processes its own message (stores in dealer_messages)
         let dealer_message = dealer_manager.create_dealer_message(&mut rng);
@@ -4341,7 +4404,9 @@ mod tests {
         let request = RetrieveMessageRequest {
             dealer: dealer_address,
         };
-        let response = dealer_manager
+        let response = dealer_store
+            .read()
+            .unwrap()
             .handle_retrieve_message_request(&request)
             .unwrap();
 
@@ -4356,13 +4421,16 @@ mod tests {
 
         // Create dealer (party 0) but don't create/process any message
         let dealer_address = setup.address(0);
-        let dealer_manager = setup.create_manager(0);
+        let (_dealer_manager, dealer_store) = setup.create_manager(0);
 
         // Party requests the dealer's message
         let request = RetrieveMessageRequest {
             dealer: dealer_address,
         };
-        let result = dealer_manager.handle_retrieve_message_request(&request);
+        let result = dealer_store
+            .read()
+            .unwrap()
+            .handle_retrieve_message_request(&request);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4378,7 +4446,7 @@ mod tests {
             create_dealer_message_and_complaint(&setup, &mut rng);
 
         // Create manager (party 1) without any dealer messages
-        let mut manager = setup.create_manager(1);
+        let (_manager, store) = setup.create_manager(1);
 
         let request = ComplainRequest {
             dealer: dealer_address,
@@ -4386,7 +4454,7 @@ mod tests {
         };
 
         // Manager has no message from this dealer
-        let result = manager.handle_complain_request(&request);
+        let result = store.write().unwrap().handle_complain_request(&request);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4402,10 +4470,12 @@ mod tests {
             create_dealer_message_and_complaint(&setup, &mut rng);
 
         // Create manager that has the message but NOT dealer_output
-        let mut manager = setup.create_manager(1);
+        let (_manager, store) = setup.create_manager(1);
 
         // Manually insert message without processing (so no dealer_output)
-        manager
+        store
+            .write()
+            .unwrap()
             .dealer_messages
             .insert(dealer_address, dealer_message.clone());
 
@@ -4415,7 +4485,7 @@ mod tests {
         };
 
         // Manager has message but no dealer_output
-        let result = manager.handle_complain_request(&request);
+        let result = store.write().unwrap().handle_complain_request(&request);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4454,7 +4524,7 @@ mod tests {
 
         // Party 2 processes the SAME cheating message
         // Party 2's shares are valid (not corrupted) so it gets valid output
-        let mut party2_manager = setup.create_manager(2);
+        let (mut party2_manager, party2_store) = setup.create_manager(2);
 
         // Set up party 2 with the cheating message
         receive_dealer_message(&mut party2_manager, &cheating_message, dealer_addr).unwrap();
@@ -4465,18 +4535,28 @@ mod tests {
         };
 
         // First call - should compute and cache
-        let response1 = party2_manager.handle_complain_request(&request).unwrap();
+        let response1 = party2_store
+            .write()
+            .unwrap()
+            .handle_complain_request(&request)
+            .unwrap();
 
         // Verify cache contains the response
-        assert_eq!(party2_manager.complaint_responses.len(), 1);
+        assert_eq!(party2_store.read().unwrap().complaint_responses.len(), 1);
         assert!(
-            party2_manager
+            party2_store
+                .read()
+                .unwrap()
                 .complaint_responses
                 .contains_key(&dealer_addr)
         );
 
         // Second call - should return cached response
-        let response2 = party2_manager.handle_complain_request(&request).unwrap();
+        let response2 = party2_store
+            .write()
+            .unwrap()
+            .handle_complain_request(&request)
+            .unwrap();
 
         // Verify responses are identical
         assert_eq!(
@@ -4486,7 +4566,7 @@ mod tests {
         );
 
         // Cache size should still be 1
-        assert_eq!(party2_manager.complaint_responses.len(), 1);
+        assert_eq!(party2_store.read().unwrap().complaint_responses.len(), 1);
     }
 
     #[tokio::test]
@@ -4500,7 +4580,7 @@ mod tests {
 
         // Party 1 receives corrupted message and creates complaint
         let party_addr = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, party_store) = setup.create_manager(1);
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
@@ -4517,7 +4597,7 @@ mod tests {
         let mut other_managers = vec![];
         for party_id in 2..4 {
             let addr = setup.address(party_id);
-            let mut mgr = setup.create_manager(party_id);
+            let (mut mgr, _store) = setup.create_manager(party_id);
             receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
             other_managers.push((addr, mgr));
         }
@@ -4539,7 +4619,13 @@ mod tests {
             "Recovery should succeed: {:?}",
             result.err()
         );
-        assert!(party_manager.dealer_outputs.contains_key(&dealer_addr));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer_addr)
+        );
         assert!(
             !party_manager
                 .complaints_to_process
@@ -4559,7 +4645,7 @@ mod tests {
 
         // Party 1 receives corrupted message and creates complaint
         let party_addr = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, party_store) = setup.create_manager(1);
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
@@ -4576,7 +4662,7 @@ mod tests {
         let mut other_managers = vec![];
         for party_id in 2..4 {
             let addr = setup.address(party_id);
-            let mut mgr = setup.create_manager(party_id);
+            let (mut mgr, _store) = setup.create_manager(party_id);
             receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
             other_managers.push((addr, mgr));
         }
@@ -4602,7 +4688,13 @@ mod tests {
             "Recovery should succeed despite failed signer: {:?}",
             result.err()
         );
-        assert!(party_manager.dealer_outputs.contains_key(&dealer_addr));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer_addr)
+        );
         assert!(
             !party_manager
                 .complaints_to_process
@@ -4618,14 +4710,20 @@ mod tests {
 
         // Create manager without any complaints
         let party_addr = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, _party_store) = setup.create_manager(1);
 
         // Create a dealer address that has no complaint
         let dealer_addr = setup.address(0);
-        let dealer_manager = setup.create_dealer_with_message(0, &mut rng);
+        let (_dealer_manager, dealer_store) = setup.create_dealer_with_message(0, &mut rng);
 
-        let dealer_message = dealer_manager.dealer_messages.get(&dealer_addr).unwrap();
-        let message_hash = compute_message_hash(dealer_message);
+        let dealer_message = dealer_store
+            .read()
+            .unwrap()
+            .dealer_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
+        let message_hash = compute_message_hash(&dealer_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
@@ -4636,7 +4734,7 @@ mod tests {
         let cert = create_certificate_with_signers(
             committee,
             dealer_addr,
-            dealer_message,
+            &dealer_message,
             [(1usize, party_addr)]
                 .iter()
                 .map(|(i, a)| setup.signing_keys[*i].sign(setup.epoch(), *a, &dkg_message))
@@ -4651,7 +4749,7 @@ mod tests {
         let result = party_manager
             .recover_shares_via_complaint(
                 &dealer_addr,
-                cert.signers(&party_manager.committee).unwrap(),
+                cert.signers(&party_manager.committee()).unwrap(),
                 &mock_p2p,
             )
             .await;
@@ -4669,8 +4767,10 @@ mod tests {
 
         // Create dealer with a message
         let dealer_addr = setup.address(0);
-        let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
-        let dealer_message = dealer_mgr
+        let (_dealer_mgr, dealer_store) = setup.create_dealer_with_message(0, &mut rng);
+        let dealer_message = dealer_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer_addr)
             .unwrap()
@@ -4678,7 +4778,7 @@ mod tests {
 
         // Create party manager with a complaint
         let party_addr = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, _party_store) = setup.create_manager(1);
 
         // Create and setup complaint for dealer
         let complaint = create_complaint_for_dealer(&setup, &dealer_message, 1, 0, &mut rng);
@@ -4718,7 +4818,7 @@ mod tests {
 
         // Party 1 receives corrupted message and creates complaint
         let party_addr = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, _party_store) = setup.create_manager(1);
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
@@ -4735,7 +4835,7 @@ mod tests {
         let mut other_managers = vec![];
         for party_id in 2..3 {
             let addr = setup.address(party_id);
-            let mut mgr = setup.create_manager(party_id);
+            let (mut mgr, _store) = setup.create_manager(party_id);
             receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
             other_managers.push((addr, mgr));
         }
@@ -4776,7 +4876,7 @@ mod tests {
 
         // Party 1 receives corrupted message and creates complaint
         let party_addr = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, party_store) = setup.create_manager(1);
         party_manager
             .store_message(dealer_addr, &cheating_message)
             .unwrap();
@@ -4790,7 +4890,11 @@ mod tests {
         );
 
         // Remove the dealer message to simulate the edge case
-        party_manager.dealer_messages.remove(&dealer_addr);
+        party_store
+            .write()
+            .unwrap()
+            .dealer_messages
+            .remove(&dealer_addr);
 
         // Create mock P2P (empty is fine since we should fail before contacting anyone)
         let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
@@ -4821,15 +4925,15 @@ mod tests {
 
         // Create responders 3 and 4 who successfully process the dealer message
         let addr3 = setup.address(3);
-        let mut mgr3 = setup.create_manager(3);
+        let (mut mgr3, store3) = setup.create_manager(3);
         receive_dealer_message(&mut mgr3, &dealer_message, dealer_addr).unwrap();
 
         let addr4 = setup.address(4);
-        let mut mgr4 = setup.create_manager(4);
+        let (mut mgr4, store4) = setup.create_manager(4);
         receive_dealer_message(&mut mgr4, &dealer_message, dealer_addr).unwrap();
 
         // Party 1 complains
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, party_store) = setup.create_manager(1);
         party_manager
             .store_message(dealer_addr, &dealer_message)
             .unwrap();
@@ -4848,8 +4952,16 @@ mod tests {
             complaint,
         };
 
-        let resp3 = mgr3.handle_complain_request(&request).unwrap();
-        let resp4 = mgr4.handle_complain_request(&request).unwrap();
+        let resp3 = store3
+            .write()
+            .unwrap()
+            .handle_complain_request(&request)
+            .unwrap();
+        let resp4 = store4
+            .write()
+            .unwrap()
+            .handle_complain_request(&request)
+            .unwrap();
 
         let responses = std::collections::HashMap::from([(addr3, resp3), (addr4, resp4)]);
 
@@ -4865,7 +4977,7 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-        party_manager.dkg_config.nodes = smaller_nodes;
+        party_store.write().unwrap().dkg_config.nodes = smaller_nodes;
 
         let p2p = PreCollectedP2PChannel::new(responses);
 
@@ -4889,17 +5001,23 @@ mod tests {
 
         // Create dealer (party 0) with its message
         let dealer_address = setup.address(0);
-        let dealer_manager = setup.create_dealer_with_message(0, &mut rng);
+        let (dealer_manager, dealer_store) = setup.create_dealer_with_message(0, &mut rng);
 
         // Create party (party 1) that will request the message
         let party_address = setup.address(1);
-        let mut party_manager = setup.create_manager(1);
+        let (mut party_manager, party_store) = setup.create_manager(1);
 
         // Get dealer's message for certificate creation
-        let dealer_message = dealer_manager.dealer_messages.get(&dealer_address).unwrap();
+        let dealer_message = dealer_store
+            .read()
+            .unwrap()
+            .dealer_messages
+            .get(&dealer_address)
+            .unwrap()
+            .clone();
 
         // Create DkgMessage and validator signatures
-        let message_hash = compute_message_hash(dealer_message);
+        let message_hash = compute_message_hash(&dealer_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address,
             message_hash,
@@ -4914,7 +5032,7 @@ mod tests {
         let cert = create_certificate_with_signers(
             committee,
             dealer_address,
-            dealer_message,
+            &dealer_message,
             vec![dealer_signature],
         )
         .unwrap();
@@ -4930,15 +5048,33 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(party_manager.dealer_messages.contains_key(&dealer_address));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer_address)
+        );
         // Message is stored but not yet processed (that happens during run_as_party)
-        assert!(!party_manager.dealer_outputs.contains_key(&dealer_address));
+        assert!(
+            !party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer_address)
+        );
 
         // Process the message to verify it's valid
         party_manager
             .process_certified_dealer_message(dealer_address)
             .unwrap();
-        assert!(party_manager.dealer_outputs.contains_key(&dealer_address));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer_address)
+        );
     }
 
     #[tokio::test]
@@ -4949,17 +5085,23 @@ mod tests {
 
         // Create dealer with message (validator 0)
         let dealer_addr = setup.address(0);
-        let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let (dealer_mgr, dealer_store) = setup.create_dealer_with_message(0, &mut rng);
 
         // Create party that will request (validator 2)
         let party_addr = setup.address(2);
-        let mut party_mgr = setup.create_manager(2);
+        let (mut party_mgr, party_store) = setup.create_manager(2);
 
         // Get dealer's message for certificate creation
-        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
+        let dealer_message = dealer_store
+            .read()
+            .unwrap()
+            .dealer_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
 
         // Create DkgMessage
-        let message_hash = compute_message_hash(dealer_message);
+        let message_hash = compute_message_hash(&dealer_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
@@ -4976,7 +5118,7 @@ mod tests {
         let cert = create_certificate_with_signers(
             committee,
             dealer_addr,
-            dealer_message,
+            &dealer_message,
             vec![validator_1_signature, dealer_signature],
         )
         .unwrap();
@@ -4992,7 +5134,13 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(party_mgr.dealer_messages.contains_key(&dealer_addr));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer_addr)
+        );
     }
 
     #[tokio::test]
@@ -5004,17 +5152,23 @@ mod tests {
 
         // Create dealer with message (validator 0)
         let dealer_addr = setup.address(0);
-        let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let (dealer_mgr, dealer_store) = setup.create_dealer_with_message(0, &mut rng);
 
         // Create party that will request (party 1)
         let party_addr = setup.address(1);
-        let mut party_mgr = setup.create_manager(1);
+        let (mut party_mgr, _party_store) = setup.create_manager(1);
 
         // Get dealer's message for certificate creation
-        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
+        let dealer_message = dealer_store
+            .read()
+            .unwrap()
+            .dealer_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
 
         // Create DkgMessage
-        let message_hash = compute_message_hash(dealer_message);
+        let message_hash = compute_message_hash(&dealer_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
@@ -5029,7 +5183,7 @@ mod tests {
         let cert = create_certificate_with_signers(
             committee,
             dealer_addr,
-            dealer_message,
+            &dealer_message,
             vec![party_signature, dealer_signature],
         )
         .unwrap();
@@ -5061,17 +5215,23 @@ mod tests {
 
         // Create dealer with message (validator 0)
         let dealer_addr = setup.address(0);
-        let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let (_dealer_mgr, dealer_store) = setup.create_dealer_with_message(0, &mut rng);
 
         // Create party that will request (validator 1)
         let party_addr = setup.address(1);
-        let mut party_mgr = setup.create_manager(1);
+        let (mut party_mgr, _party_store) = setup.create_manager(1);
 
         // Get dealer's message for certificate creation
-        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
+        let dealer_message = dealer_store
+            .read()
+            .unwrap()
+            .dealer_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone();
 
         // Create DkgMessage
-        let message_hash = compute_message_hash(dealer_message);
+        let message_hash = compute_message_hash(&dealer_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
             message_hash,
@@ -5089,7 +5249,7 @@ mod tests {
         let cert = create_certificate_with_signers(
             committee,
             dealer_addr,
-            dealer_message,
+            &dealer_message,
             vec![signer_2_signature, signer_3_signature],
         )
         .unwrap();
@@ -5118,8 +5278,10 @@ mod tests {
 
         // Create dealer A with message MA
         let dealer_a_addr = setup.address(0);
-        let dealer_a_mgr = setup.create_dealer_with_message(0, &mut rng);
-        let message_a = dealer_a_mgr
+        let (dealer_a_mgr, dealer_a_store) = setup.create_dealer_with_message(0, &mut rng);
+        let message_a = dealer_a_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer_a_addr)
             .unwrap()
@@ -5127,8 +5289,10 @@ mod tests {
 
         // Create dealer B with different message MB
         let dealer_b_addr = setup.address(1);
-        let dealer_b_mgr = setup.create_dealer_with_message(1, &mut rng);
-        let message_b = dealer_b_mgr
+        let (_dealer_b_mgr, dealer_b_store) = setup.create_dealer_with_message(1, &mut rng);
+        let message_b = dealer_b_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer_b_addr)
             .unwrap()
@@ -5136,14 +5300,16 @@ mod tests {
 
         // Create party that will request
         let party_addr = setup.address(2);
-        let mut party_mgr = setup.create_manager(2);
+        let (mut party_mgr, party_store) = setup.create_manager(2);
 
         // Create Byzantine signer that has WRONG message stored for dealer A
         // (It has dealer B's message stored under dealer A's key.)
         let byzantine_signer_addr = Address::new([3; 32]);
-        let mut byzantine_signer = setup.create_manager(3);
+        let (byzantine_signer, byzantine_store) = setup.create_manager(3);
         // Byzantine: store dealer B's message under dealer A's address
-        byzantine_signer
+        byzantine_store
+            .write()
+            .unwrap()
             .dealer_messages
             .insert(dealer_a_addr, message_b.clone());
 
@@ -5185,7 +5351,13 @@ mod tests {
 
         assert!(result.is_ok());
         // Should have dealer A's correct message (from second signer)
-        assert!(party_mgr.dealer_messages.contains_key(&dealer_a_addr));
+        assert!(
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer_a_addr)
+        );
     }
     fn create_certificate_with_signers(
         committee: &Committee,
@@ -5389,7 +5561,7 @@ mod tests {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> (Address, avss::Message, complaint::Complaint) {
         let dealer_address = setup.address(0);
-        let dealer_manager = setup.create_manager(0);
+        let (dealer_manager, _store) = setup.create_manager(0);
         let dealer_message = dealer_manager.create_dealer_message(rng);
         // Create complaint from party 1 using wrong encryption key
         let complaint = create_complaint_for_dealer(setup, &dealer_message, 1, 0, rng);
@@ -5406,24 +5578,37 @@ mod tests {
             .complaints_to_process
             .insert(*dealer_address, complaint);
         party_manager
+            .store()
+            .write()
+            .unwrap()
             .dealer_messages
             .insert(*dealer_address, dealer_message.clone());
     }
 
     fn create_handle_send_message_test_setup(
         _rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> (TestSetup, Address, DkgManager, Address, DkgManager) {
+    ) -> (
+        TestSetup,
+        Address,
+        DkgManager,
+        MessageStoreHandle,
+        Address,
+        DkgManager,
+        MessageStoreHandle,
+    ) {
         let setup = TestSetup::new(5);
         let dealer_address = setup.address(1);
-        let dealer_manager = setup.create_manager(1);
+        let (dealer_manager, dealer_store) = setup.create_manager(1);
         let receiver_address = setup.address(0);
-        let receiver_manager = setup.create_manager(0);
+        let (receiver_manager, receiver_store) = setup.create_manager(0);
         (
             setup,
             dealer_address,
             dealer_manager,
+            dealer_store,
             receiver_address,
             receiver_manager,
+            receiver_store,
         )
     }
 
@@ -5431,8 +5616,15 @@ mod tests {
     async fn test_handle_send_message_request_idempotent() {
         // Test that same request returns cached response (idempotent)
         let mut rng = rand::thread_rng();
-        let (_setup, dealer_address, dealer_manager, _receiver_address, mut receiver_manager) =
-            create_handle_send_message_test_setup(&mut rng);
+        let (
+            _setup,
+            dealer_address,
+            dealer_manager,
+            _dealer_store,
+            _receiver_address,
+            _receiver_manager,
+            receiver_store,
+        ) = create_handle_send_message_test_setup(&mut rng);
 
         let dealer_message = dealer_manager.create_dealer_message(&mut rng);
         let request = SendMessageRequest {
@@ -5440,12 +5632,16 @@ mod tests {
         };
 
         // First request
-        let response1 = receiver_manager
+        let response1 = receiver_store
+            .write()
+            .unwrap()
             .handle_send_message_request(dealer_address, &request)
             .unwrap();
 
         // Second request with same message - should return cached response
-        let response2 = receiver_manager
+        let response2 = receiver_store
+            .write()
+            .unwrap()
             .handle_send_message_request(dealer_address, &request)
             .unwrap();
 
@@ -5457,8 +5653,15 @@ mod tests {
     async fn test_handle_send_message_request_equivocation() {
         // Test that different message from same dealer triggers error
         let mut rng = rand::thread_rng();
-        let (_setup, dealer_address, dealer_manager, _receiver_address, mut receiver_manager) =
-            create_handle_send_message_test_setup(&mut rng);
+        let (
+            _setup,
+            dealer_address,
+            dealer_manager,
+            _dealer_store,
+            _receiver_address,
+            _receiver_manager,
+            receiver_store,
+        ) = create_handle_send_message_test_setup(&mut rng);
 
         // First message from dealer
         let dealer_message1 = dealer_manager.create_dealer_message(&mut rng);
@@ -5467,7 +5670,9 @@ mod tests {
         };
 
         // Process first request successfully
-        let response1 = receiver_manager
+        let response1 = receiver_store
+            .write()
+            .unwrap()
             .handle_send_message_request(dealer_address, &request1)
             .unwrap();
         // Verify we got a valid BLS signature (non-empty)
@@ -5480,7 +5685,10 @@ mod tests {
         };
 
         // Should return error
-        let result = receiver_manager.handle_send_message_request(dealer_address, &request2);
+        let result = receiver_store
+            .write()
+            .unwrap()
+            .handle_send_message_request(dealer_address, &request2);
         assert!(result.is_err());
 
         match result.unwrap_err() {
@@ -5510,14 +5718,17 @@ mod tests {
         );
 
         // Create receiver (party 0)
-        let mut receiver_manager = setup.create_manager(0);
+        let (_receiver_manager, receiver_store) = setup.create_manager(0);
 
         let request = SendMessageRequest {
             message: cheating_message.clone(),
         };
 
         // First call: message is invalid, should return error
-        let result1 = receiver_manager.handle_send_message_request(dealer_addr, &request);
+        let result1 = receiver_store
+            .write()
+            .unwrap()
+            .handle_send_message_request(dealer_addr, &request);
         assert!(result1.is_err(), "Invalid shares should return error");
         match result1.unwrap_err() {
             DkgError::InvalidMessage { sender, reason } => {
@@ -5528,7 +5739,10 @@ mod tests {
         }
 
         // Second call: same message - should return error with "previously rejected" message
-        let result2 = receiver_manager.handle_send_message_request(dealer_addr, &request);
+        let result2 = receiver_store
+            .write()
+            .unwrap()
+            .handle_send_message_request(dealer_addr, &request);
         assert!(result2.is_err(), "Second call should also return error");
         match result2.unwrap_err() {
             DkgError::InvalidMessage { sender, reason } => {
@@ -5544,13 +5758,19 @@ mod tests {
 
         // Verify message was stored (for later retrieval)
         assert!(
-            receiver_manager.dealer_messages.contains_key(&dealer_addr),
+            receiver_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer_addr),
             "Message should be stored even if invalid"
         );
 
         // Verify no response was cached (since we returned error)
         assert!(
-            !receiver_manager
+            !receiver_store
+                .read()
+                .unwrap()
                 .message_responses
                 .contains_key(&dealer_addr),
             "Response should not be cached for invalid shares"
@@ -5560,7 +5780,9 @@ mod tests {
         let retrieve_request = RetrieveMessageRequest {
             dealer: dealer_addr,
         };
-        let retrieve_response = receiver_manager
+        let retrieve_response = receiver_store
+            .read()
+            .unwrap()
             .handle_retrieve_message_request(&retrieve_request)
             .unwrap();
         assert_eq!(
@@ -5592,7 +5814,7 @@ mod tests {
         let mut signers = Vec::new();
         for i in 2..5usize {
             let addr = setup.address(i);
-            let mut mgr = setup.create_manager(i);
+            let (mut mgr, _store) = setup.create_manager(i);
             let sig = receive_dealer_message(&mut mgr, &cheating_message, dealer_addr).unwrap();
             signers.push((addr, mgr, sig));
         }
@@ -5612,7 +5834,7 @@ mod tests {
 
         // Party 0 doesn't have the message yet (simulating it wasn't received via SendMessage)
         let receiver_addr = setup.address(0);
-        let mut receiver_manager = setup.create_manager(0);
+        let (mut receiver_manager, receiver_store) = setup.create_manager(0);
 
         // Create P2P channel with signers who have the message
         let other_managers: HashMap<Address, DkgManager> = signers
@@ -5639,7 +5861,11 @@ mod tests {
 
         // Verify message was stored
         assert!(
-            receiver_manager.dealer_messages.contains_key(&dealer_addr),
+            receiver_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer_addr),
             "Invalid message should be stored for later complaint processing"
         );
 
@@ -5655,7 +5881,11 @@ mod tests {
             "Processing invalid message should create complaint"
         );
         assert!(
-            !receiver_manager.dealer_outputs.contains_key(&dealer_addr),
+            !receiver_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer_addr),
             "Invalid message should not create dealer output"
         );
     }
@@ -5787,8 +6017,8 @@ mod tests {
         let setup = TestSetup::new(num_validators);
 
         // Simulate pre-restart: dealer 0 created and stored a message
-        let original_dealer = setup.create_manager(0);
-        let dealer_address = original_dealer.address;
+        let (original_dealer, _) = setup.create_manager(0);
+        let dealer_address = original_dealer.address();
         let original_message = original_dealer.create_dealer_message(&mut rng);
         let original_hash = compute_message_hash(&original_message);
 
@@ -5798,19 +6028,26 @@ mod tests {
         store.pre_populate(dealer_address, original_message);
 
         // Simulate restart: create manager for same party with stored message
-        let mut restarted_manager = setup.create_manager_with_store(0, Box::new(store));
+        let (mut restarted_manager, restarted_store) =
+            setup.create_manager_with_store(0, Box::new(store));
 
         // Verify message was loaded
-        assert_eq!(restarted_manager.address, dealer_address);
-        let loaded = restarted_manager
+        assert_eq!(restarted_manager.address(), dealer_address);
+        let loaded = restarted_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer_address)
-            .unwrap();
-        assert_eq!(compute_message_hash(loaded), original_hash);
+            .unwrap()
+            .clone();
+        assert_eq!(compute_message_hash(&loaded), original_hash);
 
         // Create other managers for P2P
         let other_managers: HashMap<_, _> = (1..num_validators)
-            .map(|i| (setup.address(i), setup.create_manager(i)))
+            .map(|i| {
+                let (mgr, _) = setup.create_manager(i);
+                (setup.address(i), mgr)
+            })
             .collect();
         let mock_p2p = MockP2PChannel::new(other_managers, dealer_address);
         let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
@@ -5829,12 +6066,15 @@ mod tests {
         );
 
         // Verify the message in dealer_messages still has the same hash
-        let final_message = restarted_manager
+        let final_message = restarted_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer_address)
-            .unwrap();
+            .unwrap()
+            .clone();
         assert_eq!(
-            compute_message_hash(final_message),
+            compute_message_hash(&final_message),
             original_hash,
             "run_as_dealer should use the pre-stored message, not create a new one"
         );
@@ -5847,16 +6087,20 @@ mod tests {
 
         // Create dealers with messages (simulating what happened before restart)
         let dealer1_addr = setup.address(0);
-        let dealer1_mgr = setup.create_dealer_with_message(0, &mut rng);
+        let (dealer1_mgr, dealer1_store) = setup.create_dealer_with_message(0, &mut rng);
         let dealer2_addr = setup.address(1);
-        let dealer2_mgr = setup.create_dealer_with_message(1, &mut rng);
+        let (dealer2_mgr, dealer2_store) = setup.create_dealer_with_message(1, &mut rng);
 
-        let msg1 = dealer1_mgr
+        let msg1 = dealer1_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer1_addr)
             .unwrap()
             .clone();
-        let msg2 = dealer2_mgr
+        let msg2 = dealer2_store
+            .read()
+            .unwrap()
             .dealer_messages
             .get(&dealer2_addr)
             .unwrap()
@@ -5870,15 +6114,23 @@ mod tests {
 
         // Create party (validator 3) with pre-stored messages
         let party_addr = setup.address(3);
-        let mut party_manager = setup.create_manager_with_store(3, Box::new(store));
+        let (mut party_manager, party_store) = setup.create_manager_with_store(3, Box::new(store));
 
         // Verify messages were loaded on construction
         assert!(
-            party_manager.dealer_messages.contains_key(&dealer1_addr),
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer1_addr),
             "dealer1 message should be loaded"
         );
         assert!(
-            party_manager.dealer_messages.contains_key(&dealer2_addr),
+            party_store
+                .read()
+                .unwrap()
+                .dealer_messages
+                .contains_key(&dealer2_addr),
             "dealer2 message should be loaded"
         );
 
@@ -5939,11 +6191,19 @@ mod tests {
 
         // Verify dealer outputs were created from stored messages
         assert!(
-            party_manager.dealer_outputs.contains_key(&dealer1_addr),
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer1_addr),
             "dealer1 output should be created"
         );
         assert!(
-            party_manager.dealer_outputs.contains_key(&dealer2_addr),
+            party_store
+                .read()
+                .unwrap()
+                .dealer_outputs
+                .contains_key(&dealer2_addr),
             "dealer2 output should be created"
         );
     }
@@ -5968,7 +6228,10 @@ mod tests {
             let dealer_indices = vec![0usize, 1, 4];
             let mut dealer_managers: Vec<_> = dealer_indices
                 .iter()
-                .map(|&i| setup.create_manager(i))
+                .map(|&i| {
+                    let (mgr, _store) = setup.create_manager(i);
+                    mgr
+                })
                 .collect();
 
             // Each dealer creates a message
@@ -5980,7 +6243,7 @@ mod tests {
             // Create certificates by collecting signatures
             let mut certificates = HashMap::new();
             for (i, message) in dealer_messages.iter().enumerate() {
-                let dealer_address = dealer_managers[i].address;
+                let dealer_address = dealer_managers[i].address();
 
                 let validator_signatures = vec![
                     receive_dealer_message(&mut dealer_managers[0], message, dealer_address)
@@ -6016,7 +6279,7 @@ mod tests {
             &self,
             receiver_index: usize,
         ) -> (DkgManager, DkgOutput) {
-            let mut receiver_manager = self.setup.create_manager(receiver_index);
+            let (mut receiver_manager, _store) = self.setup.create_manager(receiver_index);
 
             // Process all dealer messages
             for (i, message) in self.dealer_messages.iter().enumerate() {
@@ -6038,7 +6301,7 @@ mod tests {
             &self,
             receiver_index: usize,
         ) -> (DkgManager, DkgOutput) {
-            let mut receiver_manager = self.setup.create_manager_with_store(
+            let (mut receiver_manager, _store) = self.setup.create_manager_with_store(
                 receiver_index,
                 Box::new(InMemoryPublicMessagesStore::new()),
             );
@@ -6063,7 +6326,7 @@ mod tests {
             dealer_index: usize,
         ) -> (DkgManager, DkgOutput, RotationMessages) {
             let mut rng = rand::thread_rng();
-            let mut dealer_manager = self.setup.create_manager(dealer_index);
+            let (mut dealer_manager, _store) = self.setup.create_manager(dealer_index);
 
             // Process all dealer messages
             for (i, message) in self.dealer_messages.iter().enumerate() {
@@ -6088,7 +6351,7 @@ mod tests {
             dealer_index: usize,
         ) -> (DkgManager, DkgOutput, RotationMessages) {
             let mut rng = rand::thread_rng();
-            let mut dealer_manager = self.setup.create_manager_with_store(
+            let (mut dealer_manager, _store) = self.setup.create_manager_with_store(
                 dealer_index,
                 Box::new(InMemoryPublicMessagesStore::new()),
             );
@@ -6124,7 +6387,12 @@ mod tests {
         let rotation_dealer_addr = rotation_setup.setup.address(0);
 
         // Test 1: Happy path - all valid messages should succeed
-        let rotation_outputs_before = receiver_manager.rotation_outputs.len();
+        let rotation_outputs_before = receiver_manager
+            .store()
+            .read()
+            .unwrap()
+            .rotation_outputs
+            .len();
         let result = receiver_manager.try_sign_rotation_messages(
             &receiver_dkg_output,
             rotation_dealer_addr,
@@ -6139,7 +6407,12 @@ mod tests {
         );
 
         // Verify outputs were stored (rotation_dealer has weight=3, so creates 3 rotation messages)
-        let rotation_outputs_after = receiver_manager.rotation_outputs.len();
+        let rotation_outputs_after = receiver_manager
+            .store()
+            .read()
+            .unwrap()
+            .rotation_outputs
+            .len();
         assert_eq!(
             rotation_outputs_after - rotation_outputs_before,
             rotation_messages.len(),
@@ -6178,7 +6451,12 @@ mod tests {
             rotation_messages.clone()
         };
 
-        let rotation_outputs_before = receiver_manager2.rotation_outputs.len();
+        let rotation_outputs_before = receiver_manager2
+            .store()
+            .read()
+            .unwrap()
+            .rotation_outputs
+            .len();
         let result = receiver_manager2.try_sign_rotation_messages(
             &receiver2_dkg_output,
             rotation_dealer_addr,
@@ -6192,7 +6470,12 @@ mod tests {
         );
 
         // Verify NO outputs were stored (all-or-nothing semantics)
-        let rotation_outputs_after = receiver_manager2.rotation_outputs.len();
+        let rotation_outputs_after = receiver_manager2
+            .store()
+            .read()
+            .unwrap()
+            .rotation_outputs
+            .len();
         assert_eq!(
             rotation_outputs_before, rotation_outputs_after,
             "No rotation outputs should be stored when any message fails"
@@ -6286,7 +6569,12 @@ mod tests {
 
         // Verify no outputs were stored (all-or-nothing semantics)
         assert!(
-            receiver_manager.rotation_outputs.is_empty(),
+            receiver_manager
+                .store()
+                .read()
+                .unwrap()
+                .rotation_outputs
+                .is_empty(),
             "No rotation outputs should be stored when validation fails"
         );
     }
@@ -6302,13 +6590,21 @@ mod tests {
         let (mut test_manager, test_dkg_output, _) =
             rotation_setup.create_rotation_dealer_with_memory_store(0);
         let test_addr = rotation_setup.setup.address(0);
-        test_manager.previous_dkg_output = Some(test_dkg_output.clone());
+        test_manager
+            .store()
+            .write()
+            .unwrap()
+            .set_previous_dkg_output(test_dkg_output.clone());
 
         // Create other managers for MockP2PChannel (validators 1-4)
         let mut other_managers_map = HashMap::new();
         for i in 1..5 {
-            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-            manager.previous_dkg_output = Some(output);
+            let (manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager
+                .store()
+                .write()
+                .unwrap()
+                .set_previous_dkg_output(output);
             other_managers_map.insert(rotation_setup.setup.address(i), manager);
         }
         let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
@@ -6322,11 +6618,20 @@ mod tests {
             let validator_idx = 3; // weight = 1
             let addr = rotation_setup.setup.address(validator_idx);
             let manager = other_managers.get_mut(&addr).unwrap();
-            let prev_output = manager.previous_dkg_output.clone().unwrap();
+            let prev_output = manager
+                .store()
+                .read()
+                .unwrap()
+                .previous_dkg_output
+                .clone()
+                .unwrap();
 
             // Create rotation messages
             let rotation_messages = manager.create_rotation_messages(&prev_output, &mut rng);
             manager
+                .store()
+                .write()
+                .unwrap()
                 .rotation_dealer_messages
                 .insert(addr, rotation_messages.clone());
 
@@ -6337,6 +6642,9 @@ mod tests {
 
             // Collect signature from test_manager
             test_manager
+                .store()
+                .write()
+                .unwrap()
                 .rotation_dealer_messages
                 .insert(addr, rotation_messages.clone());
             let test_sig = test_manager
@@ -6344,7 +6652,7 @@ mod tests {
                 .unwrap();
 
             // Create certificate
-            let epoch = manager.dkg_config.epoch;
+            let epoch = manager.dkg_config().epoch;
             let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
             let test_member_sig = MemberSignature::new(epoch, test_addr, test_sig);
             let cert = create_rotation_test_certificate(
@@ -6424,8 +6732,12 @@ mod tests {
         // Create existing members (validators 0-4) with completed DKG and previous_dkg_output set
         let mut existing_managers_map = HashMap::new();
         for i in 0..5 {
-            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-            manager.previous_dkg_output = Some(output);
+            let (manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager
+                .store()
+                .write()
+                .unwrap()
+                .set_previous_dkg_output(output);
             existing_managers_map.insert(rotation_setup.setup.address(i), manager);
         }
 
@@ -6434,9 +6746,13 @@ mod tests {
             .values()
             .next()
             .unwrap()
+            .store()
+            .read()
+            .unwrap()
             .previous_dkg_output
             .as_ref()
-            .unwrap();
+            .unwrap()
+            .clone();
         let expected_public_key = expected_output.public_key;
         let expected_threshold = expected_output.threshold;
         let expected_commitments_len = expected_output.commitments.len();
@@ -6482,7 +6798,7 @@ mod tests {
 
         // Create new member's DkgManager
         let session_id = SessionId::new("testchain", epoch, &ProtocolType::DkgKeyGeneration);
-        let mut new_member_manager = DkgManager::new(
+        let (mut new_member_manager, _new_member_store) = DkgManager::new(
             new_member_addr,
             &new_committee_set,
             session_id,
@@ -6560,6 +6876,9 @@ mod tests {
 
         // Store rotation messages in receiver's state
         receiver_manager
+            .store()
+            .write()
+            .unwrap()
             .rotation_dealer_messages
             .insert(rotation_dealer_addr, rotation_messages.clone());
 
@@ -6583,16 +6902,29 @@ mod tests {
         let share3_index = share_indices[2];
 
         let share1_original_output = receiver_manager
+            .store()
+            .read()
+            .unwrap()
             .rotation_outputs
             .get(&share1_index)
             .expect("Share 1 should have output")
             .clone();
 
         // Remove share 2's output (will be re-processed)
-        receiver_manager.rotation_outputs.remove(&share2_index);
+        receiver_manager
+            .store()
+            .write()
+            .unwrap()
+            .rotation_outputs
+            .remove(&share2_index);
 
         // Remove share 3's output and add a complaint
-        receiver_manager.rotation_outputs.remove(&share3_index);
+        receiver_manager
+            .store()
+            .write()
+            .unwrap()
+            .rotation_outputs
+            .remove(&share3_index);
 
         // Create a real complaint using a cheating message for share 3
         let share3_value = dealer_dkg_output
@@ -6604,7 +6936,7 @@ mod tests {
             .unwrap();
         let cheating_msg = create_cheating_rotation_message(
             &rotation_setup.setup,
-            &receiver_manager.session_id,
+            &receiver_manager.session_id(),
             &rotation_dealer_addr,
             share3_value,
             share3_index,
@@ -6612,15 +6944,15 @@ mod tests {
             &mut rng,
         );
         let session_id = receiver_manager
-            .session_id
+            .session_id()
             .rotation_session_id(&rotation_dealer_addr, share3_index);
         let receiver = avss::Receiver::new(
-            receiver_manager.dkg_config.nodes.clone(),
-            receiver_manager.party_id,
-            receiver_manager.dkg_config.threshold,
+            receiver_manager.dkg_config().nodes.clone(),
+            receiver_manager.party_id(),
+            receiver_manager.dkg_config().threshold,
             session_id.to_vec(),
             None,
-            receiver_manager.encryption_key.clone(),
+            receiver_manager.encryption_key().clone(),
         );
         let complaint = match receiver.process_message(&cheating_msg.1).unwrap() {
             avss::ProcessedMessage::Complaint(c) => c,
@@ -6630,7 +6962,12 @@ mod tests {
             .rotation_complaints_to_process
             .insert((rotation_dealer_addr, share3_index), complaint);
 
-        let outputs_before = receiver_manager.rotation_outputs.len();
+        let outputs_before = receiver_manager
+            .store()
+            .read()
+            .unwrap()
+            .rotation_outputs
+            .len();
 
         // Call process_certified_rotation_message
         receiver_manager
@@ -6639,9 +6976,13 @@ mod tests {
 
         // Verify share 1: output unchanged (skipped because already had output)
         let share1_output_after = receiver_manager
+            .store()
+            .read()
+            .unwrap()
             .rotation_outputs
             .get(&share1_index)
-            .expect("Share 1 should still have output");
+            .expect("Share 1 should still have output")
+            .clone();
         assert_eq!(
             share1_output_after.my_shares.shares.len(),
             share1_original_output.my_shares.shares.len(),
@@ -6651,6 +6992,9 @@ mod tests {
         // Verify share 2: was re-processed (new output created)
         assert!(
             receiver_manager
+                .store()
+                .read()
+                .unwrap()
                 .rotation_outputs
                 .contains_key(&share2_index),
             "Share 2 should be re-processed"
@@ -6659,6 +7003,9 @@ mod tests {
         // Verify share 3: NOT processed (skipped due to complaint)
         assert!(
             !receiver_manager
+                .store()
+                .read()
+                .unwrap()
                 .rotation_outputs
                 .contains_key(&share3_index),
             "Share 3 should not have output (skipped due to complaint)"
@@ -6672,7 +7019,13 @@ mod tests {
 
         // Verify only one new output was added (share 2)
         assert_eq!(
-            receiver_manager.rotation_outputs.len() - outputs_before,
+            receiver_manager
+                .store()
+                .read()
+                .unwrap()
+                .rotation_outputs
+                .len()
+                - outputs_before,
             1,
             "Only share 2 should be added"
         );
@@ -6695,7 +7048,11 @@ mod tests {
         let (mut dealer_manager, dealer_dkg_output, valid_rotation_messages) =
             rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
         let dealer_addr = rotation_setup.setup.address(dealer_idx);
-        dealer_manager.previous_dkg_output = Some(dealer_dkg_output.clone());
+        dealer_manager
+            .store()
+            .write()
+            .unwrap()
+            .set_previous_dkg_output(dealer_dkg_output.clone());
 
         // Get the share index and value for the first rotation message
         let first_share_index = *valid_rotation_messages.keys().next().unwrap();
@@ -6711,7 +7068,7 @@ mod tests {
         // Use the test_manager's session_id which is the base session_id for rotation
         let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
             &rotation_setup.setup,
-            &test_manager.session_id,
+            &test_manager.session_id(),
             &dealer_addr,
             share_value,
             first_share_index,
@@ -6725,20 +7082,23 @@ mod tests {
 
         // Store the cheating messages in test manager
         test_manager
+            .store()
+            .write()
+            .unwrap()
             .rotation_dealer_messages
             .insert(dealer_addr, cheating_messages.clone());
 
         // Test party processes cheating message with their CORRECT key, generating a complaint
         let session_id = test_manager
-            .session_id
+            .session_id()
             .rotation_session_id(&dealer_addr, first_share_index);
         let receiver = avss::Receiver::new(
-            test_manager.dkg_config.nodes.clone(),
-            test_manager.party_id,
-            test_manager.dkg_config.threshold,
+            test_manager.dkg_config().nodes.clone(),
+            test_manager.party_id(),
+            test_manager.dkg_config().threshold,
             session_id.to_vec(),
             None, // No expected commitment
-            test_manager.encryption_key.clone(),
+            test_manager.encryption_key().clone(),
         );
         let valid_complaint = match receiver.process_message(&cheating_message).unwrap() {
             avss::ProcessedMessage::Complaint(c) => c,
@@ -6755,9 +7115,16 @@ mod tests {
         let mut other_managers_map = HashMap::new();
         for i in [1usize, 3, 4] {
             let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-            manager.previous_dkg_output = Some(output.clone());
+            manager
+                .store()
+                .write()
+                .unwrap()
+                .set_previous_dkg_output(output.clone());
             // Store the cheating messages - other parties can still process them
             manager
+                .store()
+                .write()
+                .unwrap()
                 .rotation_dealer_messages
                 .insert(dealer_addr, cheating_messages.clone());
             // Other parties process and get valid outputs (their shares are not corrupted)
@@ -6769,6 +7136,9 @@ mod tests {
 
         // Add dealer to other managers (dealer also has the cheating message since they created it)
         dealer_manager
+            .store()
+            .write()
+            .unwrap()
             .rotation_dealer_messages
             .insert(dealer_addr, cheating_messages.clone());
         dealer_manager
@@ -6793,6 +7163,9 @@ mod tests {
         );
         assert!(
             !test_manager
+                .store()
+                .read()
+                .unwrap()
                 .rotation_outputs
                 .contains_key(&first_share_index),
             "Should not have output before recovery"
@@ -6826,6 +7199,9 @@ mod tests {
         // Verify output was created
         assert!(
             test_manager
+                .store()
+                .read()
+                .unwrap()
                 .rotation_outputs
                 .contains_key(&first_share_index),
             "Output should be created for recovered share"
@@ -6861,7 +7237,7 @@ mod tests {
         // Create a cheating rotation message that corrupts the share for victim
         let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
             &rotation_setup.setup,
-            &victim_manager.session_id,
+            &victim_manager.session_id(),
             &dealer_addr,
             share_value,
             first_share_index,
@@ -6875,19 +7251,19 @@ mod tests {
 
         // Victim processes cheating message and generates a complaint
         let session_id = victim_manager
-            .session_id
+            .session_id()
             .rotation_session_id(&dealer_addr, first_share_index);
         let commitment = victim_dkg_output
             .commitments
             .get(&first_share_index)
             .copied();
         let receiver = avss::Receiver::new(
-            victim_manager.dkg_config.nodes.clone(),
-            victim_manager.party_id,
-            victim_manager.dkg_config.threshold,
+            victim_manager.dkg_config().nodes.clone(),
+            victim_manager.party_id(),
+            victim_manager.dkg_config().threshold,
             session_id.to_vec(),
             commitment,
-            victim_manager.encryption_key.clone(),
+            victim_manager.encryption_key().clone(),
         );
         let complaint = match receiver.process_message(&cheating_message).unwrap() {
             avss::ProcessedMessage::Complaint(c) => c,
@@ -6898,10 +7274,17 @@ mod tests {
         let responder_idx = 1;
         let (mut responder_manager, responder_dkg_output) =
             rotation_setup.create_receiver_with_memory_store(responder_idx);
-        responder_manager.previous_dkg_output = Some(responder_dkg_output.clone());
+        responder_manager
+            .store()
+            .write()
+            .unwrap()
+            .set_previous_dkg_output(responder_dkg_output.clone());
 
         // Responder stores the cheating messages
         responder_manager
+            .store()
+            .write()
+            .unwrap()
             .rotation_dealer_messages
             .insert(dealer_addr, cheating_messages.clone());
 
@@ -6918,7 +7301,11 @@ mod tests {
         };
 
         // Handle the complaint request
-        let result = responder_manager.handle_rotation_complain_request(&request);
+        let result = responder_manager
+            .store()
+            .write()
+            .unwrap()
+            .handle_rotation_complain_request(&request);
 
         assert!(
             result.is_ok(),
@@ -6926,20 +7313,20 @@ mod tests {
             result.err()
         );
         let response = result.unwrap();
-        // Response contains ALL shares from the dealer (all-or-nothing semantics)
-        assert_eq!(response.responses.len(), cheating_messages.len());
+        // Each complaint request handles one share_index at a time
+        assert_eq!(response.responses.len(), 1);
         // The complained share should be in the response
-        assert!(
-            response
-                .responses
-                .iter()
-                .any(|r| r.share_index == first_share_index),
-            "Response should include the complained share"
+        assert_eq!(
+            response.responses[0].share_index, first_share_index,
+            "Response should be for the complained share"
         );
 
         // Verify response is cached by dealer
         assert!(
             responder_manager
+                .store()
+                .read()
+                .unwrap()
                 .rotation_complaint_responses
                 .contains_key(&dealer_addr),
             "Response should be cached"

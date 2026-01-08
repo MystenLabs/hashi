@@ -99,6 +99,10 @@ impl HttpService {
         self.inner.dkg_manager()
     }
 
+    pub fn message_store(&self) -> &crate::dkg::MessageStoreHandle {
+        self.inner.message_store()
+    }
+
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
         self.inner.btc_monitor()
     }
