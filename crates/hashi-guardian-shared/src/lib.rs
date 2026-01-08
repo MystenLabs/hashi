@@ -2,23 +2,49 @@ pub mod bitcoin_utils;
 pub mod crypto;
 pub mod errors;
 pub mod proto_conversions;
+pub mod test_utils;
 
 pub use crypto::*;
 pub use errors::*;
+use std::collections::HashSet;
 
 use crate::GuardianError::*;
+pub use bitcoin::taproot::Signature as BitcoinSignature;
 use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 pub use ed25519_consensus::Signature as GuardianSignature;
 use ed25519_consensus::VerificationKey;
+pub use hashi::committee::Committee as HashiCommittee;
+pub use hashi::committee::CommitteeMember as HashiCommitteeMember;
+pub use hashi::committee::SignedMessage as HashiSigned;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
 use std::time::SystemTime;
+
+use crate::proto_conversions::provisioner_init_state_to_pb;
+use prost::Message;
+
+// ---------------------------------
+//     Serialization Abstraction
+// ---------------------------------
+
+/// Trait for types that can be converted to bytes for signing, hashing, or logging.
+pub trait ToBytes {
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+/// Blanket implementation for all types that implement Serialize.
+/// This allows existing BCS serialization to work through the new trait.
+impl<T: Serialize> ToBytes for T {
+    fn to_bytes(&self) -> Vec<u8> {
+        bcs::to_bytes(self).expect("serialization should not fail")
+    }
+}
 
 // ---------------------------------
 //          Intents
@@ -52,31 +78,24 @@ pub struct Timestamped<T> {
 }
 
 /// Guardian-signed wrapper - adds timestamp and signature to any data
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GuardianSigned<T> {
     pub data: T,
     pub timestamp: SystemTime,
     pub signature: GuardianSignature,
 }
 
-/// Hashi-signed wrapper
-/// TODO: Add cert, intent. Align types with hashi.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HashiNodeSigned<T> {
-    pub data: T,
-}
-
 // ---------------------------------
 //    All requests and responses
 // ---------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     key_provisioner_public_keys: Vec<EncPubKey>,
 }
 
 /// `EnclaveSigned<T>`
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: Vec<EncryptedShare>,
     pub share_commitments: Vec<ShareCommitment>,
@@ -84,26 +103,26 @@ pub struct SetupNewKeyResponse {
 
 /// Provides S3 API keys, share commitments and the BTC network to the enclave.
 /// To be called by the operator.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
-    config: S3Config,
+    s3_config: S3Config,
     share_commitments: Vec<ShareCommitment>,
     network: Network,
 }
 
 /// Provides key shares and all other necessary state values to the enclaves.
 /// To be called by Key Provisioners (who may be outside entities).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
     encrypted_share: EncryptedShare,
     state: ProvisionerInitRequestState,
 }
 
-/// Note: Serialize & Deserialize traits are needed here to compute digest
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// Note: Serialize & Deserialize traits are needed here to compute state digest
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
-    pub hashi_committee_info: HashiCommitteeInfo,
+    pub hashi_committee: HashiCommittee,
     /// Withdrawal config
     pub withdrawal_config: WithdrawalConfig,
     /// Withdrawal state
@@ -112,10 +131,12 @@ pub struct ProvisionerInitRequestState {
     pub hashi_btc_master_pubkey: XOnlyPublicKey,
 }
 
-#[derive(Debug)]
-pub struct GetAttestationResponse {
+#[derive(Debug, PartialEq, Clone)]
+pub struct GetGuardianInfoResponse {
     /// Attestation document serialized in Hex
     pub attestation: Attestation,
+    /// Server version
+    pub server_version: String,
 }
 
 // ---------------------------------
@@ -124,7 +145,7 @@ pub struct GetAttestationResponse {
 
 /// All log messages emitted by the guardian enclave.
 /// Uses enum discriminator for automatic domain separation between variants.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessage {
     /// Attestation and signing public key
     OperatorInitAttestationUnsigned {
@@ -153,22 +174,19 @@ pub enum LogMessage {
 
 pub type Attestation = Vec<u8>;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3Config {
     pub access_key: String,
     pub secret_key: String,
     pub bucket_name: String,
 }
 
-/// Hashi public keys used to sign messages sent to guardian
-// TODO: Add pub keys, threshold. Align types with hashi.
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct HashiCommitteeInfo {}
-
-// TODO: Align types with hashi
+// TODO: Align types with hashi.
 /// All the withdrawal config
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalConfig {
+    /// Committee threshold expressed in terms of weight
+    pub committee_threshold: u64,
     /// The min delay after which any withdrawal is approved
     pub delayed_withdrawals_min_delay: Duration,
     /// The max delay after which pending withdrawals are cleaned up
@@ -176,7 +194,7 @@ pub struct WithdrawalConfig {
 }
 
 /// Withdrawal state - all that is needed to restart the enclave
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct WithdrawalState {
     /// Total number of withdrawals processed till now
     pub num_withdrawals: u64,
@@ -194,15 +212,7 @@ impl SigningIntent for SetupNewKeyResponse {
     const INTENT: IntentType = IntentType::SetupNewKeyResponse;
 }
 
-impl<T> HashiNodeSigned<T> {
-    pub fn verify_cert(self, _committee: &HashiCommitteeInfo) -> GuardianResult<T> {
-        // TODO: Validate sig with committee
-        Ok(self.data)
-    }
-}
-
 impl SetupNewKeyRequest {
-    /// Serialize and return a SetupNewKeyRequest
     pub fn new(public_keys: Vec<EncPubKey>) -> GuardianResult<Self> {
         if public_keys.len() != NUM_OF_SHARES {
             return Err(InvalidInputs("provide enough public keys".into()));
@@ -212,55 +222,37 @@ impl SetupNewKeyRequest {
         })
     }
 
-    /// Deserialize and return public keys
     pub fn public_keys(&self) -> &[EncPubKey] {
         &self.key_provisioner_public_keys
-    }
-
-    /// Generates mock key provisioner keys and SetupNewKeyRequest for testing.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn mock_for_testing() -> (Self, Vec<EncSecKey>) {
-        use hpke::kem::X25519HkdfSha256;
-        use hpke::Kem;
-
-        let mut private_keys = vec![];
-        let mut public_keys = vec![];
-        for _i in 0..NUM_OF_SHARES {
-            let mut rng = rand::thread_rng();
-            let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
-            private_keys.push(sk);
-            public_keys.push(pk);
-        }
-
-        (SetupNewKeyRequest::new(public_keys).unwrap(), private_keys)
     }
 }
 
 impl OperatorInitRequest {
     pub fn new(
-        config: S3Config,
+        s3_config: S3Config,
         share_commitments: Vec<ShareCommitment>,
         network: Network,
     ) -> GuardianResult<Self> {
         if share_commitments.len() != NUM_OF_SHARES {
             return Err(InvalidInputs("provide enough share commitments".into()));
         }
+
+        let mut x = HashSet::new();
+        for c in &share_commitments {
+            if !x.insert(c.id) {
+                return Err(InvalidInputs("duplicate share id".into()));
+            }
+        }
+
         Ok(Self {
-            config,
+            s3_config,
             share_commitments,
             network,
         })
     }
 
-    pub fn validate(&self) -> GuardianResult<()> {
-        if self.share_commitments.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs("provide enough share commitments".into()));
-        }
-        Ok(())
-    }
-
     pub fn config(&self) -> &S3Config {
-        &self.config
+        &self.s3_config
     }
 
     pub fn share_commitments(&self) -> &[ShareCommitment] {
@@ -272,46 +264,54 @@ impl OperatorInitRequest {
     }
 }
 
+impl ToBytes for ProvisionerInitRequestState {
+    fn to_bytes(&self) -> Vec<u8> {
+        provisioner_init_state_to_pb(self.clone()).encode_to_vec()
+    }
+}
+
 impl ProvisionerInitRequestState {
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(self).expect("Failed to serialize");
-        Blake2b::<U32>::digest(bytes).into()
+    pub fn new(
+        hashi_committee: HashiCommittee,
+        withdrawal_config: WithdrawalConfig,
+        withdrawal_state: WithdrawalState,
+        hashi_btc_master_pubkey: XOnlyPublicKey,
+    ) -> Self {
+        // TODO: Add validation (if any)
+        Self {
+            hashi_committee,
+            withdrawal_config,
+            withdrawal_state,
+            hashi_btc_master_pubkey,
+        }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn mock_for_testing() -> Self {
-        use bitcoin_utils::test_utils::create_keypair;
-        use bitcoin_utils::test_utils::TEST_HASHI_SK;
-
-        let kp = create_keypair(&TEST_HASHI_SK);
-        ProvisionerInitRequestState {
-            withdrawal_config: WithdrawalConfig {
-                delayed_withdrawals_min_delay: Duration::from_secs(10),
-                delayed_withdrawals_timeout: Duration::from_secs(60),
-            },
-            withdrawal_state: WithdrawalState::default(),
-            hashi_committee_info: HashiCommitteeInfo::default(),
-            hashi_btc_master_pubkey: kp.x_only_public_key().0,
-        }
+    pub fn digest(&self) -> [u8; 32] {
+        Blake2b::<U32>::digest(self.to_bytes()).into()
     }
 }
 
 impl ProvisionerInitRequest {
+    pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitRequestState) -> Self {
+        // TODO: Add validation
+        Self {
+            encrypted_share,
+            state,
+        }
+    }
+
     /// Create a new ProvisionerInitRequest by encrypting the share to the enclave's public key.
     /// In addition, it sets the state hash as AAD for the encryption effectively
     /// allowing the enclave to trust that state is indeed coming from the KP.
-    pub fn new<R: CryptoRng + RngCore>(
+    pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
         state: ProvisionerInitRequestState,
         rng: &mut R,
-    ) -> GuardianResult<Self> {
+    ) -> Self {
         let state_hash = state.digest();
-        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng)?;
-        Ok(ProvisionerInitRequest {
-            encrypted_share,
-            state,
-        })
+        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng);
+        ProvisionerInitRequest::new(encrypted_share, state)
     }
 
     pub fn encrypted_share(&self) -> &EncryptedShare {

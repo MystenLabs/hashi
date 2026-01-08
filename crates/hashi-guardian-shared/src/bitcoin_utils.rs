@@ -508,27 +508,17 @@ fn get_derived_pubkey(
 //    Test Utilities & Tests
 // ---------------------------------
 
-#[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils {
-    use super::*;
-
-    pub const TEST_ENCLAVE_SK: [u8; 32] = [1u8; 32];
-    pub const TEST_HASHI_SK: [u8; 32] = [2u8; 32];
-
-    pub fn create_keypair(sk: &[u8; 32]) -> Keypair {
-        let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
-        Keypair::from_secret_key(&BTC_LIB, &secret_key)
-    }
-}
-
 #[cfg(test)]
 mod bitcoin_tests {
     use super::*;
-    use crate::bitcoin_utils::test_utils::*;
+    use crate::test_utils::create_btc_keypair;
     use bitcoin::key::UntweakedPublicKey;
     use bitcoin::taproot::ControlBlock;
     use bitcoin::Network::Regtest;
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
+
+    const TEST_ENCLAVE_BTC_SK: [u8; 32] = [1u8; 32];
+    const TEST_HASHI_BTC_SK: [u8; 32] = [2u8; 32];
 
     fn gen_keypair_and_address(
         bytes: Option<[u8; 32]>,
@@ -540,7 +530,7 @@ mod bitcoin_tests {
             rand::Rng::fill(&mut rng, &mut bytes);
             bytes
         });
-        let keypair = create_keypair(&bytes);
+        let keypair = create_btc_keypair(&bytes);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
         let address = BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network);
         (keypair, address)
@@ -626,8 +616,8 @@ mod bitcoin_tests {
     //  E) Relayer combines the signatures and pushes the transaction to the network.
     #[test]
     fn test_taproot_multi_party_tx_signing() {
-        let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_SK), Regtest);
-        let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_SK), Regtest);
+        let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_BTC_SK), Regtest);
+        let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_BTC_SK), Regtest);
 
         let enclave_pk = enclave_keypair.x_only_public_key().0;
         let hashi_pk = hashi_keypair.x_only_public_key().0;

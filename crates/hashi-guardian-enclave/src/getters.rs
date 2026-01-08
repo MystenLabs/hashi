@@ -19,15 +19,19 @@ use serde_bytes::ByteBuf;
 use tracing::error;
 
 /// Endpoint that returns an attestation committed to the enclave's signing public key
-pub async fn get_attestation_impl(enclave: Arc<Enclave>) -> GuardianResult<GetAttestationResponse> {
+pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
     info!("/get_attestation - Received request");
 
-    get_attestation_inner(&enclave.signing_pubkey())
-        .map(|attestation| GetAttestationResponse { attestation })
+    let attestation = get_attestation(&enclave.signing_pubkey())?;
+
+    Ok(GetGuardianInfoResponse {
+        attestation,
+        server_version: "v1".to_string(),
+    })
 }
 
 #[cfg(not(test))]
-pub fn get_attestation_inner(signing_pk: &VerificationKey) -> GuardianResult<Attestation> {
+pub fn get_attestation(signing_pk: &VerificationKey) -> GuardianResult<Attestation> {
     let signing_pk_bytes = signing_pk.to_bytes();
 
     info!("Initializing NSM driver.");
@@ -59,7 +63,7 @@ pub fn get_attestation_inner(signing_pk: &VerificationKey) -> GuardianResult<Att
 }
 
 #[cfg(test)]
-pub fn get_attestation_inner(_: &VerificationKey) -> GuardianResult<Attestation> {
+pub fn get_attestation(_: &VerificationKey) -> GuardianResult<Attestation> {
     // Return a mock attestation for testing
     Ok("mock_attestation_document_hex".as_bytes().to_vec())
 }

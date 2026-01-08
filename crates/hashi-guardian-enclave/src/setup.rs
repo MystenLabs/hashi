@@ -13,7 +13,7 @@ use tracing::info;
 ///     1. KPs send their encryption pub keys to the operator
 ///     2. Operator calls setup_new_key (and optionally returns its response to all KPs)
 ///     3. KPs fetch the setup_new_key response from S3
-pub async fn setup_new_key_impl(
+pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
@@ -44,7 +44,7 @@ pub async fn setup_new_key_impl(
     for i in 0..NUM_OF_SHARES {
         let share = &shares[i];
         let pk = &key_provisioner_pks[i];
-        let encrypted = encrypt_share(share, pk, None, &mut rand::thread_rng())?;
+        let encrypted = encrypt_share(share, pk, None, &mut rand::thread_rng());
         let commitment = commit_share(share);
         encrypted_shares.push(encrypted);
         share_commitments.push(commitment);
@@ -74,13 +74,28 @@ mod tests {
     use hashi_guardian_shared::commit_share;
     use hashi_guardian_shared::decrypt_share;
     use hashi_guardian_shared::NUM_OF_SHARES;
+    use hpke::kem::X25519HkdfSha256;
+    use hpke::Kem;
+
+    fn mock_setup_new_key_request() -> (SetupNewKeyRequest, Vec<EncSecKey>) {
+        let mut private_keys = vec![];
+        let mut public_keys = vec![];
+        for _i in 0..NUM_OF_SHARES {
+            let mut rng = rand::thread_rng();
+            let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut rng);
+            private_keys.push(sk);
+            public_keys.push(pk);
+        }
+
+        (SetupNewKeyRequest::new(public_keys).unwrap(), private_keys)
+    }
 
     #[tokio::test]
     async fn test_setup_new_key() {
         let enclave = Enclave::create_operator_initialized_for_setup_mode().await;
         let verification_key = &enclave.signing_pubkey();
-        let (request, kp_private_keys) = SetupNewKeyRequest::mock_for_testing();
-        let resp = setup_new_key_impl(enclave.clone(), request).await.unwrap();
+        let (request, kp_private_keys) = mock_setup_new_key_request();
+        let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
         assert_eq!(validated_resp.encrypted_shares.len(), NUM_OF_SHARES);
 

@@ -1,4 +1,4 @@
-use crate::getters::get_attestation_inner;
+use crate::getters::get_attestation;
 use crate::Enclave;
 use crate::S3Logger;
 use hashi_guardian_shared::crypto::combine_shares;
@@ -12,7 +12,7 @@ use GuardianError::*;
 
 /// Receives S3 API keys & share commitments.
 /// Returns an error for malformed requests / dup call & panics for the rest.
-pub async fn operator_init_impl(
+pub async fn operator_init(
     enclave: Arc<Enclave>,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
@@ -26,8 +26,7 @@ pub async fn operator_init_impl(
         // shouldn't reach inside as we panic
         unreachable!("Operator init did not fully complete.");
     }
-    request.validate()?; // check we have received enough share commitments
-    info!("Request and enclave state validated.");
+    info!("Enclave state validated.");
 
     let logger = S3Logger::new(request.config())
         .await
@@ -60,7 +59,7 @@ pub async fn operator_init_impl(
     let signing_pk = enclave.signing_pubkey();
     enclave
         .timestamp_and_log(LogMessage::OperatorInitAttestationUnsigned {
-            attestation: get_attestation_inner(&signing_pk).expect("Unable to get attestation"),
+            attestation: get_attestation(&signing_pk).expect("Unable to get attestation"),
             signing_public_key: signing_pk,
         })
         .await
@@ -81,13 +80,13 @@ pub async fn operator_init_impl(
 /// Receives btc key share and a bunch of config's ("state") from each KP.
 /// While accumulating shares, we use the state hash to compare if every KP is giving us the same state.
 /// When we have enough shares, we actually set all the state variables.
-pub async fn provisioner_init_impl(
+pub async fn provisioner_init(
     enclave: Arc<Enclave>,
     request: ProvisionerInitRequest,
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
-    // Validation: ensure enclave is in the right state & request is as expected
+    // Validation
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("Do operator init first".into()));
     }
@@ -98,8 +97,7 @@ pub async fn provisioner_init_impl(
         // shouldn't reach inside as we must've panicked elsewhere
         unreachable!("Provisioner init partially complete.");
     }
-    // TODO: Validate enclave state after adding withdrawal related fields
-    info!("Request and enclave state validated.");
+    info!("Enclave state validated.");
 
     let sk = enclave.encryption_secret_key();
     let share_id = request.encrypted_share().id;
@@ -200,7 +198,7 @@ async fn finalize_init(
     info!("Setting enclave state.");
     enclave
         .set_state(
-            incoming_state.hashi_committee_info,
+            incoming_state.hashi_committee,
             incoming_state.withdrawal_state,
         )
         .await
@@ -221,8 +219,8 @@ mod tests {
     use super::*;
     use bitcoin::Network;
     use bitcoin::XOnlyPublicKey;
-    use hashi_guardian_shared::bitcoin_utils;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
+    use hashi_guardian_shared::test_utils::create_btc_keypair;
     use k256::SecretKey;
 
     /// Helper: Generate test shares and initialized enclave
@@ -243,15 +241,14 @@ mod tests {
 
         // Simulate THRESHOLD KPs calling provisioner_init
         for (i, share) in shares.iter().enumerate().take(NUM_OF_SHARES) {
-            let request = ProvisionerInitRequest::new(
+            let request = ProvisionerInitRequest::build_from_share_and_state(
                 share,
                 enclave.encryption_public_key(),
                 init_state.clone(),
                 &mut rand::thread_rng(),
-            )
-            .unwrap();
+            );
 
-            let result = provisioner_init_impl(enclave.clone(), request).await;
+            let result = provisioner_init(enclave.clone(), request).await;
 
             // Check behavior based on whether we've reached/exceeded threshold
             if i == THRESHOLD - 1 {
@@ -309,15 +306,14 @@ mod tests {
             value: k256::Scalar::ONE,
         };
         let mut rng = rand::thread_rng();
-        let request = ProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::build_from_share_and_state(
             &share,
             enclave.encryption_public_key(),
             init_state,
             &mut rng,
-        )
-        .unwrap();
+        );
 
-        let result = provisioner_init_impl(enclave, request).await;
+        let result = provisioner_init(enclave, request).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }
@@ -329,35 +325,31 @@ mod tests {
 
         // First KP sends with state1
         let state1 = ProvisionerInitRequestState::mock_for_testing();
-        let request1 = ProvisionerInitRequest::new(
+        let request1 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[0],
             enclave.encryption_public_key(),
             state1.clone(),
             &mut rand::thread_rng(),
-        )
-        .unwrap();
-        provisioner_init_impl(enclave.clone(), request1)
-            .await
-            .unwrap();
+        );
+        provisioner_init(enclave.clone(), request1).await.unwrap();
 
         // Second KP tries to send with different state (different pub key)
         let mut state2 = ProvisionerInitRequestState::mock_for_testing();
-        let kp = bitcoin_utils::test_utils::create_keypair(&[7u8; 32]);
+        let kp = create_btc_keypair(&[7u8; 32]);
         state2.hashi_btc_master_pubkey = XOnlyPublicKey::from_keypair(&kp).0;
         assert_ne!(
             state1.hashi_btc_master_pubkey,
             state2.hashi_btc_master_pubkey
         );
-        let request2 = ProvisionerInitRequest::new(
+        let request2 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[1],
             enclave.encryption_public_key(),
             state2,
             &mut rand::thread_rng(),
-        )
-        .unwrap();
+        );
 
         // This should panic with "State hash mismatch"
-        provisioner_init_impl(enclave, request2).await.unwrap();
+        provisioner_init(enclave, request2).await.unwrap();
     }
 
     #[tokio::test]
@@ -370,15 +362,14 @@ mod tests {
             value: k256::Scalar::from(42u32), // Random value that won't match commitment
         };
         let state = ProvisionerInitRequestState::mock_for_testing();
-        let request = ProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::build_from_share_and_state(
             &bogus_share,
             enclave.encryption_public_key(),
             state,
             &mut rand::thread_rng(),
-        )
-        .unwrap();
+        );
 
-        let result = provisioner_init_impl(enclave, request).await;
+        let result = provisioner_init(enclave, request).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }
@@ -389,26 +380,24 @@ mod tests {
         let state = ProvisionerInitRequestState::mock_for_testing();
 
         // Send first share
-        let request1 = ProvisionerInitRequest::new(
+        let request1 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[0],
             enclave.encryption_public_key(),
             state.clone(),
             &mut rand::thread_rng(),
-        )
-        .unwrap();
-        provisioner_init_impl(enclave.clone(), request1)
+        );
+        provisioner_init(enclave.clone(), request1)
             .await
-            .unwrap();
+            .expect("should not fail");
 
         // Try to send the same share again (duplicate ID)
-        let request2 = ProvisionerInitRequest::new(
+        let request2 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[0],
             enclave.encryption_public_key(),
             state,
             &mut rand::thread_rng(),
-        )
-        .unwrap();
-        let result = provisioner_init_impl(enclave, request2).await;
+        );
+        let result = provisioner_init(enclave, request2).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }

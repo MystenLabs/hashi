@@ -962,13 +962,14 @@ pub mod dkg_service_server {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetGuardianInfoRequest {}
+/// TODO: Add more info
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
-    #[prost(bytes = "bytes", optional, tag = "7")]
-    pub public_key: ::core::option::Option<::prost::bytes::Bytes>,
-    /// TODO: fill in info about the guardian
+    /// AWS Nitro attestation
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub attestation: ::core::option::Option<::prost::bytes::Bytes>,
     /// Software version of the service. Similar to the `server` http header.
-    #[prost(string, optional, tag = "8")]
+    #[prost(string, optional, tag = "2")]
     pub server: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Untrusted wire DTO. Converted to a validated domain request in the server.
@@ -1027,6 +1028,102 @@ pub struct SignedSetupNewKeyResponse {
     /// Signature over (intent || data || timestamp).
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OperatorInitRequest {
+    /// S3 access keys
+    #[prost(message, optional, tag = "1")]
+    pub s3_config: ::core::option::Option<S3Config>,
+    /// Commitments published by the operator for the shares generated during setup.
+    #[prost(message, repeated, tag = "2")]
+    pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+    /// Network the guardian is operating on.
+    #[prost(enumeration = "Network", optional, tag = "3")]
+    pub network: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OperatorInitResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct S3Config {
+    #[prost(string, optional, tag = "1")]
+    pub access_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    pub secret_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub bucket_name: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProvisionerInitRequest {
+    /// Encrypted share destined for this provisioner.
+    #[prost(message, optional, tag = "1")]
+    pub encrypted_share: ::core::option::Option<GuardianShareEncrypted>,
+    /// State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
+    #[prost(message, optional, tag = "2")]
+    pub state: ::core::option::Option<ProvisionerInitState>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProvisionerInitState {
+    /// Committee info for Hashi.
+    #[prost(message, optional, tag = "1")]
+    pub hashi_committee: ::core::option::Option<Committee>,
+    /// Withdrawal policy configuration.
+    #[prost(message, optional, tag = "2")]
+    pub withdrawal_config: ::core::option::Option<WithdrawalConfig>,
+    /// Current withdrawal state.
+    #[prost(message, optional, tag = "3")]
+    pub withdrawal_state: ::core::option::Option<WithdrawalState>,
+    /// X-only public key bytes (32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WithdrawalConfig {
+    /// Committee threshold expressed in terms of weight.
+    #[prost(uint64, optional, tag = "1")]
+    pub committee_threshold: ::core::option::Option<u64>,
+    /// The min delay after which any withdrawal is approved.
+    #[prost(uint64, optional, tag = "2")]
+    pub delayed_withdrawals_min_delay: ::core::option::Option<u64>,
+    /// The max delay after which pending withdrawals are cleaned up.
+    #[prost(uint64, optional, tag = "3")]
+    pub delayed_withdrawals_timeout: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WithdrawalState {
+    /// Total number of withdrawals processed till now.
+    #[prost(uint64, optional, tag = "1")]
+    pub num_withdrawals: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionerInitResponse {}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Network {
+    Mainnet = 0,
+    Testnet = 1,
+    Regtest = 2,
+}
+impl Network {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Mainnet => "MAINNET",
+            Self::Testnet => "TESTNET",
+            Self::Regtest => "REGTEST",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MAINNET" => Some(Self::Mainnet),
+            "TESTNET" => Some(Self::Testnet),
+            "REGTEST" => Some(Self::Regtest),
+            _ => None,
+        }
+    }
 }
 /// Generated client implementations.
 pub mod guardian_service_client {
@@ -1176,6 +1273,63 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Operator initialization: provide config and commitments before provisioning.
+        pub async fn operator_init(
+            &mut self,
+            request: impl tonic::IntoRequest<super::OperatorInitRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::OperatorInitResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/OperatorInit",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "OperatorInit"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Provisioner initialization: submit encrypted share and readiness info.
+        pub async fn provisioner_init(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ProvisionerInitRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProvisionerInitResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/ProvisionerInit",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "ProvisionerInit",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1205,6 +1359,22 @@ pub mod guardian_service_server {
             request: tonic::Request<super::SetupNewKeyRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignedSetupNewKeyResponse>,
+            tonic::Status,
+        >;
+        /// Operator initialization: provide config and commitments before provisioning.
+        async fn operator_init(
+            &self,
+            request: tonic::Request<super::OperatorInitRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::OperatorInitResponse>,
+            tonic::Status,
+        >;
+        /// Provisioner initialization: submit encrypted share and readiness info.
+        async fn provisioner_init(
+            &self,
+            request: tonic::Request<super::ProvisionerInitRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProvisionerInitResponse>,
             tonic::Status,
         >;
     }
@@ -1360,6 +1530,97 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SetupNewKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/OperatorInit" => {
+                    #[allow(non_camel_case_types)]
+                    struct OperatorInitSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::OperatorInitRequest>
+                    for OperatorInitSvc<T> {
+                        type Response = super::OperatorInitResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::OperatorInitRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::operator_init(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = OperatorInitSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/ProvisionerInit" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProvisionerInitSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::ProvisionerInitRequest>
+                    for ProvisionerInitSvc<T> {
+                        type Response = super::ProvisionerInitResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ProvisionerInitRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::provisioner_init(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ProvisionerInitSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

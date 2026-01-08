@@ -64,7 +64,7 @@ impl Bls12381PrivateKey {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Committee {
     epoch: u64,
     members: Vec<CommitteeMember>,
@@ -72,7 +72,7 @@ pub struct Committee {
     total_weight: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
@@ -127,6 +127,10 @@ impl Committee {
 
     pub fn members(&self) -> &[CommitteeMember] {
         &self.members
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// The total weight of the members of this committee.
@@ -306,7 +310,7 @@ impl CommitteeSignature {
 #[derive(Debug, Clone)]
 pub struct SignedMessage<T> {
     signature: CommitteeSignature,
-    pub(crate) message: T,
+    pub message: T,
 }
 
 impl<T> SignedMessage<T> {

@@ -11,6 +11,8 @@ serde_json = "1.0.143"
 bcs = "0.1.6"
 
 hashi = { path = "../hashi" }
+prost = "0.14"
+sui-sdk-types = { version = "0.1" }
 
 # Crypto dependencies
 # Note: bitcoin v0.32.7 and k256 v0.13 both require rand_core 0.6.4
@@ -27,5 +29,5 @@ miniscript = "13.0.0"
 fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
 
-[features]
-test-utils = []
+# [features]
+# test-utils = []

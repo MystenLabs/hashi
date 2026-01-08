@@ -1,9 +1,9 @@
 use hashi_guardian_shared::S3Config;
+use hashi_guardian_shared::ToBytes;
 
 use aws_sdk_s3::Client as S3Client;
 
 use crate::GuardianResult;
-use serde::Serialize;
 
 #[derive(Debug)]
 pub struct S3Logger {
@@ -17,9 +17,9 @@ impl S3Logger {
     }
 
     /// Create a new S3 Object with a random key
-    /// TODO: Implement retries
+    /// TODO: Implement retries; Introduce ToJson?
     #[cfg(not(test))]
-    pub async fn log<T: Serialize>(&self, _value: T) -> GuardianResult<()> {
+    pub async fn log<T: ToBytes>(&self, _value: T) -> GuardianResult<()> {
         todo!("Implement me")
     }
 
@@ -30,7 +30,7 @@ impl S3Logger {
 
     /// Mock logging
     #[cfg(test)]
-    pub async fn log<T: Serialize>(&self, _value: T) -> GuardianResult<()> {
+    pub async fn log<T: ToBytes>(&self, _value: T) -> GuardianResult<()> {
         Ok(())
     }
 
