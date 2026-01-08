@@ -1,4 +1,5 @@
 use anyhow::Result;
+use fastcrypto_tbls::threshold_schnorr::G;
 use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
@@ -70,6 +71,16 @@ impl HashiNodeHandle {
 
     pub fn metrics_address(&self) -> SocketAddr {
         self.0.config.metrics_http_address()
+    }
+
+    pub async fn wait_for_dkg_completion(&self) -> G {
+        let mpc_handle = loop {
+            if let Some(handle) = self.0.mpc_handle_opt() {
+                break handle;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        mpc_handle.wait_for_dkg_completion().await
     }
 }
 

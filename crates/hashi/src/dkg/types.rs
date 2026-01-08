@@ -13,9 +13,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use sui_sdk_types::Address;
+use sui_sdk_types::Digest;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-pub type MessageHash = [u8; 32];
+pub type MessageHash = Digest;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
@@ -240,6 +241,17 @@ pub struct RotationDealerMessagesHash {
 pub enum MpcMessageV1 {
     Dkg(DkgDealerMessageHash),
     Rotation(RotationDealerMessagesHash),
+}
+
+impl MpcMessageV1 {
+    pub fn inner_signing_bytes(&self) -> Vec<u8> {
+        match self {
+            MpcMessageV1::Dkg(inner) => bcs::to_bytes(inner).expect("serialization should succeed"),
+            MpcMessageV1::Rotation(inner) => {
+                bcs::to_bytes(inner).expect("serialization should succeed")
+            }
+        }
+    }
 }
 
 pub type Certificate = SignedMessage<MpcMessageV1>;

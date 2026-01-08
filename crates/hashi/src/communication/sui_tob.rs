@@ -122,7 +122,7 @@ impl SuiTobChannel {
             MpcMessageV1::Dkg(DkgDealerMessageHash {
                 dealer_address,
                 message_hash,
-            }) => (*dealer_address, message_hash.to_vec()),
+            }) => (*dealer_address, message_hash.inner().to_vec()),
             MpcMessageV1::Rotation(_) => {
                 return Err(TobError::InvalidCertificate(
                     "Rotation certificates not supported yet".into(),
@@ -255,16 +255,20 @@ impl SuiTobChannel {
     }
 
     fn convert_to_internal_cert(&self, dkg_cert: DkgCertV1) -> Result<Certificate, TobError> {
-        let message =
-            MpcMessageV1::Dkg(DkgDealerMessageHash {
-                dealer_address: dkg_cert.message.dealer_address,
-                message_hash: dkg_cert.message.message_hash.try_into().map_err(|_| {
-                    TobError::InvalidCertificate("invalid message_hash length".into())
-                })?,
-            });
-        Certificate::try_from_parts(
+        let hash_bytes: [u8; 32] = dkg_cert
+            .message
+            .message_hash
+            .try_into()
+            .map_err(|_| TobError::InvalidCertificate("invalid message_hash length".into()))?;
+        let message = MpcMessageV1::Dkg(DkgDealerMessageHash {
+            dealer_address: dkg_cert.message.dealer_address,
+            message_hash: hash_bytes.into(),
+        });
+        let message_bytes = message.inner_signing_bytes();
+        Certificate::try_from_parts_with_bytes(
             self.epoch,
             message,
+            &message_bytes,
             &dkg_cert.signature.signature,
             &dkg_cert.signature.signers_bitmap,
             &self.committee,

@@ -68,6 +68,19 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed";
 
+/// Data needed to execute the dealer phase P2P operations (async, no lock needed).
+pub struct DealerPhaseData {
+    pub message: avss::Message,
+    pub request: SendMessageRequest,
+    pub recipients: Vec<Address>,
+    pub mpc_message: types::MpcMessageV1,
+    pub my_address: Address,
+    pub my_signature: BLS12381Signature,
+    pub inner_bytes: Vec<u8>,
+    pub required_weight: u16,
+    pub committee: Committee,
+}
+
 struct RotationComplainContext {
     request: RotationComplainRequest,
     recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)>,
@@ -128,12 +141,13 @@ impl DkgManager {
                 weight: member.weight() as u16,
             });
         }
-        // TODO: Use `Nodes::new_reduce()`
-        let nodes = Nodes::new(nodes_vec).map_err(|e| DkgError::CryptoError(e.to_string()))?;
         // TODO: Pass t and f as arguments instead of computing them
+        let original_total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
+        let original_threshold = (original_total_weight - 1) / 3 + 1;
+        let (nodes, threshold) = Nodes::new_reduced(nodes_vec, original_threshold, 0, 1)
+            .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         let total_weight = nodes.total_weight();
-        let max_faulty = (total_weight - 1) / 3;
-        let threshold = max_faulty + 1;
+        let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
         let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
         let party_id = committee
             .index_of(&address)
@@ -404,6 +418,144 @@ impl DkgManager {
         Ok(RotationComplainResponse { responses })
     }
 
+    pub fn prepare_dealer_phase(
+        &mut self,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<DealerPhaseData> {
+        let message = match self.dealer_messages.get(&self.address) {
+            Some(msg) => msg.clone(),
+            None => {
+                let msg = self.create_dealer_message(rng);
+                self.store_message(self.address, &msg)?;
+                msg
+            }
+        };
+        let my_signature = self
+            .try_sign_message(self.address, &message)
+            .expect("own message should always be valid");
+        let message_hash = compute_message_hash(&message);
+        let mpc_message = Dkg(DkgDealerMessageHash {
+            dealer_address: self.address,
+            message_hash,
+        });
+        let inner_bytes = mpc_message.inner_signing_bytes();
+        let recipients: Vec<_> = self
+            .committee
+            .members()
+            .iter()
+            .map(|m| m.validator_address())
+            .filter(|addr| *addr != self.address)
+            .collect();
+        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        let request = SendMessageRequest {
+            message: message.clone(),
+        };
+        Ok(DealerPhaseData {
+            message,
+            request,
+            recipients,
+            mpc_message,
+            my_address: self.address,
+            my_signature,
+            inner_bytes,
+            required_weight,
+            committee: self.committee.clone(),
+        })
+    }
+
+    pub fn threshold(&self) -> u16 {
+        self.dkg_config.threshold
+    }
+
+    pub fn our_address(&self) -> Address {
+        self.address
+    }
+
+    // TODO: Support non-happy paths
+    pub fn process_party_certificate(
+        &mut self,
+        cert: &Certificate,
+        certified_dealers: &mut HashSet<Address>,
+    ) -> DkgResult<Option<u16>> {
+        match &cert.message {
+            Dkg(message) => {
+                let dealer = message.dealer_address;
+                if certified_dealers.contains(&dealer) {
+                    return Ok(None);
+                }
+                // Use Move-compatible verification: bcs(epoch) || inner_signing_bytes()
+                let inner_bytes = cert.message.inner_signing_bytes();
+                if let Err(e) = self
+                    .committee
+                    .verify_signature_with_bytes(cert, &inner_bytes)
+                {
+                    tracing::info!("Invalid certificate signature from {:?}: {}", &dealer, e);
+                    return Ok(None);
+                }
+                // Check if message is available (happy path assumes it is)
+                let needs_retrieval = match self.dealer_messages.get(&dealer) {
+                    None => true,
+                    Some(stored_msg) => compute_message_hash(stored_msg) != message.message_hash,
+                };
+                if needs_retrieval {
+                    // TODO: Support message retrieval
+                    tracing::warn!(
+                        "Message for dealer {:?} not available, skipping (retrieval not yet supported)",
+                        dealer
+                    );
+                    return Ok(None);
+                }
+                // Process the certified message
+                if !self.dealer_outputs.contains_key(&dealer)
+                    && !self.complaints_to_process.contains_key(&dealer)
+                {
+                    self.process_certified_dealer_message(dealer)?;
+                }
+                // Check for complaints (happy path assumes none)
+                if self.complaints_to_process.contains_key(&dealer) {
+                    // TODO: Support complaint recovery
+                    tracing::warn!(
+                        "Complaint for dealer {:?} pending, skipping (recovery not yet supported)",
+                        dealer
+                    );
+                    return Ok(None);
+                }
+                certified_dealers.insert(dealer);
+                let weight = self.committee.weight_of(&dealer).unwrap_or(0) as u16;
+                Ok(Some(weight))
+            }
+            Rotation(_) => Ok(None), // Skip rotation messages during initial DKG
+        }
+    }
+
+    pub fn finalize_dkg(&self) -> DkgResult<DkgOutput> {
+        let threshold = self.dkg_config.threshold;
+        let outputs: HashMap<PartyId, avss::PartialOutput> = self
+            .dealer_outputs
+            .iter()
+            .map(|(dealer, output)| {
+                let dealer_party_id =
+                    self.committee
+                        .index_of(dealer)
+                        .expect("dealer must be committee member") as u16;
+                (dealer_party_id, output.clone())
+            })
+            .collect();
+        let combined_output =
+            avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
+                .expect("checked that threshold is met");
+        Ok(DkgOutput {
+            public_key: combined_output.vk,
+            key_shares: combined_output.my_shares,
+            commitments: combined_output
+                .commitments
+                .into_iter()
+                .map(|c| (c.index, c.value))
+                .collect(),
+            threshold,
+        })
+    }
+
     // TODO: Consider making dealer and party flows concurrent
     pub async fn run(
         &mut self,
@@ -469,15 +621,14 @@ impl DkgManager {
             .try_sign_message(self.address, &message)
             .expect("own message should always be valid");
         let message_hash = compute_message_hash(&message);
-        let mut aggregator = BlsSignatureAggregator::new(
-            &self.committee,
-            Dkg(DkgDealerMessageHash {
-                dealer_address: self.address,
-                message_hash,
-            }),
-        );
+        let mpc_message = Dkg(DkgDealerMessageHash {
+            dealer_address: self.address,
+            message_hash,
+        });
+        let inner_bytes = mpc_message.inner_signing_bytes();
+        let mut aggregator = BlsSignatureAggregator::new(&self.committee, mpc_message);
         aggregator
-            .add_signature_from(self.address, my_signature)
+            .add_signature_from_bytes(self.address, my_signature, &inner_bytes)
             .expect("first signature should always be valid");
         let recipients: Vec<_> = self
             .committee
@@ -494,7 +645,9 @@ impl DkgManager {
         for (addr, result) in results {
             match result {
                 Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
+                    if let Err(e) =
+                        aggregator.add_signature_from_bytes(addr, response.signature, &inner_bytes)
+                    {
                         tracing::info!("Invalid signature from {:?}: {}", addr, e);
                     }
                 }
@@ -503,8 +656,9 @@ impl DkgManager {
         }
         let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
+            // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
             let cert = aggregator
-                .finish()
+                .finish_unchecked()
                 .expect("signatures should always be valid");
             // TODO: do not fail in case my certificate is already published
             with_timeout_and_retry(|| ordered_broadcast_channel.publish(cert.clone()))
@@ -537,7 +691,12 @@ impl DkgManager {
                     if certified_dealers.contains(&dealer) {
                         continue;
                     }
-                    if let Err(e) = self.committee.verify_signature(&cert) {
+                    // Use Move-compatible verification: bcs(epoch) || inner_signing_bytes()
+                    let inner_bytes = cert.message.inner_signing_bytes();
+                    if let Err(e) = self
+                        .committee
+                        .verify_signature_with_bytes(&cert, &inner_bytes)
+                    {
                         tracing::info!("Invalid certificate signature from {:?}: {}", &dealer, e);
                         continue;
                     }
@@ -603,15 +762,14 @@ impl DkgManager {
             .try_sign_rotation_messages(previous, self.address, &rotation_messages)
             .expect("own rotation messages should always be valid");
         let messages_hash = compute_rotation_messages_hash(&rotation_messages);
-        let mut aggregator = BlsSignatureAggregator::new(
-            &self.committee,
-            Rotation(RotationDealerMessagesHash {
-                dealer_address: self.address,
-                messages_hash,
-            }),
-        );
+        let mpc_message = Rotation(RotationDealerMessagesHash {
+            dealer_address: self.address,
+            messages_hash,
+        });
+        let inner_bytes = mpc_message.inner_signing_bytes();
+        let mut aggregator = BlsSignatureAggregator::new(&self.committee, mpc_message);
         aggregator
-            .add_signature_from(self.address, my_signature)
+            .add_signature_from_bytes(self.address, my_signature, &inner_bytes)
             .expect("first signature should always be valid");
         let recipients: Vec<_> = self
             .committee
@@ -630,8 +788,11 @@ impl DkgManager {
         for (addr, result) in results {
             match result {
                 Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature.clone())
-                    {
+                    if let Err(e) = aggregator.add_signature_from_bytes(
+                        addr,
+                        response.signature.clone(),
+                        &inner_bytes,
+                    ) {
                         tracing::info!("Invalid rotation signature from {:?}: {}", addr, e);
                     }
                 }
@@ -642,8 +803,9 @@ impl DkgManager {
         }
         let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
         if aggregator.weight() >= required_weight as u64 {
+            // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
             let cert = aggregator
-                .finish()
+                .finish_unchecked()
                 .expect("signatures should always be valid");
             with_timeout_and_retry(|| ordered_broadcast_channel.publish(cert.clone()))
                 .await
@@ -676,7 +838,12 @@ impl DkgManager {
                     if certified_dealers.contains(&dealer) {
                         continue;
                     }
-                    if let Err(e) = self.committee.verify_signature(&cert) {
+                    // Use Move-compatible verification: bcs(epoch) || inner_signing_bytes()
+                    let inner_bytes = cert.message.inner_signing_bytes();
+                    if let Err(e) = self
+                        .committee
+                        .verify_signature_with_bytes(&cert, &inner_bytes)
+                    {
                         tracing::info!(
                             "Invalid rotation certificate signature from {:?}: {}",
                             &dealer,
@@ -789,17 +956,19 @@ impl DkgManager {
             None, // commitment: None for initial DKG
             self.encryption_key.clone(),
         );
-        match receiver.process_message(message)? {
+        let result = receiver.process_message(message)?;
+        match result {
             avss::ProcessedMessage::Valid(output) => {
                 self.dealer_outputs.insert(dealer, output);
                 let message_hash = compute_message_hash(message);
-                let signature = self.signing_key.sign(
+                let mpc_message = Dkg(DkgDealerMessageHash {
+                    dealer_address: dealer,
+                    message_hash,
+                });
+                let signature = self.signing_key.sign_bytes(
                     self.dkg_config.epoch,
                     self.address,
-                    &Dkg(DkgDealerMessageHash {
-                        dealer_address: dealer,
-                        message_hash,
-                    }),
+                    &mpc_message.inner_signing_bytes(),
                 );
                 Ok(signature.signature().clone())
             }
@@ -1325,13 +1494,14 @@ impl DkgManager {
         }
         self.rotation_outputs.extend(outputs);
         let messages_hash = compute_rotation_messages_hash(rotation_messages);
-        let signature = self.signing_key.sign(
+        let mpc_message = Rotation(RotationDealerMessagesHash {
+            dealer_address: dealer,
+            messages_hash,
+        });
+        let signature = self.signing_key.sign_bytes(
             self.dkg_config.epoch,
             self.address,
-            &Rotation(RotationDealerMessagesHash {
-                dealer_address: dealer,
-                messages_hash,
-            }),
+            &mpc_message.inner_signing_bytes(),
         );
         Ok(signature.signature().clone())
     }
@@ -1515,7 +1685,7 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let message_bytes = bcs::to_bytes(message).expect(EXPECT_SERIALIZATION_SUCCESS);
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
-    hasher.finalize().into()
+    MessageHash::from(hasher.finalize().digest)
 }
 
 fn compute_bft_threshold(total_weight: u16) -> u16 {
@@ -1524,12 +1694,12 @@ fn compute_bft_threshold(total_weight: u16) -> u16 {
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
     let bytes = bcs::to_bytes(bundle).expect(EXPECT_SERIALIZATION_SUCCESS);
-    Blake2b256::digest(&bytes).into()
+    MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
 
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
     let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
-    Blake2b256::digest(&bytes).into()
+    Blake2b256::digest(&bytes).digest
 }
 
 async fn send_to_many<Req, Resp, F, Fut>(
@@ -1907,14 +2077,20 @@ mod tests {
             dealer_address,
             message_hash,
         });
+        let inner_bytes = dkg_message.inner_signing_bytes();
         let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
         for signature in signatures {
             aggregator
-                .add_signature(signature)
+                .add_signature_from_bytes(
+                    *signature.address(),
+                    signature.signature().clone(),
+                    &inner_bytes,
+                )
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
+        // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
         aggregator
-            .finish()
+            .finish_unchecked()
             .map_err(|e| DkgError::CryptoError(e.to_string()))
     }
 
@@ -1929,14 +2105,20 @@ mod tests {
             dealer_address,
             messages_hash,
         });
+        let inner_bytes = rotation_message.inner_signing_bytes();
         let mut aggregator = BlsSignatureAggregator::new(committee, rotation_message);
         for signature in signatures {
             aggregator
-                .add_signature(signature)
+                .add_signature_from_bytes(
+                    *signature.address(),
+                    signature.signature().clone(),
+                    &inner_bytes,
+                )
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
+        // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
         aggregator
-            .finish()
+            .finish_unchecked()
             .map_err(|e| DkgError::CryptoError(e.to_string()))
     }
 
@@ -3326,7 +3508,13 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| setup.signing_keys[*i].sign(epoch, *a, &dealer_0_dkg_message))
+            .map(|(i, a)| {
+                setup.signing_keys[*i].sign_bytes(
+                    epoch,
+                    *a,
+                    &dealer_0_dkg_message.inner_signing_bytes(),
+                )
+            })
             .collect(),
         )
         .unwrap();
@@ -3341,7 +3529,13 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| setup.signing_keys[*i].sign(epoch, *a, &dealer_1_dkg_message))
+            .map(|(i, a)| {
+                setup.signing_keys[*i].sign_bytes(
+                    epoch,
+                    *a,
+                    &dealer_1_dkg_message.inner_signing_bytes(),
+                )
+            })
             .collect(),
         )
         .unwrap();
@@ -3441,10 +3635,10 @@ mod tests {
                     dealer_address: dealer_addr_3,
                     message_hash,
                 });
-                setup.signing_keys[mgr.party_id as usize].sign(
+                setup.signing_keys[mgr.party_id as usize].sign_bytes(
                     setup.epoch(),
                     mgr.address,
-                    &dkg_message,
+                    &dkg_message.inner_signing_bytes(),
                 )
             })
             .collect();
@@ -3819,11 +4013,11 @@ mod tests {
             dealer_address: *dealer_addr,
             message_hash,
         });
+        let inner_bytes = dkg_message.inner_signing_bytes();
 
         let config = setup.dkg_config();
         let committee = setup.committee();
-        let mut aggregator =
-            crate::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
+        let mut aggregator = crate::committee::BlsSignatureAggregator::new(committee, dkg_message);
 
         // Add signatures from validators until we meet the required weight
         let dkg_required = config.threshold;
@@ -3831,8 +4025,11 @@ mod tests {
 
         for i in 0..setup.num_validators() {
             let signer_addr = setup.address(i);
-            let signature = setup.signing_keys[i].sign(setup.epoch(), signer_addr, &dkg_message);
-            aggregator.add_signature(signature).unwrap();
+            let signature =
+                setup.signing_keys[i].sign_bytes(setup.epoch(), signer_addr, &inner_bytes);
+            aggregator
+                .add_signature_from_bytes(signer_addr, signature.signature().clone(), &inner_bytes)
+                .unwrap();
             weight_sum += config
                 .nodes
                 .iter()
@@ -3845,7 +4042,8 @@ mod tests {
             }
         }
 
-        aggregator.finish().unwrap()
+        // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
+        aggregator.finish_unchecked().unwrap()
     }
 
     // Helper to create and setup a party manager for testing
@@ -4029,7 +4227,7 @@ mod tests {
                     dealer_address: dealer1_addr,
                     message_hash,
                 });
-                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+                setup.signing_keys[i].sign_bytes(epoch, addr, &dkg_message.inner_signing_bytes())
             })
             .collect();
 
@@ -4041,7 +4239,7 @@ mod tests {
                     dealer_address: dealer2_addr,
                     message_hash,
                 });
-                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+                setup.signing_keys[i].sign_bytes(epoch, addr, &dkg_message.inner_signing_bytes())
             })
             .collect();
 
@@ -4120,7 +4318,11 @@ mod tests {
                         dealer_address: dealer_addr,
                         message_hash,
                     });
-                    setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+                    setup.signing_keys[i].sign_bytes(
+                        epoch,
+                        addr,
+                        &dkg_message.inner_signing_bytes(),
+                    )
                 })
                 .collect()
         };
@@ -4232,7 +4434,13 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| setup.signing_keys[*i].sign(epoch, *a, &dealer0_dkg_message))
+            .map(|(i, a)| {
+                setup.signing_keys[*i].sign_bytes(
+                    epoch,
+                    *a,
+                    &dealer0_dkg_message.inner_signing_bytes(),
+                )
+            })
             .collect(),
         )
         .unwrap();
@@ -4246,7 +4454,13 @@ mod tests {
                 (3, setup.address(3)),
             ]
             .iter()
-            .map(|(i, a)| setup.signing_keys[*i].sign(epoch, *a, &dealer1_dkg_message))
+            .map(|(i, a)| {
+                setup.signing_keys[*i].sign_bytes(
+                    epoch,
+                    *a,
+                    &dealer1_dkg_message.inner_signing_bytes(),
+                )
+            })
             .collect(),
         )
         .unwrap();
@@ -4639,7 +4853,13 @@ mod tests {
             dealer_message,
             [(1usize, party_addr)]
                 .iter()
-                .map(|(i, a)| setup.signing_keys[*i].sign(setup.epoch(), *a, &dkg_message))
+                .map(|(i, a)| {
+                    setup.signing_keys[*i].sign_bytes(
+                        setup.epoch(),
+                        *a,
+                        &dkg_message.inner_signing_bytes(),
+                    )
+                })
                 .collect(),
         )
         .unwrap();
@@ -4906,8 +5126,11 @@ mod tests {
         });
 
         // Dealer signs its own message
-        let dealer_signature =
-            setup.signing_keys[0].sign(setup.epoch(), dealer_address, &dkg_message);
+        let dealer_signature = setup.signing_keys[0].sign_bytes(
+            setup.epoch(),
+            dealer_address,
+            &dkg_message.inner_signing_bytes(),
+        );
 
         // Create certificate with dealer's signature
         let committee = setup.committee();
@@ -4968,9 +5191,16 @@ mod tests {
         // Create certificate with two signers: validator 1 (not in P2P) and dealer (validator 0)
         // Validator 1 signs first, then validator 0
         let validator_1_addr = Address::new([1; 32]);
-        let validator_1_signature =
-            setup.signing_keys[1].sign(setup.epoch(), validator_1_addr, &dkg_message);
-        let dealer_signature = setup.signing_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
+        let validator_1_signature = setup.signing_keys[1].sign_bytes(
+            setup.epoch(),
+            validator_1_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
+        let dealer_signature = setup.signing_keys[0].sign_bytes(
+            setup.epoch(),
+            dealer_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
 
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
@@ -5022,8 +5252,16 @@ mod tests {
 
         // Create certificate with signers including the requesting party
         // This is an invalid state - party shouldn't be retrieving a message it signed for
-        let party_signature = setup.signing_keys[1].sign(setup.epoch(), party_addr, &dkg_message);
-        let dealer_signature = setup.signing_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
+        let party_signature = setup.signing_keys[1].sign_bytes(
+            setup.epoch(),
+            party_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
+        let dealer_signature = setup.signing_keys[0].sign_bytes(
+            setup.epoch(),
+            dealer_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
 
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
@@ -5080,10 +5318,16 @@ mod tests {
         // Create certificate with signers 2 and 3 (both will be offline in P2P)
         let signer_2_addr = Address::new([2; 32]);
         let signer_3_addr = Address::new([3; 32]);
-        let signer_2_signature =
-            setup.signing_keys[2].sign(setup.epoch(), signer_2_addr, &dkg_message);
-        let signer_3_signature =
-            setup.signing_keys[3].sign(setup.epoch(), signer_3_addr, &dkg_message);
+        let signer_2_signature = setup.signing_keys[2].sign_bytes(
+            setup.epoch(),
+            signer_2_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
+        let signer_3_signature = setup.signing_keys[3].sign_bytes(
+            setup.epoch(),
+            signer_3_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
 
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
@@ -5155,10 +5399,16 @@ mod tests {
         });
 
         // Create valid certificate for dealer A with correct hash, signed by Byzantine signer and dealer A
-        let byzantine_signature =
-            setup.signing_keys[3].sign(setup.epoch(), byzantine_signer_addr, &dkg_message);
-        let dealer_a_signature =
-            setup.signing_keys[0].sign(setup.epoch(), dealer_a_addr, &dkg_message);
+        let byzantine_signature = setup.signing_keys[3].sign_bytes(
+            setup.epoch(),
+            byzantine_signer_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
+        let dealer_a_signature = setup.signing_keys[0].sign_bytes(
+            setup.epoch(),
+            dealer_a_addr,
+            &dkg_message.inner_signing_bytes(),
+        );
 
         let committee = setup.committee();
         let cert = create_certificate_with_signers(
@@ -5198,16 +5448,22 @@ mod tests {
             dealer_address,
             message_hash,
         });
+        let inner_bytes = dkg_message.inner_signing_bytes();
 
         let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
 
         for signature in signatures {
             aggregator
-                .add_signature(signature)
+                .add_signature_from_bytes(
+                    *signature.address(),
+                    signature.signature().clone(),
+                    &inner_bytes,
+                )
                 .map_err(|e| DkgError::CryptoError(e.to_string()))?;
         }
+        // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
         aggregator
-            .finish()
+            .finish_unchecked()
             .map_err(|e| DkgError::CryptoError(e.to_string()))
     }
 
@@ -5603,12 +5859,16 @@ mod tests {
             dealer_address: dealer_addr,
             message_hash,
         });
+        let inner_bytes = dkg_message.inner_signing_bytes();
         let committee = setup.committee();
         let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
         for (_, _, sig) in &signers {
-            aggregator.add_signature(sig.clone()).unwrap();
+            aggregator
+                .add_signature_from_bytes(*sig.address(), sig.signature().clone(), &inner_bytes)
+                .unwrap();
         }
-        let certificate = aggregator.finish().unwrap();
+        // Use finish_unchecked since signatures were verified individually with add_signature_from_bytes
+        let certificate = aggregator.finish_unchecked().unwrap();
 
         // Party 0 doesn't have the message yet (simulating it wasn't received via SendMessage)
         let receiver_addr = setup.address(0);
@@ -5892,7 +6152,7 @@ mod tests {
                     dealer_address: dealer1_addr,
                     message_hash,
                 });
-                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+                setup.signing_keys[i].sign_bytes(epoch, addr, &dkg_message.inner_signing_bytes())
             })
             .collect();
 
@@ -5904,7 +6164,7 @@ mod tests {
                     dealer_address: dealer2_addr,
                     message_hash,
                 });
-                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+                setup.signing_keys[i].sign_bytes(epoch, addr, &dkg_message.inner_signing_bytes())
             })
             .collect();
 

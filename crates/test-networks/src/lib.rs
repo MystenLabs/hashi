@@ -242,4 +242,37 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dkg_completes_with_same_public_key() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+        const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for DKG to complete on all nodes concurrently, with timeout
+        let nodes = test_networks.hashi_network().nodes();
+        let dkg_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_dkg_completion())
+            .collect();
+
+        let public_keys: Vec<_> =
+            tokio::time::timeout(DKG_TIMEOUT, futures::future::join_all(dkg_futures))
+                .await
+                .expect("DKG should complete within timeout");
+
+        // All nodes should have the same public key
+        let first_pk = public_keys[0];
+        for (i, pk) in public_keys.iter().enumerate().skip(1) {
+            assert_eq!(
+                first_pk, *pk,
+                "Node {i} has different public key than node 0"
+            );
+        }
+        Ok(())
+    }
 }

@@ -95,8 +95,8 @@ impl HttpService {
             .unwrap()
     }
 
-    pub fn dkg_manager(&self) -> &std::sync::Mutex<crate::dkg::DkgManager> {
-        self.inner.dkg_manager()
+    pub fn mpc_handle(&self) -> &crate::mpc::MpcHandle {
+        self.inner.mpc_handle()
     }
 
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {

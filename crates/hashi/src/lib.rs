@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
@@ -13,6 +12,7 @@ pub mod dkg;
 pub mod grpc;
 pub mod leader;
 pub mod metrics;
+pub mod mpc;
 pub mod onchain;
 pub mod proto;
 pub mod storage;
@@ -30,8 +30,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    // TODO: Replace `DkgManager` by `MpcManager`
-    dkg_manager: OnceLock<Mutex<dkg::DkgManager>>,
+    mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
 
@@ -46,7 +45,7 @@ impl Hashi {
             metrics,
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
-            dkg_manager: OnceLock::new(),
+            mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
         })
     }
@@ -64,7 +63,7 @@ impl Hashi {
             metrics: Arc::new(metrics::Metrics::new(registry)),
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
-            dkg_manager: OnceLock::new(),
+            mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
         })
     }
@@ -81,8 +80,14 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn dkg_manager(&self) -> &Mutex<dkg::DkgManager> {
-        self.dkg_manager.get().expect("DkgManager not initialized")
+    pub fn mpc_handle(&self) -> &mpc::MpcHandle {
+        self.mpc_handle.get().expect("MpcHandle not initialized")
+    }
+
+    /// Returns the MpcHandle if initialized, None otherwise.
+    /// Use this when you need to check if initialization is complete.
+    pub fn mpc_handle_opt(&self) -> Option<&mpc::MpcHandle> {
+        self.mpc_handle.get()
     }
 
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
@@ -100,7 +105,7 @@ impl Hashi {
         self.onchain_state.set(onchain_state).unwrap();
     }
 
-    fn initialize_dkg(&self) -> anyhow::Result<()> {
+    fn create_dkg_manager(&self) -> anyhow::Result<dkg::DkgManager> {
         let state = self.onchain_state().state();
         let committee_set = &state.hashi().committees;
         let session_id = dkg::SessionId::new(
@@ -117,18 +122,14 @@ impl Hashi {
             self.db.clone(),
             committee_set.epoch(),
         ));
-        let dkg_manager = dkg::DkgManager::new(
+        Ok(dkg::DkgManager::new(
             self.config.validator_address()?,
             committee_set,
             session_id,
             encryption_key,
             signing_key,
             store,
-        )?;
-        self.dkg_manager
-            .set(Mutex::new(dkg_manager))
-            .map_err(|_| anyhow!("DkgManager already initialized"))?;
-        Ok(())
+        )?)
     }
 
     fn initialize_btc_monitor(&self) -> anyhow::Result<()> {
@@ -161,13 +162,20 @@ impl Hashi {
         tokio::spawn(async move {
             // Initialize
             self.initialize_onchain_state().await;
-            let init_dkg_result = self.initialize_dkg();
-            if let Err(e) = init_dkg_result {
-                tracing::error!("Failed to initialize DKG: {e}");
-                return;
-            }
-            let init_btc_result = self.initialize_btc_monitor();
-            if let Err(e) = init_btc_result {
+
+            let dkg_manager = match self.create_dkg_manager() {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Failed to create DkgManager: {e}");
+                    return;
+                }
+            };
+            let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone(), dkg_manager);
+            self.mpc_handle
+                .set(mpc_handle)
+                .expect("MpcHandle already set");
+
+            if let Err(e) = self.initialize_btc_monitor() {
                 tracing::error!("Failed to initialize BtcMonitor: {e}");
                 return;
             }
@@ -175,7 +183,8 @@ impl Hashi {
             // Start services
             let http_service = grpc::HttpService::new(self.clone()).start();
             let leader_service = leader::LeaderService::new(self.clone()).start();
-            tokio::join!(http_service, leader_service);
+            let mpc_service = mpc_service.start();
+            tokio::join!(http_service, leader_service, mpc_service);
         });
     }
 }
