@@ -1,10 +1,18 @@
 use anyhow::Result;
 use hashi::Hashi;
+
+/// Bitcoin regtest genesis block hash (BIP-122 chain ID).
+/// See: https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki
+const BITCOIN_REGTEST_CHAIN_ID: &str =
+    "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
 use std::sync::Arc;
 use sui_crypto::SuiSigner;
 use sui_rpc::field::FieldMask;
@@ -73,6 +81,72 @@ impl HashiNodeHandle {
     }
 }
 
+/// Process-based node handle
+/// Each node runs in a separate OS process to avoid lock contention.
+pub struct HashiProcessHandle {
+    pub config: HashiConfig,
+    config_path: PathBuf,
+    process: Option<Child>,
+}
+
+impl HashiProcessHandle {
+    pub fn new(config: HashiConfig, config_path: PathBuf) -> Result<Self> {
+        let config_str = toml::to_string_pretty(&config)?;
+        std::fs::write(&config_path, config_str)?;
+        Ok(Self {
+            config,
+            config_path,
+            process: None,
+        })
+    }
+
+    pub fn start(&mut self) -> Result<()> {
+        let binary = hashi_binary();
+        let log_dir = self.config_path.parent().unwrap();
+        let validator = self.config.validator_address.unwrap();
+        let stdout_file = std::fs::File::create(log_dir.join(format!("{}.stdout", validator)))?;
+        let stderr_file = std::fs::File::create(log_dir.join(format!("{}.stderr", validator)))?;
+        let child = Command::new(&binary)
+            .arg("--config")
+            .arg(&self.config_path)
+            .env("RUST_LOG", "info,hashi=debug")
+            .stdout(stdout_file)
+            .stderr(stderr_file)
+            .spawn()?;
+        self.process = Some(child);
+        info!(
+            "Started hashi process with PID: {:?}",
+            self.process.as_ref().map(|p| p.id())
+        );
+        Ok(())
+    }
+
+    pub fn https_url(&self) -> String {
+        format!("{}{}", HTTPS_SCHEME, self.config.https_address())
+    }
+
+    pub fn tls_public_key(&self) -> Result<ed25519_dalek::VerifyingKey> {
+        self.config.tls_public_key()
+    }
+}
+
+impl Drop for HashiProcessHandle {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn hashi_binary() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop(); // crates/test-networks -> crates
+    path.pop(); // crates -> repo root
+    path.push("target/release/hashi");
+    path
+}
+
 pub struct HashiNetwork {
     ids: HashiIds,
     nodes: Vec<HashiNodeHandle>,
@@ -88,17 +162,52 @@ impl HashiNetwork {
     }
 }
 
+pub struct HashiProcessNetwork {
+    ids: HashiIds,
+    nodes: Vec<HashiProcessHandle>,
+}
+
+impl HashiProcessNetwork {
+    pub fn nodes(&self) -> &[HashiProcessHandle] {
+        &self.nodes
+    }
+
+    pub fn nodes_mut(&mut self) -> &mut [HashiProcessHandle] {
+        &mut self.nodes
+    }
+
+    pub fn ids(&self) -> HashiIds {
+        self.ids
+    }
+
+    pub fn start_all(&mut self) -> Result<()> {
+        for node in &mut self.nodes {
+            node.start()?;
+        }
+        Ok(())
+    }
+}
+
 pub struct HashiNetworkBuilder {
     pub num_nodes: usize,
+    pub auto_start: bool,
 }
 
 impl HashiNetworkBuilder {
     pub fn new() -> Self {
-        Self { num_nodes: 1 }
+        Self {
+            num_nodes: 1,
+            auto_start: true,
+        }
     }
 
     pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
         self.num_nodes = num_nodes;
+        self
+    }
+
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
         self
     }
 
@@ -130,10 +239,7 @@ impl HashiNetworkBuilder {
             config.db = Some(dir.join(validator_address.to_string()));
 
             config.sui_chain_id = service_info.chain_id.clone();
-            // Bitcoin regtest chain id, from https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki
-            config.bitcoin_chain_id = Some(
-                "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206".to_string(),
-            );
+            config.bitcoin_chain_id = Some(BITCOIN_REGTEST_CHAIN_ID.to_string());
 
             configs.push(config);
         }
@@ -150,7 +256,9 @@ impl HashiNetworkBuilder {
         for config in configs {
             let validator_address = config.validator_address()?;
             let node_handle = HashiNodeHandle::new(config)?;
-            node_handle.start();
+            if self.auto_start {
+                node_handle.start();
+            }
             info!(
                 "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
                 validator_address,
@@ -162,6 +270,63 @@ impl HashiNetworkBuilder {
         }
 
         Ok(HashiNetwork {
+            ids: hashi_ids,
+            nodes,
+        })
+    }
+
+    pub async fn build_process_network(
+        self,
+        dir: &Path,
+        sui: &SuiNetworkHandle,
+        bitcoin: &BitcoinNodeHandle,
+        hashi_ids: HashiIds,
+    ) -> Result<HashiProcessNetwork> {
+        std::fs::create_dir_all(dir)?;
+        let bitcoin_rpc = bitcoin.rpc_url().to_owned();
+        let sui_rpc = sui.rpc_url.clone();
+        let service_info = sui
+            .client
+            .clone()
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        let mut configs = Vec::with_capacity(self.num_nodes);
+        for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
+            let mut config = HashiConfig::new_for_testing();
+            config.hashi_ids = Some(hashi_ids);
+            config.validator_address = Some(*validator_address);
+            config.operator_private_key = Some(private_key.to_pem()?);
+            config.sui_rpc = Some(sui_rpc.clone());
+            config.bitcoin_rpc = Some(bitcoin_rpc.clone());
+            config.db = Some(dir.join(validator_address.to_string()));
+            config.sui_chain_id = service_info.chain_id.clone();
+            config.bitcoin_chain_id = Some(BITCOIN_REGTEST_CHAIN_ID.to_string());
+
+            configs.push(config);
+        }
+        for config in &configs {
+            let client = sui.client.clone();
+            register_onchain(client, config).await?;
+        }
+        bootstrap(sui, hashi_ids).await?;
+        let mut nodes = Vec::with_capacity(configs.len());
+        for config in configs {
+            let validator_address = config.validator_address()?;
+            let config_path = dir.join(format!("{}.toml", validator_address));
+            let mut node_handle = HashiProcessHandle::new(config, config_path)?;
+            if self.auto_start {
+                node_handle.start()?;
+            }
+            info!(
+                "Created Hashi process node {} at HTTPS: {}",
+                validator_address,
+                node_handle.https_url()
+            );
+            nodes.push(node_handle);
+        }
+        Ok(HashiProcessNetwork {
             ids: hashi_ids,
             nodes,
         })

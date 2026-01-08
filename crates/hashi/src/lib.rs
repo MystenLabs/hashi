@@ -1,8 +1,9 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
+use rand::SeedableRng;
+use tokio::sync::Mutex;
 
 pub mod committee;
 pub mod communication;
@@ -18,7 +19,7 @@ pub mod proto;
 pub mod storage;
 pub mod tls;
 
-fn init_crypto_provider() {
+pub fn init_crypto_provider() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -183,12 +184,47 @@ impl Hashi {
                 tracing::error!("Failed to initialize BtcMonitor: {e}");
                 return;
             }
-
-            // Start services
-            let http_service = grpc::HttpService::new(self.clone()).start();
+            let http_service = grpc::HttpService::new(self.clone()).start().await;
+            if let Err(e) = self.run_dkg().await {
+                tracing::error!("DKG failed: {e}");
+            }
             let leader_service = leader::LeaderService::new(self.clone()).start();
-            tokio::join!(http_service, leader_service);
+            tokio::join!(async { http_service }, leader_service);
         });
+    }
+
+    async fn run_dkg(&self) -> anyhow::Result<dkg::types::DkgOutput> {
+        let (epoch, current_committee) = {
+            let state = self.onchain_state().state();
+            let committee_set = &state.hashi().committees;
+            let epoch = committee_set.epoch();
+            let current_committee = committee_set
+                .current_committee()
+                .ok_or_else(|| anyhow!("no current committee"))?
+                .clone();
+            (epoch, current_committee)
+        };
+        let p2p_channel = dkg::rpc::RpcP2PChannel::new(self.onchain_state().clone(), epoch);
+        let signer = self.config.operator_private_key()?;
+        let mut tob_channel = communication::SuiTobChannel::new(
+            self.onchain_state().clone(),
+            epoch,
+            signer,
+            current_committee,
+        );
+        let output = {
+            let mut manager = self.dkg_manager().lock().await;
+            let mut rng = rand::rngs::StdRng::from_entropy();
+            manager
+                .run(&p2p_channel, &mut tob_channel, &mut rng)
+                .await?
+        };
+        tracing::info!(
+            "DKG completed successfully for epoch {}. Public key: {:?}",
+            epoch,
+            output.public_key
+        );
+        Ok(output)
     }
 }
 
@@ -233,7 +269,6 @@ mod test {
         let http_server = crate::grpc::HttpService::new(hashi).start().await;
 
         let address = format!("https://{}", http_server.local_addr());
-        dbg!(&address);
 
         let client_tls_config = crate::tls::make_client_config(&tls_public_key);
         let client_auth_server = Client::new(&address, client_tls_config).unwrap();

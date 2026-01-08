@@ -7,12 +7,24 @@ use backon::Retryable;
 use std::future::Future;
 use std::time::Duration;
 
-// TODO: Increase the values below to 100ms, 2s, 10, 60s.
-// TODO: Make test suite use a different set of small thresholds to improve performance.
+// Unit tests use low thresholds for quick feedback.
+#[cfg(test)]
 pub const RETRY_MIN_DELAY: Duration = Duration::from_millis(50);
+#[cfg(test)]
 pub const RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
+#[cfg(test)]
 pub const MAX_RETRIES: usize = 1;
+#[cfg(test)]
 pub const CALL_TIMEOUT: Duration = Duration::from_millis(200);
+
+#[cfg(not(test))]
+pub const RETRY_MIN_DELAY: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+pub const RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+pub const MAX_RETRIES: usize = 3;
+#[cfg(not(test))]
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub async fn with_timeout_and_retry<T, F, Fut>(mut f: F) -> ChannelResult<T>
 where

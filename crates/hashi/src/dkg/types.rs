@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 use sui_sdk_types::Address;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-pub type MessageHash = [u8; 32];
+/// Matches Move's vector<u8> in BCS serialization
+pub type MessageHash = Vec<u8>;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
@@ -240,6 +241,19 @@ pub struct RotationDealerMessagesHash {
 pub enum MpcMessageV1 {
     Dkg(DkgDealerMessageHash),
     Rotation(RotationDealerMessagesHash),
+}
+
+impl MpcMessageV1 {
+    /// Returns the BCS bytes of the inner message type without the enum discriminant.
+    /// Move verification expects the inner struct, not the enum wrapper.
+    pub fn inner_signing_bytes(&self) -> Vec<u8> {
+        match self {
+            MpcMessageV1::Dkg(inner) => bcs::to_bytes(inner).expect("serialization should succeed"),
+            MpcMessageV1::Rotation(inner) => {
+                bcs::to_bytes(inner).expect("serialization should succeed")
+            }
+        }
+    }
 }
 
 pub type Certificate = SignedMessage<MpcMessageV1>;

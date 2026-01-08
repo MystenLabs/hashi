@@ -849,7 +849,7 @@ impl DkgManager {
             },
             |r| r.message,
             compute_message_hash,
-            message.message_hash,
+            message.message_hash.clone(),
             "message",
         )
         .await;
@@ -902,7 +902,7 @@ impl DkgManager {
             },
             |r| r.messages,
             compute_rotation_messages_hash,
-            message.messages_hash,
+            message.messages_hash.clone(),
             "rotation messages",
         )
         .await;
@@ -1312,7 +1312,7 @@ impl DkgManager {
         let mut certified_dealers = HashMap::new();
         for cert in certificates {
             let (dealer_address, expected_hash) = match &cert.message {
-                Dkg(msg) => (msg.dealer_address, msg.message_hash),
+                Dkg(msg) => (msg.dealer_address, msg.message_hash.clone()),
                 Rotation(_) => {
                     return Err(DkgError::InvalidCertificate(
                         "Expected DKG certificate, got Rotation".into(),
@@ -1446,7 +1446,7 @@ fn compute_message_hash(message: &avss::Message) -> MessageHash {
     let message_bytes = bcs::to_bytes(message).expect(EXPECT_SERIALIZATION_SUCCESS);
     let mut hasher = Blake2b256::default();
     hasher.update(&message_bytes);
-    hasher.finalize().into()
+    hasher.finalize().to_vec()
 }
 
 fn compute_bft_threshold(total_weight: u16) -> u16 {
@@ -1455,7 +1455,7 @@ fn compute_bft_threshold(total_weight: u16) -> u16 {
 
 fn compute_rotation_messages_hash(bundle: &RotationMessages) -> MessageHash {
     let bytes = bcs::to_bytes(bundle).expect(EXPECT_SERIALIZATION_SUCCESS);
-    Blake2b256::digest(&bytes).into()
+    Blake2b256::digest(&bytes).to_vec()
 }
 
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
@@ -1542,6 +1542,7 @@ where
             let fetch = fetch.clone();
             let extract = extract.clone();
             let compute_hash = compute_hash.clone();
+            let expected_hash = expected_hash.clone();
             async move {
                 let result = with_timeout_and_retry(|| fetch(addr, req.clone())).await;
                 let validated = validate_retrieved(
@@ -5823,7 +5824,7 @@ mod tests {
         let message_hash = compute_message_hash(&cheating_message);
         let dkg_message = Dkg(DkgDealerMessageHash {
             dealer_address: dealer_addr,
-            message_hash,
+            message_hash: message_hash.clone(),
         });
         let committee = setup.committee();
         let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);

@@ -25,6 +25,8 @@ pub use bitcoin_node::BitcoinNodeHandle;
 pub use hashi_network::HashiNetwork;
 pub use hashi_network::HashiNetworkBuilder;
 pub use hashi_network::HashiNodeHandle;
+pub use hashi_network::HashiProcessHandle;
+pub use hashi_network::HashiProcessNetwork;
 pub use sui_network::SuiNetworkBuilder;
 pub use sui_network::SuiNetworkHandle;
 use tempfile::TempDir;
@@ -38,6 +40,32 @@ pub struct TestNetworks {
     pub sui_network: SuiNetworkHandle,
     pub hashi_network: HashiNetwork,
     pub bitcoin_node: BitcoinNodeHandle,
+}
+
+pub struct TestProcessNetworks {
+    #[allow(unused)]
+    dir: TempDir,
+    pub sui_network: SuiNetworkHandle,
+    pub hashi_network: HashiProcessNetwork,
+    pub bitcoin_node: BitcoinNodeHandle,
+}
+
+impl TestProcessNetworks {
+    pub fn sui_network(&self) -> &SuiNetworkHandle {
+        &self.sui_network
+    }
+
+    pub fn hashi_network(&self) -> &HashiProcessNetwork {
+        &self.hashi_network
+    }
+
+    pub fn hashi_network_mut(&mut self) -> &mut HashiProcessNetwork {
+        &mut self.hashi_network
+    }
+
+    pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
+        &self.bitcoin_node
+    }
 }
 
 impl TestNetworks {
@@ -105,6 +133,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.hashi_builder = self.hashi_builder.with_auto_start(auto_start);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")
@@ -144,9 +177,41 @@ impl TestNetworksBuilder {
             hashi_network,
             bitcoin_node,
         };
+        Ok(test_networks)
+    }
 
-        println!("rpc url: {}", test_networks.sui_network().rpc_url);
-
+    pub async fn build_process(self) -> Result<TestProcessNetworks> {
+        let dir = tempfile::Builder::new()
+            .prefix("hashi-test-env-")
+            .tempdir()?;
+        let bitcoin_node = self.bitcoin_builder.dir(dir.as_ref()).build().await?;
+        let mut sui_network = self
+            .sui_builder
+            .dir(&dir.path().join("sui"))
+            .build()
+            .await?;
+        Self::cp_packages(dir.as_ref())?;
+        let hashi_ids = publish(
+            dir.as_ref(),
+            &mut sui_network.client,
+            sui_network.user_keys.first().unwrap(),
+        )
+        .await?;
+        let hashi_network = self
+            .hashi_builder
+            .build_process_network(
+                &dir.path().join("hashi"),
+                &sui_network,
+                &bitcoin_node,
+                hashi_ids,
+            )
+            .await?;
+        let test_networks = TestProcessNetworks {
+            dir,
+            sui_network,
+            hashi_network,
+            bitcoin_node,
+        };
         Ok(test_networks)
     }
 
@@ -176,6 +241,90 @@ impl Default for TestNetworksBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_dkg_multi_nodes() -> Result<()> {
+        hashi::init_crypto_provider();
+        // Using 3 nodes: threshold=2, max_faulty=0, required_weight=2
+        // This means each dealer needs 2 signatures (including own), so 1 from others
+        const NUM_NODES: usize = 3;
+        let status = Command::new("cargo")
+            .args(["build", "-p", "hashi", "--release"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Failed to build hashi binary");
+        }
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(NUM_NODES)
+            .with_auto_start(false) // We'll start manually after verification
+            .build_process()
+            .await?;
+        assert_eq!(test_networks.hashi_network().nodes().len(), NUM_NODES);
+
+        // Start all node processes
+        test_networks.hashi_network_mut().start_all()?;
+
+        // Give nodes time to initialize and start their HTTP servers
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        // Test connectivity by checking each node's RPC service
+        for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+            let tls_config = hashi::tls::make_client_config(&node.tls_public_key()?);
+            let client = hashi::grpc::Client::new(node.https_url(), tls_config)?;
+            // Retry up to 20 times (10 seconds total) as the node may still be starting
+            for attempt in 1..=20 {
+                match client.get_service_info().await {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(e) if attempt == 20 => {
+                        anyhow::bail!("Node {} failed to start after 20 attempts: {}", i, e);
+                    }
+                    Err(e) => {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+
+        // Get the actual epoch from onchain state
+        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
+        let (epoch, committee_size) = {
+            let hashi_state = state.state();
+            let epoch = hashi_state.hashi().committees.epoch();
+            let committee_size = hashi_state
+                .hashi()
+                .committees
+                .current_committee()
+                .map(|c| c.members().len())
+                .unwrap_or(0);
+            (epoch, committee_size)
+        };
+
+        let expected_certs = NUM_NODES;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        loop {
+            let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
+            let certs = state.fetch_dkg_certs(epoch).await?;
+            if certs.len() >= expected_certs {
+                // All certificates are present - DKG completed successfully!
+                // The certificates are validated on-chain by the Move contract when they're published.
+                return Ok(());
+            }
+            if tokio::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "DKG timeout: only {} / {} certificates on TOB after 300s",
+                    certs.len(),
+                    expected_certs
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
 
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {

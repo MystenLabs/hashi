@@ -201,8 +201,7 @@ struct X509OrRawPublicKey {
 }
 
 impl ResolvesServerCert for X509OrRawPublicKey {
-    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        dbg!(client_hello);
+    fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.rpk.clone())
     }
 

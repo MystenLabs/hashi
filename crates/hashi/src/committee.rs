@@ -1,3 +1,4 @@
+use crate::dkg::types::MpcMessageV1;
 use fastcrypto::bls12381::BLS_PRIVATE_KEY_LENGTH;
 use fastcrypto::bls12381::min_pk;
 pub use fastcrypto::bls12381::min_pk::BLS12381AggregateSignature;
@@ -49,7 +50,12 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign<T: Serialize>(&self, epoch: u64, address: Address, message: &T) -> MemberSignature {
+    pub fn sign<T: Serialize + 'static>(
+        &self,
+        epoch: u64,
+        address: Address,
+        message: &T,
+    ) -> MemberSignature {
         let signing_message = signing_message(epoch, message);
         MemberSignature {
             epoch,
@@ -152,7 +158,7 @@ impl Committee {
     }
 
     /// Verify a single signature provided by a [CommitteeMember].
-    fn verify<T: Serialize>(
+    fn verify<T: Serialize + 'static>(
         &self,
         message: &T,
         signature: &MemberSignature,
@@ -173,7 +179,7 @@ impl Committee {
     /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
     /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
     /// function.
-    pub fn verify_signature<T: Serialize>(
+    pub fn verify_signature<T: Serialize + 'static>(
         &self,
         signed_message: &SignedMessage<T>,
     ) -> Result<(), SignatureError> {
@@ -194,7 +200,7 @@ impl Committee {
     }
 
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
-    pub fn verify_signature_and_weight<T: Serialize>(
+    pub fn verify_signature_and_weight<T: Serialize + 'static>(
         &self,
         signed_message: &SignedMessage<T>,
         required_weight: u64,
@@ -358,7 +364,7 @@ impl<T> SignedMessage<T> {
     }
 }
 
-impl<T: Serialize> SignedMessage<T> {
+impl<T: Serialize + 'static> SignedMessage<T> {
     pub fn try_from_parts(
         epoch: u64,
         message: T,
@@ -393,7 +399,7 @@ pub struct BlsSignatureAggregator<'a, T> {
     message: T,
 }
 
-impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
+impl<'a, T: Serialize + Clone + 'static> BlsSignatureAggregator<'a, T> {
     pub fn new(committee: &'a Committee, message: T) -> Self {
         Self {
             bitmap: BitMap::new(),
@@ -509,10 +515,11 @@ impl BitMap {
     }
 
     /// Set the given index in the bitmap and return the previous value.
+    /// Uses LSB-first ordering to match Move's bitmap implementation.
     fn insert(&mut self, b: usize) -> Result<bool, SignatureError> {
         let byte_index = b / 8;
         let bit_index = b % 8;
-        let bit_mask = 1 << (7 - bit_index);
+        let bit_mask = 1 << bit_index;
 
         if byte_index >= self.bitmap.len() {
             self.bitmap.resize(byte_index + 1, 0);
@@ -528,7 +535,7 @@ impl BitMap {
             .enumerate()
             .flat_map(|(byte_index, byte)| {
                 (0..8).filter_map(move |bit_index| {
-                    let bit = byte & (1 << (7 - bit_index)) != 0;
+                    let bit = byte & (1 << bit_index) != 0;
                     bit.then(|| byte_index * 8 + bit_index)
                 })
             })
@@ -538,13 +545,21 @@ impl BitMap {
     fn contains(&self, b: usize) -> bool {
         let byte_index = b / 8;
         let bit_index = b % 8;
-        let bit_mask = 1 << (7 - bit_index);
+        let bit_mask = 1 << bit_index;
         byte_index < self.bitmap.len() && (self.bitmap[byte_index] & bit_mask != 0)
     }
 }
 
-fn signing_message<T: Serialize>(epoch: u64, message: &T) -> Vec<u8> {
-    bcs::to_bytes(&(epoch, message)).unwrap()
+fn signing_message<T: Serialize + 'static>(epoch: u64, message: &T) -> Vec<u8> {
+    // For `MpcMessageV1`, use the inner type's bytes to match Move's verification.
+    // Move expects the inner struct without the enum discriminant byte.
+    if let Some(mpc_msg) = (message as &dyn std::any::Any).downcast_ref::<MpcMessageV1>() {
+        let mut bytes = bcs::to_bytes(&epoch).unwrap();
+        bytes.extend(mpc_msg.inner_signing_bytes());
+        bytes
+    } else {
+        bcs::to_bytes(&(epoch, message)).unwrap()
+    }
 }
 
 #[cfg(test)]
