@@ -1,28 +1,17 @@
 //! MPC (Multi-Party Computation) Service
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 use tokio::sync::watch;
 use tracing::debug;
 use tracing::error;
-use tracing::info;
-use tracing::warn;
 
 use crate::Hashi;
-use crate::committee::BlsSignatureAggregator;
-use crate::communication::OrderedBroadcastChannel;
-use crate::communication::P2PChannel;
 use crate::communication::SuiTobChannel;
-use crate::communication::with_timeout_and_retry;
-use crate::dkg::DealerPhaseData;
 use crate::dkg::DkgManager;
 use crate::dkg::DkgOutput;
 use crate::dkg::rpc::RpcP2PChannel;
-use crate::dkg::types::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 
 #[derive(Clone)]
@@ -115,114 +104,11 @@ impl MpcService {
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(onchain_state, epoch, signer, committee);
-        let threshold = {
-            let mgr = self.dkg_manager.lock().unwrap();
-            mgr.threshold()
-        };
-        if tob_channel.existing_certificate_weight() < threshold as u32 {
-            debug!(%validator_address, "Running dealer phase");
-            if let Err(e) = self.run_as_dealer(&p2p_channel, &mut tob_channel).await {
-                warn!(%validator_address, %e, "Dealer phase failed");
-            }
-        } else {
-            debug!(%validator_address, "Skipping dealer phase - enough certificates already exist");
-        }
-        debug!(%validator_address, "Running party phase");
-        let output = self.run_as_party(&mut tob_channel).await?;
+        debug!(%validator_address, "Running DKG");
+        let output = DkgManager::run(&self.dkg_manager, &p2p_channel, &mut tob_channel)
+            .await
+            .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
         debug!(%validator_address, "DKG completed");
-        Ok(output)
-    }
-
-    // TODO: Migrate non-happy path features from DkgManager::run_as_dealer().
-    async fn run_as_dealer(
-        &self,
-        p2p_channel: &RpcP2PChannel,
-        tob_channel: &mut SuiTobChannel,
-    ) -> anyhow::Result<()> {
-        let mut rng = StdRng::from_entropy();
-        let dealer_data: DealerPhaseData = {
-            let mut mgr = self.dkg_manager.lock().unwrap();
-            mgr.prepare_dealer_phase(&mut rng)?
-        };
-        let mut aggregator =
-            BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.mpc_message);
-        aggregator
-            .add_signature_from_bytes(
-                dealer_data.my_address,
-                dealer_data.my_signature,
-                &dealer_data.inner_bytes,
-            )
-            .expect("first signature should always be valid");
-        debug!(
-            recipients = dealer_data.recipients.len(),
-            "Sending to recipients"
-        );
-        for recipient in &dealer_data.recipients {
-            match p2p_channel
-                .send_dkg_message(recipient, &dealer_data.request)
-                .await
-            {
-                Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from_bytes(
-                        *recipient,
-                        response.signature,
-                        &dealer_data.inner_bytes,
-                    ) {
-                        info!(%recipient, %e, "Invalid signature");
-                    }
-                }
-                Err(e) => info!(%recipient, %e, "Failed to send message"),
-            }
-        }
-        debug!(
-            weight = aggregator.weight(),
-            required = dealer_data.required_weight,
-            "Checking signature weight"
-        );
-        if aggregator.weight() >= dealer_data.required_weight as u64 {
-            let cert = aggregator
-                .finish_unchecked()
-                .expect("signatures should always be valid");
-            debug!("Publishing certificate");
-            with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to publish certificate: {e}"))?;
-        }
-        Ok(())
-    }
-
-    // TODO: Migrate non-happy path features from DkgManager::run_as_party().
-    async fn run_as_party(&self, tob_channel: &mut SuiTobChannel) -> anyhow::Result<DkgOutput> {
-        let threshold = {
-            let mgr = self.dkg_manager.lock().unwrap();
-            mgr.threshold()
-        };
-        let mut certified_dealers = HashSet::new();
-        let mut dealer_weight_sum = 0u32;
-        loop {
-            if dealer_weight_sum >= threshold as u32 {
-                break;
-            }
-            let cert: Certificate = tob_channel
-                .receive()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to receive certificate: {e}"))?;
-            let weight_opt = {
-                let mut mgr = self.dkg_manager.lock().unwrap();
-                mgr.process_party_certificate(&cert, &mut certified_dealers)?
-            };
-            if let Some(weight) = weight_opt {
-                dealer_weight_sum += weight as u32;
-                info!(
-                    weight_sum = dealer_weight_sum,
-                    threshold, "Processed certificate"
-                );
-            }
-        }
-        let output = {
-            let mgr = self.dkg_manager.lock().unwrap();
-            mgr.finalize_dkg()?
-        };
         Ok(output)
     }
 }
