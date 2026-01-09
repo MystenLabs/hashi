@@ -259,6 +259,18 @@ pub struct CommitteeSignature {
 }
 
 impl CommitteeSignature {
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.as_bytes()
+    }
+
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signers_bitmap.as_bytes()
+    }
+
     /// Verify that the committee could be used to verify this certificate, e.g., that the epoch and
     /// the number of signers match.
     fn verify_committee(&self, committee: &Committee) -> Result<(), SignatureError> {
@@ -314,6 +326,22 @@ pub struct SignedMessage<T> {
 }
 
 impl<T> SignedMessage<T> {
+    pub fn epoch(&self) -> u64 {
+        self.signature.epoch()
+    }
+
+    pub fn message(&self) -> &T {
+        &self.message
+    }
+
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.signature_bytes()
+    }
+
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        self.signature.signers_bitmap_bytes()
+    }
+
     /// The committee members included in this signature.
     pub fn signers(&self, committee: &Committee) -> Result<Vec<Address>, SignatureError> {
         self.signature.signers(committee)
@@ -331,6 +359,37 @@ impl<T> SignedMessage<T> {
         committee: &Committee,
     ) -> Result<bool, SignatureError> {
         self.signature.is_signer(address, committee)
+    }
+
+    /// Get a reference to the committee signature.
+    pub(crate) fn committee_signature(&self) -> &CommitteeSignature {
+        &self.signature
+    }
+}
+
+impl<T: Serialize> SignedMessage<T> {
+    pub fn try_from_parts(
+        epoch: u64,
+        message: T,
+        signature_bytes: &[u8],
+        signers_bitmap_bytes: &[u8],
+        committee: &Committee,
+        threshold: u64,
+    ) -> Result<Self, SignatureError> {
+        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
+            .map_err(SignatureError::from_source)?;
+        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
+        let committee_signature = CommitteeSignature {
+            epoch,
+            signature,
+            signers_bitmap,
+        };
+        let signed_message = SignedMessage {
+            signature: committee_signature,
+            message,
+        };
+        committee.verify_signature_and_weight(&signed_message, threshold)?;
+        Ok(signed_message)
     }
 }
 
@@ -446,6 +505,16 @@ pub(crate) struct BitMap {
 impl BitMap {
     fn new() -> Self {
         Self { bitmap: Vec::new() }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bitmap
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            bitmap: bytes.to_vec(),
+        }
     }
 
     /// Set the given index in the bitmap and return the previous value.
@@ -695,5 +764,94 @@ mod test {
                 .is_signer(&addresses[0], &wrong_committee)
                 .is_err()
         );
+    }
+
+    #[proptest]
+    fn test_from_parts(private_keys: [Bls12381PrivateKey; 4], message: Vec<u8>) {
+        // Skip cases where we have the same keys
+        {
+            let mut pks: Vec<BLS12381PublicKey> =
+                private_keys.iter().map(|key| key.public_key()).collect();
+            pks.sort();
+            pks.dedup();
+            if pks.len() != 4 {
+                return Ok(());
+            }
+        }
+
+        let epoch = 7;
+        let threshold = 3u64;
+
+        let addresses = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Address::new([i as u8; 32]))
+            .collect::<Vec<_>>();
+
+        let mut rng = rand::thread_rng();
+        let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
+            .iter()
+            .enumerate()
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
+        let members = private_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| CommitteeMember {
+                address: addresses[i],
+                public_key: key.public_key(),
+                encryption_public_key: encryption_public_keys[i].clone(),
+                weight: 1,
+            })
+            .collect();
+        let committee = Committee::new(members, epoch);
+
+        // Create a certificate via aggregator
+        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        aggregator
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .unwrap();
+        aggregator
+            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .unwrap();
+
+        let original_cert = aggregator.finish().unwrap();
+
+        // Extract parts
+        let signature_bytes = original_cert.signature_bytes();
+        let bitmap_bytes = original_cert.signers_bitmap_bytes();
+
+        // Reconstruct from parts
+        let reconstructed = SignedMessage::try_from_parts(
+            epoch,
+            message.clone(),
+            signature_bytes,
+            bitmap_bytes,
+            &committee,
+            threshold,
+        )
+        .unwrap();
+
+        // Verify reconstructed certificate matches original
+        assert_eq!(reconstructed.epoch(), original_cert.epoch());
+        assert_eq!(
+            reconstructed.signature_bytes(),
+            original_cert.signature_bytes()
+        );
+        assert_eq!(
+            reconstructed.signers_bitmap_bytes(),
+            original_cert.signers_bitmap_bytes()
+        );
+        assert_eq!(reconstructed.weight(&committee).unwrap(), 3);
+
+        // Verify signers match
+        assert!(reconstructed.is_signer(&addresses[0], &committee).unwrap());
+        assert!(reconstructed.is_signer(&addresses[1], &committee).unwrap());
+        assert!(reconstructed.is_signer(&addresses[2], &committee).unwrap());
+        assert!(!reconstructed.is_signer(&addresses[3], &committee).unwrap());
     }
 }

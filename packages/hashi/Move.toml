@@ -5,6 +5,4 @@ edition = "2024.beta"
 # authors = ["..."]      # e.g., ["Joe Smith (joesmith@noemail.com)", "John Snow (johnsnow@noemail.com)"]
 
 [dependencies]
-
-[addresses]
-hashi = "0x0"
+sui_system = { system = "sui_system" }

@@ -34,6 +34,12 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to get dealer message: {e}"))
     }
 
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+        self.db
+            .list_all_dealer_messages(self.epoch)
+            .map_err(|e| anyhow::anyhow!("failed to list dealer messages: {e}"))
+    }
+
     fn clear(&mut self) -> anyhow::Result<()> {
         self.db
             .clear_dealer_messages(self.epoch)

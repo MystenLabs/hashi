@@ -178,3 +178,282 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplainResponse {
         Ok(Self { response })
     }
 }
+
+//
+// SendRotationMessagesRequest
+//
+
+impl types::SendRotationMessagesRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::SendRotationMessagesRequest {
+        proto::SendRotationMessagesRequest {
+            epoch: Some(epoch),
+            messages: self
+                .messages
+                .iter()
+                .map(|(idx, msg)| (idx.get() as u32, serialize_bcs(msg)))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::SendRotationMessagesRequest> for types::SendRotationMessagesRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::SendRotationMessagesRequest) -> Result<Self, Self::Error> {
+        use fastcrypto_tbls::types::ShareIndex;
+        use std::collections::BTreeMap;
+
+        let mut messages = BTreeMap::new();
+        for (&index, bcs) in &value.messages {
+            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
+                TryFromProtoError::invalid("messages.key", "index must be non-zero")
+            })?;
+            let message: avss::Message = deserialize_bcs(bcs, "messages.value")?;
+            messages.insert(share_index, message);
+        }
+        Ok(Self {
+            messages: types::RotationMessages::new(messages),
+        })
+    }
+}
+
+//
+// SendRotationMessagesResponse
+//
+
+impl From<&types::SendRotationMessagesResponse> for proto::SendRotationMessagesResponse {
+    fn from(value: &types::SendRotationMessagesResponse) -> Self {
+        Self {
+            signature: Some(value.signature.as_ref().to_vec().into()),
+        }
+    }
+}
+
+impl TryFrom<&proto::SendRotationMessagesResponse> for types::SendRotationMessagesResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::SendRotationMessagesResponse) -> Result<Self, Self::Error> {
+        let signature =
+            BLS12381Signature::from_bytes(required(value.signature.as_ref(), "signature")?)
+                .map_err(|e| TryFromProtoError::invalid("signature", e))?;
+        Ok(Self { signature })
+    }
+}
+
+//
+// RetrieveRotationMessagesRequest
+//
+
+impl types::RetrieveRotationMessagesRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::RetrieveRotationMessagesRequest {
+        proto::RetrieveRotationMessagesRequest {
+            epoch: Some(epoch),
+            dealer: Some(self.dealer.to_string()),
+        }
+    }
+}
+
+impl TryFrom<&proto::RetrieveRotationMessagesRequest> for types::RetrieveRotationMessagesRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RetrieveRotationMessagesRequest) -> Result<Self, Self::Error> {
+        let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
+        Ok(Self { dealer })
+    }
+}
+
+//
+// RetrieveRotationMessagesResponse
+//
+
+impl From<&types::RetrieveRotationMessagesResponse> for proto::RetrieveRotationMessagesResponse {
+    fn from(value: &types::RetrieveRotationMessagesResponse) -> Self {
+        Self {
+            messages: value
+                .messages
+                .iter()
+                .map(|(idx, msg)| (idx.get() as u32, serialize_bcs(msg)))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::RetrieveRotationMessagesResponse> for types::RetrieveRotationMessagesResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RetrieveRotationMessagesResponse) -> Result<Self, Self::Error> {
+        use fastcrypto_tbls::types::ShareIndex;
+        use std::collections::BTreeMap;
+
+        let mut messages = BTreeMap::new();
+        for (&index, bcs) in &value.messages {
+            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
+                TryFromProtoError::invalid("messages.key", "index must be non-zero")
+            })?;
+            let message: avss::Message = deserialize_bcs(bcs, "messages.value")?;
+            messages.insert(share_index, message);
+        }
+        Ok(Self {
+            messages: types::RotationMessages::new(messages),
+        })
+    }
+}
+
+//
+// GetPublicDkgOutputRequest
+//
+
+impl types::GetPublicDkgOutputRequest {
+    pub fn to_proto(&self) -> proto::GetPublicDkgOutputRequest {
+        proto::GetPublicDkgOutputRequest {
+            epoch: Some(self.epoch),
+        }
+    }
+}
+
+//
+// RotationComplainRequest
+//
+
+impl types::RotationComplainRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::RotationComplainRequest {
+        proto::RotationComplainRequest {
+            epoch: Some(epoch),
+            dealer: Some(self.dealer.to_string()),
+            share_index: Some(self.share_index.get() as u32),
+            complaint: Some(serialize_bcs(&self.complaint)),
+        }
+    }
+}
+
+impl TryFrom<&proto::GetPublicDkgOutputRequest> for types::GetPublicDkgOutputRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::GetPublicDkgOutputRequest) -> Result<Self, Self::Error> {
+        let epoch = required(value.epoch, "epoch")?;
+        Ok(Self { epoch })
+    }
+}
+
+//
+// GetPublicDkgOutputResponse
+//
+
+impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputResponse {
+    fn from(value: &types::GetPublicDkgOutputResponse) -> Self {
+        Self {
+            public_key: Some(serialize_bcs(&value.output.public_key)),
+            commitments: value
+                .output
+                .commitments
+                .iter()
+                .map(|(&index, value)| (index.get() as u32, serialize_bcs(value)))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::GetPublicDkgOutputResponse) -> Result<Self, Self::Error> {
+        use fastcrypto_tbls::threshold_schnorr::G;
+        use fastcrypto_tbls::types::ShareIndex;
+        use std::collections::BTreeMap;
+
+        let public_key = deserialize_bcs(
+            required(value.public_key.as_ref(), "public_key")?,
+            "public_key",
+        )?;
+        let mut commitments = BTreeMap::new();
+        for (&index, bcs) in &value.commitments {
+            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
+                TryFromProtoError::invalid("commitments.key", "index must be non-zero")
+            })?;
+            let commitment_value: G = deserialize_bcs(bcs, "commitments.value")?;
+            commitments.insert(share_index, commitment_value);
+        }
+        Ok(Self {
+            output: types::PublicDkgOutput {
+                public_key,
+                commitments,
+            },
+        })
+    }
+}
+
+impl TryFrom<&proto::RotationComplainRequest> for types::RotationComplainRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RotationComplainRequest) -> Result<Self, Self::Error> {
+        let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
+        let share_index = required(value.share_index, "share_index")?;
+        let share_index = std::num::NonZeroU16::new(share_index as u16)
+            .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))?;
+        let complaint: complaint::Complaint = deserialize_bcs(
+            required(value.complaint.as_ref(), "complaint")?,
+            "complaint",
+        )?;
+        Ok(Self {
+            dealer,
+            share_index,
+            complaint,
+        })
+    }
+}
+
+//
+// RotationShareComplaintResponse
+//
+
+impl From<&types::RotationShareComplaintResponse> for proto::RotationShareComplaintResponse {
+    fn from(value: &types::RotationShareComplaintResponse) -> Self {
+        Self {
+            share_index: Some(value.share_index.get() as u32),
+            response: Some(serialize_bcs(&value.response)),
+        }
+    }
+}
+
+impl TryFrom<&proto::RotationShareComplaintResponse> for types::RotationShareComplaintResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RotationShareComplaintResponse) -> Result<Self, Self::Error> {
+        let share_index = required(value.share_index, "share_index")?;
+        let share_index = std::num::NonZeroU16::new(share_index as u16)
+            .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))?;
+        let response: complaint::ComplaintResponse<avss::SharesForNode> =
+            deserialize_bcs(required(value.response.as_ref(), "response")?, "response")?;
+        Ok(Self {
+            share_index,
+            response,
+        })
+    }
+}
+
+//
+// RotationComplainResponse
+//
+
+impl From<&types::RotationComplainResponse> for proto::RotationComplainResponse {
+    fn from(value: &types::RotationComplainResponse) -> Self {
+        Self {
+            responses: value.responses.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<&proto::RotationComplainResponse> for types::RotationComplainResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::RotationComplainResponse) -> Result<Self, Self::Error> {
+        let responses: Result<Vec<_>, _> = value
+            .responses
+            .iter()
+            .map(types::RotationShareComplaintResponse::try_from)
+            .collect();
+        Ok(Self {
+            responses: responses?,
+        })
+    }
+}

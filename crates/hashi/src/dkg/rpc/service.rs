@@ -8,6 +8,8 @@ use crate::proto::RetrieveMessageRequest;
 use crate::proto::RetrieveMessageResponse;
 use crate::proto::RetrieveRotationMessagesRequest;
 use crate::proto::RetrieveRotationMessagesResponse;
+use crate::proto::RotationComplainRequest;
+use crate::proto::RotationComplainResponse;
 use crate::proto::SendMessageRequest;
 use crate::proto::SendMessageResponse;
 use crate::proto::SendRotationMessagesRequest;
@@ -95,13 +97,31 @@ impl KeyRotationService for HttpService {
         ))
     }
 
-    #[tracing::instrument(skip(self, _request))]
+    #[tracing::instrument(skip(self, request))]
     async fn get_public_dkg_output(
         &self,
-        _request: tonic::Request<GetPublicDkgOutputRequest>,
+        request: tonic::Request<GetPublicDkgOutputRequest>,
     ) -> Result<tonic::Response<GetPublicDkgOutputResponse>, Status> {
+        authenticate_caller(&request)?;
+        let external_request = request.into_inner();
+        let internal_request = types::GetPublicDkgOutputRequest::try_from(&external_request)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let dkg_manager = self.dkg_manager().lock().unwrap();
+        let response = dkg_manager
+            .handle_get_public_dkg_output_request(&internal_request)
+            .map_err(dkg_error_to_status)?;
+        Ok(tonic::Response::new(GetPublicDkgOutputResponse::from(
+            &response,
+        )))
+    }
+
+    #[tracing::instrument(skip(self, _request))]
+    async fn rotation_complain(
+        &self,
+        _request: tonic::Request<RotationComplainRequest>,
+    ) -> Result<tonic::Response<RotationComplainResponse>, Status> {
         Err(Status::unimplemented(
-            "get_public_dkg_output not yet implemented",
+            "rotation_complain not yet implemented",
         ))
     }
 }
@@ -132,9 +152,10 @@ fn dkg_error_to_status(err: types::DkgError) -> Status {
             Status::invalid_argument(err.to_string())
         }
         Timeout { .. } => Status::deadline_exceeded(err.to_string()),
-        NotEnoughParticipants { .. } | NotEnoughApprovals { .. } => {
+        NotEnoughParticipants { .. } | NotEnoughApprovals { .. } | InvalidConfig(_) => {
             Status::failed_precondition(err.to_string())
         }
+        NotFound(_) => Status::not_found(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
 }

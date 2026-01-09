@@ -32,12 +32,18 @@ use crate::dkg::fallback_encryption_public_key;
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
 mod events;
-mod move_types;
+pub(crate) mod move_types;
 pub mod types;
 mod watcher;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OnchainState(Arc<Inner>);
+
+impl std::fmt::Debug for OnchainState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnchainState").finish_non_exhaustive()
+    }
+}
 
 //TODO should we just send a HashiEvent here?
 #[derive(Clone, Debug)]
@@ -45,10 +51,10 @@ pub enum Notification {
     ValidatorInfoUpdated(Address),
 }
 
-#[derive(Debug)]
 struct Inner {
     #[allow(unused)]
     ids: HashiIds,
+    client: Client,
     sender: broadcast::Sender<Notification>,
     /// The checkpoint height that this state is recent to
     checkpoint: watch::Sender<u64>,
@@ -79,6 +85,7 @@ impl OnchainState {
         let (checkpoint, _) = watch::channel(checkpoint);
         let state = Inner {
             ids,
+            client: client.clone(),
             sender,
             checkpoint,
             state: RwLock::new(state),
@@ -126,6 +133,112 @@ impl OnchainState {
         //TODO should we assert that this version is exactly the next one?
         state.package_versions.insert(version, package_id);
         state.package_ids.insert(package_id);
+    }
+
+    pub fn client(&self) -> Client {
+        self.0.client.clone()
+    }
+
+    /// Returns the latest package id (highest version).
+    pub fn package_id(&self) -> Option<Address> {
+        self.state()
+            .package_versions
+            .last_key_value()
+            .map(|(_, id)| *id)
+    }
+
+    pub fn hashi_id(&self) -> Address {
+        self.state().hashi.id
+    }
+
+    pub fn tob_id(&self) -> Address {
+        self.state().hashi.tob_id
+    }
+
+    /// Fetches the EpochCertsV1 for the given epoch from on-chain.
+    /// Returns None if no certs exist for this epoch.
+    // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
+    pub async fn fetch_epoch_certs(&self, epoch: u64) -> Result<Option<move_types::EpochCertsV1>> {
+        let tob_id = self.tob_id();
+        let epoch_key_bcs = bcs::to_bytes(&epoch)?;
+        let mut stream = self
+            .0
+            .client
+            .clone()
+            .list_dynamic_fields(
+                ListDynamicFieldsRequest::default()
+                    .with_parent(tob_id)
+                    .with_page_size(u32::MAX)
+                    .with_read_mask(FieldMask::from_paths([
+                        DynamicField::path_builder().name().finish(),
+                        DynamicField::path_builder().value().finish(),
+                    ])),
+            )
+            .pipe(Box::pin);
+        while let Some(field) = stream.try_next().await? {
+            if field.name().value() == epoch_key_bcs.as_slice() {
+                let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
+                return Ok(Some(epoch_certs));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Fetches all DKG certificates for the given epoch from on-chain.
+    /// Returns raw move types; caller is responsible for conversion.
+    pub async fn fetch_dkg_certs(
+        &self,
+        epoch: u64,
+    ) -> Result<
+        Vec<(
+            Address,
+            move_types::CertifiedMessage<move_types::DkgDealerMessageHashV1>,
+        )>,
+    > {
+        let epoch_certs = match self.fetch_epoch_certs(epoch).await? {
+            Some(certs) => certs,
+            None => return Ok(vec![]),
+        };
+        let Some(head) = epoch_certs.dkg_certs.head else {
+            return Ok(vec![]);
+        };
+        let mut nodes: std::collections::HashMap<
+            Address,
+            move_types::LinkedTableNode<
+                Address,
+                move_types::CertifiedMessage<move_types::DkgDealerMessageHashV1>,
+            >,
+        > = std::collections::HashMap::new();
+        let mut stream = self
+            .0
+            .client
+            .clone()
+            .list_dynamic_fields(
+                ListDynamicFieldsRequest::default()
+                    .with_parent(epoch_certs.dkg_certs.id)
+                    .with_page_size(u32::MAX)
+                    .with_read_mask(FieldMask::from_paths([
+                        DynamicField::path_builder().name().finish(),
+                        DynamicField::path_builder().value().finish(),
+                    ])),
+            )
+            .pipe(Box::pin);
+        while let Some(field) = stream.try_next().await? {
+            let dealer: Address = field.name().deserialize()?;
+            let node = field.value().deserialize()?;
+            nodes.insert(dealer, node);
+        }
+        // Traverse in insertion order following LinkedTable's linked list
+        let mut certificates = Vec::with_capacity(nodes.len());
+        let mut current = Some(head);
+        while let Some(dealer) = current {
+            let Some(node) = nodes.remove(&dealer) else {
+                break;
+            };
+            certificates.push((dealer, node.value));
+            current = node.next;
+        }
+        Ok(certificates)
     }
 }
 
@@ -197,6 +310,9 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         .checkpoint_height()
         .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
 
+    // Extract initial shared version from owner
+    let initial_shared_version = response.get_ref().object().owner().version();
+
     let move_types::Hashi {
         id,
         committees,
@@ -227,6 +343,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         checkpoint,
         types::Hashi {
             id,
+            initial_shared_version,
             committees: committee_set,
             config: convert_move_config(config),
             treasury,

@@ -12,7 +12,7 @@ bcs = "0.1.6"
 
 hashi = { path = "../hashi" }
 prost = "0.14"
-sui-sdk-types = { version = "0.1" }
+sui-sdk-types = { version = "0.2"}
 
 # Crypto dependencies
 # Note: bitcoin v0.32.7 and k256 v0.13 both require rand_core 0.6.4
@@ -26,8 +26,5 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 blake2 = "0.10"
 ed25519-consensus = "2.1"
 miniscript = "13.0.0"
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "f2deafa" }
-
-# [features]
-# test-utils = []
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }

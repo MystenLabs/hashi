@@ -2,16 +2,19 @@
 
 use crate::dkg::ComplainRequest;
 use crate::dkg::ComplainResponse;
+use crate::dkg::GetPublicDkgOutputRequest;
+use crate::dkg::GetPublicDkgOutputResponse;
 use crate::dkg::RetrieveMessageRequest;
 use crate::dkg::RetrieveMessageResponse;
 use crate::dkg::RetrieveRotationMessagesRequest;
 use crate::dkg::RetrieveRotationMessagesResponse;
+use crate::dkg::RotationComplainRequest;
+use crate::dkg::RotationComplainResponse;
 use crate::dkg::SendMessageRequest;
 use crate::dkg::SendMessageResponse;
 use crate::dkg::SendRotationMessagesRequest;
 use crate::dkg::SendRotationMessagesResponse;
 use async_trait::async_trait;
-use std::time::Duration;
 use sui_sdk_types::Address;
 use thiserror::Error;
 
@@ -23,6 +26,9 @@ pub type ChannelResult<T> = Result<T, ChannelError>;
 pub enum ChannelError {
     #[error("Request failed: {0}")]
     RequestFailed(String),
+
+    #[error("Client not found for address {0}")]
+    ClientNotFound(Address),
 
     #[error("Receive timeout")]
     Timeout,
@@ -55,6 +61,12 @@ pub trait P2PChannel: Send + Sync {
         request: &ComplainRequest,
     ) -> ChannelResult<ComplainResponse>;
 
+    async fn rotation_complain(
+        &self,
+        party: &Address,
+        request: &RotationComplainRequest,
+    ) -> ChannelResult<RotationComplainResponse>;
+
     async fn send_rotation_messages(
         &self,
         recipient: &Address,
@@ -66,6 +78,12 @@ pub trait P2PChannel: Send + Sync {
         party: &Address,
         request: &RetrieveRotationMessagesRequest,
     ) -> ChannelResult<RetrieveRotationMessagesResponse>;
+
+    async fn get_public_dkg_output(
+        &self,
+        party: &Address,
+        request: &GetPublicDkgOutputRequest,
+    ) -> ChannelResult<GetPublicDkgOutputResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages
@@ -82,12 +100,6 @@ where
 
     /// Receive the next message in the total order
     async fn receive(&mut self) -> ChannelResult<M>;
-
-    async fn try_receive_timeout(&mut self, timeout: Duration) -> ChannelResult<Option<M>>;
-
-    fn pending_messages(&self) -> Option<usize> {
-        None
-    }
 
     /// The total weight of certificates already available on the channel
     fn existing_certificate_weight(&self) -> u32 {

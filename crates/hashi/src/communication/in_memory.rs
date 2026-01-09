@@ -5,33 +5,16 @@ use crate::communication::interfaces::OrderedBroadcastChannel;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 
 const RECEIVE_POLL_INTERVAL_MS: u64 = 10;
 const INITIAL_READ_POSITION: usize = 0;
 
 // TODO: Replacing in-memory implementation with RPC-based loopback testing
 type MessageQueue<M> = Arc<Mutex<VecDeque<M>>>;
-
-async fn try_receive_with_timeout<T, F, Fut>(
-    duration: Duration,
-    receive_fn: F,
-) -> ChannelResult<Option<T>>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = ChannelResult<T>>,
-{
-    match timeout(duration, receive_fn()).await {
-        Ok(Ok(msg)) => Ok(Some(msg)),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Ok(None),
-    }
-}
 
 /// In-memory ordered broadcast channel for testing
 ///
@@ -94,21 +77,16 @@ where
             tokio::time::sleep(Duration::from_millis(RECEIVE_POLL_INTERVAL_MS)).await;
         }
     }
+}
 
-    async fn try_receive_timeout(&mut self, duration: Duration) -> ChannelResult<Option<M>> {
-        try_receive_with_timeout(duration, || self.receive()).await
-    }
-
-    fn pending_messages(&self) -> Option<usize> {
+impl<M> InMemoryOrderedBroadcastChannel<M>
+where
+    M: Clone + Send + Sync + 'static,
+{
+    pub fn pending_messages(&self) -> Option<usize> {
         let queue = self.shared_queue.try_lock().ok()?;
         let pos = self.read_position.try_lock().ok()?;
         Some(queue.len().saturating_sub(*pos))
-    }
-
-    fn existing_certificate_weight(&self) -> u32 {
-        // Approximate: use pending message count as total weight.
-        // For accurate weight calculation, implementation would need committee info.
-        self.pending_messages().unwrap_or(0) as u32
     }
 }
 
