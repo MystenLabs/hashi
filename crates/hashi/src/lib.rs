@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
@@ -30,6 +31,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
+    dkg_manager: OnceLock<Arc<Mutex<dkg::DkgManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
@@ -45,6 +47,7 @@ impl Hashi {
             metrics,
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
+            dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
         })
@@ -63,6 +66,7 @@ impl Hashi {
             metrics: Arc::new(metrics::Metrics::new(registry)),
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
+            dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
         })
@@ -78,6 +82,10 @@ impl Hashi {
     // initialized or not
     pub fn onchain_state_opt(&self) -> Option<&onchain::OnchainState> {
         self.onchain_state.get()
+    }
+
+    pub fn dkg_manager(&self) -> &Arc<Mutex<dkg::DkgManager>> {
+        self.dkg_manager.get().expect("DkgManager not initialized")
     }
 
     pub fn mpc_handle(&self) -> &mpc::MpcHandle {
@@ -164,12 +172,15 @@ impl Hashi {
             self.initialize_onchain_state().await;
 
             let dkg_manager = match self.create_dkg_manager() {
-                Ok(m) => m,
+                Ok(m) => Arc::new(Mutex::new(m)),
                 Err(e) => {
                     tracing::error!("Failed to create DkgManager: {e}");
                     return;
                 }
             };
+            if self.dkg_manager.set(dkg_manager.clone()).is_err() {
+                panic!("DkgManager already set");
+            }
             let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone(), dkg_manager);
             self.mpc_handle
                 .set(mpc_handle)

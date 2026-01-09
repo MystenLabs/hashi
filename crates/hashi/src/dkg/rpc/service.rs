@@ -1,4 +1,5 @@
 use crate::dkg::types;
+use crate::dkg::types::DkgError;
 use crate::grpc::HttpService;
 use crate::proto::ComplainRequest;
 use crate::proto::ComplainResponse;
@@ -28,14 +29,14 @@ impl DkgService for HttpService {
     ) -> Result<tonic::Response<SendMessageResponse>, Status> {
         let sender = authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let epoch = extract_epoch(external_request.epoch)?;
         let internal_request = types::SendMessageRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = self
-            .mpc_handle()
-            .send_message(sender, epoch, internal_request)
-            .await
-            .map_err(dkg_error_to_status)?;
+        let response = {
+            let mut mgr = self.dkg_manager().lock().unwrap();
+            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
+            mgr.handle_send_message_request(sender, &internal_request)
+                .map_err(dkg_error_to_status)?
+        };
         Ok(tonic::Response::new(SendMessageResponse::from(&response)))
     }
 
@@ -46,14 +47,14 @@ impl DkgService for HttpService {
     ) -> Result<tonic::Response<RetrieveMessageResponse>, Status> {
         authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let epoch = extract_epoch(external_request.epoch)?;
         let internal_request = types::RetrieveMessageRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = self
-            .mpc_handle()
-            .retrieve_message(epoch, internal_request)
-            .await
-            .map_err(dkg_error_to_status)?;
+        let response = {
+            let mgr = self.dkg_manager().lock().unwrap();
+            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
+            mgr.handle_retrieve_message_request(&internal_request)
+                .map_err(dkg_error_to_status)?
+        };
         Ok(tonic::Response::new(RetrieveMessageResponse::from(
             &response,
         )))
@@ -66,14 +67,14 @@ impl DkgService for HttpService {
     ) -> Result<tonic::Response<ComplainResponse>, Status> {
         authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let epoch = extract_epoch(external_request.epoch)?;
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = self
-            .mpc_handle()
-            .complain(epoch, internal_request)
-            .await
-            .map_err(dkg_error_to_status)?;
+        let response = {
+            let mut mgr = self.dkg_manager().lock().unwrap();
+            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
+            mgr.handle_complain_request(&internal_request)
+                .map_err(dkg_error_to_status)?
+        };
         Ok(tonic::Response::new(ComplainResponse::from(&response)))
     }
 }
@@ -129,11 +130,18 @@ fn authenticate_caller<T>(request: &tonic::Request<T>) -> Result<Address, Status
         .ok_or_else(|| Status::permission_denied("unknown validator"))
 }
 
-fn extract_epoch(epoch: Option<u64>) -> Result<u64, Status> {
-    epoch.ok_or_else(|| Status::invalid_argument("epoch: missing required field"))
+fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Status> {
+    let epoch =
+        request_epoch.ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+    if epoch != expected {
+        return Err(Status::failed_precondition(format!(
+            "epoch mismatch: expected {expected}, got {epoch}"
+        )));
+    }
+    Ok(())
 }
 
-fn dkg_error_to_status(err: types::DkgError) -> Status {
+fn dkg_error_to_status(err: DkgError) -> Status {
     use types::DkgError::*;
     match &err {
         InvalidThreshold(_) | InvalidMessage { .. } | InvalidCertificate(_) => {
