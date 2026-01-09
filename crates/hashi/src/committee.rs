@@ -58,21 +58,6 @@ impl Bls12381PrivateKey {
         }
     }
 
-    pub fn sign_bytes(
-        &self,
-        epoch: u64,
-        address: Address,
-        message_bytes: &[u8],
-    ) -> MemberSignature {
-        let mut signing_bytes = bcs::to_bytes(&epoch).unwrap();
-        signing_bytes.extend_from_slice(message_bytes);
-        MemberSignature {
-            epoch,
-            address,
-            signature: self.0.sign(&signing_bytes),
-        }
-    }
-
     pub fn proof_of_possession(&self, epoch: u64, address: Address) -> MemberSignature {
         let public_key = self.public_key();
         self.sign(epoch, address, &(address, public_key))
@@ -189,26 +174,6 @@ impl Committee {
             .map_err(SignatureError::from_source)
     }
 
-    /// Verify a single signature using raw message bytes (epoch is prepended automatically).
-    fn verify_bytes(
-        &self,
-        message_bytes: &[u8],
-        signature: &MemberSignature,
-    ) -> Result<(), SignatureError> {
-        if self.epoch != signature.epoch {
-            return Err(SignatureError::from_source(format!(
-                "signature epoch {} does not match committee epoch {}",
-                signature.epoch, self.epoch,
-            )));
-        }
-        let mut signing_bytes = bcs::to_bytes(&signature.epoch).unwrap();
-        signing_bytes.extend_from_slice(message_bytes);
-        self.member(&signature.address)?
-            .public_key
-            .verify(&signing_bytes, &signature.signature)
-            .map_err(SignatureError::from_source)
-    }
-
     /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
     /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
     /// function.
@@ -246,43 +211,6 @@ impl Committee {
             )));
         }
         self.verify_signature(signed_message)
-    }
-
-    /// Verify a signature using raw message bytes (Move-compatible format: bcs(epoch) || message_bytes).
-    pub fn verify_signature_with_bytes<T>(
-        &self,
-        signed_message: &SignedMessage<T>,
-        message_bytes: &[u8],
-    ) -> Result<(), SignatureError> {
-        let pks = signed_message
-            .signature
-            .signers_bitmap
-            .iter()
-            .map(|index| self.members[index].public_key.clone())
-            .collect::<Vec<_>>();
-        let mut signing_bytes = bcs::to_bytes(&signed_message.signature.epoch).unwrap();
-        signing_bytes.extend_from_slice(message_bytes);
-        signed_message
-            .signature
-            .signature
-            .verify(&pks, &signing_bytes)
-            .map_err(SignatureError::from_source)
-    }
-
-    pub fn verify_signature_with_bytes_and_weight<T>(
-        &self,
-        signed_message: &SignedMessage<T>,
-        message_bytes: &[u8],
-        required_weight: u64,
-    ) -> Result<(), SignatureError> {
-        let signed_weight = signed_message.signature.weight(self)?;
-        if signed_weight < required_weight {
-            return Err(SignatureError::from_source(format!(
-                "insufficient signing weight {}; required weight threshold is {}",
-                signed_weight, required_weight,
-            )));
-        }
-        self.verify_signature_with_bytes(signed_message, message_bytes)
     }
 
     /// The number of members of this committee.
@@ -463,35 +391,6 @@ impl<T: Serialize> SignedMessage<T> {
         committee.verify_signature_and_weight(&signed_message, threshold)?;
         Ok(signed_message)
     }
-
-    pub fn try_from_parts_with_bytes(
-        epoch: u64,
-        message: T,
-        message_bytes: &[u8],
-        signature_bytes: &[u8],
-        signers_bitmap_bytes: &[u8],
-        committee: &Committee,
-        threshold: u64,
-    ) -> Result<Self, SignatureError> {
-        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
-            .map_err(SignatureError::from_source)?;
-        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
-        let committee_signature = CommitteeSignature {
-            epoch,
-            signature,
-            signers_bitmap,
-        };
-        let signed_message = SignedMessage {
-            signature: committee_signature,
-            message,
-        };
-        committee.verify_signature_with_bytes_and_weight(
-            &signed_message,
-            message_bytes,
-            threshold,
-        )?;
-        Ok(signed_message)
-    }
 }
 
 #[derive(Debug)]
@@ -567,47 +466,6 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
         self.add_signature(member_signature)
     }
 
-    /// Add a raw [BLS12381Signature] verifying against raw message bytes.
-    ///
-    /// Returns an error if:
-    ///  * a signature from the same member has already been added,
-    ///  * if the signer is not a member of the committee,
-    ///  * if the signature is not valid.
-    pub fn add_signature_from_bytes(
-        &mut self,
-        signer: Address,
-        signature: BLS12381Signature,
-        message_bytes: &[u8],
-    ) -> Result<(), SignatureError> {
-        let member_signature = MemberSignature {
-            epoch: self.committee.epoch,
-            address: signer,
-            signature,
-        };
-        // Verify using raw bytes (for Move compatibility)
-        self.committee
-            .verify_bytes(message_bytes, &member_signature)?;
-        let index = self
-            .committee
-            .address_to_index
-            .get(&signer)
-            .ok_or_else(|| SignatureError::from_source(format!("unknown address {signer}")))?;
-
-        if self.bitmap.insert(*index)? {
-            return Err(SignatureError::from_source(
-                "duplicate signature from same committee member",
-            ));
-        }
-        match self.aggregate_signature {
-            None => self.aggregate_signature = Some(member_signature.signature.into()),
-            Some(ref mut aggregate_signature) => aggregate_signature
-                .add_signature(member_signature.signature)
-                .map_err(SignatureError::from_source)?,
-        }
-        self.signed_weight += self.committee.members[*index].weight;
-        Ok(())
-    }
-
     /// The total weight of the signatures aggregated so far.
     pub fn weight(&self) -> u64 {
         self.signed_weight
@@ -633,29 +491,6 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
                 // Double check that the aggregated sig still verifies
                 self.committee.verify_signature(&signed_message)?;
 
-                Ok(signed_message)
-            }
-        }
-    }
-
-    /// Return the aggregated signature without re-verifying.
-    /// Use this when signatures were added via `add_signature_from_bytes` which
-    /// already verified each individual signature. The final aggregate signature
-    /// verification uses a different message format and would fail.
-    pub fn finish_unchecked(&self) -> Result<SignedMessage<T>, SignatureError> {
-        match &self.aggregate_signature {
-            None => Err(SignatureError::from_source(
-                "signature map must have at least one entry",
-            )),
-            Some(signature) => {
-                let signed_message = SignedMessage {
-                    signature: CommitteeSignature {
-                        epoch: self.committee.epoch,
-                        signature: signature.clone(),
-                        signers_bitmap: self.bitmap.clone(),
-                    },
-                    message: self.message.clone(),
-                };
                 Ok(signed_message)
             }
         }

@@ -236,25 +236,83 @@ pub struct RotationDealerMessagesHash {
     pub messages_hash: MessageHash,
 }
 
+pub type DkgCertificate = SignedMessage<DkgDealerMessageHash>;
+pub type RotationCertificate = SignedMessage<RotationDealerMessagesHash>;
+
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum MpcMessageV1 {
-    Dkg(DkgDealerMessageHash),
-    Rotation(RotationDealerMessagesHash),
+#[derive(Clone, Debug)]
+pub enum CertificateV1 {
+    Dkg(DkgCertificate),
+    Rotation(RotationCertificate),
 }
 
-impl MpcMessageV1 {
-    pub fn inner_signing_bytes(&self) -> Vec<u8> {
+impl CertificateV1 {
+    pub fn epoch(&self) -> u64 {
         match self {
-            MpcMessageV1::Dkg(inner) => bcs::to_bytes(inner).expect("serialization should succeed"),
-            MpcMessageV1::Rotation(inner) => {
-                bcs::to_bytes(inner).expect("serialization should succeed")
-            }
+            CertificateV1::Dkg(cert) => cert.epoch(),
+            CertificateV1::Rotation(cert) => cert.epoch(),
+        }
+    }
+
+    pub fn signature_bytes(&self) -> &[u8] {
+        match self {
+            CertificateV1::Dkg(cert) => cert.signature_bytes(),
+            CertificateV1::Rotation(cert) => cert.signature_bytes(),
+        }
+    }
+
+    pub fn signers_bitmap_bytes(&self) -> &[u8] {
+        match self {
+            CertificateV1::Dkg(cert) => cert.signers_bitmap_bytes(),
+            CertificateV1::Rotation(cert) => cert.signers_bitmap_bytes(),
+        }
+    }
+
+    pub fn signers(
+        &self,
+        committee: &crate::committee::Committee,
+    ) -> Result<Vec<Address>, sui_crypto::SignatureError> {
+        match self {
+            CertificateV1::Dkg(cert) => cert.signers(committee),
+            CertificateV1::Rotation(cert) => cert.signers(committee),
+        }
+    }
+
+    pub fn weight(
+        &self,
+        committee: &crate::committee::Committee,
+    ) -> Result<u64, sui_crypto::SignatureError> {
+        match self {
+            CertificateV1::Dkg(cert) => cert.weight(committee),
+            CertificateV1::Rotation(cert) => cert.weight(committee),
+        }
+    }
+
+    pub fn is_signer(
+        &self,
+        address: &Address,
+        committee: &crate::committee::Committee,
+    ) -> Result<bool, sui_crypto::SignatureError> {
+        match self {
+            CertificateV1::Dkg(cert) => cert.is_signer(address, committee),
+            CertificateV1::Rotation(cert) => cert.is_signer(address, committee),
+        }
+    }
+
+    pub fn dkg_message_hash(&self) -> Option<&DkgDealerMessageHash> {
+        match self {
+            CertificateV1::Dkg(cert) => Some(cert.message()),
+            CertificateV1::Rotation(_) => None,
+        }
+    }
+
+    pub fn rotation_message_hash(&self) -> Option<&RotationDealerMessagesHash> {
+        match self {
+            CertificateV1::Dkg(_) => None,
+            CertificateV1::Rotation(cert) => Some(cert.message()),
         }
     }
 }
-
-pub type Certificate = SignedMessage<MpcMessageV1>;
 
 pub type DkgResult<T> = Result<T, DkgError>;
 
@@ -320,8 +378,6 @@ mod tests {
     use fastcrypto_tbls::nodes::Node;
     use std::num::NonZeroU16;
 
-    const EXPECT_DKG_MESSAGE: &str = "expected Dkg message";
-
     impl RotationMessages {
         pub fn insert(&mut self, share_index: ShareIndex, message: avss::Message) {
             self.messages.insert(share_index, message);
@@ -329,22 +385,6 @@ mod tests {
 
         pub fn keys(&self) -> impl Iterator<Item = &ShareIndex> {
             self.messages.keys()
-        }
-    }
-
-    impl MpcMessageV1 {
-        pub fn as_dkg_message(&self) -> &DkgDealerMessageHash {
-            match self {
-                MpcMessageV1::Dkg(msg) => msg,
-                MpcMessageV1::Rotation(_) => panic!("{}", EXPECT_DKG_MESSAGE),
-            }
-        }
-
-        pub fn as_mut_dkg_message(&mut self) -> &mut DkgDealerMessageHash {
-            match self {
-                MpcMessageV1::Dkg(msg) => msg,
-                MpcMessageV1::Rotation(_) => panic!("{}", EXPECT_DKG_MESSAGE),
-            }
         }
     }
 

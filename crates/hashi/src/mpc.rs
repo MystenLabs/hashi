@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use tokio::sync::watch;
-use tracing::debug;
 use tracing::error;
 
 use crate::Hashi;
@@ -65,15 +64,10 @@ impl MpcService {
     }
 
     pub async fn start(self) {
-        debug!("MpcService: starting");
         // Wait for all nodes' RPC services to be ready before starting DKG.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         match self.run_dkg().await {
             Ok(output) => {
-                debug!(
-                    "MpcService: DKG completed successfully. Public key: {:?}",
-                    output.public_key
-                );
                 let _ = self.dkg_completion_tx.send(Some(output.public_key));
             }
             Err(e) => error!("MpcService: DKG failed: {e:?}"),
@@ -81,8 +75,6 @@ impl MpcService {
     }
 
     async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
-        let validator_address = self.inner.config.validator_address()?;
-        debug!(%validator_address, "Starting DKG");
         let onchain_state = self.inner.onchain_state().clone();
         let (epoch, committee) = {
             let state = onchain_state.state();
@@ -95,20 +87,12 @@ impl MpcService {
                 .clone();
             (epoch, committee)
         };
-        debug!(
-            %validator_address,
-            epoch,
-            committee_size = committee.members().len(),
-            "DKG configuration"
-        );
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(onchain_state, epoch, signer, committee);
-        debug!(%validator_address, "Running DKG");
         let output = DkgManager::run(&self.dkg_manager, &p2p_channel, &mut tob_channel)
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
-        debug!(%validator_address, "DKG completed");
         Ok(output)
     }
 }

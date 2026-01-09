@@ -92,8 +92,6 @@ impl Hashi {
         self.mpc_handle.get().expect("MpcHandle not initialized")
     }
 
-    /// Returns the MpcHandle if initialized, None otherwise.
-    /// Use this when you need to check if initialization is complete.
     pub fn mpc_handle_opt(&self) -> Option<&mpc::MpcHandle> {
         self.mpc_handle.get()
     }
