@@ -115,9 +115,17 @@ impl MpcService {
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(onchain_state, epoch, signer, committee);
-        debug!(%validator_address, "Running dealer phase");
-        if let Err(e) = self.run_as_dealer(&p2p_channel, &mut tob_channel).await {
-            warn!(%validator_address, %e, "Dealer phase failed");
+        let threshold = {
+            let mgr = self.dkg_manager.lock().unwrap();
+            mgr.threshold()
+        };
+        if tob_channel.existing_certificate_weight() < threshold as u32 {
+            debug!(%validator_address, "Running dealer phase");
+            if let Err(e) = self.run_as_dealer(&p2p_channel, &mut tob_channel).await {
+                warn!(%validator_address, %e, "Dealer phase failed");
+            }
+        } else {
+            debug!(%validator_address, "Skipping dealer phase - enough certificates already exist");
         }
         debug!(%validator_address, "Running party phase");
         let output = self.run_as_party(&mut tob_channel).await?;
