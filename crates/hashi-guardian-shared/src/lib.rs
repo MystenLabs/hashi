@@ -9,13 +9,15 @@ pub use errors::*;
 use std::collections::HashSet;
 
 use crate::GuardianError::*;
+pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
 use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
 pub use ed25519_consensus::Signature as GuardianSignature;
-use ed25519_consensus::VerificationKey;
+pub use ed25519_consensus::SigningKey as GuardianSigningKeyPair;
+pub use ed25519_consensus::VerificationKey as GuardianVerificationKey;
 pub use hashi::committee::Committee as HashiCommittee;
 pub use hashi::committee::CommitteeMember as HashiCommitteeMember;
 pub use hashi::committee::SignedMessage as HashiSigned;
@@ -26,6 +28,7 @@ use serde::Serialize;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::bitcoin_utils::TxUTXOs;
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
 // ---------------------------------
@@ -58,6 +61,8 @@ pub enum IntentType {
     LogMessage = 0,
     /// Intent for SetupNewKeyResponse
     SetupNewKeyResponse = 1,
+    /// Intent for NormalWithdrawalResponse
+    NormalWithdrawalResponse = 2,
 }
 
 /// Trait for types that can be signed, providing domain separation via an intent.
@@ -138,6 +143,25 @@ pub struct GetGuardianInfoResponse {
     pub server_version: String,
 }
 
+/// An "immediate withdrawal" request. `HashiSigned<T>.`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalWithdrawalRequest {
+    /// Unique withdrawal ID assigned by Hashi
+    wid: WithdrawalID,
+    /// Hashi-assigned timestamp
+    timestamp_secs: WithdrawalTime,
+    /// BTC transaction input and output utxos
+    all_utxos: TxUTXOs,
+    /// Was delayed_withdraw previously called for this withdrawal?
+    is_delayed: bool,
+}
+
+/// `EnclaveSigned<T>`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalWithdrawalResponse {
+    pub enclave_signatures: Vec<BitcoinSignature>,
+}
+
 // ---------------------------------
 //          Log Messages
 // ---------------------------------
@@ -149,7 +173,7 @@ pub enum LogMessage {
     /// Attestation and signing public key
     OperatorInitAttestationUnsigned {
         attestation: Attestation,
-        signing_public_key: VerificationKey,
+        signing_public_key: GuardianVerificationKey,
     },
     /// Share commitments given in /operator_init
     OperatorInitShareCommitments(Vec<ShareCommitment>),
@@ -165,11 +189,24 @@ pub enum LogMessage {
     },
     /// Threshold reached - enclave fully initialized (happens once)
     EnclaveFullyInitialized,
+    /// Immediate withdraw
+    NormalWithdrawalSuccess {
+        request: NormalWithdrawalRequest,
+        response: NormalWithdrawalResponse,
+        withdraw_count: u64,
+    },
 }
 
 // ---------------------------------
 //      Helper types & structs
 // ---------------------------------
+
+// TODO: Align types with hashi
+/// Unique identifier for a withdrawal request
+pub type WithdrawalID = u64;
+
+/// Sui-assigned timestamp for a withdrawal (seconds since UNIX_EPOCH)
+pub type WithdrawalTime = u64;
 
 pub type Attestation = Vec<u8>;
 
@@ -209,6 +246,10 @@ impl SigningIntent for LogMessage {
 
 impl SigningIntent for SetupNewKeyResponse {
     const INTENT: IntentType = IntentType::SetupNewKeyResponse;
+}
+
+impl SigningIntent for NormalWithdrawalResponse {
+    const INTENT: IntentType = IntentType::NormalWithdrawalResponse;
 }
 
 impl SetupNewKeyRequest {
@@ -323,6 +364,24 @@ impl ProvisionerInitRequest {
 
     pub fn into_state(self) -> ProvisionerInitRequestState {
         self.state
+    }
+}
+
+impl NormalWithdrawalRequest {
+    pub fn wid(&self) -> &WithdrawalID {
+        &self.wid
+    }
+
+    pub fn all_utxos(&self) -> &TxUTXOs {
+        &self.all_utxos
+    }
+
+    pub fn timestamp(&self) -> &WithdrawalTime {
+        &self.timestamp_secs
+    }
+
+    pub fn is_delayed(&self) -> bool {
+        self.is_delayed
     }
 }
 

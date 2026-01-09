@@ -133,19 +133,8 @@ pub async fn provisioner_init(
     // MILESTONE: At this point, we are sure it is a legitimate payload (both share & config)
 
     // 4) Persist share
-    info!("Persisting share.");
-    let mut received_shares = enclave.decrypted_shares().lock().await;
-    let share_id = share.id;
-    // Check for duplicate share ID (linear search is fine for small share count)
-    if received_shares.iter().any(|s| s.id == share_id) {
-        return Err(InvalidInputs("Duplicate share ID".into()));
-    }
-    received_shares.push(share);
-    let current_share_count = received_shares.len();
-    info!(
-        "Total shares received: {}/{}.",
-        current_share_count, THRESHOLD
-    );
+    info!("Storing share internally.");
+    let total_share_count = enclave.store_new_share(share)?;
 
     // Note: This S3 log does not serve any security purpose.
     enclave
@@ -157,9 +146,9 @@ pub async fn provisioner_init(
         .expect("Unable to log ProvisionerInitSuccess");
 
     // 5) If we have enough shares, finish initialization: combine shares & set config
-    if current_share_count >= THRESHOLD {
-        let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
-        finalize_init(&shares_vec, &enclave, request.into_state()).await;
+    if total_share_count >= THRESHOLD {
+        let all_shares = enclave.get_all_shares();
+        finalize_init(&all_shares, &enclave, request.into_state()).await;
         // Log to S3 indicating that withdrawals can be expected henceforth
         enclave
             .sign_and_log(LogMessage::EnclaveFullyInitialized)
@@ -201,8 +190,7 @@ async fn finalize_init(
             incoming_state.hashi_committee,
             incoming_state.withdrawal_state,
         )
-        .await
-        .expect("Unable to set state");
+        .await;
 
     info!("Enclave initialization complete.");
 }

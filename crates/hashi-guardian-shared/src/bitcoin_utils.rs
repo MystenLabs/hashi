@@ -12,6 +12,8 @@
 //! - `*_::validate(network)` should be called at request boundaries. It checks invariants and also enforces
 //!   network-dependent constraints (e.g. that all provided addresses match `network`).
 
+use crate::BitcoinKeypair;
+use crate::BitcoinSignature;
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
@@ -359,7 +361,7 @@ impl TxUTXOs {
 /// Signs messages using Schnorr signatures (suitable for taproot script-spend).
 ///
 /// Each message is signed and wrapped in a `Signature` with `TapSighashType::Default`.
-pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
+pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSignature> {
     messages
         .iter()
         // Not using aux randomness which only provides side-channel protection
@@ -523,7 +525,7 @@ mod bitcoin_tests {
     fn gen_keypair_and_address(
         bytes: Option<[u8; 32]>,
         network: Network,
-    ) -> (Keypair, BitcoinAddress) {
+    ) -> (BitcoinKeypair, BitcoinAddress) {
         let mut rng = rand::thread_rng();
         let bytes = bytes.unwrap_or({
             let mut bytes = [0u8; 32];

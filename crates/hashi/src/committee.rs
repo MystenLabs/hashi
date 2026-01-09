@@ -334,6 +334,10 @@ impl<T> SignedMessage<T> {
         &self.message
     }
 
+    pub fn into_message(self) -> T {
+        self.message
+    }
+
     pub fn signature_bytes(&self) -> &[u8] {
         self.signature.signature_bytes()
     }

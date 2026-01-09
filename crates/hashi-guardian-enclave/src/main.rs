@@ -2,18 +2,16 @@ use anyhow::Result;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Network;
 use bitcoin::XOnlyPublicKey;
-use ed25519_consensus::SigningKey;
-use ed25519_consensus::VerificationKey;
 use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::SystemTime;
-use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 use tonic::transport::Server;
 use tracing::info;
@@ -23,6 +21,7 @@ mod init;
 mod rpc;
 mod s3_logger;
 mod setup;
+mod withdraw;
 
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
@@ -43,15 +42,15 @@ pub struct Enclave {
 pub struct EnclaveConfig {
     /// Ephemeral keypair on boot
     pub eph_keys: EphemeralKeyPairs,
-    /// S3 client & config
+    /// S3 client & config (set in operator_init)
     pub s3_logger: OnceLock<S3Logger>,
-    /// Enclave BTC private key
+    /// Enclave BTC private key (set in provisioner_init)
     pub enclave_btc_keypair: OnceLock<Keypair>,
-    /// BTC network (mainnet, testnet, regtest, etc.)
+    /// BTC network: mainnet, testnet, regtest (set in operator_init)
     pub btc_network: OnceLock<Network>,
-    /// Hashi BTC public key used to derive child keys
+    /// Hashi BTC public key used to derive child keys (set in provisioner_init)
     pub hashi_btc_master_pubkey: OnceLock<XOnlyPublicKey>,
-    /// Withdraw related config's
+    /// Withdraw related config's (set in provisioner_init)
     pub withdrawal_config: OnceLock<WithdrawalConfig>,
     // TODO: Add rate limiter
 }
@@ -61,7 +60,8 @@ pub struct EnclaveState {
     /// Hashi bls pk's
     pub hashi_committee: RwLock<Arc<HashiCommittee>>,
     /// Withdrawal-related state
-    pub withdraw_state: Mutex<WithdrawalState>,
+    /// Note: We use tokio::sync::Mutex because when mutating the inner counter, guard needs to be held until S3 write succeeds.
+    pub withdraw_state: tokio::sync::Mutex<WithdrawalState>,
 }
 
 /// Scratchpad used only during initialization.
@@ -69,7 +69,7 @@ pub struct EnclaveState {
 #[derive(Default)]
 pub struct Scratchpad {
     /// The received shares
-    pub decrypted_shares: Mutex<Vec<Share>>,
+    pub shares: Mutex<Vec<Share>>,
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in ProvisionerInitRequest
@@ -77,7 +77,7 @@ pub struct Scratchpad {
 }
 
 pub struct EphemeralKeyPairs {
-    pub signing_keys: SigningKey,
+    pub signing_key: GuardianSigningKeyPair,
     pub encryption_keys: EncKeyPair,
 }
 
@@ -100,9 +100,9 @@ async fn main() -> Result<()> {
         info!("Normal mode: provisioner_init route available, setup_new_key disabled.");
     }
 
-    let signing_keys = SigningKey::new(rand::thread_rng());
+    let signing_key = GuardianSigningKeyPair::new(rand::thread_rng());
     let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
+    let enclave = Arc::new(Enclave::new(signing_key, encryption_keys));
 
     let svc = GuardianGrpc {
         enclave,
@@ -120,10 +120,10 @@ async fn main() -> Result<()> {
 }
 
 impl EnclaveConfig {
-    pub fn new(signing_keys: SigningKey, encryption_keys: EncKeyPair) -> Self {
+    pub fn new(signing_key: GuardianSigningKeyPair, encryption_keys: EncKeyPair) -> Self {
         EnclaveConfig {
             eph_keys: EphemeralKeyPairs {
-                signing_keys,
+                signing_key,
                 encryption_keys,
             },
             s3_logger: OnceLock::new(),
@@ -140,12 +140,12 @@ impl Enclave {
     // Construction & Initialization Status
     // ========================================================================
 
-    pub fn new(signing_keys: SigningKey, encryption_keys: EncKeyPair) -> Self {
+    pub fn new(signing_keys: GuardianSigningKeyPair, encryption_keys: EncKeyPair) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
                 hashi_committee: RwLock::new(Arc::new(HashiCommittee::new(vec![], 0))),
-                withdraw_state: Mutex::new(WithdrawalState::default()),
+                withdraw_state: tokio::sync::Mutex::new(WithdrawalState::default()),
             },
             scratchpad: Scratchpad::default(),
         }
@@ -154,11 +154,13 @@ impl Enclave {
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.config.enclave_btc_keypair.get().is_some()
             && self.config.hashi_btc_master_pubkey.get().is_some()
+            && self.config.withdrawal_config.get().is_some()
     }
 
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
         self.config.enclave_btc_keypair.get().is_some()
             || self.config.hashi_btc_master_pubkey.get().is_some()
+            || self.config.withdrawal_config.get().is_some()
     }
 
     pub fn is_operator_init_complete(&self) -> bool {
@@ -193,13 +195,13 @@ impl Enclave {
     }
 
     /// Get the enclave's signing keypair
-    pub fn signing_keypair(&self) -> &SigningKey {
-        &self.config.eph_keys.signing_keys
+    pub fn signing_keypair(&self) -> &GuardianSigningKeyPair {
+        &self.config.eph_keys.signing_key
     }
 
     /// Get the enclave's verification key
-    pub fn signing_pubkey(&self) -> VerificationKey {
-        self.config.eph_keys.signing_keys.verification_key()
+    pub fn signing_pubkey(&self) -> GuardianVerificationKey {
+        self.config.eph_keys.signing_key.verification_key()
     }
 
     pub fn sign<T: ToBytes + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
@@ -281,7 +283,7 @@ impl Enclave {
         Ok(self.withdrawal_config()?.delayed_withdrawals_timeout)
     }
 
-    pub fn withdrawal_committee_threshold(&self) -> GuardianResult<u64> {
+    pub fn committee_threshold(&self) -> GuardianResult<u64> {
         Ok(self.withdrawal_config()?.committee_threshold)
     }
 
@@ -330,30 +332,12 @@ impl Enclave {
     // Runtime State
     // ========================================================================
 
-    pub async fn get_withdraw_state(&self) -> MutexGuard<'_, WithdrawalState> {
+    pub async fn acquire_withdrawal_state_lock(&self) -> MutexGuard<'_, WithdrawalState> {
         self.state.withdraw_state.lock().await
     }
 
-    pub async fn set_state(
-        &self,
-        committee: HashiCommittee,
-        withdrawal_state: WithdrawalState,
-    ) -> GuardianResult<()> {
-        {
-            let mut x = self
-                .state
-                .hashi_committee
-                .write()
-                .map_err(|_| InternalError("unable to acquire lock".into()))?;
-            *x = Arc::new(committee);
-        } // drop the RwLock guard which is not Send before calling await
-
-        {
-            let mut y = self.get_withdraw_state().await;
-            *y = withdrawal_state;
-        }
-
-        Ok(())
+    pub async fn set_withdrawal_state(&self, state: WithdrawalState) {
+        *self.state.withdraw_state.lock().await = state;
     }
 
     /// Get the current hashi committee. The read lock is held very briefly only to clone the Arc.
@@ -364,12 +348,12 @@ impl Enclave {
             .read()
             .expect("rwlock should never throw an error");
         // Note: read() or write() return an error if there's a panic while holding the write guard.
-        //       we only write in update_committee which can never panic.
+        //       we only write in set_committee which can never panic.
         Arc::clone(x)
     }
 
-    /// Update committee. Expected to be called sporadically, e.g., once a day or so.
-    pub async fn set_committee(&self, new_committee: HashiCommittee) {
+    /// Set new committee. Expected to be called sporadically, e.g., once a day or so.
+    pub fn set_committee(&self, new_committee: HashiCommittee) {
         let mut state = self
             .state
             .hashi_committee
@@ -378,12 +362,50 @@ impl Enclave {
         *state = Arc::new(new_committee);
     }
 
+    pub async fn set_state(&self, committee: HashiCommittee, withdrawal_state: WithdrawalState) {
+        // Set committee
+        // Note: RwLock guard is dropped upon return (which is not Send) before calling await
+        self.set_committee(committee);
+
+        // Set withdraw state
+        self.set_withdrawal_state(withdrawal_state).await;
+    }
+
     // ========================================================================
     // Scratchpad (Initialization-only data)
     // ========================================================================
 
-    pub fn decrypted_shares(&self) -> &Mutex<Vec<Share>> {
-        &self.scratchpad.decrypted_shares
+    /// Adds a share to the internal list and returns the total number of shares received so far.
+    pub fn store_new_share(&self, share: Share) -> GuardianResult<usize> {
+        let mut shares = self
+            .scratchpad
+            .shares
+            .lock()
+            .expect("Unable to lock shares");
+        let share_id = share.id;
+        // Check for duplicate share ID (linear search is fine for small share count)
+        if shares.iter().any(|s| s.id == share_id) {
+            return Err(InvalidInputs("Duplicate share ID".into()));
+        }
+        shares.push(share);
+        let current_share_count = shares.len();
+        info!(
+            "Total shares received: {}/{}.",
+            current_share_count, THRESHOLD
+        );
+        Ok(current_share_count)
+    }
+
+    /// Returns all the shares. Called when we have enough shares.
+    /// TODO: Save space by getting rid of the data inside Mutex
+    pub fn get_all_shares(&self) -> Vec<Share> {
+        let shares = self
+            .scratchpad
+            .shares
+            .lock()
+            .expect("Unable to lock shares");
+
+        shares.clone()
     }
 
     pub fn share_commitments(&self) -> GuardianResult<&Vec<ShareCommitment>> {
@@ -418,7 +440,7 @@ impl Enclave {
 #[cfg(test)]
 impl Enclave {
     pub fn create_with_random_keys() -> Arc<Self> {
-        let signing_keys = SigningKey::new(rand::thread_rng());
+        let signing_keys = GuardianSigningKeyPair::new(rand::thread_rng());
         let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
         Arc::new(Enclave::new(signing_keys, encryption_keys))
     }
