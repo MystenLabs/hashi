@@ -15,7 +15,7 @@ use bitcoin::XOnlyPublicKey;
 use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
 use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
 use hashi_guardian_shared::bitcoin_utils::TxUTXOs;
-use hashi_guardian_shared::BitcoinKeypair;
+use hashi_guardian_shared::{BitcoinKeypair, HashiCommittee};
 use hashi_guardian_shared::BitcoinSignature;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::GuardianResult;
@@ -29,23 +29,13 @@ use std::sync::Arc;
 use tracing::info;
 
 pub fn verify_hashi_cert<T: Serialize>(
-    enclave: Arc<Enclave>,
-    signed_request: HashiSigned<T>,
-) -> GuardianResult<T> {
-    if !enclave.is_fully_initialized() {
-        return Err(InvalidInputs("meant to be called only post init".into()));
-    }
-
-    let committee = enclave.get_committee(signed_request.epoch())?;
-    let threshold = enclave
-        .committee_threshold()
-        .expect("committee threshold not found in enclave");
-
+    committee: Arc<HashiCommittee>,
+    threshold: u64,
+    signed_request: &HashiSigned<T>,
+) -> GuardianResult<()> {
     committee
-        .verify_signature_and_weight(&signed_request, threshold)
-        .map_err(|e| InvalidInputs(format!("signature verification failed {:?}", e)))?;
-
-    Ok(signed_request.into_message())
+        .verify_signature_and_weight(signed_request, threshold)
+        .map_err(|e| InvalidInputs(format!("signature verification failed {:?}", e)))
 }
 
 fn sign(
@@ -76,10 +66,16 @@ pub async fn normal_withdrawal(
     }
 
     // verify request cert
-    let request = verify_hashi_cert(enclave.clone(), request)?; // clone is cheap
+    let committee = enclave.get_committee(request.epoch())?;
+    let threshold = enclave
+        .committee_threshold()
+        .expect("committee threshold not found in enclave");
+
+    verify_hashi_cert(committee, threshold, &request)?;
     info!("Request cert verified.");
 
     // validate request data
+    let request = request.into_message();
     let network = enclave
         .bitcoin_network()
         .expect("network should be initialized in operator_init");

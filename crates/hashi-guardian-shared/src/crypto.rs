@@ -32,7 +32,7 @@ use tracing::info;
 
 pub type EncSecKey = <X25519HkdfSha256 as Kem>::PrivateKey;
 pub type EncPubKey = <X25519HkdfSha256 as Kem>::PublicKey;
-pub struct EncKeyPair {
+pub struct GuardianEncKeyPair {
     sk: EncSecKey,
     pk: EncPubKey,
 }
@@ -75,7 +75,7 @@ pub struct Ciphertext {
 //          Helper impl's
 // ---------------------------------
 
-impl EncKeyPair {
+impl GuardianEncKeyPair {
     pub fn random<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
         let (sk, pk) = X25519HkdfSha256::gen_keypair(rng);
         Self { sk, pk }
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_encrypt_and_decrypt() {
         let bytes = b"Let's encrypt some stuff!";
-        let keypair = EncKeyPair::random(&mut rand::thread_rng());
+        let keypair = GuardianEncKeyPair::random(&mut rand::thread_rng());
         let aad = Some(&[0; 32]);
         let ciphertext =
             encrypt(bytes, keypair.public_key(), aad, &mut rand::thread_rng()).unwrap();

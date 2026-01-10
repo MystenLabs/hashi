@@ -78,7 +78,7 @@ pub struct Scratchpad {
 
 pub struct EphemeralKeyPairs {
     pub signing_key: GuardianSigningKeyPair,
-    pub encryption_keys: EncKeyPair,
+    pub encryption_keys: GuardianEncKeyPair,
 }
 
 /// Enclave initialization.
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
     }
 
     let signing_key = GuardianSigningKeyPair::new(rand::thread_rng());
-    let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
+    let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
     let enclave = Arc::new(Enclave::new(signing_key, encryption_keys));
 
     let svc = GuardianGrpc {
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
 }
 
 impl EnclaveConfig {
-    pub fn new(signing_key: GuardianSigningKeyPair, encryption_keys: EncKeyPair) -> Self {
+    pub fn new(signing_key: GuardianSigningKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
         EnclaveConfig {
             eph_keys: EphemeralKeyPairs {
                 signing_key,
@@ -140,7 +140,7 @@ impl Enclave {
     // Construction & Initialization Status
     // ========================================================================
 
-    pub fn new(signing_keys: GuardianSigningKeyPair, encryption_keys: EncKeyPair) -> Self {
+    pub fn new(signing_keys: GuardianSigningKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
@@ -474,7 +474,7 @@ impl Enclave {
 impl Enclave {
     pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSigningKeyPair::new(rand::thread_rng());
-        let encryption_keys = EncKeyPair::random(&mut rand::thread_rng());
+        let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
         Arc::new(Enclave::new(signing_keys, encryption_keys))
     }
 
