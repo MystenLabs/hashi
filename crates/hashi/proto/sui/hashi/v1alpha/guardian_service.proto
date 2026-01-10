@@ -121,8 +121,8 @@ message ProvisionerInitRequest {
 }
 
 message ProvisionerInitState {
-  // Committee info for Hashi.
-  Committee hashi_committee = 1;
+  // Old Hashi Committees.
+  map<uint64, Committee> hashi_committees = 1;
 
   // Withdrawal policy configuration.
   WithdrawalConfig withdrawal_config = 2;

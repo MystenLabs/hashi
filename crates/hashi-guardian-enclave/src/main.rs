@@ -6,6 +6,8 @@ use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -25,7 +27,6 @@ mod withdraw;
 
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
-use hashi::committee::Committee as HashiCommittee;
 use hashi::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
@@ -52,13 +53,12 @@ pub struct EnclaveConfig {
     pub hashi_btc_master_pubkey: OnceLock<XOnlyPublicKey>,
     /// Withdraw related config's (set in provisioner_init)
     pub withdrawal_config: OnceLock<WithdrawalConfig>,
-    // TODO: Add rate limiter
 }
 
 /// Mutable state that changes during operation
 pub struct EnclaveState {
     /// Hashi bls pk's
-    pub hashi_committee: RwLock<Arc<HashiCommittee>>,
+    pub hashi_committees: RwLock<HashMap<u64, Arc<HashiCommittee>>>,
     /// Withdrawal-related state
     /// Note: We use tokio::sync::Mutex because when mutating the inner counter, guard needs to be held until S3 write succeeds.
     pub withdraw_state: tokio::sync::Mutex<WithdrawalState>,
@@ -144,7 +144,7 @@ impl Enclave {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
-                hashi_committee: RwLock::new(Arc::new(HashiCommittee::new(vec![], 0))),
+                hashi_committees: RwLock::new(HashMap::new()),
                 withdraw_state: tokio::sync::Mutex::new(WithdrawalState::default()),
             },
             scratchpad: Scratchpad::default(),
@@ -341,31 +341,65 @@ impl Enclave {
     }
 
     /// Get the current hashi committee. The read lock is held very briefly only to clone the Arc.
-    pub fn get_committee(&self) -> Arc<HashiCommittee> {
-        let x = &self
+    pub fn get_committee(&self, epoch: u64) -> GuardianResult<Arc<HashiCommittee>> {
+        let committee_map = &self
             .state
-            .hashi_committee
+            .hashi_committees
             .read()
             .expect("rwlock should never throw an error");
         // Note: read() or write() return an error if there's a panic while holding the write guard.
         //       we only write in set_committee which can never panic.
-        Arc::clone(x)
+        match committee_map.get(&epoch) {
+            Some(committee) => Ok(Arc::clone(committee)),
+            None => Err(InvalidInputs(format!(
+                "requested committee {} not found",
+                epoch
+            ))),
+        }
     }
 
     /// Set new committee. Expected to be called sporadically, e.g., once a day or so.
-    pub fn set_committee(&self, new_committee: HashiCommittee) {
-        let mut state = self
+    pub fn add_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
+        let epoch = committee.epoch();
+        let mut committee_map = self
             .state
-            .hashi_committee
+            .hashi_committees
             .write()
             .expect("rwlock should never throw an error");
-        *state = Arc::new(new_committee);
+
+        match committee_map.entry(epoch) {
+            Entry::Vacant(v) => v.insert(Arc::new(committee)),
+            Entry::Occupied(_) => {
+                return Err(InvalidInputs(format!(
+                    "requested epoch {} already present in committee map",
+                    epoch
+                )))
+            }
+        };
+
+        if committee_map.len() > MAX_HASHI_COMMITTEES {
+            // Remove the committee with the smallest (oldest) epoch
+            let &min_epoch = committee_map
+                .keys()
+                .min()
+                .expect("min is guaranteed to exist");
+            committee_map.remove(&min_epoch);
+        }
+
+        Ok(())
     }
 
-    pub async fn set_state(&self, committee: HashiCommittee, withdrawal_state: WithdrawalState) {
+    pub async fn set_state(
+        &self,
+        committees: HashMap<u64, HashiCommittee>,
+        withdrawal_state: WithdrawalState,
+    ) {
         // Set committee
         // Note: RwLock guard is dropped upon return (which is not Send) before calling await
-        self.set_committee(committee);
+        for (_, committee) in committees {
+            self.add_committee(committee)
+                .expect("epochs should not be same since it is a HashMap");
+        }
 
         // Set withdraw state
         self.set_withdrawal_state(withdrawal_state).await;
@@ -397,7 +431,6 @@ impl Enclave {
     }
 
     /// Returns all the shares. Called when we have enough shares.
-    /// TODO: Save space by getting rid of the data inside Mutex
     pub fn get_all_shares(&self) -> Vec<Share> {
         let shares = self
             .scratchpad

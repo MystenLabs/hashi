@@ -6,6 +6,7 @@ pub mod test_utils;
 
 pub use crypto::*;
 pub use errors::*;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::GuardianError::*;
@@ -31,6 +32,9 @@ use std::time::SystemTime;
 use crate::bitcoin_utils::TxUTXOs;
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
+
+pub const MAX_HASHI_COMMITTEES: usize = 7;
+
 // ---------------------------------
 //     Serialization Abstraction
 // ---------------------------------
@@ -125,7 +129,7 @@ pub struct ProvisionerInitRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
-    pub hashi_committee: HashiCommittee,
+    pub hashi_committees: HashMap<u64, HashiCommittee>,
     /// Withdrawal config
     pub withdrawal_config: WithdrawalConfig,
     /// Withdrawal state
@@ -312,18 +316,22 @@ impl ToBytes for ProvisionerInitRequestState {
 
 impl ProvisionerInitRequestState {
     pub fn new(
-        hashi_committee: HashiCommittee,
+        hashi_committees: HashMap<u64, HashiCommittee>,
         withdrawal_config: WithdrawalConfig,
         withdrawal_state: WithdrawalState,
         hashi_btc_master_pubkey: XOnlyPublicKey,
-    ) -> Self {
-        // TODO: Add validation (if any)
-        Self {
-            hashi_committee,
+    ) -> GuardianResult<Self> {
+        // TODO: Add more validation (if any)
+        if hashi_committees.len() > MAX_HASHI_COMMITTEES {
+            return Err(InvalidInputs("too many committees".into()));
+        }
+
+        Ok(Self {
+            hashi_committees,
             withdrawal_config,
             withdrawal_state,
             hashi_btc_master_pubkey,
-        }
+        })
     }
 
     pub fn digest(&self) -> [u8; 32] {

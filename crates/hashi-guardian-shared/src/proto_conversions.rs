@@ -29,6 +29,7 @@ use hashi::committee::EncryptionPublicKey;
 use hashi::proto as pb;
 use hpke::Deserializable;
 use hpke::Serializable;
+use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 use std::time::Duration;
@@ -130,10 +131,11 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         // State
         let state_pb = req.state.ok_or_else(|| missing("state"))?;
 
-        let committee_pb = state_pb
-            .hashi_committee
-            .ok_or_else(|| missing("hashi_committee"))?;
-        let hashi_committee = pb_to_hashi_committee(committee_pb)?;
+        let committees_pb = state_pb.hashi_committees;
+        let hashi_committees = committees_pb
+            .into_iter()
+            .map(|(e, committee_pb)| Ok((e, pb_to_hashi_committee(committee_pb)?)))
+            .collect::<GuardianResult<HashMap<_, _>>>()?;
 
         let withdrawal_config_pb = state_pb
             .withdrawal_config
@@ -155,11 +157,11 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         Ok(ProvisionerInitRequest::new(
             encrypted_share,
             ProvisionerInitRequestState::new(
-                hashi_committee,
+                hashi_committees,
                 withdrawal_config,
                 withdrawal_state,
                 hashi_btc_master_pubkey,
-            ),
+            )?,
         ))
     }
 }
@@ -228,8 +230,13 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::ProvisionerInitState {
+    let committees = s
+        .hashi_committees
+        .into_iter()
+        .map(|(e, committee)| (e, hashi_committee_to_pb(committee)))
+        .collect();
     pb::ProvisionerInitState {
-        hashi_committee: Some(hashi_committee_to_pb(s.hashi_committee)),
+        hashi_committees: committees,
         withdrawal_config: Some(withdrawal_config_to_pb(s.withdrawal_config)),
         withdrawal_state: Some(withdrawal_state_to_pb(s.withdrawal_state)),
         hashi_btc_master_pubkey: Some(s.hashi_btc_master_pubkey.serialize().to_vec().into()),

@@ -36,7 +36,7 @@ pub fn verify_hashi_cert<T: Serialize>(
         return Err(InvalidInputs("meant to be called only post init".into()));
     }
 
-    let committee = enclave.get_committee();
+    let committee = enclave.get_committee(signed_request.epoch())?;
     let threshold = enclave
         .committee_threshold()
         .expect("committee threshold not found in enclave");

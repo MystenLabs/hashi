@@ -187,7 +187,7 @@ async fn finalize_init(
     info!("Setting enclave state.");
     enclave
         .set_state(
-            incoming_state.hashi_committee,
+            incoming_state.hashi_committees,
             incoming_state.withdrawal_state,
         )
         .await;

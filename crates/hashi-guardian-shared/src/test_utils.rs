@@ -23,6 +23,7 @@ use fastcrypto::traits::ToFromBytes;
 use hashi::committee::EncryptionPrivateKey;
 use hashi::committee::EncryptionPublicKey;
 use hpke::Deserializable;
+use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
@@ -132,7 +133,10 @@ impl ProvisionerInitRequestState {
                 delayed_withdrawals_timeout: Duration::from_secs(60),
             },
             withdrawal_state: WithdrawalState::default(),
-            hashi_committee: HashiCommittee::new(vec![mock_committee_member()], 0),
+            hashi_committees: HashMap::from([(
+                0,
+                HashiCommittee::new(vec![mock_committee_member()], 0),
+            )]),
             hashi_btc_master_pubkey: kp.x_only_public_key().0,
         }
     }

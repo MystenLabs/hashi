@@ -1063,9 +1063,9 @@ pub struct ProvisionerInitRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitState {
-    /// Committee info for Hashi.
-    #[prost(message, optional, tag = "1")]
-    pub hashi_committee: ::core::option::Option<Committee>,
+    /// Old Hashi Committees.
+    #[prost(map = "uint64, message", tag = "1")]
+    pub hashi_committees: ::std::collections::HashMap<u64, Committee>,
     /// Withdrawal policy configuration.
     #[prost(message, optional, tag = "2")]
     pub withdrawal_config: ::core::option::Option<WithdrawalConfig>,
