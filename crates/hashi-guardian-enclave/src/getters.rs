@@ -20,7 +20,7 @@ use tracing::error;
 
 /// Endpoint that returns an attestation committed to the enclave's signing public key
 pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
-    info!("/get_attestation - Received request");
+    info!("/get_guardian_info - Received request");
 
     let attestation = get_attestation(&enclave.signing_pubkey())?;
 

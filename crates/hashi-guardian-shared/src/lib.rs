@@ -28,7 +28,6 @@ use std::time::SystemTime;
 
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
-
 // ---------------------------------
 //     Serialization Abstraction
 // ---------------------------------
@@ -135,6 +134,7 @@ pub struct GetGuardianInfoResponse {
     /// Attestation document serialized in Hex
     pub attestation: Attestation,
     /// Server version
+    /// TODO: Replace with hashi's ServerVersion to include crate SHA and version
     pub server_version: String,
 }
 
