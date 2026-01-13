@@ -8,7 +8,7 @@ use fjall::KeyspaceCreateOptions;
 use fjall::Result;
 use sui_sdk_types::Address;
 
-use crate::committee::EncryptionPrivateKey;
+use hashi_types::committee::EncryptionPrivateKey;
 
 pub struct Database {
     #[allow(unused)]
@@ -154,12 +154,12 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use crate::committee::EncryptionPrivateKey;
-    use crate::committee::EncryptionPublicKey;
     use crate::dkg::EncryptionGroupElement;
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
     use fastcrypto_tbls::threshold_schnorr::avss;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
     use sui_sdk_types::Address;
 
     use super::Database;

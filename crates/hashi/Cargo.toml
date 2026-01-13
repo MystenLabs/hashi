@@ -10,6 +10,8 @@ sui-rpc = { version = "0.2" }
 sui-http = "0.1.0"
 sui-transaction-builder = "0.2.1"
 
+hashi-types = { path = "../hashi-types" }
+
 # Bitcoin dependencies
 bitcoin = "0.32.7"
 hashi-btc = { path = "../hashi-btc" }

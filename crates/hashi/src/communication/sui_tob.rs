@@ -27,13 +27,13 @@ use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
 use thiserror::Error;
 
-use crate::committee::Committee;
 use crate::dkg::types::Certificate;
 use crate::dkg::types::DkgDealerMessageHash;
 use crate::dkg::types::MpcMessageV1;
 use crate::onchain::OnchainState;
-use crate::onchain::move_types::CertifiedMessage;
-use crate::onchain::move_types::DkgDealerMessageHashV1;
+use hashi_types::committee::Committee;
+use hashi_types::move_types::CertifiedMessage;
+use hashi_types::move_types::DkgDealerMessageHashV1;
 
 type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;
 

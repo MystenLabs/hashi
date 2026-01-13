@@ -1,7 +1,5 @@
 //! Core types for the DKG protocol
 
-use crate::committee::BLS12381Signature;
-use crate::committee::SignedMessage;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::random_oracle::RandomOracle;
@@ -9,6 +7,8 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
+use hashi_types::committee::BLS12381Signature;
+use hashi_types::committee::SignedMessage;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -303,9 +303,9 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::EncryptionPrivateKey;
-    use crate::committee::EncryptionPublicKey;
     use fastcrypto_tbls::nodes::Node;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
     use std::num::NonZeroU16;
 
     const EXPECT_DKG_MESSAGE: &str = "expected Dkg message";

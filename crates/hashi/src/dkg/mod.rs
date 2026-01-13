@@ -3,9 +3,6 @@
 pub mod rpc;
 pub mod types;
 
-use crate::committee::Bls12381PrivateKey;
-use crate::committee::BlsSignatureAggregator;
-use crate::committee::Committee;
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
@@ -34,6 +31,9 @@ use fastcrypto_tbls::types::ShareIndex;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
+use hashi_types::committee::Bls12381PrivateKey;
+use hashi_types::committee::BlsSignatureAggregator;
+use hashi_types::committee::Committee;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -531,8 +531,8 @@ impl DkgManager {
                 .receive()
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
-            match cert.message {
-                Dkg(ref message) => {
+            match cert.message() {
+                Dkg(message) => {
                     let dealer = message.dealer_address;
                     if certified_dealers.contains(&dealer) {
                         continue;
@@ -670,7 +670,7 @@ impl DkgManager {
                 .receive()
                 .await
                 .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
-            match &cert.message {
+            match cert.message() {
                 Rotation(message) => {
                     let dealer = message.dealer_address;
                     if certified_dealers.contains(&dealer) {
@@ -1388,7 +1388,7 @@ impl DkgManager {
     ) -> DkgResult<DkgOutput> {
         let mut certified_dealers = HashMap::new();
         for cert in certificates {
-            let (dealer_address, expected_hash) = match &cert.message {
+            let (dealer_address, expected_hash) = match cert.message() {
                 Dkg(msg) => (msg.dealer_address, msg.message_hash),
                 Rotation(_) => {
                     return Err(DkgError::InvalidCertificate(
@@ -1636,10 +1636,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::Committee;
-    use crate::committee::CommitteeMember;
-    use crate::committee::EncryptionPublicKey;
-    use crate::committee::MemberSignature;
     use crate::dkg::types::ProtocolType;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
@@ -1649,6 +1645,10 @@ mod tests {
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPublicKey;
+    use hashi_types::committee::MemberSignature;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -3823,7 +3823,7 @@ mod tests {
         let config = setup.dkg_config();
         let committee = setup.committee();
         let mut aggregator =
-            crate::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
+            hashi_types::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
 
         // Add signatures from validators until we meet the required weight
         let dkg_required = config.threshold;
@@ -6405,7 +6405,7 @@ mod tests {
             1,
             "Test manager should have published one rotation certificate"
         );
-        match &published[0].message {
+        match published[0].message() {
             Rotation(m) => {
                 assert_eq!(
                     m.dealer_address, test_addr,

@@ -2444,6 +2444,7 @@ dependencies = [
  "fjall",
  "futures",
  "hashi-btc",
+ "hashi-types",
  "hex",
  "prometheus",
  "prometheus-closure-metric",
@@ -2507,8 +2508,8 @@ dependencies = [
  "aws-sdk-s3",
  "bitcoin",
  "ed25519-consensus",
- "hashi",
  "hashi-guardian-shared",
+ "hashi-types",
  "hpke",
  "k256",
  "rand 0.8.5",
@@ -2530,7 +2531,7 @@ dependencies = [
  "ed25519-consensus",
  "fastcrypto",
  "fastcrypto-tbls",
- "hashi",
+ "hashi-types",
  "hpke",
  "k256",
  "miniscript 13.0.0",
@@ -2542,6 +2543,30 @@ dependencies = [
  "sui-sdk-types",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hashi-types"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bcs",
+ "bytes",
+ "ed25519-dalek",
+ "fastcrypto",
+ "fastcrypto-tbls",
+ "proptest",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "serde",
+ "serde_derive",
+ "sui-crypto",
+ "sui-rpc",
+ "sui-sdk-types",
+ "test-strategy",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]

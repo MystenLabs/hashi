@@ -22,10 +22,11 @@ impl HttpService {
     pub async fn start(self) -> sui_http::ServerHandle {
         let router = {
             let bridge_service =
-                crate::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
-            let dkg_service = crate::proto::dkg_service_server::DkgServiceServer::new(self.clone());
+                hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
+            let dkg_service =
+                hashi_types::proto::dkg_service_server::DkgServiceServer::new(self.clone());
             let key_rotation_service =
-                crate::proto::key_rotation_service_server::KeyRotationServiceServer::new(
+                hashi_types::proto::key_rotation_service_server::KeyRotationServiceServer::new(
                     self.clone(),
                 );
 
@@ -38,7 +39,7 @@ impl HttpService {
                 sui_rpc::proto::google::protobuf::FILE_DESCRIPTOR_SET,
                 sui_rpc::proto::google::rpc::FILE_DESCRIPTOR_SET,
                 tonic_health::pb::FILE_DESCRIPTOR_SET,
-                crate::proto::FILE_DESCRIPTOR_SET,
+                hashi_types::proto::FILE_DESCRIPTOR_SET,
             ] {
                 reflection_v1 =
                     reflection_v1.register_encoded_file_descriptor_set(file_descriptor_set);

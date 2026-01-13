@@ -1,13 +1,13 @@
 use crate::Hashi;
-use crate::committee::BlsSignatureAggregator;
-use crate::committee::CommitteeMember;
-use crate::committee::MemberSignature;
 use crate::config::ForceRunAsLeader;
 use crate::onchain::types::DepositRequest;
-use crate::proto::SignDepositConfirmationRequest;
-use crate::proto::SignDepositConfirmationResponse;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
+use hashi_types::committee::BlsSignatureAggregator;
+use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::MemberSignature;
+use hashi_types::proto::SignDepositConfirmationRequest;
+use hashi_types::proto::SignDepositConfirmationResponse;
 use prost_types::FieldMask;
 use std::sync::Arc;
 use sui_crypto::SuiSigner;
@@ -201,9 +201,7 @@ impl LeaderService {
             validator_address
         );
 
-        response
-            .into_inner()
-            .into_member_signature()
+        into_member_signature(response.into_inner())
             .inspect_err(|e| {
                 error!(
                     "Failed to parse member signature from response from {}: {e}",
@@ -264,7 +262,7 @@ impl LeaderService {
     async fn submit_deposit_confirmation_onchain(
         &self,
         deposit_request: &DepositRequest,
-        signed_message: crate::committee::SignedMessage<DepositRequest>,
+        signed_message: hashi_types::committee::SignedMessage<DepositRequest>,
     ) -> anyhow::Result<()> {
         use sui_sdk_types::*;
 
@@ -373,26 +371,26 @@ impl DepositRequest {
     }
 }
 
-impl SignDepositConfirmationResponse {
-    fn into_member_signature(self) -> anyhow::Result<MemberSignature> {
-        let member_signature = self.member_signature.ok_or(anyhow::anyhow!(
-            "No member_signature in SignDepositConfirmationResponse"
-        ))?;
-        let epoch = member_signature
-            .epoch
-            .ok_or(anyhow::anyhow!("No epoch in MemberSignature"))?;
-        let address = Address::from_bytes(
-            member_signature
-                .address
-                .ok_or(anyhow::anyhow!("No address in MemberSignature"))?
-                .as_bytes(),
-        )?;
-        let signature = BLS12381Signature::from_bytes(
-            member_signature
-                .signature
-                .ok_or(anyhow::anyhow!("No signature in MemberSignature"))?
-                .as_bytes(),
-        )?;
-        Ok(MemberSignature::new(epoch, address, signature))
-    }
+fn into_member_signature(
+    response: SignDepositConfirmationResponse,
+) -> anyhow::Result<MemberSignature> {
+    let member_signature = response.member_signature.ok_or(anyhow::anyhow!(
+        "No member_signature in SignDepositConfirmationResponse"
+    ))?;
+    let epoch = member_signature
+        .epoch
+        .ok_or(anyhow::anyhow!("No epoch in MemberSignature"))?;
+    let address = Address::from_bytes(
+        member_signature
+            .address
+            .ok_or(anyhow::anyhow!("No address in MemberSignature"))?
+            .as_bytes(),
+    )?;
+    let signature = BLS12381Signature::from_bytes(
+        member_signature
+            .signature
+            .ok_or(anyhow::anyhow!("No signature in MemberSignature"))?
+            .as_bytes(),
+    )?;
+    Ok(MemberSignature::new(epoch, address, signature))
 }

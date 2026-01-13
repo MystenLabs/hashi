@@ -24,15 +24,14 @@ use tap::Pipe;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
-use crate::committee::Committee;
-use crate::committee::CommitteeMember;
 use crate::config::HashiIds;
 use crate::dkg::fallback_encryption_public_key;
+use hashi_types::committee::Committee;
+use hashi_types::committee::CommitteeMember;
+use hashi_types::move_types;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
-mod events;
-pub(crate) mod move_types;
 pub mod types;
 mod watcher;
 

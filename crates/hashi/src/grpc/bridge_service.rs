@@ -5,11 +5,11 @@ use tonic::Status;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
-use crate::proto::GetServiceInfoRequest;
-use crate::proto::GetServiceInfoResponse;
-use crate::proto::SignDepositConfirmationRequest;
-use crate::proto::SignDepositConfirmationResponse;
-use crate::proto::bridge_service_server::BridgeService;
+use hashi_types::proto::GetServiceInfoRequest;
+use hashi_types::proto::GetServiceInfoResponse;
+use hashi_types::proto::SignDepositConfirmationRequest;
+use hashi_types::proto::SignDepositConfirmationResponse;
+use hashi_types::proto::bridge_service_server::BridgeService;
 
 use super::HttpService;
 
@@ -28,7 +28,7 @@ impl BridgeService for HttpService {
         &self,
         request: Request<SignDepositConfirmationRequest>,
     ) -> Result<Response<SignDepositConfirmationResponse>, Status> {
-        let deposit_request = request.get_ref().parse_deposit_request();
+        let deposit_request = parse_deposit_request(request.get_ref());
         let member_signature = self
             .inner
             .validate_and_sign_deposit_confirmation(&deposit_request)
@@ -40,28 +40,26 @@ impl BridgeService for HttpService {
     }
 }
 
-impl SignDepositConfirmationRequest {
-    fn parse_deposit_request(&self) -> DepositRequest {
-        use sui_sdk_types::Address;
+fn parse_deposit_request(request: &SignDepositConfirmationRequest) -> DepositRequest {
+    use sui_sdk_types::Address;
 
-        let id = Address::from_bytes(&self.id).expect("invalid id");
-        let txid = Address::from_bytes(&self.txid).expect("invalid txid");
-        let derivation_path = self
-            .derivation_path
-            .as_ref()
-            .map(|bytes| Address::from_bytes(bytes).expect("invalid derivation_path"));
+    let id = Address::from_bytes(&request.id).expect("invalid id");
+    let txid = Address::from_bytes(&request.txid).expect("invalid txid");
+    let derivation_path = request
+        .derivation_path
+        .as_ref()
+        .map(|bytes| Address::from_bytes(bytes).expect("invalid derivation_path"));
 
-        DepositRequest {
-            id,
-            utxo: Utxo {
-                id: UtxoId {
-                    txid,
-                    vout: self.vout,
-                },
-                amount: self.amount,
-                derivation_path,
+    DepositRequest {
+        id,
+        utxo: Utxo {
+            id: UtxoId {
+                txid,
+                vout: request.vout,
             },
-            timestamp_ms: self.timestamp_ms,
-        }
+            amount: request.amount,
+            derivation_path,
+        },
+        timestamp_ms: request.timestamp_ms,
     }
 }

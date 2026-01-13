@@ -16,9 +16,9 @@ use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
 pub type EncryptionPrivateKey =
-    fastcrypto_tbls::ecies_v1::PrivateKey<crate::dkg::EncryptionGroupElement>;
+    fastcrypto_tbls::ecies_v1::PrivateKey<fastcrypto::groups::ristretto255::RistrettoPoint>;
 pub type EncryptionPublicKey =
-    fastcrypto_tbls::ecies_v1::PublicKey<crate::dkg::EncryptionGroupElement>;
+    fastcrypto_tbls::ecies_v1::PublicKey<fastcrypto::groups::ristretto255::RistrettoPoint>;
 
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
 #[derive(Serialize, Deserialize, Debug)]
@@ -322,7 +322,7 @@ impl CommitteeSignature {
 #[derive(Debug, Clone)]
 pub struct SignedMessage<T> {
     signature: CommitteeSignature,
-    pub(crate) message: T,
+    message: T,
 }
 
 impl<T> SignedMessage<T> {
@@ -362,8 +362,12 @@ impl<T> SignedMessage<T> {
     }
 
     /// Get a reference to the committee signature.
-    pub(crate) fn committee_signature(&self) -> &CommitteeSignature {
+    pub fn committee_signature(&self) -> &CommitteeSignature {
         &self.signature
+    }
+
+    pub fn into_parts(self) -> (CommitteeSignature, T) {
+        (self.signature, self.message)
     }
 }
 
@@ -498,7 +502,7 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct BitMap {
+struct BitMap {
     bitmap: Vec<u8>,
 }
 

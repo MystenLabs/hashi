@@ -12,7 +12,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 
 # Ser/Deser deps
 tonic = { version = "0.14"}
-hashi = { path = "../hashi" } # TODO: Remove dep over hashi crate
+hashi-types = { path = "../hashi-types" }
 
 # Logging dependencies
 tracing = "0.1.41"
