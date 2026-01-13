@@ -210,9 +210,6 @@ pub enum LogMessage {
 /// Unique identifier for a withdrawal request
 pub type WithdrawalID = u64;
 
-/// Sui-assigned timestamp for a withdrawal (seconds since UNIX_EPOCH)
-pub type WithdrawalTime = u64;
-
 pub type Attestation = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -445,7 +442,6 @@ impl WithdrawalState {
         }
     }
 
-    /// Adds one new epoch and if needed prunes one old epoch
     /// Adds a new epoch and prunes an old epoch
     pub fn add_epoch_to_limiter(&mut self, epoch: u64) -> GuardianResult<()> {
         info!("Adding epoch {} to rate limiter.", epoch);
@@ -478,8 +474,8 @@ impl WithdrawalState {
         Ok(())
     }
 
-    pub fn limiter_len(&self) -> usize {
-        self.rate_limiter_state.len()
+    pub fn is_limiter_empty(&self) -> bool {
+        self.rate_limiter_state.is_empty()
     }
 }
 

@@ -193,7 +193,7 @@ fn finalize_init(
         .expect("Unable to set withdraw config");
 
     info!("Setting enclave state.");
-    enclave.set_state(incoming_state);
+    enclave.state.init(incoming_state);
 
     info!("Enclave initialization complete.");
 }
