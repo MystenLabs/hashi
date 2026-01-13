@@ -1,6 +1,6 @@
-use crate::committee::EncryptionPrivateKey;
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use hashi_types::committee::EncryptionPrivateKey;
 use sui_sdk_types::Address;
 
 pub trait PublicMessagesStore: Send + Sync {

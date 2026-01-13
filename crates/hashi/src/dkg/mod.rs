@@ -3,10 +3,6 @@
 pub mod rpc;
 pub mod types;
 
-use crate::committee::Bls12381PrivateKey;
-use crate::committee::BlsSignatureAggregator;
-use crate::committee::Committee;
-use crate::committee::MemberSignature;
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
@@ -35,6 +31,10 @@ use fastcrypto_tbls::types::ShareIndex;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
+use hashi_types::committee::Bls12381PrivateKey;
+use hashi_types::committee::BlsSignatureAggregator;
+use hashi_types::committee::Committee;
+use hashi_types::committee::MemberSignature;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::collections::HashMap;
@@ -1754,10 +1754,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::Committee;
-    use crate::committee::CommitteeMember;
-    use crate::committee::EncryptionPublicKey;
-    use crate::committee::MemberSignature;
     use crate::dkg::types::ProtocolType;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
@@ -1767,6 +1763,10 @@ mod tests {
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPublicKey;
+    use hashi_types::committee::MemberSignature;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -3921,7 +3921,7 @@ mod tests {
         let config = setup.dkg_config();
         let committee = setup.committee();
         let mut aggregator =
-            crate::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
+            hashi_types::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
 
         // Add signatures from validators until we meet the required weight
         let dkg_required = config.threshold;

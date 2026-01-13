@@ -10,9 +10,9 @@ use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
 
-use crate::committee::Committee;
-use crate::committee::EncryptionPublicKey;
 use crate::grpc::Client;
+use hashi_types::committee::Committee;
+use hashi_types::committee::EncryptionPublicKey;
 
 #[derive(Debug)]
 pub struct Hashi {

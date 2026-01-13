@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 
 use anyhow::anyhow;
 
-pub mod committee;
 pub mod communication;
 pub mod config;
 pub mod db;
@@ -15,7 +14,6 @@ pub mod leader;
 pub mod metrics;
 pub mod mpc;
 pub mod onchain;
-pub mod proto;
 pub mod storage;
 pub mod tls;
 

@@ -9,7 +9,6 @@ use tracing::error;
 use tracing::info;
 
 use crate::Hashi;
-use crate::committee::Committee;
 use crate::communication::SuiTobChannel;
 use crate::dkg::DkgManager;
 use crate::dkg::DkgOutput;
@@ -18,6 +17,7 @@ use crate::dkg::types::DkgCertificate;
 use crate::dkg::types::DkgDealerMessageHash;
 use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
+use hashi_types::committee::Committee;
 
 // TODO: Read threshold from on-chain config once it is made configurable.
 const THRESHOLD_NUMERATOR: u64 = 2;
@@ -94,8 +94,7 @@ impl MpcService {
                 }
                 Ok(None) => match self.run_dkg().await {
                     Ok(output) => {
-                        // TODO: Store DKG public key on-chain after completion so external clients
-                        // can derive deposit addresses without querying nodes.
+                        // TODO: Store DKG public key on-chain.
                         let _ = self.dkg_completion_tx.send(Some(output.public_key));
                         return;
                     }

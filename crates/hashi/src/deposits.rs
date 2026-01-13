@@ -1,10 +1,10 @@
 use crate::Hashi;
 use crate::onchain::types::DepositRequest;
-use crate::proto::MemberSignature;
 use anyhow::anyhow;
 use anyhow::bail;
 use bitcoin::hashes::Hash;
 use fastcrypto::traits::ToFromBytes;
+use hashi_types::proto::MemberSignature;
 
 impl Hashi {
     pub async fn validate_and_sign_deposit_confirmation(

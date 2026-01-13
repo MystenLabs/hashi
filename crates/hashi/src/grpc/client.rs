@@ -19,12 +19,12 @@ use crate::dkg::types::SendMessageRequest;
 use crate::dkg::types::SendMessageResponse;
 use crate::dkg::types::SendRotationMessagesRequest;
 use crate::dkg::types::SendRotationMessagesResponse;
-use crate::proto::GetServiceInfoRequest;
-use crate::proto::GetServiceInfoResponse;
-use crate::proto::bridge_service_client::BridgeServiceClient;
-use crate::proto::dkg_service_client::DkgServiceClient;
-use crate::proto::key_rotation_service_client::KeyRotationServiceClient;
 use crate::tls::make_client_config_no_verification;
+use hashi_types::proto::GetServiceInfoRequest;
+use hashi_types::proto::GetServiceInfoResponse;
+use hashi_types::proto::bridge_service_client::BridgeServiceClient;
+use hashi_types::proto::dkg_service_client::DkgServiceClient;
+use hashi_types::proto::key_rotation_service_client::KeyRotationServiceClient;
 
 type Result<T, E = tonic::Status> = std::result::Result<T, E>;
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;

@@ -10,11 +10,11 @@ check-fmt: ## Check code formatting
 .PHONY: fmt
 fmt: ## Format code
 	cargo fmt -- --config imports_granularity=Item --config format_code_in_doc_comments=true
-	$(MAKE) -C crates/hashi buf-fmt
+	$(MAKE) -C crates/hashi-types buf-fmt
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint
-	$(MAKE) -C crates/hashi buf-lint
+	$(MAKE) -C crates/hashi-types buf-lint
 
 .PHONY: test
 test: ## Run all tests
@@ -32,7 +32,7 @@ fmt-move: ## Format code
 
 .PHONY: proto
 proto: ## Build proto files
-	$(MAKE) -C crates/hashi proto
+	$(MAKE) -C crates/hashi-types proto
 
 .PHONY: clippy
 clippy: ## run cargo clippy

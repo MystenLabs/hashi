@@ -1,9 +1,9 @@
-use crate::committee::BLS12381Signature;
 use crate::dkg::types;
-use crate::proto;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
+use hashi_types::committee::BLS12381Signature;
+use hashi_types::proto;
 use serde::Deserialize;
 use serde::Serialize;
 use sui_rpc::proto::TryFromProtoError;

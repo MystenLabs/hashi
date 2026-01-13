@@ -10,7 +10,7 @@ tracing = "0.1.41"
 serde_json = "1.0.143"
 bcs = "0.1.6"
 
-hashi = { path = "../hashi" }
+hashi-types = { path = "../hashi-types" }
 prost = "0.14"
 sui-sdk-types = { version = "0.2"}
 

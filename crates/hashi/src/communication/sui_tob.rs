@@ -30,10 +30,10 @@ use thiserror::Error;
 use super::ChannelError;
 use super::ChannelResult;
 use super::OrderedBroadcastChannel;
-use crate::committee::Committee;
 use crate::dkg::types::CertificateV1;
 use crate::dkg::types::DkgDealerMessageHash;
 use crate::onchain::OnchainState;
+use hashi_types::committee::Committee;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GAS_BUDGET: u64 = 50_000_000;

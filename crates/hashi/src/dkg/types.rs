@@ -1,10 +1,5 @@
 //! Core types for the DKG protocol
 
-use crate::committee::BLS12381Signature;
-use crate::committee::Committee;
-use crate::committee::SignedMessage;
-use crate::onchain::move_types::CertifiedMessage;
-use crate::onchain::move_types::DkgDealerMessageHashV1;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::random_oracle::RandomOracle;
@@ -12,6 +7,11 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
+use hashi_types::committee::BLS12381Signature;
+use hashi_types::committee::Committee;
+use hashi_types::committee::SignedMessage;
+use hashi_types::move_types::CertifiedMessage;
+use hashi_types::move_types::DkgDealerMessageHashV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -306,7 +306,7 @@ impl CertificateV1 {
 
     pub fn signers(
         &self,
-        committee: &crate::committee::Committee,
+        committee: &Committee,
     ) -> Result<Vec<Address>, sui_crypto::SignatureError> {
         match self {
             CertificateV1::Dkg(cert) => cert.signers(committee),
@@ -314,10 +314,7 @@ impl CertificateV1 {
         }
     }
 
-    pub fn weight(
-        &self,
-        committee: &crate::committee::Committee,
-    ) -> Result<u64, sui_crypto::SignatureError> {
+    pub fn weight(&self, committee: &Committee) -> Result<u64, sui_crypto::SignatureError> {
         match self {
             CertificateV1::Dkg(cert) => cert.weight(committee),
             CertificateV1::Rotation(cert) => cert.weight(committee),
@@ -327,7 +324,7 @@ impl CertificateV1 {
     pub fn is_signer(
         &self,
         address: &Address,
-        committee: &crate::committee::Committee,
+        committee: &Committee,
     ) -> Result<bool, sui_crypto::SignatureError> {
         match self {
             CertificateV1::Dkg(cert) => cert.is_signer(address, committee),
@@ -412,13 +409,13 @@ impl From<crate::communication::ChannelError> for DkgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::Bls12381PrivateKey;
-    use crate::committee::BlsSignatureAggregator;
-    use crate::committee::CommitteeMember;
-    use crate::committee::EncryptionPrivateKey;
-    use crate::committee::EncryptionPublicKey;
-    use crate::onchain::move_types::CommitteeSignature as MoveCommitteeSignature;
     use fastcrypto_tbls::nodes::Node;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::BlsSignatureAggregator;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
+    use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
     use std::num::NonZeroU16;
 
     impl RotationMessages {
