@@ -2,7 +2,6 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
-use crate::epoch_store::ConsecutiveEpochStoreRepr;
 use crate::Ciphertext;
 use crate::CommitteeStore;
 use crate::EncPubKey;

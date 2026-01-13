@@ -4,6 +4,8 @@ use crate::GuardianResult;
 use crate::MAX_EPOCHS;
 use std::collections::VecDeque;
 
+// TODO: Add tests
+
 /// A store of last X epoch's entries for some type T, e.g., committee, amount_withdrawn
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsecutiveEpochStore<V> {
@@ -167,5 +169,3 @@ impl<V> ConsecutiveEpochStore<V> {
             .map(move |(i, v)| (base + i as u64, v))
     }
 }
-
-// TODO: Add tests
