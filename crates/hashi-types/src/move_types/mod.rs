@@ -224,7 +224,7 @@ pub struct UtxoPool {
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCertsV1 {
     pub epoch: u64,
-    /// LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>
+    // LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>
     pub dkg_certs: LinkedTable<Address>,
 }
 
