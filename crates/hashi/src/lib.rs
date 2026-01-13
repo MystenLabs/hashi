@@ -88,14 +88,6 @@ impl Hashi {
         self.dkg_manager.get().expect("DkgManager not initialized")
     }
 
-    pub fn mpc_handle(&self) -> &mpc::MpcHandle {
-        self.mpc_handle.get().expect("MpcHandle not initialized")
-    }
-
-    pub fn mpc_handle_opt(&self) -> Option<&mpc::MpcHandle> {
-        self.mpc_handle.get()
-    }
-
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
         self.btc_monitor.get().expect("BtcMonitor not initialized")
     }

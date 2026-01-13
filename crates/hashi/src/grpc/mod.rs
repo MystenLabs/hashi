@@ -99,10 +99,6 @@ impl HttpService {
         self.inner.dkg_manager()
     }
 
-    pub fn mpc_handle(&self) -> &crate::mpc::MpcHandle {
-        self.inner.mpc_handle()
-    }
-
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
         self.inner.btc_monitor()
     }
