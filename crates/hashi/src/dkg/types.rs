@@ -381,9 +381,6 @@ pub enum DkgError {
     #[error("Storage error: {0}")]
     StorageError(String),
 
-    #[error("Recovery failed: {0}")]
-    RecoveryFailed(String),
-
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
 
