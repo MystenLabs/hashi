@@ -4945,7 +4945,7 @@ dependencies = [
  "bcs",
  "bitcoin",
  "bitcoincore-rpc",
- "fastcrypto-tbls 0.1.0 (git+https://github.com/MystenLabs/fastcrypto.git?rev=cc67fd2)",
+ "fastcrypto-tbls",
  "futures",
  "hashi",
  "prometheus",
