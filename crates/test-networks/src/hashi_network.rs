@@ -1,5 +1,4 @@
 use anyhow::Result;
-use fastcrypto_tbls::threshold_schnorr::G;
 use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
@@ -34,6 +33,9 @@ use crate::SuiNetworkHandle;
 
 const HTTPS_SCHEME: &str = "https://";
 const HTTP_SCHEME: &str = "http://";
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const THRESHOLD_NUMERATOR: u64 = 2;
+const THRESHOLD_DENOMINATOR: u64 = 3;
 
 pub struct HashiNodeHandle(pub Arc<Hashi>);
 
@@ -73,14 +75,53 @@ impl HashiNodeHandle {
         self.0.config.metrics_http_address()
     }
 
-    pub async fn wait_for_dkg_completion(&self) -> G {
-        let mpc_handle = loop {
-            if let Some(handle) = self.0.mpc_handle_opt() {
-                break handle;
+    pub async fn wait_for_dkg_completion(&self, timeout: std::time::Duration) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_dkg_completion_inner())
+            .await
+            .map_err(|_| anyhow::anyhow!("DKG completion timed out after {:?}", timeout))
+    }
+
+    async fn wait_for_dkg_completion_inner(&self) {
+        loop {
+            // Wait for hashi to finish initializing
+            let onchain_state = match self.0.onchain_state_opt() {
+                Some(state) => state,
+                None => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let epoch_threshold_and_committee = {
+                let state = onchain_state.state();
+                let epoch = state.hashi().committees.epoch();
+                state.hashi().committees.current_committee().map(|c| {
+                    let threshold = c.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
+                    (epoch, threshold, c.clone())
+                })
+            };
+            let (epoch, threshold, committee) = match epoch_threshold_and_committee {
+                Some(et) => et,
+                None => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let raw_certs = match onchain_state.fetch_dkg_certs(epoch).await {
+                Ok(certs) => certs,
+                Err(_) => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let certified_weight: u64 = raw_certs
+                .iter()
+                .filter_map(|(dealer, _)| committee.weight_of(dealer).ok())
+                .sum();
+            if certified_weight >= threshold {
+                return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        };
-        mpc_handle.wait_for_dkg_completion().await
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 }
 

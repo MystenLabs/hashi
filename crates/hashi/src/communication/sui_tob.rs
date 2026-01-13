@@ -27,19 +27,13 @@ use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
 use thiserror::Error;
 
-use crate::committee::Committee;
-use crate::committee::SignedMessage;
-use crate::dkg::types::CertificateV1;
-use crate::dkg::types::DkgDealerMessageHash;
-use crate::onchain::OnchainState;
-use crate::onchain::move_types::CertifiedMessage;
-use crate::onchain::move_types::DkgDealerMessageHashV1;
-
-type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;
-
 use super::ChannelError;
 use super::ChannelResult;
 use super::OrderedBroadcastChannel;
+use crate::committee::Committee;
+use crate::dkg::types::CertificateV1;
+use crate::dkg::types::DkgDealerMessageHash;
+use crate::onchain::OnchainState;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GAS_BUDGET: u64 = 50_000_000;
@@ -245,32 +239,16 @@ impl SuiTobChannel {
             .map_err(|e| TobError::RpcError(e.to_string()))?;
         let mut certificates = Vec::with_capacity(raw_certs.len());
         for (dealer, dkg_cert) in raw_certs {
-            let cert = self.convert_to_internal_cert(dkg_cert)?;
-            certificates.push((dealer, cert));
+            let inner_cert = DkgDealerMessageHash::from_onchain_cert(
+                &dkg_cert,
+                self.epoch,
+                &self.committee,
+                self.threshold(),
+            )
+            .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
+            certificates.push((dealer, CertificateV1::Dkg(inner_cert)));
         }
         Ok(certificates)
-    }
-
-    fn convert_to_internal_cert(&self, dkg_cert: DkgCertV1) -> Result<CertificateV1, TobError> {
-        let hash_bytes: [u8; 32] = dkg_cert
-            .message
-            .message_hash
-            .try_into()
-            .map_err(|_| TobError::InvalidCertificate("invalid message_hash length".into()))?;
-        let message = DkgDealerMessageHash {
-            dealer_address: dkg_cert.message.dealer_address,
-            message_hash: hash_bytes.into(),
-        };
-        let inner_cert = SignedMessage::try_from_parts(
-            self.epoch,
-            message,
-            &dkg_cert.signature.signature,
-            &dkg_cert.signature.signers_bitmap,
-            &self.committee,
-            self.threshold(),
-        )
-        .map_err(|e: sui_crypto::SignatureError| TobError::InvalidCertificate(e.to_string()))?;
-        Ok(CertificateV1::Dkg(inner_cert))
     }
 }
 
