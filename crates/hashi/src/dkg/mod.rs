@@ -122,6 +122,8 @@ pub struct DkgManager {
 }
 
 // TODO: Factor out common code between DKG and key rotation.
+// TODO: Consider wrapping crypto operations with `tokio::task::spawn_blocking`
+// since they are CPU-heavy and can block the async runtime.
 impl DkgManager {
     pub fn new(
         address: Address,
