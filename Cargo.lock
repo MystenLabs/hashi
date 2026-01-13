@@ -2444,6 +2444,7 @@ dependencies = [
  "fjall",
  "futures",
  "hashi-btc",
+ "hashi-guardian-shared",
  "hashi-types",
  "hex",
  "prometheus",
