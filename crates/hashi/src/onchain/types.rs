@@ -23,7 +23,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
-    pub proposals: ProposalSet,
+    pub proposals: Proposals,
     pub tob_id: Address,
 }
 
@@ -258,11 +258,11 @@ impl MemberInfo {
     }
 }
 
+/// Proposals bag - stores governance proposals by ID
 #[derive(Debug)]
-pub struct ProposalSet {
+pub struct Proposals {
     pub id: Address,
     pub size: u64,
-    pub seq_num: u64,
 }
 
 #[derive(Debug)]

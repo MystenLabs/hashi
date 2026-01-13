@@ -1,13 +1,7 @@
 /// Module: hashi
 module hashi::hashi;
 
-use hashi::{
-    committee::Committee,
-    committee_set::CommitteeSet,
-    config::Config,
-    proposal_set::{Self, ProposalSet},
-    treasury::Treasury
-};
+use hashi::{committee::Committee, committee_set::CommitteeSet, config::Config, treasury::Treasury};
 use sui::bag::{Self, Bag};
 
 public struct Hashi has key {
@@ -17,7 +11,7 @@ public struct Hashi has key {
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
-    proposals: ProposalSet,
+    proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     tob: Bag,
 }
@@ -31,7 +25,7 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
-        proposals: proposal_set::create(ctx),
+        proposals: bag::new(ctx),
         tob: bag::new(ctx),
     };
 
@@ -106,7 +100,11 @@ public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
     &mut self.treasury
 }
 
-public(package) fun proposals_mut(self: &mut Hashi): &mut ProposalSet {
+public(package) fun proposals(self: &Hashi): &Bag {
+    &self.proposals
+}
+
+public(package) fun proposals_mut(self: &mut Hashi): &mut Bag {
     &mut self.proposals
 }
 
