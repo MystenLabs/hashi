@@ -147,7 +147,7 @@ message WithdrawalConfig {
 
 message WithdrawalState {
   // Total number of withdrawals processed till now.
-  optional uint64 num_withdrawals = 1;
+  map<uint64, uint64> rate_limiter_state = 1;
 }
 
 message ProvisionerInitResponse {}

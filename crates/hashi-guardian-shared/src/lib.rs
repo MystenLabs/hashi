@@ -4,21 +4,19 @@ pub mod errors;
 pub mod proto_conversions;
 pub mod test_utils;
 
-pub use crypto::*;
-pub use errors::*;
-use std::collections::HashMap;
-use std::collections::HashSet;
-
 use crate::GuardianError::*;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
+pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
 use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
 use blake2::Digest;
+pub use crypto::*;
 pub use ed25519_consensus::Signature as GuardianSignature;
-pub use ed25519_consensus::SigningKey as GuardianSigningKeyPair;
-pub use ed25519_consensus::VerificationKey as GuardianVerificationKey;
+pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
+pub use ed25519_consensus::VerificationKey as GuardianPubKey;
+pub use errors::*;
 pub use hashi::committee::Committee as HashiCommittee;
 pub use hashi::committee::CommitteeMember as HashiCommitteeMember;
 pub use hashi::committee::SignedMessage as HashiSigned;
@@ -26,14 +24,20 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::bitcoin_utils::TxUTXOs;
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
+use tracing::info;
 
-pub const MAX_HASHI_COMMITTEES: usize = 7;
+//TODO: Move these to config?
+pub const MAX_EPOCHS: usize = 7;
+pub const MAX_WITHDRAWABLE_PER_EPOCH: Amount = Amount::from_sat(100_000_000);
 
 // ---------------------------------
 //     Serialization Abstraction
@@ -129,13 +133,13 @@ pub struct ProvisionerInitRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
-    pub hashi_committees: HashMap<u64, HashiCommittee>,
+    hashi_committees: HashMap<u64, HashiCommittee>,
     /// Withdrawal config
-    pub withdrawal_config: WithdrawalConfig,
+    withdrawal_config: WithdrawalConfig,
     /// Withdrawal state
-    pub withdrawal_state: WithdrawalState,
+    withdrawal_state: WithdrawalState,
     /// Hashi BTC master key used to derive child keys for diff inputs
-    pub hashi_btc_master_pubkey: XOnlyPublicKey,
+    hashi_btc_master_pubkey: BitcoinPubkey,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -148,16 +152,13 @@ pub struct GetGuardianInfoResponse {
 }
 
 /// An "immediate withdrawal" request. `HashiSigned<T>.`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Note that epoch number is present in the wrapper.
+#[derive(Debug, Clone, Serialize)]
 pub struct NormalWithdrawalRequest {
     /// Unique withdrawal ID assigned by Hashi
     wid: WithdrawalID,
-    /// Hashi-assigned timestamp
-    timestamp_secs: WithdrawalTime,
     /// BTC transaction input and output utxos
-    all_utxos: TxUTXOs,
-    /// Was delayed_withdraw previously called for this withdrawal?
-    is_delayed: bool,
+    utxos: TxUTXOs,
 }
 
 /// `EnclaveSigned<T>`
@@ -172,12 +173,12 @@ pub struct NormalWithdrawalResponse {
 
 /// All log messages emitted by the guardian enclave.
 /// Uses enum discriminator for automatic domain separation between variants.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub enum LogMessage {
     /// Attestation and signing public key
     OperatorInitAttestationUnsigned {
         attestation: Attestation,
-        signing_public_key: GuardianVerificationKey,
+        signing_public_key: GuardianPubKey,
     },
     /// Share commitments given in /operator_init
     OperatorInitShareCommitments(Vec<ShareCommitment>),
@@ -197,7 +198,7 @@ pub enum LogMessage {
     NormalWithdrawalSuccess {
         request: NormalWithdrawalRequest,
         response: NormalWithdrawalResponse,
-        withdraw_count: u64,
+        signers: Vec<u8>,
     },
 }
 
@@ -222,7 +223,6 @@ pub struct S3Config {
 }
 
 // TODO: Align types with hashi.
-/// All the withdrawal config
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
@@ -233,11 +233,10 @@ pub struct WithdrawalConfig {
     pub delayed_withdrawals_timeout: Duration,
 }
 
-/// Withdrawal state - all that is needed to restart the enclave
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalState {
-    /// Total number of withdrawals processed till now
-    pub num_withdrawals: u64,
+    /// Amount withdrawn keyed by epoch number in the last MAX_EPOCHS epochs
+    rate_limiter_state: HashMap<u64, Amount>,
 }
 
 // ---------------------------------
@@ -319,10 +318,10 @@ impl ProvisionerInitRequestState {
         hashi_committees: HashMap<u64, HashiCommittee>,
         withdrawal_config: WithdrawalConfig,
         withdrawal_state: WithdrawalState,
-        hashi_btc_master_pubkey: XOnlyPublicKey,
+        hashi_btc_master_pubkey: BitcoinPubkey,
     ) -> GuardianResult<Self> {
         // TODO: Add more validation (if any)
-        if hashi_committees.len() > MAX_HASHI_COMMITTEES {
+        if hashi_committees.len() > MAX_EPOCHS {
             return Err(InvalidInputs("too many committees".into()));
         }
 
@@ -332,6 +331,30 @@ impl ProvisionerInitRequestState {
             withdrawal_state,
             hashi_btc_master_pubkey,
         })
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        HashMap<u64, HashiCommittee>,
+        WithdrawalConfig,
+        WithdrawalState,
+        BitcoinPubkey,
+    ) {
+        (
+            self.hashi_committees,
+            self.withdrawal_config,
+            self.withdrawal_state,
+            self.hashi_btc_master_pubkey,
+        )
+    }
+
+    pub fn withdrawal_config(&self) -> &WithdrawalConfig {
+        &self.withdrawal_config
+    }
+
+    pub fn hashi_btc_master_pubkey(&self) -> BitcoinPubkey {
+        self.hashi_btc_master_pubkey
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -376,20 +399,87 @@ impl ProvisionerInitRequest {
 }
 
 impl NormalWithdrawalRequest {
+    pub fn new(wid: WithdrawalID, utxos: TxUTXOs) -> Self {
+        Self { wid, utxos }
+    }
+
     pub fn wid(&self) -> &WithdrawalID {
         &self.wid
     }
 
-    pub fn all_utxos(&self) -> &TxUTXOs {
-        &self.all_utxos
+    pub fn utxos(&self) -> &TxUTXOs {
+        &self.utxos
+    }
+}
+
+impl WithdrawalState {
+    pub fn new(rate_limiter_state: HashMap<u64, Amount>) -> GuardianResult<Self> {
+        if rate_limiter_state.len() > MAX_EPOCHS {
+            return Err(InvalidInputs("too many epochs".into()));
+        }
+        Ok(Self { rate_limiter_state })
     }
 
-    pub fn timestamp(&self) -> &WithdrawalTime {
-        &self.timestamp_secs
+    pub fn empty() -> Self {
+        Self {
+            rate_limiter_state: HashMap::new(),
+        }
     }
 
-    pub fn is_delayed(&self) -> bool {
-        self.is_delayed
+    /// Consume amount units from the given epoch's rate limit
+    pub fn consume_from_limiter(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+        match self.rate_limiter_state.entry(epoch) {
+            Entry::Occupied(mut entry) => {
+                let cur_sum = entry.get();
+                let new_sum = cur_sum
+                    .checked_add(amount)
+                    .ok_or(InvalidInputs("Overflow when computing sum".into()))?;
+                if new_sum > MAX_WITHDRAWABLE_PER_EPOCH {
+                    Err(InvalidInputs("Rate limit will exceed".into()))
+                } else {
+                    entry.insert(new_sum);
+                    Ok(())
+                }
+            }
+            Entry::Vacant(_) => Err(InvalidInputs("Missing epoch".into())),
+        }
+    }
+
+    /// Adds one new epoch and if needed prunes one old epoch
+    /// Adds a new epoch and prunes an old epoch
+    pub fn add_epoch_to_limiter(&mut self, epoch: u64) -> GuardianResult<()> {
+        info!("Adding epoch {} to rate limiter.", epoch);
+        match self.rate_limiter_state.entry(epoch) {
+            Entry::Vacant(entry) => {
+                entry.insert(Amount::from_sat(0));
+                info!("Epoch {} added to rate limiter.", epoch);
+            }
+            Entry::Occupied(_) => {
+                return Err(InvalidInputs(format!("Epoch {} already present", epoch)))
+            }
+        };
+
+        if self.rate_limiter_state.len() > MAX_EPOCHS {
+            let min_epoch = self
+                .rate_limiter_state
+                .keys()
+                .min()
+                .copied()
+                .expect("min should exist since MAX_EPOCHS items exist");
+            info!("Pruning old epoch {} from rate limiter.", min_epoch);
+            self.rate_limiter_state.remove(&min_epoch);
+        }
+
+        info!(
+            "Rate limiter now tracking {} epochs.",
+            self.rate_limiter_state.len()
+        );
+
+        Ok(())
+    }
+
+    pub fn limiter_len(&self) -> usize {
+        self.rate_limiter_state.len()
     }
 }
 

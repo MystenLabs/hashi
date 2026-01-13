@@ -1088,11 +1088,11 @@ pub struct WithdrawalConfig {
     #[prost(uint64, optional, tag = "3")]
     pub delayed_withdrawals_timeout: ::core::option::Option<u64>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WithdrawalState {
     /// Total number of withdrawals processed till now.
-    #[prost(uint64, optional, tag = "1")]
-    pub num_withdrawals: ::core::option::Option<u64>,
+    #[prost(map = "uint64, uint64", tag = "1")]
+    pub rate_limiter_state: ::std::collections::HashMap<u64, u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}

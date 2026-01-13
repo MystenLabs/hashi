@@ -106,7 +106,7 @@ impl ProvisionerInitRequest {
                     aes_ciphertext: vec![0u8; 32],
                 },
             },
-            state: ProvisionerInitRequestState::mock_for_testing(),
+            state: ProvisionerInitRequestState::mock_for_testing(None),
         }
     }
 }
@@ -124,15 +124,19 @@ fn mock_committee_member() -> HashiCommitteeMember {
 }
 
 impl ProvisionerInitRequestState {
-    pub fn mock_for_testing() -> Self {
-        let kp = create_btc_keypair(&[1u8; 32]);
+    pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
+        let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         ProvisionerInitRequestState {
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 0,
                 delayed_withdrawals_min_delay: Duration::from_secs(10),
                 delayed_withdrawals_timeout: Duration::from_secs(60),
             },
-            withdrawal_state: WithdrawalState::default(),
+            withdrawal_state: WithdrawalState::new(HashMap::from([(
+                0,
+                bitcoin::Amount::from_sat(0),
+            )]))
+            .unwrap(),
             hashi_committees: HashMap::from([(
                 0,
                 HashiCommittee::new(vec![mock_committee_member()], 0),

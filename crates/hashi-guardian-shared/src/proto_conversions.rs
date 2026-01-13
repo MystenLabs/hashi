@@ -22,6 +22,7 @@ use crate::ShareCommitment;
 use crate::ShareID;
 use crate::WithdrawalConfig;
 use crate::WithdrawalState;
+use bitcoin::Amount;
 use bitcoin::XOnlyPublicKey;
 use fastcrypto::traits::ToFromBytes;
 use hashi::committee::BLS12381PublicKey;
@@ -418,16 +419,21 @@ fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
 }
 
 fn pb_to_withdrawal_state(st: pb::WithdrawalState) -> GuardianResult<WithdrawalState> {
-    let num_withdrawals = st
-        .num_withdrawals
-        .ok_or_else(|| missing("num_withdrawals"))?;
-
-    Ok(WithdrawalState { num_withdrawals })
+    WithdrawalState::new(
+        st.rate_limiter_state
+            .into_iter()
+            .map(|(k, v)| (k, Amount::from_sat(v)))
+            .collect(),
+    )
 }
 
 fn withdrawal_state_to_pb(st: WithdrawalState) -> pb::WithdrawalState {
     pb::WithdrawalState {
-        num_withdrawals: Some(st.num_withdrawals),
+        rate_limiter_state: st
+            .rate_limiter_state
+            .iter()
+            .map(|(e, a)| (*e, a.to_sat()))
+            .collect(),
     }
 }
 
