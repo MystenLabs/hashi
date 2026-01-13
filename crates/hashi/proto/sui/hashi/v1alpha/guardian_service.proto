@@ -126,7 +126,6 @@ message CommitteeStore {
   repeated Committee committees = 2;
 }
 
-
 message ProvisionerInitState {
   // Hashi Committees indexed by epoch.
   CommitteeStore hashi_committees = 1;
