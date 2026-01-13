@@ -94,6 +94,8 @@ impl MpcService {
                 }
                 Ok(None) => match self.run_dkg().await {
                     Ok(output) => {
+                        // TODO: Store DKG public key on-chain after completion so external clients
+                        // can derive deposit addresses without querying nodes.
                         let _ = self.dkg_completion_tx.send(Some(output.public_key));
                         return;
                     }
