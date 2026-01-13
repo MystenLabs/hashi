@@ -6,8 +6,6 @@ use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -27,6 +25,7 @@ mod withdraw;
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
 use hashi::proto::guardian_service_server::GuardianServiceServer;
+use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
 
 /// Enclave's config & state
 pub struct Enclave {
@@ -41,26 +40,27 @@ pub struct Enclave {
 /// Configuration set during initialization (immutable after set)
 pub struct EnclaveConfig {
     /// Ephemeral keypair (set on boot)
-    pub eph_keys: EphemeralKeyPairs,
+    eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
-    pub s3_logger: OnceLock<S3Logger>,
+    s3_logger: OnceLock<S3Logger>,
     /// Enclave BTC private key (set in provisioner_init)
-    pub enclave_btc_keypair: OnceLock<Keypair>,
+    enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
-    pub btc_network: OnceLock<Network>,
+    btc_network: OnceLock<Network>,
     /// Hashi BTC public key used to derive child keys (set in provisioner_init)
-    pub hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
+    hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
     /// Withdraw related config's (set in provisioner_init)
-    pub withdrawal_config: OnceLock<WithdrawalConfig>,
+    withdrawal_config: OnceLock<WithdrawalConfig>,
 }
+
+pub type ArcCommitteeStore = ConsecutiveEpochStore<Arc<HashiCommittee>>;
 
 /// Mutable state that changes during operation
 pub struct EnclaveState {
     /// Hashi bls pk's
-    /// TODO: Combine rate limiter's hashmap into this hashmap?
-    pub hashi_committees: RwLock<HashMap<u64, Arc<HashiCommittee>>>,
+    hashi_committees: RwLock<ArcCommitteeStore>,
     /// Withdrawal-related state
-    pub withdraw_state: Mutex<WithdrawalState>,
+    withdraw_state: Mutex<WithdrawalState>,
 }
 
 /// Scratchpad used only during initialization.
@@ -68,7 +68,8 @@ pub struct EnclaveState {
 #[derive(Default)]
 pub struct Scratchpad {
     /// The received shares
-    pub shares: Mutex<Vec<Share>>,
+    /// TODO: Investigate if it can be moved to std::sync::Mutex
+    pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// The share commitments
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in ProvisionerInitRequest
@@ -298,7 +299,7 @@ impl EnclaveState {
             .expect("rwlock should never throw an error");
         // Note: read() or write() return an error if there's a panic while holding the write guard.
         //       we only write in `update_committee_map` and `set_committees` which can never panic.
-        match committee_map.get(&epoch) {
+        match committee_map.get(epoch) {
             Some(committee) => Ok(Arc::clone(committee)),
             None => Err(InvalidInputs(format!(
                 "Requested committee {} not found",
@@ -311,48 +312,26 @@ impl EnclaveState {
     pub fn update_committee_map(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
         let epoch = new_committee.epoch();
         info!("Adding new epoch {} to committee map.", epoch);
-        let mut committee_map = self
-            .hashi_committees
+        // TODO: Replace with push_next_epoch if we are sure that this method is only called post-genesis.
+        self.hashi_committees
             .write()
-            .expect("rwlock should never throw an error");
-
-        match committee_map.entry(epoch) {
-            Entry::Vacant(v) => {
-                v.insert(Arc::new(new_committee));
-                info!("Epoch {} added to committee map.", epoch);
-            }
-            Entry::Occupied(_) => {
-                return Err(InvalidInputs(format!(
-                    "Requested epoch {} already present in committee map",
-                    epoch
-                )))
-            }
-        };
-
-        if committee_map.len() > MAX_EPOCHS {
-            // Remove the committee with the smallest (oldest) epoch
-            let &min_epoch = committee_map
-                .keys()
-                .min()
-                .expect("min is guaranteed to exist since we know MAX_EPOCHS elements exist");
-            info!("Pruning old epoch {} from committee map.", min_epoch);
-            committee_map.remove(&min_epoch);
-        }
-
-        Ok(())
+            .expect("rwlock should never throw an error")
+            .insert_or_start(epoch, Arc::new(new_committee))
     }
 
     /// Called only from init(ProvisionerInitRequestState)
-    fn set_committees(&self, hashi_committees: HashMap<u64, HashiCommittee>) {
+    fn set_committees(&self, hashi_committees: CommitteeStore) {
         info!("Setting state with {} committees.", hashi_committees.len());
         // Set committees (validation is done in ProvisionerInitRequestState; so committees.size() <= MAX_EPOCHS)
         let mut committee_map = self
             .hashi_committees
             .write()
             .expect("rwlock should never throw an error");
-        for (e, committee) in hashi_committees {
+        for (e, committee) in hashi_committees.into_owned_iter() {
             info!("Adding committee for epoch {}.", e);
-            committee_map.insert(e, Arc::new(committee));
+            committee_map
+                .insert_or_start(e, Arc::new(committee))
+                .expect("Should not fail because we are reading from a ConsecutiveEpochStore");
         }
     }
 
@@ -401,7 +380,7 @@ impl Enclave {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
-                hashi_committees: RwLock::new(HashMap::new()),
+                hashi_committees: RwLock::new(ArcCommitteeStore::empty(MAX_EPOCHS)),
                 withdraw_state: Mutex::new(WithdrawalState::empty()),
             },
             scratchpad: Scratchpad::default(),
@@ -498,36 +477,8 @@ impl Enclave {
     // Scratchpad (Initialization-only data)
     // ========================================================================
 
-    /// Adds a share to the internal list and returns the total number of shares received so far.
-    pub fn store_new_share(&self, share: Share) -> GuardianResult<usize> {
-        let mut shares = self
-            .scratchpad
-            .shares
-            .lock()
-            .expect("Unable to lock shares");
-        let share_id = share.id;
-        // Check for duplicate share ID (linear search is fine for small share count)
-        if shares.iter().any(|s| s.id == share_id) {
-            return Err(InvalidInputs("Duplicate share ID".into()));
-        }
-        shares.push(share);
-        let current_share_count = shares.len();
-        info!(
-            "Total shares received: {}/{}.",
-            current_share_count, THRESHOLD
-        );
-        Ok(current_share_count)
-    }
-
-    /// Returns all the shares. Called when we have enough shares.
-    pub fn get_all_shares(&self) -> Vec<Share> {
-        let shares = self
-            .scratchpad
-            .shares
-            .lock()
-            .expect("Unable to lock shares");
-
-        shares.clone()
+    pub fn decrypted_shares(&self) -> &tokio::sync::Mutex<Vec<Share>> {
+        &self.scratchpad.shares
     }
 
     pub fn share_commitments(&self) -> GuardianResult<&Vec<ShareCommitment>> {

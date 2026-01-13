@@ -137,8 +137,19 @@ pub async fn provisioner_init(
     // MILESTONE: At this point, we are sure it is a legitimate payload (both share & config)
 
     // 4) Persist share
-    info!("Storing share internally.");
-    let total_share_count = enclave.store_new_share(share)?;
+    info!("Persisting share.");
+    let mut received_shares = enclave.decrypted_shares().lock().await;
+    let share_id = share.id;
+    // Check for duplicate share ID (linear search is fine for small share count)
+    if received_shares.iter().any(|s| s.id == share_id) {
+        return Err(InvalidInputs("Duplicate share ID".into()));
+    }
+    received_shares.push(share);
+    let current_share_count = received_shares.len();
+    info!(
+        "Total shares received: {}/{}.",
+        current_share_count, THRESHOLD
+    );
 
     // Note: This S3 log does not serve any security purpose.
     enclave
@@ -150,9 +161,9 @@ pub async fn provisioner_init(
         .expect("Unable to log ProvisionerInitSuccess");
 
     // 5) If we have enough shares, finish initialization: combine shares & set config
-    if total_share_count >= THRESHOLD {
-        let all_shares = enclave.get_all_shares();
-        finalize_init(&all_shares, &enclave, request.into_state());
+    if current_share_count >= THRESHOLD {
+        let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
+        finalize_init(&shares_vec, &enclave, request.into_state()).await;
         // Log to S3 indicating that withdrawals can be expected henceforth
         enclave
             .sign_and_log(LogMessage::EnclaveFullyInitialized)
@@ -165,7 +176,7 @@ pub async fn provisioner_init(
 
 /// Finalize the initialization process.
 /// Panics upon an error as the enclaves state is irrecoverable at this point.
-fn finalize_init(
+async fn finalize_init(
     shares: &[Share],
     enclave: &Arc<Enclave>,
     incoming_state: ProvisionerInitRequestState,
@@ -186,13 +197,12 @@ fn finalize_init(
         .expect("Unable to set hashi public key");
 
     info!("Setting withdraw config.");
-    // should be a cheap clone as it is just config
     enclave
         .config
         .set_withdrawal_config(incoming_state.withdrawal_config().clone())
         .expect("Unable to set withdraw config");
 
-    info!("Setting enclave state.");
+    info!("Setting enclave mutable state.");
     enclave.state.init(incoming_state);
 
     info!("Enclave initialization complete.");

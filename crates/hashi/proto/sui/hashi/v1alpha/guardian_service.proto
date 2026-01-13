@@ -120,9 +120,16 @@ message ProvisionerInitRequest {
   ProvisionerInitState state = 2;
 }
 
+message CommitteeStore {
+  optional uint64 base_epoch = 1;
+
+  repeated Committee committees = 2;
+}
+
+
 message ProvisionerInitState {
-  // Old Hashi Committees.
-  map<uint64, Committee> hashi_committees = 1;
+  // Hashi Committees indexed by epoch.
+  CommitteeStore hashi_committees = 1;
 
   // Withdrawal policy configuration.
   WithdrawalConfig withdrawal_config = 2;
@@ -145,9 +152,15 @@ message WithdrawalConfig {
   optional uint64 delayed_withdrawals_timeout = 3;
 }
 
+message RateLimiter {
+  optional uint64 base_epoch = 1;
+
+  repeated uint64 withdrawn_sats = 2;
+}
+
 message WithdrawalState {
-  // Total number of withdrawals processed till now.
-  map<uint64, uint64> rate_limiter_state = 1;
+  // Per-epoch withdrawn amounts for the last MAX_EPOCHS epochs.
+  RateLimiter rate_limiter_state = 1;
 }
 
 message ProvisionerInitResponse {}

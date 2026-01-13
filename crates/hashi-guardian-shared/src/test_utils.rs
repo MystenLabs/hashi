@@ -1,5 +1,6 @@
 use crate::bitcoin_utils::BTC_LIB;
 use crate::Ciphertext;
+use crate::CommitteeStore;
 use crate::EncPubKey;
 use crate::EncryptedShare;
 use crate::GuardianSigned;
@@ -8,6 +9,7 @@ use crate::HashiCommitteeMember;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
 use crate::ProvisionerInitRequestState;
+use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
 use crate::ShareCommitment;
@@ -16,6 +18,7 @@ use crate::WithdrawalState;
 use crate::NUM_OF_SHARES;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::SecretKey;
+use bitcoin::Amount;
 use ed25519_consensus::SigningKey;
 use fastcrypto::bls12381::min_pk::BLS12381KeyPair;
 use fastcrypto::traits::KeyPair;
@@ -23,7 +26,6 @@ use fastcrypto::traits::ToFromBytes;
 use hashi::committee::EncryptionPrivateKey;
 use hashi::committee::EncryptionPublicKey;
 use hpke::Deserializable;
-use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
@@ -111,7 +113,7 @@ impl ProvisionerInitRequest {
     }
 }
 
-fn mock_committee_member() -> HashiCommitteeMember {
+pub(crate) fn mock_committee_member() -> HashiCommitteeMember {
     HashiCommitteeMember::new(
         SuiAddress::new([0u8; 32]),
         BLS12381KeyPair::from_bytes(&[1u8; 32])
@@ -123,6 +125,10 @@ fn mock_committee_member() -> HashiCommitteeMember {
     )
 }
 
+pub fn mock_committee_with_one_member() -> HashiCommittee {
+    HashiCommittee::new(vec![mock_committee_member()], 0)
+}
+
 impl ProvisionerInitRequestState {
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
@@ -132,15 +138,11 @@ impl ProvisionerInitRequestState {
                 delayed_withdrawals_min_delay: Duration::from_secs(10),
                 delayed_withdrawals_timeout: Duration::from_secs(60),
             },
-            withdrawal_state: WithdrawalState::new(HashMap::from([(
-                0,
-                bitcoin::Amount::from_sat(0),
-            )]))
-            .unwrap(),
-            hashi_committees: HashMap::from([(
-                0,
-                HashiCommittee::new(vec![mock_committee_member()], 0),
-            )]),
+            withdrawal_state: WithdrawalState::new(
+                RateLimiter::new(0, vec![Amount::from_sat(0)]).unwrap(),
+            ),
+            hashi_committees: CommitteeStore::new(0, vec![mock_committee_with_one_member()])
+                .unwrap(),
             hashi_btc_master_pubkey: kp.x_only_public_key().0,
         }
     }

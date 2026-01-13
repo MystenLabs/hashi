@@ -1,5 +1,6 @@
 pub mod bitcoin_utils;
 pub mod crypto;
+pub mod epoch_store;
 pub mod errors;
 pub mod proto_conversions;
 pub mod test_utils;
@@ -24,18 +25,18 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::bitcoin_utils::TxUTXOs;
+use crate::epoch_store::ConsecutiveEpochStore;
+use crate::epoch_store::ConsecutiveEpochStoreRepr;
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
 use tracing::info;
 
-//TODO: Move these to config?
+// TODO: Discuss if these need to be configurable
 pub const MAX_EPOCHS: usize = 7;
 pub const MAX_WITHDRAWABLE_PER_EPOCH: Amount = Amount::from_sat(100_000_000);
 
@@ -133,7 +134,7 @@ pub struct ProvisionerInitRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequestState {
     /// Hashi BLS keys used to sign cert's
-    hashi_committees: HashMap<u64, HashiCommittee>,
+    hashi_committees: CommitteeStore,
     /// Withdrawal config
     withdrawal_config: WithdrawalConfig,
     /// Withdrawal state
@@ -153,7 +154,7 @@ pub struct GetGuardianInfoResponse {
 
 /// An "immediate withdrawal" request. `HashiSigned<T>.`
 /// Note that epoch number is present in the wrapper.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalWithdrawalRequest {
     /// Unique withdrawal ID assigned by Hashi
     wid: WithdrawalID,
@@ -173,7 +174,7 @@ pub struct NormalWithdrawalResponse {
 
 /// All log messages emitted by the guardian enclave.
 /// Uses enum discriminator for automatic domain separation between variants.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessage {
     /// Attestation and signing public key
     OperatorInitAttestationUnsigned {
@@ -206,7 +207,6 @@ pub enum LogMessage {
 //      Helper types & structs
 // ---------------------------------
 
-// TODO: Align types with hashi
 /// Unique identifier for a withdrawal request
 pub type WithdrawalID = u64;
 
@@ -219,7 +219,6 @@ pub struct S3Config {
     pub bucket_name: String,
 }
 
-// TODO: Align types with hashi.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
@@ -230,11 +229,17 @@ pub struct WithdrawalConfig {
     pub delayed_withdrawals_timeout: Duration,
 }
 
+/// Rate limiter state: (epoch_number, amount_withdrawn) for the last MAX_EPOCHS epochs
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimiter(ConsecutiveEpochStore<Amount>);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalState {
-    /// Amount withdrawn keyed by epoch number in the last MAX_EPOCHS epochs
-    rate_limiter_state: HashMap<u64, Amount>,
+    pub limiter: RateLimiter,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitteeStore(ConsecutiveEpochStore<HashiCommittee>);
 
 // ---------------------------------
 //          Helper impl's
@@ -304,6 +309,7 @@ impl OperatorInitRequest {
     }
 }
 
+// TODO: Implement custom serializer since proto buf serializer is not deterministic
 impl ToBytes for ProvisionerInitRequestState {
     fn to_bytes(&self) -> Vec<u8> {
         provisioner_init_state_to_pb(self.clone()).encode_to_vec()
@@ -312,28 +318,23 @@ impl ToBytes for ProvisionerInitRequestState {
 
 impl ProvisionerInitRequestState {
     pub fn new(
-        hashi_committees: HashMap<u64, HashiCommittee>,
+        hashi_committees: CommitteeStore,
         withdrawal_config: WithdrawalConfig,
         withdrawal_state: WithdrawalState,
         hashi_btc_master_pubkey: BitcoinPubkey,
-    ) -> GuardianResult<Self> {
-        // TODO: Add more validation (if any)
-        if hashi_committees.len() > MAX_EPOCHS {
-            return Err(InvalidInputs("too many committees".into()));
-        }
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             hashi_committees,
             withdrawal_config,
             withdrawal_state,
             hashi_btc_master_pubkey,
-        })
+        }
     }
 
     pub fn into_parts(
         self,
     ) -> (
-        HashMap<u64, HashiCommittee>,
+        CommitteeStore,
         WithdrawalConfig,
         WithdrawalState,
         BitcoinPubkey,
@@ -361,7 +362,6 @@ impl ProvisionerInitRequestState {
 
 impl ProvisionerInitRequest {
     pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitRequestState) -> Self {
-        // TODO: Add validation
         Self {
             encrypted_share,
             state,
@@ -397,6 +397,7 @@ impl ProvisionerInitRequest {
 
 impl NormalWithdrawalRequest {
     pub fn new(wid: WithdrawalID, utxos: TxUTXOs) -> Self {
+        // TODO: Validate that UTXOs belong to the correct network
         Self { wid, utxos }
     }
 
@@ -410,72 +411,128 @@ impl NormalWithdrawalRequest {
 }
 
 impl WithdrawalState {
-    pub fn new(rate_limiter_state: HashMap<u64, Amount>) -> GuardianResult<Self> {
-        if rate_limiter_state.len() > MAX_EPOCHS {
-            return Err(InvalidInputs("too many epochs".into()));
-        }
-        Ok(Self { rate_limiter_state })
+    pub fn new(limiter: RateLimiter) -> Self {
+        Self { limiter }
     }
 
     pub fn empty() -> Self {
         Self {
-            rate_limiter_state: HashMap::new(),
+            limiter: RateLimiter::empty(),
         }
+    }
+
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        &self.limiter
     }
 
     /// Consume amount units from the given epoch's rate limit
     pub fn consume_from_limiter(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        match self.rate_limiter_state.entry(epoch) {
-            Entry::Occupied(mut entry) => {
-                let cur_sum = entry.get();
-                let new_sum = cur_sum
-                    .checked_add(amount)
-                    .ok_or(InvalidInputs("Overflow when computing sum".into()))?;
-                if new_sum > MAX_WITHDRAWABLE_PER_EPOCH {
-                    Err(InvalidInputs("Rate limit will exceed".into()))
-                } else {
-                    entry.insert(new_sum);
-                    Ok(())
-                }
-            }
-            Entry::Vacant(_) => Err(InvalidInputs("Missing epoch".into())),
-        }
+        self.limiter.consume(epoch, amount)
     }
 
     /// Adds a new epoch and prunes an old epoch
     pub fn add_epoch_to_limiter(&mut self, epoch: u64) -> GuardianResult<()> {
-        info!("Adding epoch {} to rate limiter.", epoch);
-        match self.rate_limiter_state.entry(epoch) {
-            Entry::Vacant(entry) => {
-                entry.insert(Amount::from_sat(0));
-                info!("Epoch {} added to rate limiter.", epoch);
-            }
-            Entry::Occupied(_) => {
-                return Err(InvalidInputs(format!("Epoch {} already present", epoch)))
-            }
-        };
-
-        if self.rate_limiter_state.len() > MAX_EPOCHS {
-            let min_epoch = self
-                .rate_limiter_state
-                .keys()
-                .min()
-                .copied()
-                .expect("min should exist since MAX_EPOCHS items exist");
-            info!("Pruning old epoch {} from rate limiter.", min_epoch);
-            self.rate_limiter_state.remove(&min_epoch);
-        }
-
-        info!(
-            "Rate limiter now tracking {} epochs.",
-            self.rate_limiter_state.len()
-        );
-
-        Ok(())
+        self.limiter.add_epoch(epoch)
     }
 
     pub fn is_limiter_empty(&self) -> bool {
-        self.rate_limiter_state.is_empty()
+        self.limiter.is_empty()
+    }
+}
+
+impl RateLimiter {
+    pub fn new(base_epoch: u64, amounts: Vec<Amount>) -> GuardianResult<Self> {
+        Self::from_repr(ConsecutiveEpochStoreRepr::<Amount> {
+            base_epoch,
+            entries: amounts,
+        })
+    }
+
+    pub fn from_repr(wire_input: ConsecutiveEpochStoreRepr<Amount>) -> GuardianResult<Self> {
+        Ok(Self(wire_input.try_into()?))
+    }
+
+    pub fn empty() -> Self {
+        Self(ConsecutiveEpochStore::empty(MAX_EPOCHS))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.0.is_initialized()
+    }
+
+    /// Consume amount units from the given epoch's rate limit.
+    /// Stored values are the amount withdrawn so far in that epoch.
+    pub fn consume(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+        let cur_sum = self
+            .0
+            .get(epoch)
+            .copied()
+            .ok_or_else(|| InvalidInputs("Missing epoch".into()))?;
+
+        let new_sum = cur_sum
+            .checked_add(amount)
+            .ok_or(InvalidInputs("Overflow when computing sum".into()))?;
+
+        if new_sum > MAX_WITHDRAWABLE_PER_EPOCH {
+            return Err(InvalidInputs("Rate limit will exceed".into()));
+        }
+
+        *self.0.get_mut(epoch).expect("epoch checked to exist") = new_sum;
+        Ok(())
+    }
+
+    /// Adds a new epoch (must be the next consecutive epoch). Old epochs are pruned automatically.
+    pub fn add_epoch(&mut self, epoch: u64) -> GuardianResult<()> {
+        info!("Adding epoch {} to rate limiter.", epoch);
+        self.0.insert_or_start(epoch, Amount::from_sat(0))?;
+        info!("Epoch {} added to rate limiter.", epoch);
+        Ok(())
+    }
+
+    /// Returns the number of epochs tracked by the limiter window.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl CommitteeStore {
+    pub fn new(base_epoch: u64, committees: Vec<HashiCommittee>) -> GuardianResult<Self> {
+        Self::from_repr(ConsecutiveEpochStoreRepr::<HashiCommittee> {
+            base_epoch,
+            entries: committees,
+        })
+    }
+
+    pub fn from_repr(
+        wire_input: ConsecutiveEpochStoreRepr<HashiCommittee>,
+    ) -> GuardianResult<Self> {
+        let mut base_epoch = wire_input.base_epoch;
+        for committee in &wire_input.entries {
+            if committee.epoch() != base_epoch {
+                return Err(InvalidInputs("epoch doesn't match".into()));
+            }
+            base_epoch += 1;
+        }
+        Ok(Self(wire_input.try_into()?))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn insert(&mut self, epoch: u64, committee: HashiCommittee) -> GuardianResult<()> {
+        self.0.insert_or_start(epoch, committee)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &HashiCommittee)> {
+        self.0.iter()
+    }
+
+    pub fn into_owned_iter(self) -> impl Iterator<Item = (u64, HashiCommittee)> {
+        self.0.into_owned_iter()
     }
 }
 

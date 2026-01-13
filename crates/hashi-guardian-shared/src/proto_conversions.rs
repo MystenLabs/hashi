@@ -2,7 +2,9 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use crate::epoch_store::ConsecutiveEpochStoreRepr;
 use crate::Ciphertext;
+use crate::CommitteeStore;
 use crate::EncPubKey;
 use crate::EncryptedShare;
 use crate::GetGuardianInfoResponse;
@@ -16,6 +18,7 @@ use crate::HashiCommitteeMember;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
 use crate::ProvisionerInitRequestState;
+use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
 use crate::ShareCommitment;
@@ -30,7 +33,6 @@ use hashi::committee::EncryptionPublicKey;
 use hashi::proto as pb;
 use hpke::Deserializable;
 use hpke::Serializable;
-use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 use std::time::Duration;
@@ -39,7 +41,6 @@ use std::time::UNIX_EPOCH;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::bcs::ToBcs;
 use sui_sdk_types::Address as SuiAddress;
-
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
@@ -132,11 +133,10 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         // State
         let state_pb = req.state.ok_or_else(|| missing("state"))?;
 
-        let committees_pb = state_pb.hashi_committees;
-        let hashi_committees = committees_pb
-            .into_iter()
-            .map(|(e, committee_pb)| Ok((e, pb_to_hashi_committee(committee_pb)?)))
-            .collect::<GuardianResult<HashMap<_, _>>>()?;
+        let committees_pb = state_pb
+            .hashi_committees
+            .ok_or_else(|| missing("committees"))?;
+        let hashi_committees = pb_to_hashi_committee_store(committees_pb)?;
 
         let withdrawal_config_pb = state_pb
             .withdrawal_config
@@ -162,7 +162,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
                 withdrawal_config,
                 withdrawal_state,
                 hashi_btc_master_pubkey,
-            )?,
+            ),
         ))
     }
 }
@@ -231,13 +231,8 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::ProvisionerInitState {
-    let committees = s
-        .hashi_committees
-        .into_iter()
-        .map(|(e, committee)| (e, hashi_committee_to_pb(committee)))
-        .collect();
     pb::ProvisionerInitState {
-        hashi_committees: committees,
+        hashi_committees: Some(hashi_committee_store_to_pb(s.hashi_committees)),
         withdrawal_config: Some(withdrawal_config_to_pb(s.withdrawal_config)),
         withdrawal_state: Some(withdrawal_state_to_pb(s.withdrawal_state)),
         hashi_btc_master_pubkey: Some(s.hashi_btc_master_pubkey.serialize().to_vec().into()),
@@ -418,21 +413,56 @@ fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
     }
 }
 
+// TODO: Do we need to handle the case of an empty rate limiter? Yes: below might need change. No: insert_strict in epoch_store might be better.
 fn pb_to_withdrawal_state(st: pb::WithdrawalState) -> GuardianResult<WithdrawalState> {
-    WithdrawalState::new(
-        st.rate_limiter_state
-            .into_iter()
-            .map(|(k, v)| (k, Amount::from_sat(v)))
-            .collect(),
-    )
+    let rl = st
+        .rate_limiter_state
+        .ok_or_else(|| missing("rate_limiter_state"))?;
+
+    let withdrawn: Vec<Amount> = rl
+        .withdrawn_sats
+        .into_iter()
+        .map(Amount::from_sat)
+        .collect();
+
+    let base_epoch = rl
+        .base_epoch
+        .ok_or_else(|| missing("rate_limiter_state.base_epoch"))?;
+
+    Ok(WithdrawalState::new(RateLimiter::new(
+        base_epoch, withdrawn,
+    )?))
 }
 
 fn withdrawal_state_to_pb(st: WithdrawalState) -> pb::WithdrawalState {
+    let limiter = st.rate_limiter();
     pb::WithdrawalState {
-        rate_limiter_state: st
-            .rate_limiter_state
-            .iter()
-            .map(|(e, a)| (*e, a.to_sat()))
+        rate_limiter_state: Some(pb::RateLimiter {
+            base_epoch: limiter.0.base_epoch(),
+            withdrawn_sats: limiter.0.iter().map(|(_, x)| Amount::to_sat(*x)).collect(),
+        }),
+    }
+}
+
+fn pb_to_hashi_committee_store(c: pb::CommitteeStore) -> GuardianResult<CommitteeStore> {
+    let base_epoch = c.base_epoch.ok_or(missing("base_epoch"))?;
+
+    CommitteeStore::new(
+        base_epoch,
+        c.committees
+            .into_iter()
+            .map(pb_to_hashi_committee)
+            .collect::<GuardianResult<Vec<_>>>()?,
+    )
+}
+
+fn hashi_committee_store_to_pb(c: CommitteeStore) -> pb::CommitteeStore {
+    pb::CommitteeStore {
+        base_epoch: c.0.base_epoch(),
+        committees: c
+            .0
+            .into_owned_iter()
+            .map(|(_, x)| hashi_committee_to_pb(x))
             .collect(),
     }
 }

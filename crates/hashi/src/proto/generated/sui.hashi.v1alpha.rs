@@ -1062,10 +1062,17 @@ pub struct ProvisionerInitRequest {
     pub state: ::core::option::Option<ProvisionerInitState>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CommitteeStore {
+    #[prost(uint64, optional, tag = "1")]
+    pub base_epoch: ::core::option::Option<u64>,
+    #[prost(message, repeated, tag = "2")]
+    pub committees: ::prost::alloc::vec::Vec<Committee>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitState {
-    /// Old Hashi Committees.
-    #[prost(map = "uint64, message", tag = "1")]
-    pub hashi_committees: ::std::collections::HashMap<u64, Committee>,
+    /// Hashi Committees indexed by epoch.
+    #[prost(message, optional, tag = "1")]
+    pub hashi_committees: ::core::option::Option<CommitteeStore>,
     /// Withdrawal policy configuration.
     #[prost(message, optional, tag = "2")]
     pub withdrawal_config: ::core::option::Option<WithdrawalConfig>,
@@ -1088,11 +1095,18 @@ pub struct WithdrawalConfig {
     #[prost(uint64, optional, tag = "3")]
     pub delayed_withdrawals_timeout: ::core::option::Option<u64>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RateLimiter {
+    #[prost(uint64, optional, tag = "1")]
+    pub base_epoch: ::core::option::Option<u64>,
+    #[prost(uint64, repeated, tag = "2")]
+    pub withdrawn_sats: ::prost::alloc::vec::Vec<u64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawalState {
-    /// Total number of withdrawals processed till now.
-    #[prost(map = "uint64, uint64", tag = "1")]
-    pub rate_limiter_state: ::std::collections::HashMap<u64, u64>,
+    /// Per-epoch withdrawn amounts for the last MAX_EPOCHS epochs.
+    #[prost(message, optional, tag = "1")]
+    pub rate_limiter_state: ::core::option::Option<RateLimiter>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}

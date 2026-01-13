@@ -1,4 +1,5 @@
 use crate::Enclave;
+use bitcoin::Network;
 use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
 use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
 use hashi_guardian_shared::bitcoin_utils::TxUTXOs;
@@ -71,7 +72,11 @@ pub async fn normal_withdrawal(
         .config
         .hashi_btc_pk()
         .expect("Hashi BTC public key should be set");
-    let signatures = sign(enclave_btc_keypair, hashi_btc_pk, request.utxos());
+    let network = enclave
+        .config
+        .bitcoin_network()
+        .expect("Bitcoin network should be set");
+    let signatures = sign(enclave_btc_keypair, hashi_btc_pk, request.utxos(), network);
     let response = NormalWithdrawalResponse {
         enclave_signatures: signatures,
     };
@@ -101,11 +106,13 @@ fn sign(
     enclave_keypair: &BitcoinKeypair,
     hashi_pubkey: &BitcoinPubkey,
     tx_utxos: &TxUTXOs,
+    network: Network,
 ) -> Vec<BitcoinSignature> {
     let messages = construct_signing_messages(
         tx_utxos,
         &enclave_keypair.x_only_public_key().0,
         hashi_pubkey,
+        network,
     );
     sign_btc_tx(&messages, enclave_keypair)
 }
