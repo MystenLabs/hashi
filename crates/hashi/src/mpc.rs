@@ -6,22 +6,15 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::error;
-use tracing::info;
 
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::dkg::DkgManager;
 use crate::dkg::DkgOutput;
 use crate::dkg::rpc::RpcP2PChannel;
-use crate::dkg::types::DkgCertificate;
-use crate::dkg::types::DkgDealerMessageHash;
 use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::committee::Committee;
-
-// TODO: Read threshold from on-chain config once it is made configurable.
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
 
 const DKG_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -77,33 +70,15 @@ impl MpcService {
 
     pub async fn start(self) {
         loop {
-            match check_dkg_completed(&self.inner.onchain_state().clone()).await {
-                Ok(Some(certificates)) => {
-                    match DkgManager::recover_from_storage_when_completed(
-                        &self.dkg_manager,
-                        certificates,
-                    ) {
-                        Ok(output) => {
-                            let _ = self.dkg_completion_tx.send(Some(output.public_key));
-                            return;
-                        }
-                        Err(e) => {
-                            info!("Recovery failed ({e}), will retry...");
-                        }
-                    }
+            // TODO: Store DKG public key on-chain, and read it from there if it already exists.
+            // Note that restart is already supported in `DkgManager`, so the latter is not strictly necessary despite more direct.
+            match self.run_dkg().await {
+                Ok(output) => {
+                    let _ = self.dkg_completion_tx.send(Some(output.public_key));
+                    return;
                 }
-                Ok(None) => match self.run_dkg().await {
-                    Ok(output) => {
-                        // TODO: Store DKG public key on-chain.
-                        let _ = self.dkg_completion_tx.send(Some(output.public_key));
-                        return;
-                    }
-                    Err(e) => {
-                        error!("DKG failed: {e:?}");
-                    }
-                },
                 Err(e) => {
-                    error!("Failed to check DKG status: {e:?}");
+                    error!("DKG failed: {e:?}");
                 }
             }
             tokio::time::sleep(DKG_RETRY_INTERVAL).await;
@@ -133,31 +108,4 @@ fn get_epoch_and_committee(onchain_state: &OnchainState) -> anyhow::Result<(u64,
         .ok_or_else(|| anyhow::anyhow!("No current committee"))?
         .clone();
     Ok((epoch, committee))
-}
-
-async fn check_dkg_completed(
-    onchain_state: &OnchainState,
-) -> anyhow::Result<Option<Vec<DkgCertificate>>> {
-    let (epoch, committee) = get_epoch_and_committee(onchain_state)?;
-    let threshold = committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
-    let raw_certs = onchain_state.fetch_dkg_certs(epoch).await?;
-    if raw_certs.is_empty() {
-        return Ok(None);
-    }
-    let certificates: Vec<DkgCertificate> = raw_certs
-        .iter()
-        .map(|(_, cert)| {
-            DkgDealerMessageHash::from_onchain_cert(cert, epoch, &committee, threshold)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        })
-        .collect::<anyhow::Result<_>>()?;
-    let certified_weight: u64 = certificates
-        .iter()
-        .filter_map(|cert| committee.weight_of(&cert.message().dealer_address).ok())
-        .sum();
-    if certified_weight >= threshold {
-        Ok(Some(certificates))
-    } else {
-        Ok(None)
-    }
 }
