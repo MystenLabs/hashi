@@ -24,8 +24,9 @@ mod withdraw;
 
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
-use hashi::proto::guardian_service_server::GuardianServiceServer;
 use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
+use hashi_types::committee::Committee as HashiCommittee;
+use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
 pub struct Enclave {

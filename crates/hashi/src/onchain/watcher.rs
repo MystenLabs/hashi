@@ -9,9 +9,9 @@ use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
-use crate::onchain::events::HashiEvent;
 use crate::onchain::scrape_member_info;
 use crate::onchain::types::DepositRequest;
+use hashi_types::move_types::HashiEvent;
 
 pub async fn watcher(mut client: Client, state: OnchainState) {
     let subscription_read_mask = FieldMask::from_paths([

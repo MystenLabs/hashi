@@ -5,13 +5,16 @@ use std::path::PathBuf;
 
 fn main() {
     let root_dir = PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
-    let proto_dir = root_dir.join("../hashi/proto").canonicalize().unwrap();
+    let proto_dir = root_dir
+        .join("../hashi-types/proto")
+        .canonicalize()
+        .unwrap();
     let vendored_dir = root_dir
-        .join("../hashi/proto/vendored")
+        .join("../hashi-types/proto/vendored")
         .canonicalize()
         .unwrap();
     let out_dir = root_dir
-        .join("../hashi/src/proto/generated")
+        .join("../hashi-types/src/proto/generated")
         .canonicalize()
         .unwrap();
 
