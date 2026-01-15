@@ -9,12 +9,14 @@ use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::Committee;
+use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::CertifiedMessage;
 use hashi_types::move_types::DkgDealerMessageHashV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
 
@@ -132,99 +134,43 @@ pub struct GetPublicDkgOutputResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationMessages {
-    messages: BTreeMap<ShareIndex, avss::Message>,
-}
-
-impl RotationMessages {
-    pub fn new(messages: BTreeMap<ShareIndex, avss::Message>) -> Self {
-        Self { messages }
-    }
-
-    pub fn get(&self, share_index: ShareIndex) -> Option<&avss::Message> {
-        self.messages.get(&share_index)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&ShareIndex, &avss::Message)> {
-        self.messages.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.messages.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
-    }
+#[allow(clippy::large_enum_variant)]
+pub enum Messages {
+    Dkg(avss::Message),
+    Rotation(BTreeMap<ShareIndex, avss::Message>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendRotationMessagesRequest {
-    pub messages: RotationMessages,
+pub struct SendMessagesRequest {
+    pub messages: Messages,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendRotationMessagesResponse {
+pub struct SendMessagesResponse {
     pub signature: BLS12381Signature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveRotationMessagesRequest {
+pub struct RetrieveMessagesRequest {
     pub dealer: Address,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveRotationMessagesResponse {
-    pub messages: RotationMessages,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendMessageRequest {
-    pub message: avss::Message,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendMessageResponse {
-    pub signature: BLS12381Signature,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveMessageRequest {
-    pub dealer: Address,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetrieveMessageResponse {
-    pub message: avss::Message,
+pub struct RetrieveMessagesResponse {
+    pub messages: Messages,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
     pub dealer: Address,
+    pub share_index: Option<ShareIndex>, // None for DKG
     pub complaint: complaint::Complaint,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ComplainResponse {
-    pub response: complaint::ComplaintResponse<avss::SharesForNode>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationComplainRequest {
-    pub dealer: Address,
-    pub share_index: ShareIndex,
-    pub complaint: complaint::Complaint,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationShareComplaintResponse {
-    pub share_index: ShareIndex,
-    pub response: complaint::ComplaintResponse<avss::SharesForNode>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationComplainResponse {
-    pub responses: Vec<RotationShareComplaintResponse>,
+pub enum ComplaintResponses {
+    Dkg(complaint::ComplaintResponse<avss::SharesForNode>),
+    Rotation(BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -403,6 +349,34 @@ impl From<crate::communication::ChannelError> for DkgError {
     }
 }
 
+pub struct DealerFlowData {
+    pub messages: Messages,
+    pub request: SendMessagesRequest,
+    pub recipients: Vec<Address>,
+    pub dkg_message_hash: DkgDealerMessageHash,
+    pub my_address: Address,
+    pub my_signature: MemberSignature,
+    pub required_weight: u16,
+    pub committee: Committee,
+}
+
+pub(crate) struct RotationComplainContext {
+    pub(crate) request: ComplainRequest,
+    pub(crate) recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DealerOutputsKey {
+    Dkg(Address),
+    Rotation(ShareIndex),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ComplaintsToProcessKey {
+    Dkg(Address),
+    Rotation(Address, ShareIndex),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,16 +388,6 @@ mod tests {
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
     use std::num::NonZeroU16;
-
-    impl RotationMessages {
-        pub fn insert(&mut self, share_index: ShareIndex, message: avss::Message) {
-            self.messages.insert(share_index, message);
-        }
-
-        pub fn keys(&self) -> impl Iterator<Item = &ShareIndex> {
-            self.messages.keys()
-        }
-    }
 
     fn create_test_validator(
         party_id: u16,

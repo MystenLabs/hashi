@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+import "sui/rpc/v2/bcs.proto";
+
+service MpcService {
+  // Send dealer messages and receive signature.
+  rpc SendMessages(SendMessagesRequest) returns (SendMessagesResponse);
+
+  // Retrieve a dealer's messages.
+  rpc RetrieveMessages(RetrieveMessagesRequest) returns (RetrieveMessagesResponse);
+
+  // Send complaints about invalid shares and receive correct shares.
+  rpc Complain(ComplainRequest) returns (ComplainResponse);
+
+  // Get public DKG output.
+  rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
+}
+
+message SendMessagesRequest {
+  // The epoch for this MPC instance.
+  optional uint64 epoch = 1;
+
+  // For DKG: single dealer message.
+  optional sui.rpc.v2.Bcs dkg_message = 2;
+
+  // For key rotation: messages keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> rotation_messages = 3;
+}
+
+message SendMessagesResponse {
+  // The BLS12-381 signature from the receiving validator.
+  optional bytes signature = 1;
+}
+
+message RetrieveMessagesRequest {
+  // The epoch for this MPC instance.
+  optional uint64 epoch = 1;
+
+  // The hex-encoded Sui address of the dealer whose messages are requested.
+  optional string dealer = 2;
+}
+
+message RetrieveMessagesResponse {
+  // For DKG: single dealer message.
+  optional sui.rpc.v2.Bcs dkg_message = 1;
+
+  // For key rotation: messages keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> rotation_messages = 2;
+}
+
+message ComplainRequest {
+  // The epoch for this MPC instance.
+  optional uint64 epoch = 1;
+
+  // The hex-encoded Sui address of the dealer who sent invalid shares.
+  optional string dealer = 2;
+
+  // For DKG: not set.
+  // For rotation: the specific share index that triggered the complaint.
+  optional uint32 share_index = 3;
+
+  // The complaint containing proof of invalid share.
+  optional sui.rpc.v2.Bcs complaint = 4;
+}
+
+message ComplainResponse {
+  // For DKG: single response.
+  optional sui.rpc.v2.Bcs dkg_response = 1;
+
+  // For rotation: responses keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> rotation_responses = 2;
+}
+
+message GetPublicDkgOutputRequest {
+  // The epoch for which to retrieve the public DKG output.
+  optional uint64 epoch = 1;
+}
+
+message GetPublicDkgOutputResponse {
+  // The aggregated public key.
+  optional sui.rpc.v2.Bcs public_key = 1;
+
+  // The commitments keyed by share index.
+  map<uint32, sui.rpc.v2.Bcs> commitments = 2;
+}
