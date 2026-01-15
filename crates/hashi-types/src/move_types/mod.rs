@@ -314,15 +314,9 @@ impl HashiEvent {
             DepositConfirmedEvent::MODULE_NAME => {
                 DepositConfirmedEvent::from_bcs(bcs.value())?.into()
             }
-            StartReconfigEvent::MODULE_NAME => {
-                StartReconfigEvent::from_bcs(bcs.value())?.into()
-            }
-            EndReconfigEvent::MODULE_NAME => {
-                EndReconfigEvent::from_bcs(bcs.value())?.into()
-            }
-            AbortReconfigEvent::MODULE_NAME => {
-                AbortReconfigEvent::from_bcs(bcs.value())?.into()
-            }
+            StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
+            EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
+            AbortReconfigEvent::MODULE_NAME => AbortReconfigEvent::from_bcs(bcs.value())?.into(),
             _ => {
                 return Ok(None);
             }
