@@ -23,7 +23,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
-    pub proposals: ProposalSet,
+    pub proposals: Bag,
     pub tob: Bag,
 }
 
@@ -51,13 +51,6 @@ pub struct Field<N, V> {
     pub id: Address,
     pub name: N,
     pub value: V,
-}
-
-/// Rust version of the Move hashi::proposal_set::ProposalSet type.
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct ProposalSet {
-    pub proposals: Bag,
-    pub seq_num: u64,
 }
 
 /// Rust version of the Move hashi::committee_set::MemberInfo type.

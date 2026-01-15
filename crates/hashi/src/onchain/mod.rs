@@ -348,7 +348,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
             treasury,
             deposit_queue,
             utxo_pool,
-            proposals: convert_move_proposal_set(proposals),
+            proposals: convert_move_proposals(proposals),
             tob_id: tob.id,
         },
     ))
@@ -385,11 +385,10 @@ fn convert_move_upgrade_cap(cap: move_types::UpgradeCap) -> types::UpgradeCap {
     }
 }
 
-fn convert_move_proposal_set(proposals: move_types::ProposalSet) -> types::ProposalSet {
-    types::ProposalSet {
-        id: proposals.proposals.id,
-        size: proposals.proposals.size,
-        seq_num: proposals.seq_num,
+fn convert_move_proposals(proposals: move_types::Bag) -> types::Proposals {
+    types::Proposals {
+        id: proposals.id,
+        size: proposals.size,
     }
 }
 
