@@ -533,8 +533,15 @@ impl DkgManager {
                     tracing::warn!("No dealer output for {:?} after processing", dealer);
                     continue;
                 }
-                mgr.committee
-                    .weight_of(&dealer)
+                // Use dkg_config.nodes weights (after Nodes::new_reduced) to match
+                // what complete_dkg/avss uses, not the original committee weights.
+                let party_id = mgr
+                    .committee
+                    .index_of(&dealer)
+                    .expect("dealer must be in committee") as u16;
+                mgr.dkg_config
+                    .nodes
+                    .weight_of(party_id)
                     .map_err(|_| DkgError::ProtocolFailed("Missing dealer weight".to_string()))?
             };
             dealer_weight_sum += dealer_weight as u32;
@@ -3862,6 +3869,41 @@ mod tests {
         assert_eq!(
             remaining, 3,
             "Should consume exactly 2 certificates to reach threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_as_party_with_reduced_weights() {
+        let weights = vec![2500, 2500, 2500, 2500];
+        let test_setup = setup_weight_based_test(weights.clone(), 0, None); // threshold computed automatically
+
+        let manager = test_setup.setup.create_manager(0);
+        let original_weight: u16 = test_setup
+            .setup
+            .committee()
+            .weight_of(&manager.address)
+            .unwrap() as u16;
+        let reduced_weight = manager
+            .dkg_config
+            .nodes
+            .weight_of(manager.party_id)
+            .unwrap();
+
+        assert_ne!(
+            original_weight, reduced_weight,
+            "Test requires weights to be reduced by Nodes::new_reduced. \
+             Original: {}, Reduced: {}. If equal, this test won't catch the bug.",
+            original_weight, reduced_weight
+        );
+
+        let (result, _mock_tob) = setup_party_and_run(&test_setup, 0).await;
+
+        assert!(
+            result.is_ok(),
+            "run_as_party should succeed when using correct reduced weights. \
+             Failure indicates weight tracking uses committee weights instead of \
+             dkg_config.nodes weights. Error: {:?}",
+            result.unwrap_err()
         );
     }
 
