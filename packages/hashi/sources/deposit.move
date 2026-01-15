@@ -10,9 +10,7 @@ public fun deposit(
     fee: Coin<SUI>,
 ) {
     hashi.config().assert_version_enabled();
-
-    // Check if state is PAUSED
-    assert!(!hashi.config().paused());
+    hashi.assert_unpaused();
 
     // Check that the fee is sufficient
     assert!(hashi.config().deposit_fee() == fee.value());
@@ -41,9 +39,7 @@ public fun confirm_deposit(
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
-
-    // Check if state is PAUSED
-    assert!(!hashi.config().paused());
+    hashi.assert_unpaused();
 
     let request = hashi.deposit_queue_mut().remove(request_id);
 

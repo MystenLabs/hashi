@@ -19,6 +19,8 @@ public struct CommitteeSet has store {
     /// The current epoch.
     epoch: u64,
     committees: Bag,
+    //TODO do we want more info for this?
+    pending_epoch_change: Option<u64>,
 }
 
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
@@ -26,6 +28,7 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         members: sui::bag::new(ctx),
         epoch: 0,
         committees: sui::bag::new(ctx),
+        pending_epoch_change: option::none(),
     }
 }
 
@@ -55,6 +58,10 @@ public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
 
 fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
     self.committees.add(committee.epoch(), committee)
+}
+
+fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
+    self.committees.remove(epoch)
 }
 
 public(package) fun current_committee(self: &CommitteeSet): &Committee {
@@ -320,13 +327,20 @@ fun new_committee_from_validator_set(
     committee::new_committee(epoch, committee_members)
 }
 
-public(package) fun bootstrap(
+public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
+    self.pending_epoch_change.is_some()
+}
+
+public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
-) {
-    assert!(self.epoch() == 0);
+): u64 {
     assert!(!self.has_committee(ctx.epoch()));
+    // We can only trigger reconfig if the current epoch is 0 (for genesis) or our current epoch is not the same as Sui's epoch
+    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
+    // We can't trigger reconfig if we are already reconfiguring
+    assert!(!self.is_reconfiguring());
 
     let committee = self.new_committee_from_validator_set(sui_system, ctx);
 
@@ -340,6 +354,25 @@ public(package) fun bootstrap(
     // Ensure 95% of stake has registered
     assert!(committee.total_weight() as u64 >= ((9500 * sui_system_weight) / 10000));
 
-    self.epoch = committee.epoch();
-    self.insert_committee(committee)
+    let epoch = committee.epoch();
+    self.pending_epoch_change = option::some(epoch);
+    self.insert_committee(committee);
+    epoch
+}
+
+//TODO include a cert from the current (if epoch != 0) and next committees
+public(package) fun end_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+    assert!(self.is_reconfiguring());
+    let next_epoch = self.pending_epoch_change.extract();
+    assert!(self.has_committee(next_epoch));
+    self.epoch = next_epoch;
+    next_epoch
+}
+
+//TODO include a cert from the current committee?
+public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+    assert!(self.is_reconfiguring());
+    let next_epoch = self.pending_epoch_change.extract();
+    self.remove_committee(next_epoch);
+    next_epoch
 }

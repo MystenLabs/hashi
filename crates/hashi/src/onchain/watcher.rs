@@ -177,6 +177,39 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 state.hashi.utxo_pool.utxos.insert(utxo.id, utxo);
                 // TODO notify
             }
+            HashiEvent::StartReconfigEvent(start_reconfig_event) => {
+                let epoch = start_reconfig_event.epoch;
+                // Fetch new committee
+                let committees_id = state.state().hashi().committees.committees_id();
+                //TODO maybe include info in the event
+                let committee = super::scrape_committee(client.clone(), committees_id, epoch)
+                    .await
+                    .unwrap();
+                let mut state = state.state_mut();
+                state
+                    .hashi
+                    .committees
+                    .committees_mut()
+                    .insert(epoch, committee);
+                state.hashi.committees.set_pending_epoch_change(Some(epoch));
+            }
+            HashiEvent::EndReconfigEvent(end_reconfig_event) => {
+                let mut state = state.state_mut();
+                state
+                    .hashi
+                    .committees
+                    .set_epoch(end_reconfig_event.epoch)
+                    .set_pending_epoch_change(None);
+            }
+            HashiEvent::AbortReconfigEvent(abort_reconfig_event) => {
+                let mut state = state.state_mut();
+                state
+                    .hashi
+                    .committees
+                    .committees_mut()
+                    .remove(&abort_reconfig_event.epoch);
+                state.hashi.committees.set_pending_epoch_change(None);
+            }
         }
     }
 
