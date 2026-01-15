@@ -338,9 +338,11 @@ public(package) fun start_reconfig(
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
     assert!(!self.is_reconfiguring());
-    // Don't start a reconfig for an epoch where we already have a committee determined. (This should never happen)
+    // Don't start a reconfig for an epoch where we already have a committee
+    // determined.
     assert!(!self.has_committee(ctx.epoch()));
-    // We can only trigger reconfig if the current epoch is 0 (for genesis) or our current epoch is not the same as Sui's epoch
+    // We can only trigger reconfig if the current epoch is 0 (for genesis) or
+    // our current epoch is not the same as Sui's epoch
     assert!(self.epoch == 0 || self.epoch != ctx.epoch());
 
     let committee = self.new_committee_from_validator_set(sui_system, ctx);
