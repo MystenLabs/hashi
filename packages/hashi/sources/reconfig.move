@@ -22,7 +22,7 @@ entry fun start_reconfig(
     sui::event::emit(StartReconfigEvent { epoch });
 }
 
-//TODO include a cert from the current (if epoch != 0) and next committees
+//TODO include a cert from the next committee to confirm the handover.
 entry fun end_reconfig(self: &mut Hashi, ctx: &TxContext) {
     self.config().assert_version_enabled();
     // Assert that we are reconfiguring
@@ -32,7 +32,7 @@ entry fun end_reconfig(self: &mut Hashi, ctx: &TxContext) {
     sui::event::emit(EndReconfigEvent { epoch });
 }
 
-// TODO we need to have a reconfig abort path
+// TODO include a cert from the current committee to abort a failed reconfig.
 entry fun abort_reconfig(self: &mut Hashi, ctx: &TxContext) {
     self.config().assert_version_enabled();
     // Assert that we are reconfiguring

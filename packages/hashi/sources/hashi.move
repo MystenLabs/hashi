@@ -35,6 +35,9 @@ fun init(ctx: &mut TxContext) {
 public(package) fun assert_unpaused(self: &Hashi) {
     // Check if state is PAUSED
     assert!(!self.config().paused());
+}
+
+public(package) fun assert_not_reconfiguring(self: &Hashi) {
     // Check that we are not reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
     // Check that we still don't need to do genesis

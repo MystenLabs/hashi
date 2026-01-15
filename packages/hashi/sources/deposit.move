@@ -10,6 +10,8 @@ public fun deposit(
     fee: Coin<SUI>,
 ) {
     hashi.config().assert_version_enabled();
+    // Check that the system isn't paused, but still allow users to request
+    // deposits even when the system is reconfiguring
     hashi.assert_unpaused();
 
     // Check that the fee is sufficient
@@ -40,6 +42,9 @@ public fun confirm_deposit(
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
+    // Do not allow confirmation of deposits during a reconfiguration, this
+    // delays the confirmation to be done by the next epoch's committee.
+    hashi.assert_not_reconfiguring();
 
     let request = hashi.deposit_queue_mut().remove(request_id);
 

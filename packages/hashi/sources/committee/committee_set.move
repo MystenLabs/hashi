@@ -336,11 +336,12 @@ public(package) fun start_reconfig(
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
 ): u64 {
+    // We can't trigger reconfig if we are already reconfiguring
+    assert!(!self.is_reconfiguring());
+    // Don't start a reconfig for an epoch where we already have a committee determined. (This should never happen)
     assert!(!self.has_committee(ctx.epoch()));
     // We can only trigger reconfig if the current epoch is 0 (for genesis) or our current epoch is not the same as Sui's epoch
     assert!(self.epoch == 0 || self.epoch != ctx.epoch());
-    // We can't trigger reconfig if we are already reconfiguring
-    assert!(!self.is_reconfiguring());
 
     let committee = self.new_committee_from_validator_set(sui_system, ctx);
 
@@ -360,7 +361,7 @@ public(package) fun start_reconfig(
     epoch
 }
 
-//TODO include a cert from the current (if epoch != 0) and next committees
+//TODO include a cert from the next committee to confirm the handover.
 public(package) fun end_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();
@@ -369,7 +370,7 @@ public(package) fun end_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64
     next_epoch
 }
 
-//TODO include a cert from the current committee?
+// TODO include a cert from the current committee to abort a failed reconfig.
 public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();
