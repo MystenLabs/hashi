@@ -24,6 +24,7 @@ use fastcrypto_tbls::ecies_v1::PublicKey;
 use fastcrypto_tbls::nodes::Node;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
+use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::IndexedValue;
@@ -318,7 +319,6 @@ impl DkgManager {
         Ok(responses)
     }
 
-    /// RPC endpoint handler for `GetPublicDkgOutputRequest`
     pub fn handle_get_public_dkg_output_request(
         &self,
         request: &GetPublicDkgOutputRequest,
@@ -509,7 +509,7 @@ impl DkgManager {
                         .complaints_to_process
                         .contains_key(&ComplaintsToProcessKey::Dkg(dealer))
                 {
-                    mgr.process_certified_dealer_message(dealer)?;
+                    mgr.process_certified_dkg_message(dealer)?;
                 }
                 mgr.complaints_to_process
                     .contains_key(&ComplaintsToProcessKey::Dkg(dealer))
@@ -533,8 +533,14 @@ impl DkgManager {
                     tracing::warn!("No dealer output for {:?} after processing", dealer);
                     continue;
                 }
-                mgr.committee
-                    .weight_of(&dealer)
+                // Use the reduced weights (after `Nodes::new_reduced`), not the original committee weights.
+                let party_id = mgr
+                    .committee
+                    .index_of(&dealer)
+                    .expect("dealer must be in committee") as u16;
+                mgr.dkg_config
+                    .nodes
+                    .weight_of(party_id)
                     .map_err(|_| DkgError::ProtocolFailed("Missing dealer weight".to_string()))?
             };
             dealer_weight_sum += dealer_weight as u32;
@@ -784,37 +790,21 @@ impl DkgManager {
         }
     }
 
-    fn process_certified_dealer_message(&mut self, dealer: Address) -> DkgResult<()> {
-        let messages = self
+    fn process_certified_dkg_message(&mut self, dealer: Address) -> DkgResult<()> {
+        let output_key = DealerOutputsKey::Dkg(dealer);
+        let complaint_key = ComplaintsToProcessKey::Dkg(dealer);
+        let message = match self
             .dealer_messages
             .get(&dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?;
-        let message = match messages {
-            Messages::Dkg(msg) => msg,
+            .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?
+        {
+            Messages::Dkg(msg) => msg.clone(),
             Messages::Rotation(_) => {
-                panic!("process_certified_dealer_message called with rotation messages")
+                panic!("process_certified_dkg_message called with rotation messages")
             }
         };
-        let dealer_session_id = self.session_id.dealer_session_id(&dealer);
-        let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
-            dealer_session_id.to_vec(),
-            None,
-            self.encryption_key.clone(),
-        );
-        match receiver.process_message(message)? {
-            avss::ProcessedMessage::Valid(output) => {
-                self.dealer_outputs
-                    .insert(DealerOutputsKey::Dkg(dealer), output);
-            }
-            avss::ProcessedMessage::Complaint(complaint) => {
-                self.complaints_to_process
-                    .insert(ComplaintsToProcessKey::Dkg(dealer), complaint);
-            }
-        }
-        Ok(())
+        let session_id = self.session_id.dealer_session_id(&dealer).to_vec();
+        self.process_and_store_message(session_id, &message, None, output_key, complaint_key)
     }
 
     fn process_certified_rotation_message(
@@ -822,47 +812,62 @@ impl DkgManager {
         dealer: &Address,
         previous_dkg_output: &DkgOutput,
     ) -> DkgResult<()> {
-        let messages = self
+        let rotation_messages = match self
             .dealer_messages
             .get(dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?;
-        let rotation_messages = match messages {
-            Messages::Rotation(msgs) => msgs,
+            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?
+        {
+            Messages::Rotation(msgs) => msgs.clone(),
             Messages::Dkg(_) => {
                 panic!("process_certified_rotation_message called with DKG message")
             }
         };
-        for (&share_index, message) in rotation_messages {
-            if self
-                .dealer_outputs
-                .contains_key(&DealerOutputsKey::Rotation(share_index))
-                || self
-                    .complaints_to_process
-                    .contains_key(&ComplaintsToProcessKey::Rotation(*dealer, share_index))
+        for (share_index, message) in rotation_messages {
+            let output_key = DealerOutputsKey::Rotation(share_index);
+            let complaint_key = ComplaintsToProcessKey::Rotation(*dealer, share_index);
+            if self.dealer_outputs.contains_key(&output_key)
+                || self.complaints_to_process.contains_key(&complaint_key)
             {
                 continue;
             }
-            let session_id = self.session_id.rotation_session_id(dealer, share_index);
+            let session_id = self
+                .session_id
+                .rotation_session_id(dealer, share_index)
+                .to_vec();
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
-            let receiver = avss::Receiver::new(
-                self.dkg_config.nodes.clone(),
-                self.party_id,
-                self.dkg_config.threshold,
-                session_id.to_vec(),
+            self.process_and_store_message(
+                session_id,
+                &message,
                 commitment,
-                self.encryption_key.clone(),
-            );
-            match receiver.process_message(message)? {
-                avss::ProcessedMessage::Valid(output) => {
-                    self.dealer_outputs
-                        .insert(DealerOutputsKey::Rotation(share_index), output);
-                }
-                avss::ProcessedMessage::Complaint(complaint) => {
-                    self.complaints_to_process.insert(
-                        ComplaintsToProcessKey::Rotation(*dealer, share_index),
-                        complaint,
-                    );
-                }
+                output_key,
+                complaint_key,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn process_and_store_message(
+        &mut self,
+        session_id: Vec<u8>,
+        message: &avss::Message,
+        commitment: Option<G>,
+        output_key: DealerOutputsKey,
+        complaint_key: ComplaintsToProcessKey,
+    ) -> DkgResult<()> {
+        let receiver = avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            session_id,
+            commitment,
+            self.encryption_key.clone(),
+        );
+        match receiver.process_message(message)? {
+            avss::ProcessedMessage::Valid(output) => {
+                self.dealer_outputs.insert(output_key, output);
+            }
+            avss::ProcessedMessage::Complaint(complaint) => {
+                self.complaints_to_process.insert(complaint_key, complaint);
             }
         }
         Ok(())
@@ -1508,7 +1513,7 @@ impl DkgManager {
                 )));
             }
             self.dealer_messages.insert(dealer_address, messages);
-            self.process_certified_dealer_message(dealer_address)?;
+            self.process_certified_dkg_message(dealer_address)?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
         self.complete_dkg(certified_dealers.into_keys())
@@ -3226,7 +3231,7 @@ mod tests {
             .store_messages(dealer_1_addr, &dealer_1_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(dealer_1_addr)
+            .process_certified_dkg_message(dealer_1_addr)
             .unwrap();
         // DKG: complaints keyed by dealer address
         assert!(
@@ -3866,6 +3871,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_as_party_with_reduced_weights() {
+        let weights = vec![2500, 2500, 2500, 2500];
+        let test_setup = setup_weight_based_test(weights.clone(), 0, None); // threshold computed automatically
+
+        let manager = test_setup.setup.create_manager(0);
+        let original_weight: u16 = test_setup
+            .setup
+            .committee()
+            .weight_of(&manager.address)
+            .unwrap() as u16;
+        let reduced_weight = manager
+            .dkg_config
+            .nodes
+            .weight_of(manager.party_id)
+            .unwrap();
+
+        assert_ne!(
+            original_weight, reduced_weight,
+            "Test requires weights to be reduced by Nodes::new_reduced. \
+             Original: {}, Reduced: {}. If equal, this test won't catch the bug.",
+            original_weight, reduced_weight
+        );
+
+        let (result, _mock_tob) = setup_party_and_run(&test_setup, 0).await;
+
+        assert!(
+            result.is_ok(),
+            "run_as_party should succeed when using correct reduced weights. \
+             Failure indicates weight tracking uses committee weights instead of \
+             dkg_config.nodes weights. Error: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_as_party_skips_duplicate_dealers() {
         // Test that run_as_party skips duplicate certificates from the same dealer without validation
 
@@ -4465,7 +4505,7 @@ mod tests {
             .store_messages(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(dealer_addr)
+            .process_certified_dkg_message(dealer_addr)
             .unwrap();
         // DKG: complaints keyed by dealer address
         assert!(
@@ -4535,7 +4575,7 @@ mod tests {
             .store_messages(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(dealer_addr)
+            .process_certified_dkg_message(dealer_addr)
             .unwrap();
         // DKG: complaints keyed by dealer address
         assert!(
@@ -4711,7 +4751,7 @@ mod tests {
             .store_messages(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(dealer_addr)
+            .process_certified_dkg_message(dealer_addr)
             .unwrap();
         // DKG: complaints keyed by dealer address
         assert!(
@@ -4776,7 +4816,7 @@ mod tests {
             .store_messages(dealer_addr, &cheating_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(dealer_addr)
+            .process_certified_dkg_message(dealer_addr)
             .unwrap();
         // DKG: complaints keyed by dealer address
         assert!(
@@ -4832,7 +4872,7 @@ mod tests {
             .store_messages(dealer_addr, &dealer_message)
             .unwrap();
         party_manager
-            .process_certified_dealer_message(dealer_addr)
+            .process_certified_dkg_message(dealer_addr)
             .unwrap();
 
         // Pre-collect complaint responses from parties 3 and 4
@@ -4953,7 +4993,7 @@ mod tests {
         party_manager
             .lock()
             .unwrap()
-            .process_certified_dealer_message(dealer_address)
+            .process_certified_dkg_message(dealer_address)
             .unwrap();
         assert!(
             party_manager
@@ -5705,7 +5745,7 @@ mod tests {
         receiver_manager
             .lock()
             .unwrap()
-            .process_certified_dealer_message(dealer_addr)
+            .process_certified_dkg_message(dealer_addr)
             .unwrap();
 
         let mgr = receiver_manager.lock().unwrap();
