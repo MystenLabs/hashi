@@ -43,7 +43,12 @@ public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContex
 }
 
 public(package) fun deposit_fee<T>(self: &mut Treasury, fee: Coin<T>) {
-    self.balance<T>().join(fee);
+    let key = Key<Coin<T>> {};
+    if (self.objects.contains(key)) {
+        self.balance<T>().join(fee);
+    } else {
+        self.objects.add(key, fee);
+    }
 }
 
 public(package) fun register_treasury_cap<T>(self: &mut Treasury, treasury_cap: TreasuryCap<T>) {

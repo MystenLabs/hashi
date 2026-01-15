@@ -5,3 +5,5 @@
 
 pub mod config;
 pub mod monitor;
+
+pub use kyoto::TrustedPeer;

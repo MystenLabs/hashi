@@ -16,6 +16,7 @@ use std::process::Command;
 use anyhow::Result;
 
 pub mod bitcoin_node;
+pub mod deposit_flow;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
@@ -316,8 +317,7 @@ mod tests {
         let mut saved_config = nodes[0].0.config.clone();
         let original_db_path = saved_config.db.as_ref().unwrap().clone();
 
-        // Copy the database to a new location so we can restart without lock conflicts
-        // (the original node's tasks may still be holding the DB lock)
+        // TODO: Use graceful shutdown/restart instead of copying the database and spinning up a duplicate node.
         let recovery_db_path = original_db_path.with_file_name(format!(
             "{}-recovery",
             original_db_path.file_name().unwrap().to_str().unwrap()

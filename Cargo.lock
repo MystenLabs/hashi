@@ -2444,6 +2444,7 @@ dependencies = [
  "fjall",
  "futures",
  "hashi-btc",
+ "hashi-guardian-shared",
  "hashi-types",
  "hex",
  "prometheus",
@@ -4973,6 +4974,8 @@ dependencies = [
  "fastcrypto-tbls",
  "futures",
  "hashi",
+ "hashi-btc",
+ "hashi-types",
  "prometheus",
  "serde",
  "serde_json",
@@ -4983,6 +4986,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

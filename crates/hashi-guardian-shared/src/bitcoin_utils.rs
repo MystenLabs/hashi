@@ -483,7 +483,7 @@ fn compute_taproot_artifacts(
 /// Derives a child public key using unhardened derivation from a parent public key.
 ///
 /// Uses the provided derivation path to compute a new public key.
-fn get_derived_pubkey(
+pub fn get_derived_pubkey(
     parent_pubkey: &XOnlyPublicKey,
     derivation_path: &DerivationPath,
 ) -> XOnlyPublicKey {
