@@ -1174,10 +1174,10 @@ pub struct SendMessagesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    /// For DKG: single dealer message (no share index needed).
+    /// For DKG: single dealer message.
     #[prost(message, optional, tag = "2")]
     pub dkg_message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// For rotation: messages keyed by share index (1-based).
+    /// For key rotation: messages keyed by share index.
     #[prost(map = "uint32, message", tag = "3")]
     pub rotation_messages: ::std::collections::HashMap<
         u32,
@@ -1199,13 +1199,12 @@ pub struct RetrieveMessagesRequest {
     #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Exactly one of the following will be set:
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {
     /// For DKG: single dealer message.
     #[prost(message, optional, tag = "1")]
     pub dkg_message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// For rotation: messages keyed by share index (1-based).
+    /// For key rotation: messages keyed by share index.
     #[prost(map = "uint32, message", tag = "2")]
     pub rotation_messages: ::std::collections::HashMap<
         u32,
@@ -1220,22 +1219,20 @@ pub struct ComplainRequest {
     /// The hex-encoded Sui address of the dealer who sent invalid shares.
     #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-    /// The share index that triggered the complaint.
-    /// For DKG: not set (dealer has only one message).
-    /// For rotation: the specific share index with invalid data.
+    /// For DKG: not set.
+    /// For rotation: the specific share index that triggered the complaint.
     #[prost(uint32, optional, tag = "3")]
     pub share_index: ::core::option::Option<u32>,
     /// The complaint containing proof of invalid share.
     #[prost(message, optional, tag = "4")]
     pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
-/// Exactly one of the following will be set:
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ComplainResponse {
-    /// For DKG: single response (no share index needed).
+    /// For DKG: single response.
     #[prost(message, optional, tag = "1")]
     pub dkg_response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// For rotation: responses keyed by share index (1-based).
+    /// For rotation: responses keyed by share index.
     #[prost(map = "uint32, message", tag = "2")]
     pub rotation_responses: ::std::collections::HashMap<
         u32,
@@ -1271,8 +1268,6 @@ pub mod mpc_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Unified MPC service for both DKG and key rotation.
-    /// DKG is the degenerate case where each dealer has a single message.
     #[derive(Debug, Clone)]
     pub struct MpcServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -1505,8 +1500,6 @@ pub mod mpc_service_server {
             tonic::Status,
         >;
     }
-    /// Unified MPC service for both DKG and key rotation.
-    /// DKG is the degenerate case where each dealer has a single message.
     #[derive(Debug)]
     pub struct MpcServiceServer<T> {
         inner: Arc<T>,

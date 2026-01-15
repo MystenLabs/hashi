@@ -1244,7 +1244,6 @@ impl DkgManager {
             .list_all_dealer_messages()
             .map_err(|e| DkgError::StorageError(e.to_string()))?;
         for (dealer, message) in stored {
-            // Storage only contains DKG messages
             self.dealer_messages.insert(dealer, Messages::Dkg(message));
         }
         Ok(())
@@ -1500,7 +1499,6 @@ impl DkgManager {
                         dealer_address
                     ))
                 })?;
-            // Storage only contains DKG messages
             let messages = Messages::Dkg(message);
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != expected_hash {
