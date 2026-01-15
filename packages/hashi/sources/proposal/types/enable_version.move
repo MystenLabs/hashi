@@ -3,9 +3,9 @@
 
 module hashi::enable_version;
 
-use hashi::{hashi::Hashi, proposal::{Self, Proposal}};
+use hashi::{hashi::Hashi, proposal};
 use std::string::String;
-use sui::vec_map::VecMap;
+use sui::{clock::Clock, vec_map::VecMap};
 
 const THRESHOLD_BPS: u64 = 10000;
 
@@ -17,13 +17,14 @@ public fun propose(
     hashi: &mut Hashi,
     version: u64,
     metadata: VecMap<String, String>,
+    clock: &Clock,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
-    proposal::create(hashi, EnableVersion { version }, THRESHOLD_BPS, metadata, ctx)
+    proposal::create(hashi, EnableVersion { version }, THRESHOLD_BPS, metadata, clock, ctx)
 }
 
-public fun execute(hashi: &mut Hashi, proposal: Proposal<EnableVersion>) {
-    let EnableVersion { version } = proposal.execute(hashi);
+public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+    let EnableVersion { version } = proposal::execute(hashi, proposal_id, clock);
     hashi.config_mut().enable_version(version);
 }
