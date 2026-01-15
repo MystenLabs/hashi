@@ -203,7 +203,10 @@ async fn finalize_init(
         .expect("Unable to set withdraw config");
 
     info!("Setting enclave mutable state.");
-    enclave.state.init(incoming_state);
+    enclave
+        .state
+        .init(incoming_state)
+        .expect("Unable to init state");
 
     info!("Enclave initialization complete.");
 }

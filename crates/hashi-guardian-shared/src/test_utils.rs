@@ -132,6 +132,10 @@ pub fn mock_committee_with_one_member() -> HashiCommittee {
 impl ProvisionerInitRequestState {
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
+        let num_epochs_to_track = NonZeroU16::new(2).unwrap();
+        let epoch_window = crate::epoch_store::EpochWindow::new(0, num_epochs_to_track);
+        let max_withdrawable_per_epoch = Amount::from_sat(1000);
+
         ProvisionerInitRequestState {
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 0,
@@ -139,10 +143,18 @@ impl ProvisionerInitRequestState {
                 delayed_withdrawals_timeout: Duration::from_secs(60),
             },
             withdrawal_state: WithdrawalState::new(
-                RateLimiter::new(0, vec![Amount::from_sat(0)]).unwrap(),
-            ),
-            hashi_committees: CommitteeStore::new(0, vec![mock_committee_with_one_member()])
+                RateLimiter::new(
+                    epoch_window,
+                    vec![Amount::from_sat(0)],
+                    max_withdrawable_per_epoch,
+                )
                 .unwrap(),
+            ),
+            hashi_committees: CommitteeStore::new(
+                epoch_window,
+                vec![mock_committee_with_one_member()],
+            )
+            .unwrap(),
             hashi_btc_master_pubkey: kp.x_only_public_key().0,
         }
     }

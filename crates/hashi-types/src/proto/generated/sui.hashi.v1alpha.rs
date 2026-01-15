@@ -1063,10 +1063,19 @@ pub struct ProvisionerInitRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommitteeStore {
+    #[prost(message, repeated, tag = "1")]
+    pub committees: ::prost::alloc::vec::Vec<Committee>,
+}
+/// / CommitteeStore and RateLimiter track a window of epochs from base_epoch to base_epoch + num_epochs
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EpochWindow {
+    /// Base epoch corresponding to index 0 for both committee and rate-limiter vectors.
     #[prost(uint64, optional, tag = "1")]
     pub base_epoch: ::core::option::Option<u64>,
-    #[prost(message, repeated, tag = "2")]
-    pub committees: ::prost::alloc::vec::Vec<Committee>,
+    /// Number of old epochs to track in both committee store and withdrawal limiter.
+    /// Must be >= 1.
+    #[prost(uint32, optional, tag = "2")]
+    pub num_epochs: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitState {
@@ -1082,6 +1091,9 @@ pub struct ProvisionerInitState {
     /// X-only public key bytes (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Shared epoch window metadata for both committee store and withdrawal limiter.
+    #[prost(message, optional, tag = "5")]
+    pub epoch_window: ::core::option::Option<EpochWindow>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawalConfig {
@@ -1097,14 +1109,16 @@ pub struct WithdrawalConfig {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RateLimiter {
-    #[prost(uint64, optional, tag = "1")]
-    pub base_epoch: ::core::option::Option<u64>,
-    #[prost(uint64, repeated, tag = "2")]
+    /// Amount withdrawn in the previous `num_epochs` epochs.
+    #[prost(uint64, repeated, tag = "1")]
     pub withdrawn_sats: ::prost::alloc::vec::Vec<u64>,
+    /// Maximum amount withdrawable per epoch, in sats.
+    #[prost(uint64, optional, tag = "2")]
+    pub max_withdrawable_per_epoch_sats: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawalState {
-    /// Per-epoch withdrawn amounts for the last MAX_EPOCHS epochs.
+    /// Per-epoch withdrawn amounts for the configured epoch window.
     #[prost(message, optional, tag = "1")]
     pub rate_limiter_state: ::core::option::Option<RateLimiter>,
 }

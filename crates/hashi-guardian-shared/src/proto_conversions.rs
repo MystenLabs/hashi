@@ -2,6 +2,7 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use crate::epoch_store::EpochWindow;
 use crate::Ciphertext;
 use crate::CommitteeStore;
 use crate::EncPubKey;
@@ -132,10 +133,15 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         // State
         let state_pb = req.state.ok_or_else(|| missing("state"))?;
 
+        let epoch_window_pb = state_pb
+            .epoch_window
+            .ok_or_else(|| missing("epoch_window"))?;
+        let epoch_window = pb_to_epoch_window(epoch_window_pb)?;
+
         let committees_pb = state_pb
             .hashi_committees
             .ok_or_else(|| missing("committees"))?;
-        let hashi_committees = pb_to_hashi_committee_store(committees_pb)?;
+        let hashi_committees = pb_to_hashi_committee_store(committees_pb, epoch_window)?;
 
         let withdrawal_config_pb = state_pb
             .withdrawal_config
@@ -145,7 +151,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         let withdrawal_state_pb = state_pb
             .withdrawal_state
             .ok_or_else(|| missing("withdrawal_state"))?;
-        let withdrawal_state = pb_to_withdrawal_state(withdrawal_state_pb)?;
+        let withdrawal_state = pb_to_withdrawal_state(withdrawal_state_pb, epoch_window)?;
 
         let master_pk_bytes = state_pb
             .hashi_btc_master_pubkey
@@ -161,7 +167,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
                 withdrawal_config,
                 withdrawal_state,
                 hashi_btc_master_pubkey,
-            ),
+            )?,
         ))
     }
 }
@@ -230,11 +236,20 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::ProvisionerInitState {
+    // Shared window metadata.
+    let window = s.hashi_committees.epoch_window();
+    debug_assert_eq!(
+        window,
+        s.withdrawal_state.rate_limiter().epoch_window(),
+        "committee store and rate limiter must use the same EpochWindow"
+    );
+
     pb::ProvisionerInitState {
         hashi_committees: Some(hashi_committee_store_to_pb(s.hashi_committees)),
         withdrawal_config: Some(withdrawal_config_to_pb(s.withdrawal_config)),
         withdrawal_state: Some(withdrawal_state_to_pb(s.withdrawal_state)),
         hashi_btc_master_pubkey: Some(s.hashi_btc_master_pubkey.serialize().to_vec().into()),
+        epoch_window: Some(epoch_window_to_pb(window)),
     }
 }
 
@@ -266,6 +281,29 @@ fn pb_share_commitments_to_domain(
             })
         })
         .collect::<GuardianResult<Vec<_>>>()
+}
+
+fn pb_to_epoch_window(w: pb::EpochWindow) -> GuardianResult<EpochWindow> {
+    let base_epoch = w
+        .base_epoch
+        .ok_or_else(|| missing("epoch_window.base_epoch"))?;
+    let num_epochs = w
+        .num_epochs
+        .ok_or_else(|| missing("epoch_window.num_epochs"))?;
+
+    let num_epochs = u16::try_from(num_epochs)
+        .map_err(|_| InvalidInputs("num_epochs: out of range for u16".into()))?;
+    let num_epochs = NonZeroU16::new(num_epochs)
+        .ok_or_else(|| InvalidInputs("num_epochs must be >= 1".into()))?;
+
+    Ok(EpochWindow::new(base_epoch, num_epochs))
+}
+
+fn epoch_window_to_pb(w: EpochWindow) -> pb::EpochWindow {
+    pb::EpochWindow {
+        base_epoch: Some(w.base_epoch),
+        num_epochs: Some(w.num_epochs.get() as u32),
+    }
 }
 
 fn system_time_to_ms(time: SystemTime) -> u64 {
@@ -413,7 +451,10 @@ fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
 }
 
 // TODO: Do we need to handle the case of an empty rate limiter? Yes: below might need change. No: insert_strict in epoch_store might be better.
-fn pb_to_withdrawal_state(st: pb::WithdrawalState) -> GuardianResult<WithdrawalState> {
+fn pb_to_withdrawal_state(
+    st: pb::WithdrawalState,
+    epoch_window: EpochWindow,
+) -> GuardianResult<WithdrawalState> {
     let rl = st
         .rate_limiter_state
         .ok_or_else(|| missing("rate_limiter_state"))?;
@@ -424,30 +465,38 @@ fn pb_to_withdrawal_state(st: pb::WithdrawalState) -> GuardianResult<WithdrawalS
         .map(Amount::from_sat)
         .collect();
 
-    let base_epoch = rl
-        .base_epoch
-        .ok_or_else(|| missing("rate_limiter_state.base_epoch"))?;
+    let max_withdrawable_per_epoch_sats = rl
+        .max_withdrawable_per_epoch_sats
+        .ok_or_else(|| missing("rate_limiter_state.max_withdrawable_per_epoch_sats"))?;
 
     Ok(WithdrawalState::new(RateLimiter::new(
-        base_epoch, withdrawn,
+        epoch_window,
+        withdrawn,
+        Amount::from_sat(max_withdrawable_per_epoch_sats),
     )?))
 }
 
 fn withdrawal_state_to_pb(st: WithdrawalState) -> pb::WithdrawalState {
     let limiter = st.rate_limiter();
+
     pb::WithdrawalState {
         rate_limiter_state: Some(pb::RateLimiter {
-            base_epoch: limiter.0.base_epoch(),
-            withdrawn_sats: limiter.0.iter().map(|(_, x)| Amount::to_sat(*x)).collect(),
+            withdrawn_sats: limiter
+                .state
+                .iter()
+                .map(|(_, x)| Amount::to_sat(*x))
+                .collect(),
+            max_withdrawable_per_epoch_sats: Some(limiter.max_withdrawable_per_epoch.to_sat()),
         }),
     }
 }
 
-fn pb_to_hashi_committee_store(c: pb::CommitteeStore) -> GuardianResult<CommitteeStore> {
-    let base_epoch = c.base_epoch.ok_or(missing("base_epoch"))?;
-
+fn pb_to_hashi_committee_store(
+    c: pb::CommitteeStore,
+    epoch_window: EpochWindow,
+) -> GuardianResult<CommitteeStore> {
     CommitteeStore::new(
-        base_epoch,
+        epoch_window,
         c.committees
             .into_iter()
             .map(pb_to_hashi_committee)
@@ -457,7 +506,6 @@ fn pb_to_hashi_committee_store(c: pb::CommitteeStore) -> GuardianResult<Committe
 
 fn hashi_committee_store_to_pb(c: CommitteeStore) -> pb::CommitteeStore {
     pb::CommitteeStore {
-        base_epoch: c.0.base_epoch(),
         committees: c
             .0
             .into_owned_iter()

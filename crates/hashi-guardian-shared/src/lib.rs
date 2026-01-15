@@ -26,19 +26,17 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::num::NonZeroU16;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::bitcoin_utils::TxUTXOs;
 use crate::epoch_store::ConsecutiveEpochStore;
 use crate::epoch_store::ConsecutiveEpochStoreRepr;
+use crate::epoch_store::EpochWindow;
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
 use tracing::info;
-
-// TODO: Discuss if these need to be configurable
-pub const MAX_EPOCHS: usize = 7;
-pub const MAX_WITHDRAWABLE_PER_EPOCH: Amount = Amount::from_sat(100_000_000);
 
 // ---------------------------------
 //     Serialization Abstraction
@@ -229,13 +227,18 @@ pub struct WithdrawalConfig {
     pub delayed_withdrawals_timeout: Duration,
 }
 
-/// Rate limiter state: (epoch_number, amount_withdrawn) for the last MAX_EPOCHS epochs
+/// Rate limiter
 #[derive(Debug, Clone, PartialEq)]
-pub struct RateLimiter(ConsecutiveEpochStore<Amount>);
+pub struct RateLimiter {
+    // State: (epoch_number, amount_withdrawn) for the last X epochs
+    state: ConsecutiveEpochStore<Amount>,
+    // Maximum amount withdrawable per epoch
+    max_withdrawable_per_epoch: Amount,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalState {
-    pub limiter: RateLimiter,
+    limiter: RateLimiter,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -322,13 +325,17 @@ impl ProvisionerInitRequestState {
         withdrawal_config: WithdrawalConfig,
         withdrawal_state: WithdrawalState,
         hashi_btc_master_pubkey: BitcoinPubkey,
-    ) -> Self {
-        Self {
+    ) -> GuardianResult<Self> {
+        if hashi_committees.epoch_window() != withdrawal_state.limiter.epoch_window() {
+            return Err(InvalidInputs("epoch window mismatch".into()));
+        }
+
+        Ok(Self {
             hashi_committees,
             withdrawal_config,
             withdrawal_state,
             hashi_btc_master_pubkey,
-        }
+        })
     }
 
     pub fn into_parts(
@@ -415,9 +422,9 @@ impl WithdrawalState {
         Self { limiter }
     }
 
-    pub fn empty() -> Self {
+    pub fn empty(max_withdrawable_per_epoch: Amount, num_epochs: NonZeroU16) -> Self {
         Self {
-            limiter: RateLimiter::empty(),
+            limiter: RateLimiter::empty(max_withdrawable_per_epoch, num_epochs),
         }
     }
 
@@ -435,71 +442,89 @@ impl WithdrawalState {
         self.limiter.add_epoch(epoch)
     }
 
-    pub fn is_limiter_empty(&self) -> bool {
-        self.limiter.is_empty()
+    pub fn is_initialized(&self) -> bool {
+        self.limiter.is_initialized()
     }
 }
 
 impl RateLimiter {
-    pub fn new(base_epoch: u64, amounts: Vec<Amount>) -> GuardianResult<Self> {
-        Self::from_repr(ConsecutiveEpochStoreRepr::<Amount> {
-            base_epoch,
-            entries: amounts,
+    pub fn new(
+        epoch_window: EpochWindow,
+        amounts: Vec<Amount>,
+        max_withdrawable_per_epoch: Amount,
+    ) -> GuardianResult<Self> {
+        Self::from_repr(
+            ConsecutiveEpochStoreRepr::<Amount> {
+                base_epoch: epoch_window.base_epoch,
+                entries: amounts,
+                capacity: epoch_window.num_epochs,
+            },
+            max_withdrawable_per_epoch,
+        )
+    }
+
+    pub fn from_repr(
+        wire_input: ConsecutiveEpochStoreRepr<Amount>,
+        max_withdrawable: Amount,
+    ) -> GuardianResult<Self> {
+        Ok(Self {
+            state: wire_input.try_into()?,
+            max_withdrawable_per_epoch: max_withdrawable,
         })
     }
 
-    pub fn from_repr(wire_input: ConsecutiveEpochStoreRepr<Amount>) -> GuardianResult<Self> {
-        Ok(Self(wire_input.try_into()?))
+    /// Construct an empty limiter.
+    pub fn empty(max_withdrawable_per_epoch: Amount, num_epochs: NonZeroU16) -> Self {
+        Self {
+            state: ConsecutiveEpochStore::empty(num_epochs),
+            max_withdrawable_per_epoch,
+        }
     }
 
-    pub fn empty() -> Self {
-        Self(ConsecutiveEpochStore::empty(MAX_EPOCHS))
+    pub fn max_withdrawable_per_epoch(&self) -> Amount {
+        self.max_withdrawable_per_epoch
     }
 
-    pub fn is_empty(&self) -> bool {
-        !self.0.is_initialized()
+    pub fn epoch_window(&self) -> EpochWindow {
+        self.state.epoch_window()
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.state.is_initialized()
     }
 
     /// Consume amount units from the given epoch's rate limit.
     /// Stored values are the amount withdrawn so far in that epoch.
     pub fn consume(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        let cur_sum = self
-            .0
-            .get(epoch)
-            .copied()
-            .ok_or_else(|| InvalidInputs("Missing epoch".into()))?;
+        let cur_sum = *self.state.get_checked(epoch)?;
 
         let new_sum = cur_sum
             .checked_add(amount)
             .ok_or(InvalidInputs("Overflow when computing sum".into()))?;
 
-        if new_sum > MAX_WITHDRAWABLE_PER_EPOCH {
+        if new_sum > self.max_withdrawable_per_epoch {
             return Err(InvalidInputs("Rate limit will exceed".into()));
         }
 
-        *self.0.get_mut(epoch).expect("epoch checked to exist") = new_sum;
+        *self.state.get_mut_checked(epoch)? = new_sum;
         Ok(())
     }
 
     /// Adds a new epoch (must be the next consecutive epoch). Old epochs are pruned automatically.
     pub fn add_epoch(&mut self, epoch: u64) -> GuardianResult<()> {
         info!("Adding epoch {} to rate limiter.", epoch);
-        self.0.insert_or_start(epoch, Amount::from_sat(0))?;
+        self.state.insert_or_start(epoch, Amount::from_sat(0))?;
         info!("Epoch {} added to rate limiter.", epoch);
         Ok(())
-    }
-
-    /// Returns the number of epochs tracked by the limiter window.
-    pub fn len(&self) -> usize {
-        self.0.len()
     }
 }
 
 impl CommitteeStore {
-    pub fn new(base_epoch: u64, committees: Vec<HashiCommittee>) -> GuardianResult<Self> {
+    pub fn new(epoch_window: EpochWindow, committees: Vec<HashiCommittee>) -> GuardianResult<Self> {
         Self::from_repr(ConsecutiveEpochStoreRepr::<HashiCommittee> {
-            base_epoch,
+            base_epoch: epoch_window.base_epoch,
             entries: committees,
+            capacity: epoch_window.num_epochs,
         })
     }
 
@@ -516,11 +541,16 @@ impl CommitteeStore {
         Ok(Self(wire_input.try_into()?))
     }
 
-    pub fn len(&self) -> usize {
+    pub fn num_entries(&self) -> usize {
         self.0.len()
     }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+
+    pub fn capacity(&self) -> NonZeroU16 {
+        self.0.capacity()
+    }
+
+    pub fn epoch_window(&self) -> EpochWindow {
+        self.0.epoch_window()
     }
 
     pub fn insert(&mut self, epoch: u64, committee: HashiCommittee) -> GuardianResult<()> {
