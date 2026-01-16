@@ -44,7 +44,7 @@ public(package) fun create<T: store>(
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
-) {
+): ID {
     // only voters can create proposal
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
@@ -60,7 +60,9 @@ public(package) fun create<T: store>(
         data,
     };
 
-    hashi.proposals_mut().add(object::id(&proposal), proposal);
+    let proposal_id = object::id(&proposal);
+    hashi.proposals_mut().add(proposal_id, proposal);
+    proposal_id
 }
 
 public(package) fun execute<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {

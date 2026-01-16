@@ -1,7 +1,14 @@
 /// Module: hashi
 module hashi::hashi;
 
-use hashi::{committee::Committee, committee_set::CommitteeSet, config::Config, treasury::Treasury};
+use hashi::{
+    committee::Committee,
+    committee_set::CommitteeSet,
+    config::Config,
+    deposit_queue::DepositRequestQueue,
+    treasury::Treasury,
+    utxo_pool::UtxoPool
+};
 use sui::bag::{Self, Bag};
 
 public struct Hashi has key {
@@ -9,8 +16,8 @@ public struct Hashi has key {
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    deposit_queue: hashi::deposit_queue::DepositRequestQueue,
-    utxo_pool: hashi::utxo_pool::UtxoPool,
+    deposit_queue: DepositRequestQueue,
+    utxo_pool: UtxoPool,
     proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     tob: Bag,
@@ -137,4 +144,30 @@ public(package) fun epoch_certs_and_committee(
         self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };
     (self.tob.borrow_mut(epoch), self.committee_set.current_committee())
+}
+
+// ======== Test-only Functions ========
+
+#[test_only]
+/// Creates a Hashi instance for testing with all components provided
+public fun create_for_testing(
+    committee_set: CommitteeSet,
+    config: Config,
+    treasury: Treasury,
+    deposit_queue: hashi::deposit_queue::DepositRequestQueue,
+    utxo_pool: hashi::utxo_pool::UtxoPool,
+    proposals: Bag,
+    tob: Bag,
+    ctx: &mut TxContext,
+): Hashi {
+    Hashi {
+        id: object::new(ctx),
+        committee_set,
+        config,
+        treasury,
+        deposit_queue,
+        utxo_pool,
+        proposals,
+        tob,
+    }
 }
