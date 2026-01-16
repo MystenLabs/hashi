@@ -104,12 +104,23 @@ impl Hashi {
     fn create_dkg_manager(&self) -> anyhow::Result<dkg::DkgManager> {
         let state = self.onchain_state().state();
         let committee_set = &state.hashi().committees;
+        let epoch = committee_set.epoch();
         let session_id = dkg::SessionId::new(
             self.config.sui_chain_id(),
-            committee_set.epoch(),
+            epoch,
             &dkg::types::ProtocolType::DkgKeyGeneration,
         );
         let encryption_key = self.config.encryption_private_key()?;
+        if self
+            .db
+            .get_encryption_key(Some(epoch))
+            .map_err(|e| anyhow!("failed to get encryption key: {e}"))?
+            .is_none()
+        {
+            self.db
+                .store_encryption_key(Some(epoch), &encryption_key)
+                .map_err(|e| anyhow!("failed to store encryption key: {e}"))?;
+        }
         let signing_key = self
             .config
             .protocol_private_key()

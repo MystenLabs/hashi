@@ -25,7 +25,6 @@ pub trait SecretsStore: Send + Sync {
     /// Store encryption private key
     ///
     /// Fails if called more than once.
-    // TODO: Apply at node initialization
     fn store_encryption_key(&mut self, key: &EncryptionPrivateKey) -> Result<()>;
 
     /// Retrieve encryption private key

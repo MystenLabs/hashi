@@ -49,14 +49,22 @@ impl Database {
         }
     }
 
+    /// Store encryption key for the given epoch.
+    ///
+    /// Fails if a key already exists for this epoch.
     pub fn store_encryption_key(
         &self,
         epoch: Option<u64>,
         encryption_key: &EncryptionPrivateKey,
     ) -> Result<()> {
         let key = epoch.unwrap_or(u64::MAX).to_be_bytes();
+        if self.encryption_keys.contains_key(key)? {
+            return Err(fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "encryption key already exists for this epoch",
+            )));
+        }
         let value = bcs::to_bytes(encryption_key).unwrap();
-
         self.encryption_keys.insert(key, value)
     }
 
@@ -82,6 +90,11 @@ impl Database {
             ))
         })?;
         Ok(Some(EncryptionPrivateKey::from(scalar)))
+    }
+
+    pub fn clear_encryption_key(&self, epoch: u64) -> Result<()> {
+        let key = epoch.to_be_bytes();
+        self.encryption_keys.remove(key)
     }
 
     pub fn store_dealer_message(
@@ -220,6 +233,22 @@ mod tests {
             db.get_encryption_key(Some(100)).unwrap().unwrap()
         );
         assert!(db.get_encryption_key(Some(101)).unwrap().is_none());
+
+        // Test that storing twice fails
+        let another_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        assert!(db.store_encryption_key(None, &another_key).is_err());
+
+        // Test clear_encryption_key
+        db.clear_encryption_key(100).unwrap();
+        assert!(db.get_encryption_key(Some(100)).unwrap().is_none());
+        assert_eq!(private_key, db.get_encryption_key(None).unwrap().unwrap());
+
+        // After clearing, can store again
+        db.store_encryption_key(Some(100), &another_key).unwrap();
+        assert_eq!(
+            another_key,
+            db.get_encryption_key(Some(100)).unwrap().unwrap()
+        );
     }
 
     #[test]
