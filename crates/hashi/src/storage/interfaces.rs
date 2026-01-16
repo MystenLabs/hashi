@@ -1,6 +1,5 @@
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use hashi_types::committee::EncryptionPrivateKey;
 use sui_sdk_types::Address;
 
 pub trait PublicMessagesStore: Send + Sync {
@@ -18,18 +17,5 @@ pub trait PublicMessagesStore: Send + Sync {
     fn list_all_dealer_messages(&self) -> Result<Vec<(Address, avss::Message)>>;
 
     /// Clear all stored messages (called at epoch transitions)
-    fn clear(&mut self) -> Result<()>;
-}
-
-pub trait SecretsStore: Send + Sync {
-    /// Store encryption private key
-    ///
-    /// Fails if called more than once.
-    fn store_encryption_key(&mut self, key: &EncryptionPrivateKey) -> Result<()>;
-
-    /// Retrieve encryption private key
-    fn get_encryption_key(&self) -> Result<Option<EncryptionPrivateKey>>;
-
-    /// Clear all secrets (called at epoch transitions)
     fn clear(&mut self) -> Result<()>;
 }
