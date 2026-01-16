@@ -3,6 +3,11 @@ module hashi::deposit_queue;
 use hashi::utxo::Utxo;
 use sui::{bag::Bag, clock::Clock};
 
+const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
+
+#[error(code = 0)]
+const EDepositRequestNotExpired: vector<u8> = b"Deposit request not expired";
+
 public struct DepositRequestQueue has store {
     // XXX bag or table?
     requests: Bag,
@@ -57,4 +62,28 @@ public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
     DepositRequestQueue {
         requests: sui::bag::new(ctx),
     }
+}
+
+fun is_expired(deposit_request: &DepositRequest, clock: &Clock): bool {
+    clock.timestamp_ms() > deposit_request.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
+}
+
+public(package) fun delete_expired(
+    self: &mut DepositRequestQueue,
+    request_id: address,
+    clock: &Clock,
+) {
+    let deposit_request: DepositRequest = self.requests.remove(request_id);
+
+    assert!(deposit_request.is_expired(clock), EDepositRequestNotExpired);
+    deposit_request.delete();
+}
+
+public(package) fun delete(deposit_request: DepositRequest) {
+    let DepositRequest {
+        id: _,
+        utxo,
+        timestamp_ms: _,
+    } = deposit_request;
+    utxo.delete();
 }
