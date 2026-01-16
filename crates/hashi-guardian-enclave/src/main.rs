@@ -335,11 +335,7 @@ impl EnclaveState {
 
     /// Get the current hashi committee.
     pub fn get_committee(&self, epoch: u64) -> GuardianResult<Arc<HashiCommittee>> {
-        self.with_committees(|committee_map| {
-            committee_map
-                .get_checked(epoch)
-                .map(Arc::clone)
-        })?
+        self.with_committees(|committee_map| committee_map.get_checked(epoch).map(Arc::clone))?
     }
 
     /// Adds one committee and prunes one if needed.
@@ -355,7 +351,10 @@ impl EnclaveState {
 
     /// Set committees. Called only from init(ProvisionerInitRequestState)
     fn set_committees(&self, hashi_committees: CommitteeStore) -> GuardianResult<()> {
-        info!("Setting state with {} committees.", hashi_committees.num_entries());
+        info!(
+            "Setting state with {} committees.",
+            hashi_committees.num_entries()
+        );
 
         // Check if it is already initialized
         let mut guard = self
@@ -397,6 +396,10 @@ impl EnclaveState {
 
     pub fn consume_from_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
         self.with_withdraw_state_mut(|st| st.consume_from_limiter(epoch, amount))
+    }
+
+    pub fn revert_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+        self.with_withdraw_state_mut(|st| st.revert_limiter(epoch, amount))
     }
 
     pub fn add_epoch_to_limiter(&self, epoch: u64) -> GuardianResult<()> {

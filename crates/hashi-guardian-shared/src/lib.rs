@@ -35,9 +35,9 @@ use crate::epoch_store::ConsecutiveEpochStore;
 use crate::epoch_store::ConsecutiveEpochStoreRepr;
 use crate::epoch_store::EpochWindow;
 use crate::proto_conversions::provisioner_init_state_to_pb;
+use hashi_types::committee::CommitteeSignature;
 use prost::Message;
 use tracing::info;
-
 // ---------------------------------
 //     Serialization Abstraction
 // ---------------------------------
@@ -163,6 +163,9 @@ pub struct NormalWithdrawalRequest {
 /// `EnclaveSigned<T>`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalWithdrawalResponse {
+    /// A copy of the unsigned request
+    pub request: NormalWithdrawalRequest,
+    /// Enclave's BTC signatures
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
 
@@ -193,11 +196,17 @@ pub enum LogMessage {
     },
     /// Threshold reached - enclave fully initialized (happens once)
     EnclaveFullyInitialized,
-    /// Immediate withdraw
+    /// Immediate withdraw success
     NormalWithdrawalSuccess {
-        request: NormalWithdrawalRequest,
         response: NormalWithdrawalResponse,
-        signers: Vec<u8>,
+        request_signature: CommitteeSignature,
+    },
+    /// Immediate withdraw failure
+    /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
+    NormalWithdrawalFailure {
+        unsigned_request: NormalWithdrawalRequest,
+        request_signature: CommitteeSignature,
+        error: GuardianError,
     },
 }
 
@@ -442,6 +451,11 @@ impl WithdrawalState {
         self.limiter.add_epoch(epoch)
     }
 
+    /// Reverse of consume_from_limiter
+    pub fn revert_limiter(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+        self.limiter.revert(epoch, amount)
+    }
+
     pub fn is_initialized(&self) -> bool {
         self.limiter.is_initialized()
     }
@@ -505,6 +519,19 @@ impl RateLimiter {
         if new_sum > self.max_withdrawable_per_epoch {
             return Err(InvalidInputs("Rate limit will exceed".into()));
         }
+
+        *self.state.get_mut_checked(epoch)? = new_sum;
+        Ok(())
+    }
+
+    /// Add back consumed units to the limiter
+    pub fn revert(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+        let cur_sum = *self.state.get_checked(epoch)?;
+
+        debug_assert!(cur_sum > amount);
+        let new_sum = cur_sum
+            .checked_sub(amount)
+            .ok_or(InternalError("Underflow when computing sub".into()))?; // this should be unreachable
 
         *self.state.get_mut_checked(epoch)? = new_sum;
         Ok(())
