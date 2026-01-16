@@ -13,6 +13,8 @@ use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use crate::onchain::scrape_member_info;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::Proposal;
+use crate::onchain::types::ProposalType;
 use hashi_types::move_types::HashiEvent;
 
 pub async fn watcher(mut client: Client, state: OnchainState) {
@@ -120,8 +122,37 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
             }
             HashiEvent::VoteCastEvent(_) => {}
             HashiEvent::VoteRemovedEvent(_) => {}
-            HashiEvent::ProposalDeletedEvent(_) => {}
-            HashiEvent::ProposalExecutedEvent(_) => {}
+            HashiEvent::ProposalCreatedEvent(proposal_created_event) => {
+                let proposal = Proposal {
+                    id: proposal_created_event.proposal_id,
+                    timestamp_ms: proposal_created_event.timestamp_ms,
+                    proposal_type: parse_proposal_type_from_string(
+                        &proposal_created_event.proposal_type,
+                    ),
+                };
+                state
+                    .state_mut()
+                    .hashi
+                    .proposals
+                    .proposals
+                    .insert(proposal.id, proposal);
+            }
+            HashiEvent::ProposalDeletedEvent(proposal_deleted_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .proposals
+                    .proposals
+                    .remove(&proposal_deleted_event.proposal_id);
+            }
+            HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .proposals
+                    .proposals
+                    .remove(&proposal_executed_event.proposal_id);
+            }
             HashiEvent::QuorumReachedEvent(_) => {}
             HashiEvent::PackageUpgradedEvent(package_upgraded_event) => {
                 state.add_package_version(
@@ -249,5 +280,27 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
             }
             Err(e) => tracing::error!("unable to query validator {validator}'s info: {e}"),
         }
+    }
+}
+
+/// Parse the proposal type from the type name string emitted by the Move event.
+/// The format is: `<package_addr>::<module>::<struct_name>`
+/// For example: `0x123::update_deposit_fee::UpdateDepositFee`
+fn parse_proposal_type_from_string(type_name: &str) -> ProposalType {
+    // Split by "::" and get the last two parts (module::struct_name)
+    let parts: Vec<&str> = type_name.split("::").collect();
+    if parts.len() < 2 {
+        return ProposalType::Unknown(type_name.to_string());
+    }
+
+    let module = parts[parts.len() - 2];
+    let name = parts[parts.len() - 1];
+
+    match (module, name) {
+        ("update_deposit_fee", "UpdateDepositFee") => ProposalType::UpdateDepositFee,
+        ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
+        ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
+        ("upgrade", "Upgrade") => ProposalType::Upgrade,
+        _ => ProposalType::Unknown(format!("{}::{}", module, name)),
     }
 }
