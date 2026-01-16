@@ -18,15 +18,21 @@ service MpcService {
   rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
 }
 
+message RotationMessages {
+  map<uint32, sui.rpc.v2.Bcs> messages = 1;
+}
+
 message SendMessagesRequest {
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
 
-  // For DKG: single dealer message.
-  optional sui.rpc.v2.Bcs dkg_message = 2;
+  oneof messages {
+    // For DKG: single dealer message.
+    sui.rpc.v2.Bcs dkg_message = 2;
 
-  // For key rotation: messages keyed by share index.
-  map<uint32, sui.rpc.v2.Bcs> rotation_messages = 3;
+    // For key rotation: messages keyed by share index.
+    RotationMessages rotation_messages = 3;
+  }
 }
 
 message SendMessagesResponse {
@@ -43,11 +49,13 @@ message RetrieveMessagesRequest {
 }
 
 message RetrieveMessagesResponse {
-  // For DKG: single dealer message.
-  optional sui.rpc.v2.Bcs dkg_message = 1;
+  oneof messages {
+    // For DKG: single dealer message.
+    sui.rpc.v2.Bcs dkg_message = 1;
 
-  // For key rotation: messages keyed by share index.
-  map<uint32, sui.rpc.v2.Bcs> rotation_messages = 2;
+    // For key rotation: messages keyed by share index.
+    RotationMessages rotation_messages = 2;
+  }
 }
 
 message ComplainRequest {
@@ -58,19 +66,25 @@ message ComplainRequest {
   optional string dealer = 2;
 
   // For DKG: not set.
-  // For rotation: the specific share index that triggered the complaint.
+  // For key rotation: the specific share index that triggered the complaint.
   optional uint32 share_index = 3;
 
   // The complaint containing proof of invalid share.
   optional sui.rpc.v2.Bcs complaint = 4;
 }
 
-message ComplainResponse {
-  // For DKG: single response.
-  optional sui.rpc.v2.Bcs dkg_response = 1;
+message RotationResponses {
+  map<uint32, sui.rpc.v2.Bcs> responses = 1;
+}
 
-  // For rotation: responses keyed by share index.
-  map<uint32, sui.rpc.v2.Bcs> rotation_responses = 2;
+message ComplainResponse {
+  oneof responses {
+    // For DKG: single response.
+    sui.rpc.v2.Bcs dkg_response = 1;
+
+    // For key rotation: responses keyed by share index.
+    RotationResponses rotation_responses = 2;
+  }
 }
 
 message GetPublicDkgOutputRequest {

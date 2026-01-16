@@ -74,17 +74,18 @@ fn rotation_messages_to_proto(
 
 impl types::SendMessagesRequest {
     pub fn to_proto(&self, epoch: u64) -> proto::SendMessagesRequest {
-        match &self.messages {
-            types::Messages::Dkg(message) => proto::SendMessagesRequest {
-                epoch: Some(epoch),
-                dkg_message: Some(serialize_bcs(message)),
-                rotation_messages: Default::default(),
-            },
-            types::Messages::Rotation(messages) => proto::SendMessagesRequest {
-                epoch: Some(epoch),
-                dkg_message: None,
-                rotation_messages: rotation_messages_to_proto(messages),
-            },
+        use proto::send_messages_request::Messages;
+        let messages = match &self.messages {
+            types::Messages::Dkg(message) => Messages::DkgMessage(serialize_bcs(message)),
+            types::Messages::Rotation(messages) => {
+                Messages::RotationMessages(proto::RotationMessages {
+                    messages: rotation_messages_to_proto(messages),
+                })
+            }
+        };
+        proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: Some(messages),
         }
     }
 }
@@ -93,15 +94,20 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::SendMessagesRequest) -> Result<Self, Self::Error> {
-        let messages = if let Some(dkg_message) = &value.dkg_message {
-            let message: avss::Message = deserialize_bcs(dkg_message, "dkg_message")?;
-            types::Messages::Dkg(message)
-        } else if !value.rotation_messages.is_empty() {
-            types::Messages::Rotation(parse_rotation_messages_map(&value.rotation_messages)?)
-        } else {
-            return Err(TryFromProtoError::missing(
-                "dkg_message or rotation_messages",
-            ));
+        use proto::send_messages_request::Messages;
+        let messages = match &value.messages {
+            Some(Messages::DkgMessage(dkg_message)) => {
+                let message: avss::Message = deserialize_bcs(dkg_message, "dkg_message")?;
+                types::Messages::Dkg(message)
+            }
+            Some(Messages::RotationMessages(rotation)) => {
+                types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
+            }
+            None => {
+                return Err(TryFromProtoError::missing(
+                    "dkg_message or rotation_messages",
+                ));
+            }
         };
         Ok(Self { messages })
     }
@@ -158,15 +164,17 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
 
 impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse {
     fn from(value: &types::RetrieveMessagesResponse) -> Self {
-        match &value.messages {
-            types::Messages::Dkg(message) => Self {
-                dkg_message: Some(serialize_bcs(message)),
-                rotation_messages: Default::default(),
-            },
-            types::Messages::Rotation(messages) => Self {
-                dkg_message: None,
-                rotation_messages: rotation_messages_to_proto(messages),
-            },
+        use proto::retrieve_messages_response::Messages;
+        let messages = match &value.messages {
+            types::Messages::Dkg(message) => Messages::DkgMessage(serialize_bcs(message)),
+            types::Messages::Rotation(messages) => {
+                Messages::RotationMessages(proto::RotationMessages {
+                    messages: rotation_messages_to_proto(messages),
+                })
+            }
+        };
+        Self {
+            messages: Some(messages),
         }
     }
 }
@@ -175,15 +183,20 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::RetrieveMessagesResponse) -> Result<Self, Self::Error> {
-        let messages = if let Some(dkg_message) = &value.dkg_message {
-            let message: avss::Message = deserialize_bcs(dkg_message, "dkg_message")?;
-            types::Messages::Dkg(message)
-        } else if !value.rotation_messages.is_empty() {
-            types::Messages::Rotation(parse_rotation_messages_map(&value.rotation_messages)?)
-        } else {
-            return Err(TryFromProtoError::missing(
-                "dkg_message or rotation_messages",
-            ));
+        use proto::retrieve_messages_response::Messages;
+        let messages = match &value.messages {
+            Some(Messages::DkgMessage(dkg_message)) => {
+                let message: avss::Message = deserialize_bcs(dkg_message, "dkg_message")?;
+                types::Messages::Dkg(message)
+            }
+            Some(Messages::RotationMessages(rotation)) => {
+                types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
+            }
+            None => {
+                return Err(TryFromProtoError::missing(
+                    "dkg_message or rotation_messages",
+                ));
+            }
         };
         Ok(Self { messages })
     }
@@ -264,15 +277,19 @@ fn rotation_responses_to_proto(
 
 impl From<&types::ComplaintResponses> for proto::ComplainResponse {
     fn from(value: &types::ComplaintResponses) -> Self {
-        match value {
-            types::ComplaintResponses::Dkg(response) => Self {
-                dkg_response: Some(serialize_bcs(response)),
-                rotation_responses: Default::default(),
-            },
-            types::ComplaintResponses::Rotation(responses) => Self {
-                dkg_response: None,
-                rotation_responses: rotation_responses_to_proto(responses),
-            },
+        use proto::complain_response::Responses;
+        let responses = match value {
+            types::ComplaintResponses::Dkg(response) => {
+                Responses::DkgResponse(serialize_bcs(response))
+            }
+            types::ComplaintResponses::Rotation(responses) => {
+                Responses::RotationResponses(proto::RotationResponses {
+                    responses: rotation_responses_to_proto(responses),
+                })
+            }
+        };
+        Self {
+            responses: Some(responses),
         }
     }
 }
@@ -281,18 +298,21 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::ComplainResponse) -> Result<Self, Self::Error> {
-        if let Some(dkg_response) = &value.dkg_response {
-            let response: complaint::ComplaintResponse<avss::SharesForNode> =
-                deserialize_bcs(dkg_response, "dkg_response")?;
-            Ok(types::ComplaintResponses::Dkg(response))
-        } else if !value.rotation_responses.is_empty() {
-            Ok(types::ComplaintResponses::Rotation(
-                parse_rotation_responses_map(&value.rotation_responses)?,
-            ))
-        } else {
-            Err(TryFromProtoError::missing(
+        use proto::complain_response::Responses;
+        match &value.responses {
+            Some(Responses::DkgResponse(dkg_response)) => {
+                let response: complaint::ComplaintResponse<avss::SharesForNode> =
+                    deserialize_bcs(dkg_response, "dkg_response")?;
+                Ok(types::ComplaintResponses::Dkg(response))
+            }
+            Some(Responses::RotationResponses(rotation)) => {
+                Ok(types::ComplaintResponses::Rotation(
+                    parse_rotation_responses_map(&rotation.responses)?,
+                ))
+            }
+            None => Err(TryFromProtoError::missing(
                 "dkg_response or rotation_responses",
-            ))
+            )),
         }
     }
 }

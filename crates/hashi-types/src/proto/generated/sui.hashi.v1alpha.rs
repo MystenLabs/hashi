@@ -1170,19 +1170,29 @@ pub mod guardian_service_server {
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RotationMessages {
+    #[prost(map = "uint32, message", tag = "1")]
+    pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SendMessagesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    /// For DKG: single dealer message.
-    #[prost(message, optional, tag = "2")]
-    pub dkg_message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// For key rotation: messages keyed by share index.
-    #[prost(map = "uint32, message", tag = "3")]
-    pub rotation_messages: ::std::collections::HashMap<
-        u32,
-        ::sui_rpc::proto::sui::rpc::v2::Bcs,
-    >,
+    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3")]
+    pub messages: ::core::option::Option<send_messages_request::Messages>,
+}
+/// Nested message and enum types in `SendMessagesRequest`.
+pub mod send_messages_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Messages {
+        /// For DKG: single dealer message.
+        #[prost(message, tag = "2")]
+        DkgMessage(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For key rotation: messages keyed by share index.
+        #[prost(message, tag = "3")]
+        RotationMessages(super::RotationMessages),
+    }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessagesResponse {
@@ -1201,15 +1211,20 @@ pub struct RetrieveMessagesRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {
-    /// For DKG: single dealer message.
-    #[prost(message, optional, tag = "1")]
-    pub dkg_message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// For key rotation: messages keyed by share index.
-    #[prost(map = "uint32, message", tag = "2")]
-    pub rotation_messages: ::std::collections::HashMap<
-        u32,
-        ::sui_rpc::proto::sui::rpc::v2::Bcs,
-    >,
+    #[prost(oneof = "retrieve_messages_response::Messages", tags = "1, 2")]
+    pub messages: ::core::option::Option<retrieve_messages_response::Messages>,
+}
+/// Nested message and enum types in `RetrieveMessagesResponse`.
+pub mod retrieve_messages_response {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Messages {
+        /// For DKG: single dealer message.
+        #[prost(message, tag = "1")]
+        DkgMessage(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For key rotation: messages keyed by share index.
+        #[prost(message, tag = "2")]
+        RotationMessages(super::RotationMessages),
+    }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainRequest {
@@ -1220,7 +1235,7 @@ pub struct ComplainRequest {
     #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
     /// For DKG: not set.
-    /// For rotation: the specific share index that triggered the complaint.
+    /// For key rotation: the specific share index that triggered the complaint.
     #[prost(uint32, optional, tag = "3")]
     pub share_index: ::core::option::Option<u32>,
     /// The complaint containing proof of invalid share.
@@ -1228,16 +1243,26 @@ pub struct ComplainRequest {
     pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RotationResponses {
+    #[prost(map = "uint32, message", tag = "1")]
+    pub responses: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ComplainResponse {
-    /// For DKG: single response.
-    #[prost(message, optional, tag = "1")]
-    pub dkg_response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// For rotation: responses keyed by share index.
-    #[prost(map = "uint32, message", tag = "2")]
-    pub rotation_responses: ::std::collections::HashMap<
-        u32,
-        ::sui_rpc::proto::sui::rpc::v2::Bcs,
-    >,
+    #[prost(oneof = "complain_response::Responses", tags = "1, 2")]
+    pub responses: ::core::option::Option<complain_response::Responses>,
+}
+/// Nested message and enum types in `ComplainResponse`.
+pub mod complain_response {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Responses {
+        /// For DKG: single response.
+        #[prost(message, tag = "1")]
+        DkgResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For key rotation: responses keyed by share index.
+        #[prost(message, tag = "2")]
+        RotationResponses(super::RotationResponses),
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPublicDkgOutputRequest {
