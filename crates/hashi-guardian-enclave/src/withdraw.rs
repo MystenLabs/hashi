@@ -190,7 +190,7 @@ async fn log_withdrawal_success(
             // Commit limiter consumption only after we've successfully logged.
             limiter_guard.commit();
             Ok(())
-        },
+        }
         Err(e) => {
             // Logging failed => return Err (do not return signatures).
             // Note that LimiterGuard::Drop will revert the limiter
