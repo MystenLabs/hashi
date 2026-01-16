@@ -387,17 +387,24 @@ public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u
 public fun create_for_testing(
     committee: Committee,
     member_addresses: vector<address>,
+    bls_pubkey_bytes: vector<u8>,
+    encryption_key: vector<u8>,
     ctx: &mut TxContext,
 ): CommitteeSet {
     let mut committee_set = CommitteeSet {
         members: sui::bag::new(ctx),
         epoch: committee.epoch(),
         committees: sui::bag::new(ctx),
+        pending_epoch_change: option::none(),
     };
 
-    // Add dummy member info for each address so has_member checks pass
+    // Add member info for each address so has_member checks pass
     member_addresses.do!(|addr| {
-        let member_info = create_member_info_for_testing(addr);
+        let member_info = create_member_info_for_testing(
+            addr,
+            bls_pubkey_bytes,
+            encryption_key,
+        );
         committee_set.members.add(addr, member_info);
     });
 
@@ -408,15 +415,16 @@ public fun create_for_testing(
 }
 
 #[test_only]
-/// Creates dummy member info for testing
-fun create_member_info_for_testing(validator_address: address): MemberInfo {
+/// Creates member info for testing with provided keys
+fun create_member_info_for_testing(
+    validator_address: address,
+    bls_pubkey_bytes: vector<u8>,
+    encryption_key: vector<u8>,
+): MemberInfo {
     use sui::bls12381;
 
-    // Create a valid BLS12-381 G1 point (generator)
-    let dummy_pubkey_bytes =
-        x"97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
     let public_key = bls12381::g1_to_uncompressed_g1(
-        &bls12381::g1_from_bytes(&dummy_pubkey_bytes),
+        &bls12381::g1_from_bytes(&bls_pubkey_bytes),
     );
 
     MemberInfo {
@@ -425,39 +433,6 @@ fun create_member_info_for_testing(validator_address: address): MemberInfo {
         next_epoch_public_key: public_key,
         https_address: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
-        next_epoch_encryption_public_key: vector[
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-        ],
+        next_epoch_encryption_public_key: encryption_key,
     }
 }

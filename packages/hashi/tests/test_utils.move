@@ -3,7 +3,7 @@
 
 /// Test utilities for creating Hashi instances and proposals in unit tests
 #[test_only]
-#[allow(unused_use, duplicate_alias)]
+#[allow(unused_use, duplicate_alias, implicit_const_copy)]
 module hashi::test_utils;
 
 use hashi::{
@@ -16,6 +16,17 @@ use hashi::{
     utxo_pool
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
+
+// ======== Test Fixtures ========
+// TODO: add proper signing and encryption fixtures for signature verification tests
+
+/// BLS12-381 G1 generator point - valid public key for testing committee membership
+const TEST_BLS_PUBKEY: vector<u8> =
+    x"97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
+
+/// 32-byte dummy encryption key for testing
+const TEST_ENCRYPTION_KEY: vector<u8> =
+    x"0000000000000000000000000000000000000000000000000000000000000001";
 
 // ======== Transaction Context Helpers ========
 
@@ -60,7 +71,13 @@ public fun create_hashi_with_weighted_committee(
     let committee = committee::new_committee(ctx.epoch(), members);
 
     // Create committee set with the test committee
-    let committee_set = hashi::committee_set::create_for_testing(committee, voters, ctx);
+    let committee_set = hashi::committee_set::create_for_testing(
+        committee,
+        voters,
+        TEST_BLS_PUBKEY,
+        TEST_ENCRYPTION_KEY,
+        ctx,
+    );
 
     // Create config with version enabled
     let config = hashi::config::create();
@@ -93,53 +110,14 @@ public fun create_hashi_with_weighted_committee(
 }
 
 fun create_test_committee_member(validator_address: address, weight: u16): CommitteeMember {
-    // Create a dummy BLS public key (valid BLS12-381 G1 generator point)
-    let dummy_pubkey_bytes =
-        x"97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
     let public_key = bls12381::g1_to_uncompressed_g1(
-        &bls12381::g1_from_bytes(&dummy_pubkey_bytes),
+        &bls12381::g1_from_bytes(&TEST_BLS_PUBKEY),
     );
-
-    // Create dummy encryption key (32 bytes)
-    let encryption_key = vector[
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-    ];
 
     committee::new_committee_member(
         validator_address,
         public_key,
-        encryption_key,
+        TEST_ENCRYPTION_KEY,
         weight,
     )
 }

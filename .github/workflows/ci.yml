@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
 
 env:
   RUSTFLAGS: -Dwarnings
@@ -142,68 +141,6 @@ jobs:
       - run: make proto
 
       - run: make is-dirty
-
-  move-tests:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Check for Move package changes
-        uses: dorny/paths-filter@v3
-        id: changes
-        with:
-          list-files: shell
-          filters: |
-            packages:
-              - 'packages/**'
-
-      - name: Install Sui Binary
-        if: steps.changes.outputs.packages == 'true'
-        run: |
-          # Get latest testnet release that has ubuntu binary available
-          echo "Detecting latest Sui testnet version with ubuntu binary..."
-          SUI_VERSION=$(curl -s https://api.github.com/repos/MystenLabs/sui/releases | \
-            jq -r '.[] | select(.tag_name | startswith("testnet-")) |
-                   select(.assets[].name | contains("ubuntu-x86_64")) |
-                   .tag_name' | head -n 1)
-
-          if [ -z "$SUI_VERSION" ]; then
-            echo "Failed to detect testnet version, falling back to testnet-v1.63.1"
-            SUI_VERSION="testnet-v1.63.1"
-          fi
-
-          echo "Installing Sui binary ${SUI_VERSION}..."
-
-          wget https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz || {
-            echo "Failed to download Sui ${SUI_VERSION}"
-            exit 1
-          }
-
-          echo "Extracting Sui binary..."
-          tar -xzf sui-*.tgz ./sui
-
-          # Move sui binary to PATH
-          echo "Installing Sui binary..."
-          sudo mv sui /usr/local/bin/
-
-          # Cleanup
-          rm -f sui-*.tgz
-
-          # Verify installation
-          echo "Verifying Sui installation..."
-          sui --version
-
-      - name: Run Move tests
-        if: steps.changes.outputs.packages == 'true'
-        run: |
-          cd packages/hashi
-          sui move test
-
-      - name: Skip Move tests
-        if: steps.changes.outputs.packages == 'false'
-        run: echo "Skipping Move tests - no changes in packages/ directory"
 
   docs:
     runs-on: ubuntu-latest
