@@ -375,7 +375,7 @@ pub struct Utxo {
 }
 
 /// txid:vout
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde_derive::Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde_derive::Serialize)]
 pub struct UtxoId {
     // a 32 byte sha256 of the transaction
     pub txid: Address,

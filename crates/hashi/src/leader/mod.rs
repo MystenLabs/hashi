@@ -3,6 +3,7 @@ mod garbage_collection;
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
@@ -11,7 +12,9 @@ use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::RwLock;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
 use tracing::debug;
@@ -25,11 +28,17 @@ const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 #[derive(Clone)]
 pub struct LeaderService {
     inner: Arc<Hashi>,
+    // Keep track of deposit requests which have already failed validation, so we don't keep trying
+    // to confirm them
+    invalid_deposit_requests: Arc<RwLock<HashSet<UtxoId>>>,
 }
 
 impl LeaderService {
     pub fn new(hashi: Arc<Hashi>) -> Self {
-        Self { inner: hashi }
+        Self {
+            inner: hashi,
+            invalid_deposit_requests: Arc::new(RwLock::new(HashSet::new())),
+        }
     }
 
     /// Start the leader service and return a `Service` for lifecycle management.
@@ -102,9 +111,21 @@ impl LeaderService {
     }
 
     async fn process_deposit_requests(&self, checkpoint_timestamp_ms: u64) {
-        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
+        let mut deposit_requests: Vec<_> = self
+            .inner
+            .onchain_state()
+            .deposit_requests()
+            .into_iter()
+            .filter(|request| {
+                !self
+                    .invalid_deposit_requests
+                    .read()
+                    .unwrap()
+                    .contains(&request.utxo.id)
+            })
+            .collect();
         // Sort deposit_requests by timestamp, from earliest to latest
-        deposit_requests.sort_by_key(|r| r.timestamp_ms);
+        deposit_requests.sort_by_key(|request| request.timestamp_ms);
 
         info!("Processing {} deposit requests", deposit_requests.len());
 
@@ -129,6 +150,10 @@ impl LeaderService {
                 "Deposit request {:?} failed validation: {e}",
                 deposit_request.id
             );
+            self.invalid_deposit_requests
+                .write()
+                .unwrap()
+                .insert(deposit_request.utxo.id);
             return;
         }
         info!(
