@@ -1,0 +1,18 @@
+# Nextest configuration for hashi
+# See https://nexte.st/docs/configuration/ for details
+
+# Integration tests in test-networks are heavy - they spin up Bitcoin regtest,
+# Sui localnet, and multiple Hashi nodes. Mark them as requiring all threads
+# so only one runs at a time.
+[[profile.default.overrides]]
+filter = 'package(test-networks)'
+threads-required = 4
+
+# CI profile with more conservative settings
+[profile.ci]
+# Retry flaky tests once in CI
+retries = 1
+failure-output = "immediate-final"
+success-output = "never"
+# Don't stop on first failure - run all tests
+fail-fast = false
