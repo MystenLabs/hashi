@@ -22,6 +22,7 @@ use sui_sdk_types::Digest;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 pub type MessageHash = Digest;
+pub type RotationMessages = BTreeMap<ShareIndex, avss::Message>;
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
@@ -137,7 +138,7 @@ pub struct GetPublicDkgOutputResponse {
 #[allow(clippy::large_enum_variant)]
 pub enum Messages {
     Dkg(avss::Message),
-    Rotation(BTreeMap<ShareIndex, avss::Message>),
+    Rotation(RotationMessages),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
