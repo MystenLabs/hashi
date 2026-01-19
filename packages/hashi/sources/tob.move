@@ -46,7 +46,7 @@ public(package) fun submit_dkg_cert(
     message_hash: vector<u8>,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,
-    threshold: u16,
+    threshold: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.dkg_certs.contains(dealer)) {

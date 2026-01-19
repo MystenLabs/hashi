@@ -106,7 +106,7 @@ pub struct CommitteeMember {
     pub validator_address: Address,
     pub public_key: Vec<u8>, //Element<UncompressedG1>,
     pub encryption_public_key: Vec<u8>,
-    pub weight: u16,
+    pub weight: u64,
 }
 
 /// This represents a BLS signing committee for a given epoch.
@@ -120,8 +120,7 @@ pub struct Committee {
     /// A vector of committee members
     pub members: Vec<CommitteeMember>,
     /// Total voting weight of the committee.
-    pub total_weight: u16,
-    pub total_aggregated_key: Vec<u8>, // Element<G1>,
+    pub total_weight: u64,
 }
 
 /// Rust version of the Move hashi::config::Config type.
@@ -263,7 +262,7 @@ pub struct CommitteeSignature {
 pub struct CertifiedMessage<T> {
     pub message: T,
     pub signature: CommitteeSignature,
-    pub stake_support: u16,
+    pub stake_support: u64,
 }
 
 #[derive(Debug)]
@@ -637,10 +636,7 @@ impl From<&crate::committee::CommitteeMember> for CommitteeMember {
             validator_address: m.validator_address(),
             public_key: m.public_key().as_bytes().to_vec(),
             encryption_public_key: m.encryption_public_key().to_bcs().expect("should not fail"),
-            weight: m
-                .weight()
-                .try_into()
-                .expect("committee member weight should fit into u16"),
+            weight: m.weight(),
         }
     }
 }
@@ -660,7 +656,7 @@ impl TryFrom<CommitteeMember> for crate::committee::CommitteeMember {
             m.validator_address,
             public_key,
             encryption_public_key,
-            m.weight as u64,
+            m.weight,
         ))
     }
 }
@@ -670,12 +666,7 @@ impl From<&crate::committee::Committee> for Committee {
         Self {
             epoch: c.epoch(),
             members: c.members().iter().map(Into::into).collect(),
-            total_weight: c
-                .total_weight()
-                .try_into()
-                .expect("committee total_weight should fit into u16"),
-            // TODO: implement aggregation if needed
-            total_aggregated_key: vec![],
+            total_weight: c.total_weight(),
         }
     }
 }

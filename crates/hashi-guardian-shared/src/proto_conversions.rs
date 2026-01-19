@@ -677,9 +677,6 @@ fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiC
         .ok_or_else(|| missing("encryption_public_key"))?;
 
     let weight = m.weight.ok_or_else(|| missing("weight"))?;
-    let weight: u16 = weight
-        .try_into()
-        .map_err(|_| InvalidInputs(format!("invalid weight (must fit in u16): {weight}")))?;
 
     let x = hashi_types::move_types::CommitteeMember {
         validator_address,
@@ -698,7 +695,7 @@ fn hashi_committee_member_to_pb(m: HashiCommitteeMember) -> pb::CommitteeMember 
         address: Some(x.validator_address.to_string()),
         public_key: Some(x.public_key.into()),
         encryption_public_key: Some(x.encryption_public_key.into()),
-        weight: Some(x.weight as u64),
+        weight: Some(x.weight),
     }
 }
 

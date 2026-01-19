@@ -87,14 +87,14 @@ public fun bls_aggregate_sigs(signatures: &vector<vector<u8>>): vector<u8> {
 /// Creates a test Hashi instance with a committee containing the specified voters
 /// Each voter has equal weight (weight = 1)
 public fun create_hashi_with_committee(voters: vector<address>, ctx: &mut TxContext): Hashi {
-    let weights = voters.map!(|_| 1u16);
+    let weights = voters.map!(|_| 1u64);
     create_hashi_with_weighted_committee(voters, weights, ctx)
 }
 
 /// Creates a test Hashi instance with a committee containing voters with custom weights
 public fun create_hashi_with_weighted_committee(
     voters: vector<address>,
-    weights: vector<u16>,
+    weights: vector<u64>,
     ctx: &mut TxContext,
 ): Hashi {
     assert!(voters.length() == weights.length());
@@ -153,7 +153,7 @@ public fun create_hashi_with_weighted_committee(
     )
 }
 
-fun create_test_committee_member(validator_address: address, weight: u16): CommitteeMember {
+fun create_test_committee_member(validator_address: address, weight: u64): CommitteeMember {
     let sk = bls_sk_for_testing();
     let pub_key = bls12381::g1_to_uncompressed_g1(
         &bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk)),

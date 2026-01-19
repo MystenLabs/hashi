@@ -444,15 +444,12 @@ fun test_delete_non_expired_proposal_fails() {
 
 #[test]
 /// Test quorum calculation with weighted committee
-/// Note: Using weights that don't overflow u16 when multiplied by 10000
-/// (max safe individual weight is ~6 since 6*10000 = 60000 < 65535)
 fun test_weighted_quorum() {
     let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
 
     // Create committee with weights: VOTER1=3, VOTER2=2, VOTER3=1 (total=6)
-    // This ensures valid_voting_power * 10000 doesn't overflow u16
     let voters = vector[VOTER1, VOTER2, VOTER3];
-    let weights = vector[3u16, 2u16, 1u16];
+    let weights = vector[3u64, 2u64, 1u64];
     let mut hashi = test_utils::create_hashi_with_weighted_committee(voters, weights, ctx1);
     let clock = clock::create_for_testing(ctx1);
 

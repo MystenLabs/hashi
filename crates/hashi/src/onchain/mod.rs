@@ -657,7 +657,7 @@ fn convert_move_committee_member(
         crate::dkg::EncryptionGroupElement::try_from(encryption_public_key.as_slice())
             .map(Into::into)
             .unwrap_or_else(|_| fallback_encryption_public_key()),
-        weight.into(),
+        weight,
     )
 }
 
