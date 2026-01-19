@@ -160,8 +160,8 @@ public(package) fun verify_certificate<T>(
     assert!(signature.epoch == self.epoch());
 
     // Use the signers_bitmap to construct the key and the weights.
-    let mut non_signer_aggregate_weight = 0;
-    let mut non_signer_public_keys: vector<Element<UncompressedG1>> = vector::empty();
+    let mut aggregate_weight = 0;
+    let mut signer_public_keys: vector<Element<UncompressedG1>> = vector::empty();
     let mut offset: u64 = 0;
     let n_members = self.n_members();
     let max_bitmap_len_bytes = n_members.divide_and_round_up(8);
@@ -170,56 +170,35 @@ public(package) fun verify_certificate<T>(
     // It may be shorter, in which case the excluded members are treated as non-signers.
     assert!(signature.signers_bitmap.length() <= max_bitmap_len_bytes, EInvalidBitmap);
 
-    // Iterate over the signers bitmap and check if each member is a signer.
-    max_bitmap_len_bytes.do!(|i| {
-        // Get the current byte or 0 if we've reached the end of the bitmap.
-        let byte = if (i < signature.signers_bitmap.length()) {
-            signature.signers_bitmap[i]
-        } else {
-            0
-        };
-
-        (8u8).do!(|i| {
-            let index = offset + (i as u64);
-            let bitmask = 1 << (7 - i);
-            let is_signer = (byte & bitmask) != 0;
+    // Iterate over the bitmap, adding up signing weight and collecting public keys
+    signature.signers_bitmap.do!(|byte| {
+        (8u8).do!(|bit_index| {
+            // The member index
+            let index = offset + (bit_index as u64);
+            let is_signer = (byte & (1 << (7 - bit_index))) != 0;
 
             // If the index is out of bounds, the bit must be 0 to ensure
-            // uniqueness of the signers_bitmap.
+            // a wellformed bitmap.
             if (index >= n_members) {
                 assert!(!is_signer, EInvalidBitmap);
                 return
             };
 
-            // There will be fewer non-signers than signers, so we handle
-            // non-signers here.
-            if (!is_signer) {
+            if (is_signer) {
                 let member = self.members[index];
-                non_signer_aggregate_weight = non_signer_aggregate_weight + member.weight;
-                non_signer_public_keys.push_back(member.public_key);
+                aggregate_weight = aggregate_weight + member.weight;
+                signer_public_keys.push_back(member.public_key);
             };
         });
         offset = offset + 8;
     });
 
-    //XXX we should tally up both signers and non-signers and based on which is
-    //shorter we can either build up an aggregate_key from the signers or
-    //substract the non-signers from the total_aggregated_key in order to
-    //optimize for gas costs.
-
-    // Compute the aggregate weight as the difference between the total weight
-    // and the total weight of the non-signers.
-    let aggregate_weight = self.total_weight - non_signer_aggregate_weight;
-
     // Check if the aggregate weight is enough to satisfy the required weight.
     assert!(aggregate_weight >= threshold, ENotEnoughStake);
 
-    // Compute the aggregate public key as the difference between the total
-    // aggregated key and the sum of the non-signer public keys.
-    let aggregate_key = bls12381::g1_sub(
-        &self.total_aggregated_key,
-        &bls12381::uncompressed_g1_to_g1(
-            &bls12381::uncompressed_g1_sum(&non_signer_public_keys),
+    let aggregate_key = bls12381::uncompressed_g1_to_g1(
+        &bls12381::uncompressed_g1_sum(
+            &signer_public_keys,
         ),
     );
 
