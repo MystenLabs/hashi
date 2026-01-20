@@ -179,7 +179,7 @@ pub async fn provisioner_init(
 async fn finalize_init(
     shares: &[Share],
     enclave: &Arc<Enclave>,
-    incoming_state: ProvisionerInitRequestState,
+    incoming_state: ProvisionerInitState,
 ) {
     info!("Threshold reached, combining shares.");
     let enclave_btc_keypair = combine_shares(shares).expect("Unable to combine shares");
@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let init_state = ProvisionerInitRequestState::mock_for_testing(None);
+        let init_state = ProvisionerInitState::mock_for_testing(None);
 
         // Simulate THRESHOLD KPs calling provisioner_init
         for (i, share) in shares.iter().enumerate().take(NUM_OF_SHARES) {
@@ -303,7 +303,7 @@ mod tests {
         // Create enclave without operator init
         let enclave = Enclave::create_with_random_keys();
 
-        let init_state = ProvisionerInitRequestState::mock_for_testing(None);
+        let init_state = ProvisionerInitState::mock_for_testing(None);
         let share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::ONE,
@@ -327,7 +327,7 @@ mod tests {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
 
         // First KP sends with state1
-        let state1 = ProvisionerInitRequestState::mock_for_testing(None);
+        let state1 = ProvisionerInitState::mock_for_testing(None);
         let request1 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[0],
             enclave.encryption_public_key(),
@@ -338,7 +338,7 @@ mod tests {
 
         // Second KP tries to send with different state (different pub key)
         let kp = create_btc_keypair(&[7u8; 32]);
-        let state2 = ProvisionerInitRequestState::mock_for_testing(Some(kp));
+        let state2 = ProvisionerInitState::mock_for_testing(Some(kp));
         assert_ne!(
             state1.hashi_btc_master_pubkey(),
             state2.hashi_btc_master_pubkey()
@@ -363,7 +363,7 @@ mod tests {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32), // Random value that won't match commitment
         };
-        let state = ProvisionerInitRequestState::mock_for_testing(None);
+        let state = ProvisionerInitState::mock_for_testing(None);
         let request = ProvisionerInitRequest::build_from_share_and_state(
             &bogus_share,
             enclave.encryption_public_key(),
@@ -379,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init_duplicate_share() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let state = ProvisionerInitRequestState::mock_for_testing(None);
+        let state = ProvisionerInitState::mock_for_testing(None);
 
         // Send first share
         let request1 = ProvisionerInitRequest::build_from_share_and_state(

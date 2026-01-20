@@ -13,7 +13,7 @@ use crate::HashiCommitteeMember;
 use crate::HashiSigned;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
-use crate::ProvisionerInitRequestState;
+use crate::ProvisionerInitState;
 use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
@@ -124,7 +124,7 @@ impl ProvisionerInitRequest {
                     aes_ciphertext: vec![0u8; 32],
                 },
             },
-            state: ProvisionerInitRequestState::mock_for_testing(None),
+            state: ProvisionerInitState::mock_for_testing(None),
         }
     }
 }
@@ -145,14 +145,14 @@ fn mock_committee_with_one_member() -> HashiCommittee {
     HashiCommittee::new(vec![mock_committee_member()], 0)
 }
 
-impl ProvisionerInitRequestState {
+impl ProvisionerInitState {
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let num_epochs_to_track = NonZeroU16::new(2).unwrap();
         let epoch_window = crate::epoch_store::EpochWindow::new(0, num_epochs_to_track);
         let max_withdrawable_per_epoch = Amount::from_sat(1000);
 
-        ProvisionerInitRequestState {
+        ProvisionerInitState {
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 0,
                 delayed_withdrawals_min_delay: Duration::from_secs(10),

@@ -1,11 +1,5 @@
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::response::Response;
-use axum::Json;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
-use tracing::error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GuardianError {
@@ -25,18 +19,3 @@ impl std::fmt::Display for GuardianError {
 }
 
 impl std::error::Error for GuardianError {}
-
-/// Implement IntoResponse for EnclaveError.
-impl IntoResponse for GuardianError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            GuardianError::InternalError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            GuardianError::InvalidInputs(e) => (StatusCode::BAD_REQUEST, e),
-        };
-        error!("Status: {}, Message: {}", status, error_message);
-        let body = Json(json!({
-            "error": error_message,
-        }));
-        (status, body).into_response()
-    }
-}

@@ -28,35 +28,15 @@ pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
 pub use hashi_types::committee::Committee as HashiCommittee;
 pub use hashi_types::committee::CommitteeMember as HashiCommitteeMember;
+use hashi_types::committee::CommitteeSignature;
 pub use hashi_types::committee::SignedMessage as HashiSigned;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::num::NonZeroU16;
 use std::time::Duration;
 use std::time::SystemTime;
-
-use hashi_types::committee::CommitteeSignature;
-use tracing::info;
-
-// ---------------------------------
-//     Serialization Abstraction
-// ---------------------------------
-
-/// Trait for types that can be converted to bytes for signing, hashing, or logging.
-pub trait ToBytes {
-    fn to_bytes(&self) -> Vec<u8>;
-}
-
-/// Blanket implementation for all types that implement Serialize.
-/// This allows existing BCS serialization to work through the new trait.
-impl<T: Serialize> ToBytes for T {
-    fn to_bytes(&self) -> Vec<u8> {
-        bcs::to_bytes(self).expect("serialization should not fail")
-    }
-}
 
 // ---------------------------------
 //          Intents
@@ -129,11 +109,11 @@ pub struct OperatorInitRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
     encrypted_share: EncryptedShare,
-    state: ProvisionerInitRequestState,
+    state: ProvisionerInitState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitRequestState {
+pub struct ProvisionerInitState {
     /// Hashi BLS keys used to sign cert's
     hashi_committees: CommitteeStore,
     /// Withdrawal config
@@ -149,13 +129,13 @@ pub struct GetGuardianInfoResponse {
     /// Attestation document serialized in Hex
     pub attestation: Attestation,
     /// Server version
-    /// TODO: Replace with hashi's ServerVersion to include crate SHA and version
+    /// TODO: Replace with hashi ServerVersion to include crate SHA and version
     pub server_version: String,
 }
 
 /// An "immediate withdrawal" request. `HashiSigned<T>.`
 /// Note: Deserialize is not implemented because UTXOs contain validated addresses.
-/// StandardWithdrawalRequestWire is the mock of this type with unverified addresses and Deserialize trait.
+/// StandardWithdrawalRequestWire mocks this type with unverified addresses and Deserialize trait.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StandardWithdrawalRequest {
     /// Unique withdrawal ID assigned by Hashi
@@ -239,12 +219,12 @@ pub struct WithdrawalConfig {
     pub delayed_withdrawals_timeout: Duration,
 }
 
-/// Rate limiter
+/// Rate limiter state: Amount withdrawn in the last N epochs.
+/// RateLimiterState and CommitteeStore have the same window & entries size. This is enforced in
+/// ProvisionerInitState::new() and Enclave::register_new_epoch().
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RateLimiter {
-    // State: (epoch_number, amount_withdrawn) for the last X epochs
     state: ConsecutiveEpochStore<Amount>,
-    // Maximum amount withdrawable per epoch
     max_withdrawable_per_epoch: Amount,
 }
 
@@ -253,6 +233,7 @@ pub struct WithdrawalState {
     limiter: RateLimiter,
 }
 
+/// A store for last N committees. Needs to be initialized with at least one committee.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitteeStore(ConsecutiveEpochStore<HashiCommittee>);
 
@@ -324,7 +305,7 @@ impl OperatorInitRequest {
     }
 }
 
-impl ProvisionerInitRequestState {
+impl ProvisionerInitState {
     pub fn new(
         hashi_committees: CommitteeStore,
         withdrawal_config: WithdrawalConfig,
@@ -333,6 +314,11 @@ impl ProvisionerInitRequestState {
     ) -> GuardianResult<Self> {
         if hashi_committees.epoch_window() != withdrawal_state.limiter.epoch_window() {
             return Err(InvalidInputs("epoch window mismatch".into()));
+        }
+        if hashi_committees.num_entries() != withdrawal_state.limiter.num_entries() {
+            return Err(InvalidInputs(
+                "mismatch between number of committees and limiter size".into(),
+            ));
         }
 
         Ok(Self {
@@ -368,12 +354,14 @@ impl ProvisionerInitRequestState {
     }
 
     pub fn digest(&self) -> [u8; 32] {
-        Blake2b::<U32>::digest(self.to_bytes()).into()
+        let bytes = bcs::to_bytes(&ProvisionerInitStateRepr::from(self))
+            .expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
     }
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitRequestState) -> Self {
+    pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitState) -> Self {
         Self {
             encrypted_share,
             state,
@@ -386,7 +374,7 @@ impl ProvisionerInitRequest {
     pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        state: ProvisionerInitRequestState,
+        state: ProvisionerInitState,
         rng: &mut R,
     ) -> Self {
         let state_hash = state.digest();
@@ -398,18 +386,17 @@ impl ProvisionerInitRequest {
         &self.encrypted_share
     }
 
-    pub fn state(&self) -> &ProvisionerInitRequestState {
+    pub fn state(&self) -> &ProvisionerInitState {
         &self.state
     }
 
-    pub fn into_state(self) -> ProvisionerInitRequestState {
+    pub fn into_state(self) -> ProvisionerInitState {
         self.state
     }
 }
 
 impl StandardWithdrawalRequest {
     pub fn new(wid: WithdrawalID, utxos: TxUTXOs) -> Self {
-        // TODO: Validate that UTXOs belong to the correct network
         Self { wid, utxos }
     }
 
@@ -425,12 +412,6 @@ impl StandardWithdrawalRequest {
 impl WithdrawalState {
     pub fn new(limiter: RateLimiter) -> Self {
         Self { limiter }
-    }
-
-    pub fn empty(max_withdrawable_per_epoch: Amount, num_epochs: NonZeroU16) -> Self {
-        Self {
-            limiter: RateLimiter::empty(max_withdrawable_per_epoch, num_epochs),
-        }
     }
 
     pub fn rate_limiter(&self) -> &RateLimiter {
@@ -451,44 +432,22 @@ impl WithdrawalState {
     pub fn revert_limiter(&mut self, epoch: u64, amount: Amount) -> GuardianResult<()> {
         self.limiter.revert(epoch, amount)
     }
-
-    pub fn is_initialized(&self) -> bool {
-        self.limiter.is_initialized()
-    }
 }
 
 impl RateLimiter {
     pub fn new(
         epoch_window: EpochWindow,
-        amounts: Vec<Amount>,
+        amounts_withdrawn_per_epoch: Vec<Amount>,
         max_withdrawable_per_epoch: Amount,
     ) -> GuardianResult<Self> {
-        Self::from_repr(
-            ConsecutiveEpochStoreRepr::<Amount> {
-                base_epoch: epoch_window.base_epoch,
-                entries: amounts,
-                capacity: epoch_window.num_epochs,
-            },
-            max_withdrawable_per_epoch,
-        )
-    }
-
-    pub fn from_repr(
-        wire_input: ConsecutiveEpochStoreRepr<Amount>,
-        max_withdrawable: Amount,
-    ) -> GuardianResult<Self> {
-        Ok(Self {
-            state: wire_input.try_into()?,
-            max_withdrawable_per_epoch: max_withdrawable,
-        })
-    }
-
-    /// Construct an empty limiter.
-    pub fn empty(max_withdrawable_per_epoch: Amount, num_epochs: NonZeroU16) -> Self {
-        Self {
-            state: ConsecutiveEpochStore::empty(num_epochs),
-            max_withdrawable_per_epoch,
+        // Note: instead of erring out, we could use zero as default
+        if amounts_withdrawn_per_epoch.is_empty() {
+            return Err(InvalidInputs("amounts empty".into()));
         }
+        Ok(Self {
+            state: ConsecutiveEpochStore::<Amount>::new(epoch_window, amounts_withdrawn_per_epoch)?,
+            max_withdrawable_per_epoch,
+        })
     }
 
     pub fn max_withdrawable_per_epoch(&self) -> Amount {
@@ -499,8 +458,8 @@ impl RateLimiter {
         self.state.epoch_window()
     }
 
-    pub fn is_initialized(&self) -> bool {
-        self.state.is_initialized()
+    pub fn num_entries(&self) -> usize {
+        self.state.num_entries()
     }
 
     /// Consume amount units from the given epoch's rate limit.
@@ -535,49 +494,39 @@ impl RateLimiter {
 
     /// Adds a new epoch (must be the next consecutive epoch). Old epochs are pruned automatically.
     pub fn add_epoch(&mut self, epoch: u64) -> GuardianResult<()> {
-        info!("Adding epoch {} to rate limiter.", epoch);
-        self.state.insert_or_start(epoch, Amount::from_sat(0))?;
-        info!("Epoch {} added to rate limiter.", epoch);
+        self.state.insert(epoch, Amount::from_sat(0))?;
         Ok(())
     }
 }
 
 impl CommitteeStore {
     pub fn new(epoch_window: EpochWindow, committees: Vec<HashiCommittee>) -> GuardianResult<Self> {
-        Self::from_repr(ConsecutiveEpochStoreRepr::<HashiCommittee> {
-            base_epoch: epoch_window.base_epoch,
-            entries: committees,
-            capacity: epoch_window.num_epochs,
-        })
-    }
+        // Err if input has no committees
+        if committees.is_empty() {
+            return Err(InvalidInputs("No committee set".into()));
+        }
 
-    pub fn from_repr(
-        wire_input: ConsecutiveEpochStoreRepr<HashiCommittee>,
-    ) -> GuardianResult<Self> {
-        let mut base_epoch = wire_input.base_epoch;
-        for committee in &wire_input.entries {
+        // Match window.epoch() against committee.epoch()
+        let mut base_epoch = epoch_window.first_epoch;
+        for committee in &committees {
             if committee.epoch() != base_epoch {
                 return Err(InvalidInputs("epoch doesn't match".into()));
             }
             base_epoch += 1;
         }
-        Ok(Self(wire_input.try_into()?))
+
+        Ok(Self(ConsecutiveEpochStore::<HashiCommittee>::new(
+            epoch_window,
+            committees,
+        )?))
     }
 
     pub fn num_entries(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn capacity(&self) -> NonZeroU16 {
-        self.0.capacity()
+        self.0.num_entries()
     }
 
     pub fn epoch_window(&self) -> EpochWindow {
         self.0.epoch_window()
-    }
-
-    pub fn insert(&mut self, epoch: u64, committee: HashiCommittee) -> GuardianResult<()> {
-        self.0.insert_or_start(epoch, committee)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (u64, &HashiCommittee)> {
@@ -616,9 +565,9 @@ pub struct SignedStandardWithdrawalRequestWire {
 #[derive(Serialize)]
 struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<hashi_types::move_types::Committee>);
 
-/// Mock of ProvisionerInitRequestState with Serialize. Used for computing digest of ProvisionerInitRequestState.
+/// Mock of ProvisionerInitState with Serialize. Used for computing the digest of ProvisionerInitState.
 #[derive(Serialize)]
-struct ProvisionerInitRequestStateRepr {
+struct ProvisionerInitStateRepr {
     pub hashi_committees: CommitteeStoreRepr,
     pub withdrawal_config: WithdrawalConfig,
     pub withdrawal_state: WithdrawalState,
@@ -685,16 +634,15 @@ impl From<CommitteeStore> for CommitteeStoreRepr {
     fn from(store: CommitteeStore) -> Self {
         CommitteeStoreRepr(
             ConsecutiveEpochStoreRepr::<hashi_types::move_types::Committee> {
-                base_epoch: store.0.raw_base_epoch(),
+                window: store.0.epoch_window(),
                 entries: store.0.iter().map(|(_, c)| c.into()).collect(),
-                capacity: store.0.capacity(),
             },
         )
     }
 }
 
-impl From<&ProvisionerInitRequestState> for ProvisionerInitRequestStateRepr {
-    fn from(state: &ProvisionerInitRequestState) -> Self {
+impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
+    fn from(state: &ProvisionerInitState) -> Self {
         let (a, b, c, d) = state.clone().into_parts();
 
         Self {
@@ -704,32 +652,4 @@ impl From<&ProvisionerInitRequestState> for ProvisionerInitRequestStateRepr {
             hashi_btc_master_pubkey: d,
         }
     }
-}
-
-impl ToBytes for ProvisionerInitRequestState {
-    fn to_bytes(&self) -> Vec<u8> {
-        bcs::to_bytes(&ProvisionerInitRequestStateRepr::from(self))
-            .expect("serialization should work")
-    }
-}
-
-// ---------------------------------
-//    Tracing utilities
-// ---------------------------------
-
-/// Initialize tracing subscriber with optional file/line number logging
-pub fn init_tracing_subscriber(with_file_line: bool) {
-    let mut builder = tracing_subscriber::FmtSubscriber::builder().with_env_filter(
-        tracing_subscriber::EnvFilter::builder()
-            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-            .from_env_lossy(),
-    );
-
-    if with_file_line {
-        builder = builder.with_file(true).with_line_number(true);
-    }
-
-    let subscriber = builder.finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("unable to initialize tracing subscriber");
 }

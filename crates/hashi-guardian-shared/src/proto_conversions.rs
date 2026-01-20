@@ -25,7 +25,7 @@ use crate::HashiCommitteeMember;
 use crate::HashiSigned;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
-use crate::ProvisionerInitRequestState;
+use crate::ProvisionerInitState;
 use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
@@ -174,7 +174,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
 
         Ok(ProvisionerInitRequest::new(
             encrypted_share,
-            ProvisionerInitRequestState::new(
+            ProvisionerInitState::new(
                 hashi_committees,
                 withdrawal_config,
                 withdrawal_state,
@@ -306,7 +306,7 @@ pub fn provisioner_init_request_to_pb(
     })
 }
 
-pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::ProvisionerInitState {
+pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
     // Shared window metadata.
     let window = s.hashi_committees.epoch_window();
     debug_assert_eq!(
@@ -418,7 +418,7 @@ fn pb_to_epoch_window(w: pb::EpochWindow) -> GuardianResult<EpochWindow> {
 
 fn epoch_window_to_pb(w: EpochWindow) -> pb::EpochWindow {
     pb::EpochWindow {
-        base_epoch: Some(w.base_epoch),
+        base_epoch: Some(w.first_epoch),
         num_epochs: Some(w.num_epochs.get() as u32),
     }
 }
@@ -843,13 +843,12 @@ mod tests {
     use super::*;
     use crate::AddressValidation;
     use crate::StandardWithdrawalRequest;
-    use crate::ToBytes;
     use bitcoin::Network;
 
     #[test]
     fn get_guardian_info_response_round_trip() {
         let resp = GetGuardianInfoResponse {
-            attestation: "abcd".to_bytes(),
+            attestation: "abcd".as_bytes().to_vec(),
             server_version: "v1".into(),
         };
         let pb = get_guardian_info_response_to_pb(resp.clone());

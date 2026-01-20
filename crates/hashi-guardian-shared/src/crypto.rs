@@ -3,7 +3,6 @@ use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use crate::GuardianSigned;
 use crate::SigningIntent;
-use crate::ToBytes;
 use ed25519_consensus::SigningKey;
 use ed25519_consensus::VerificationKey;
 use hpke::aead::AesGcm256;
@@ -274,11 +273,11 @@ pub fn decrypt_share(
 // ---------------------------------
 
 /// Methods for `Signed<T>` wrapper - signing and verification
-impl<T: ToBytes + SigningIntent> GuardianSigned<T> {
+impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
     pub fn new(data: T, signing_key: &SigningKey, timestamp: SystemTime) -> Self {
-        let tuple = (T::INTENT, &data.to_bytes(), timestamp);
+        let tuple = (T::INTENT, &data, timestamp);
         let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
         let signature = signing_key.sign(&signing_payload);
         Self {
@@ -291,7 +290,7 @@ impl<T: ToBytes + SigningIntent> GuardianSigned<T> {
     /// Verify signature and extract payload
     /// Checks intent byte to ensure signature is for the correct type
     pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
-        let tuple = (T::INTENT, &self.data.to_bytes(), self.timestamp);
+        let tuple = (T::INTENT, &self.data, self.timestamp);
         let msg_bytes = bcs::to_bytes(&tuple).expect("serialization should not fail");
         pub_key
             .verify(&self.signature, &msg_bytes)

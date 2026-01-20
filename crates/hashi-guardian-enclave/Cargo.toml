@@ -9,13 +9,10 @@ anyhow = "1.0"
 hashi-guardian-shared = { path = "../hashi-guardian-shared" }
 serde_bytes = "0.11.17"
 serde = { version = "1.0.228", features = ["derive"] }
-
-# Ser/Deser deps
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tonic = { version = "0.14"}
 hashi-types = { path = "../hashi-types" }
-
-# Logging dependencies
-tracing = "0.1.41"
 
 # AWS dependencies
 aws-config = "1.1.7"
@@ -25,7 +22,6 @@ aws-sdk-s3 = "1.12.0"
 rand = "0.8.5"
 bitcoin = "0.32.7"
 k256 = "0.13"
-ed25519-consensus = "2.1"
 nsm_api = { git = "https://github.com/aws/aws-nitro-enclaves-nsm-api.git/", rev = "8ec7eac72bbb2097f1058ee32c13e1ff232f13e8", package="aws-nitro-enclaves-nsm-api", optional = false }
 
 [dev-dependencies]
