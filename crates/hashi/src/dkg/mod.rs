@@ -1574,6 +1574,8 @@ impl DkgManager {
         certificates: &[CertificateV1],
         previous_threshold: u16,
     ) -> DkgResult<DkgOutput> {
+        // Each dealer only rotates their own shares from the previous epoch, so share indices
+        // are unique across dealers (no duplicates in `certified_share_indices`).
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
             let CertificateV1::Rotation(rotation_cert) = cert else {
