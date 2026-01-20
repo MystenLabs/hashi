@@ -169,10 +169,7 @@ impl EnclaveConfig {
     }
 
     /// Sign a BTC tx. Returns an Err if enclave btc keypair or hashi btc pk is not set.
-    pub fn btc_sign(
-        &self,
-        tx_utxos: &TxUTXOs,
-    ) -> GuardianResult<Vec<BitcoinSignature>> {
+    pub fn btc_sign(&self, tx_utxos: &TxUTXOs) -> GuardianResult<Vec<BitcoinSignature>> {
         let enclave_keypair = self
             .enclave_btc_keypair
             .get()

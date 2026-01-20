@@ -1,6 +1,6 @@
 use crate::Enclave;
 use bitcoin::Amount;
-use hashi_guardian_shared::{GuardianError, StandardWithdrawalRequestWire};
+use hashi_guardian_shared::GuardianError;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::GuardianResult;
@@ -9,6 +9,7 @@ use hashi_guardian_shared::HashiCommittee;
 use hashi_guardian_shared::HashiSigned;
 use hashi_guardian_shared::LogMessage;
 use hashi_guardian_shared::StandardWithdrawalRequest;
+use hashi_guardian_shared::StandardWithdrawalRequestWire;
 use hashi_guardian_shared::StandardWithdrawalResponse;
 use serde::Serialize;
 use std::sync::Arc;

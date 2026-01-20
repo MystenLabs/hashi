@@ -2,12 +2,12 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
-use crate::epoch_store::EpochWindow;
 use crate::bitcoin_utils::ExternalOutputUTXOWire;
 use crate::bitcoin_utils::InputUTXOWire;
 use crate::bitcoin_utils::InternalOutputUTXO;
 use crate::bitcoin_utils::OutputUTXOWire;
 use crate::bitcoin_utils::TxUTXOsWire;
+use crate::epoch_store::EpochWindow;
 use crate::BitcoinSignature;
 use crate::Ciphertext;
 use crate::CommitteeSignatureWire;
