@@ -104,7 +104,7 @@ impl Database {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         let value = bcs::to_bytes(message).unwrap();
         self.dealer_messages.insert(key, value)?;
-        self.cleanup_old_dealer_messages(epoch)
+        clean_up_old_epochs(&self.dealer_messages, epoch)
     }
 
     pub fn get_dealer_message(
@@ -128,17 +128,6 @@ impl Database {
         })?;
 
         Ok(Some(message))
-    }
-
-    /// Clear dealer messages older than `current_epoch - 1`.
-    fn cleanup_old_dealer_messages(&self, current_epoch: u64) -> Result<()> {
-        for epoch in 0..current_epoch.saturating_sub(1) {
-            let prefix = epoch.to_be_bytes();
-            for guard in self.dealer_messages.prefix(prefix) {
-                self.dealer_messages.remove(guard.key()?)?;
-            }
-        }
-        Ok(())
     }
 
     pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
@@ -174,7 +163,7 @@ impl Database {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         let value = bcs::to_bytes(messages).unwrap();
         self.rotation_messages.insert(key, value)?;
-        self.cleanup_old_rotation_messages(epoch)
+        clean_up_old_epochs(&self.rotation_messages, epoch)
     }
 
     pub fn get_rotation_messages(
@@ -223,17 +212,29 @@ impl Database {
         }
         Ok(results)
     }
+}
 
-    /// Clear rotation messages older than `current_epoch - 1`.
-    fn cleanup_old_rotation_messages(&self, current_epoch: u64) -> Result<()> {
-        for epoch in 0..current_epoch.saturating_sub(1) {
-            let prefix = epoch.to_be_bytes();
-            for guard in self.rotation_messages.prefix(prefix) {
-                self.rotation_messages.remove(guard.key()?)?;
+/// Delete entries from keyspace where key starts with epoch (big-endian u64) < cutoff.
+/// Cutoff is `current_epoch - 1`, keeping current and previous epoch.
+fn clean_up_old_epochs(keyspace: &Keyspace, current_epoch: u64) -> Result<()> {
+    let cutoff = current_epoch.saturating_sub(1);
+    let keys_to_delete: Vec<_> = keyspace
+        .iter()
+        .filter_map(|guard| {
+            let key = guard.key().ok()?;
+            let epoch_bytes: [u8; 8] = key.as_ref().get(..8)?.try_into().ok()?;
+            let epoch = u64::from_be_bytes(epoch_bytes);
+            if epoch < cutoff {
+                Some(key.to_vec())
+            } else {
+                None
             }
-        }
-        Ok(())
+        })
+        .collect();
+    for key in keys_to_delete {
+        keyspace.remove(key)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
