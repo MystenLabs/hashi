@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
 use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use crate::proto_conversions::provisioner_init_state_to_pb;
 use prost::Message;
@@ -66,6 +67,19 @@ pub trait SigningIntent {
 }
 
 // ---------------------------------
+//          Time
+// ---------------------------------
+
+/// Milliseconds since Unix epoch.
+/// Panics if the system clock is before `UNIX_EPOCH`.
+pub fn now_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system_time cannot be before Unix epoch")
+        .as_millis() as u64
+}
+
+// ---------------------------------
 //          Envelopes
 // ---------------------------------
 
@@ -73,14 +87,17 @@ pub trait SigningIntent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Timestamped<T> {
     pub data: T,
-    pub timestamp: SystemTime,
+    /// Milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
 }
 
 /// Guardian-signed wrapper - adds timestamp and signature to any data
+/// TODO: Impl custom ser/deser for GuardianSignature as signatures are displayed as long bytes in S3 logs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GuardianSigned<T> {
     pub data: T,
-    pub timestamp: SystemTime,
+    /// Milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
     pub signature: GuardianSignature,
 }
 
@@ -260,6 +277,10 @@ impl OperatorInitRequest {
 
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    pub fn into_parts(self) -> (S3Config, Vec<ShareCommitment>, Network) {
+        (self.s3_config, self.share_commitments, self.network)
     }
 }
 

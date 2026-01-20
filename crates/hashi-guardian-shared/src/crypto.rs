@@ -24,7 +24,6 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::num::NonZeroU16;
-use std::time::SystemTime;
 use tracing::info;
 // ---------------------------------
 //      Crypto Structs & Types
@@ -277,13 +276,13 @@ pub fn decrypt_share(
 impl<T: ToBytes + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
-    pub fn new(data: T, signing_key: &SigningKey, timestamp: SystemTime) -> Self {
-        let tuple = (T::INTENT, &data.to_bytes(), timestamp);
+    pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: u64) -> Self {
+        let tuple = (T::INTENT, &data.to_bytes(), timestamp_ms);
         let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
         let signature = signing_key.sign(&signing_payload);
         Self {
             data,
-            timestamp,
+            timestamp_ms,
             signature,
         }
     }
@@ -291,7 +290,7 @@ impl<T: ToBytes + SigningIntent> GuardianSigned<T> {
     /// Verify signature and extract payload
     /// Checks intent byte to ensure signature is for the correct type
     pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
-        let tuple = (T::INTENT, &self.data.to_bytes(), self.timestamp);
+        let tuple = (T::INTENT, &self.data.to_bytes(), self.timestamp_ms);
         let msg_bytes = bcs::to_bytes(&tuple).expect("serialization should not fail");
         pub_key
             .verify(&self.signature, &msg_bytes)

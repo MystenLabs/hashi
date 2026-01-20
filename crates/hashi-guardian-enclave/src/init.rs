@@ -28,30 +28,29 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
-    let logger = S3Logger::new(request.s3_config())
-        .await
-        .expect("Unable to create logger");
+    let (config, commitments, network) = request.into_parts();
+    let s3_session_id = enclave.s3_session_id();
+    let logger = S3Logger::new(s3_session_id, config).await;
+    logger.test_s3_connectivity().await?;
+    info!("S3 connectivity check complete.");
 
     info!("Storing S3 configuration.");
     enclave.set_s3_logger(logger).expect("Unable to set logger");
 
-    info!("Setting bitcoin network to {:?}.", request.network());
+    info!("Setting bitcoin network to {:?}.", network);
     enclave
-        .set_bitcoin_network(request.network())
+        .set_bitcoin_network(network)
         .expect("Unable to set network");
 
-    info!(
-        "Storing {} share commitments.",
-        request.share_commitments().len()
-    );
-    for (i, share_commitment) in request.share_commitments().iter().enumerate() {
+    info!("Storing {} share commitments.", commitments.len());
+    for (i, share_commitment) in commitments.iter().enumerate() {
         info!(
             "Share {}: ID {} Digest {:x?}.",
             i, share_commitment.id, share_commitment.digest
         );
     }
     enclave
-        .set_share_commitments(request.share_commitments().to_vec())
+        .set_share_commitments(commitments.clone())
         .expect("Unable to set share commitments");
 
     // Log to S3!
@@ -67,9 +66,7 @@ pub async fn operator_init(
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
-        .sign_and_log(LogMessage::OperatorInitShareCommitments(
-            request.share_commitments().to_vec(),
-        ))
+        .sign_and_log(LogMessage::OperatorInitShareCommitments(commitments))
         .await
         .expect("Unable to log OperatorInitShareCommitments");
 

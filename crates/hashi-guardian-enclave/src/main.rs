@@ -1,4 +1,6 @@
 use anyhow::Result;
+use bitcoin::hex::Case;
+use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Network;
 use bitcoin::XOnlyPublicKey;
@@ -12,7 +14,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
-use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 use tonic::transport::Server;
@@ -204,8 +205,8 @@ impl Enclave {
 
     pub fn sign<T: ToBytes + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
         let kp = self.signing_keypair();
-        let timestamp = SystemTime::now();
-        GuardianSigned::new(data, kp, timestamp)
+        let timestamp_ms = now_timestamp_ms();
+        GuardianSigned::new(data, kp, timestamp_ms)
     }
 
     // ========================================================================
@@ -303,21 +304,25 @@ impl Enclave {
             .map_err(|_| InvalidInputs("S3 logger already set".into()))
     }
 
+    /// A unique session ID for the current enclave session.
+    /// Logs are organized as follows: SessionId/xyz.json
+    pub fn s3_session_id(&self) -> String {
+        self.signing_pubkey().as_bytes().to_hex_string(Case::Lower)
+    }
+
     /// Sign and log a LogMessage to S3.
     /// Only LogMessage variants can be logged to enforce consistency.
     pub async fn sign_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let signed = self.sign(data);
-        self.s3_logger()?.log(signed).await
+        self.s3_logger()?.write(&signed).await
     }
 
     /// Log unsigned data to S3 with timestamp.
     /// Only LogMessage variants can be logged to enforce consistency.
     pub async fn timestamp_and_log(&self, data: LogMessage) -> GuardianResult<()> {
-        let timestamped = Timestamped {
-            data,
-            timestamp: SystemTime::now(),
-        };
-        self.s3_logger()?.log(timestamped).await
+        let timestamp_ms = now_timestamp_ms();
+        let timestamped = Timestamped { data, timestamp_ms };
+        self.s3_logger()?.write(&timestamped).await
     }
 
     /// Does a prior LogMessage::ImmediateWithdrawal log with the provided counter value exist?

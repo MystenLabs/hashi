@@ -8,6 +8,7 @@ use tracing::error;
 #[derive(Debug, PartialEq)]
 pub enum GuardianError {
     InternalError(String),
+    S3Error(String), // a type of internal errors related to S3 errors
     InvalidInputs(String),
 }
 
@@ -18,6 +19,7 @@ impl std::fmt::Display for GuardianError {
         match self {
             GuardianError::InternalError(e) => write!(f, "InternalError: {}", e),
             GuardianError::InvalidInputs(e) => write!(f, "InvalidInputs: {}", e),
+            GuardianError::S3Error(e) => write!(f, "S3Error: {}", e),
         }
     }
 }
@@ -30,6 +32,7 @@ impl IntoResponse for GuardianError {
         let (status, error_message) = match self {
             GuardianError::InternalError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             GuardianError::InvalidInputs(e) => (StatusCode::BAD_REQUEST, e),
+            GuardianError::S3Error(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
         };
         error!("Status: {}, Message: {}", status, error_message);
         let body = Json(json!({

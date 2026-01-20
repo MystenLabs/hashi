@@ -32,8 +32,6 @@ use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::bcs::ToBcs;
 use sui_sdk_types::Address as SuiAddress;
@@ -83,16 +81,12 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
-        let timestamp = UNIX_EPOCH
-            .checked_add(Duration::from_millis(timestamp_ms))
-            .ok_or_else(|| InvalidInputs("invalid timestamp".to_string()))?;
-
         Ok(GuardianSigned {
             data: SetupNewKeyResponse {
                 encrypted_shares,
                 share_commitments,
             },
-            timestamp,
+            timestamp_ms,
             signature,
         })
     }
@@ -188,7 +182,7 @@ pub fn setup_new_key_response_signed_to_pb(
 
     pb::SignedSetupNewKeyResponse {
         data: Some(setup_new_key_response_to_pb(s.data)),
-        timestamp_ms: Some(system_time_to_ms(s.timestamp)),
+        timestamp_ms: Some(s.timestamp_ms),
         signature: Some(signature.into()),
     }
 }
@@ -264,13 +258,6 @@ fn pb_share_commitments_to_domain(
             })
         })
         .collect::<GuardianResult<Vec<_>>>()
-}
-
-fn system_time_to_ms(time: SystemTime) -> u64 {
-    // For signing, timestamps older than UNIX_EPOCH should not be possible.
-    time.duration_since(UNIX_EPOCH)
-        .expect("system_time cannot be before Unix epoch")
-        .as_millis() as u64
 }
 
 fn pb_to_share_id(id_pb_opt: Option<pb::GuardianShareId>) -> GuardianResult<ShareID> {

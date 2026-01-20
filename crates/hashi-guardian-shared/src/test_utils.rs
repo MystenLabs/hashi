@@ -25,7 +25,6 @@ use hashi_types::committee::EncryptionPublicKey;
 use hpke::Deserializable;
 use std::num::NonZeroU16;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::Address as SuiAddress;
 
@@ -66,7 +65,7 @@ impl GuardianSigned<SetupNewKeyResponse> {
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, UNIX_EPOCH)
+        GuardianSigned::new(resp, &signing_kp, 0)
     }
 }
 
