@@ -1,6 +1,7 @@
 use crate::GuardianError;
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::num::NonZeroU16;
 // TODO: Add tests
@@ -25,13 +26,14 @@ impl EpochWindow {
 }
 
 /// A store of last X epoch's entries for some type T, e.g., committee, amount_withdrawn
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ConsecutiveEpochStore<V> {
     base_epoch: u64,
     entries: VecDeque<V>,
     capacity: NonZeroU16,
 }
 
+#[derive(Serialize)]
 pub struct ConsecutiveEpochStoreRepr<V> {
     pub base_epoch: u64,
     pub entries: Vec<V>,
@@ -94,6 +96,10 @@ impl<V> ConsecutiveEpochStore<V> {
         self.base_epoch = base_epoch;
         self.entries.push_back(value);
         Ok(())
+    }
+
+    pub fn raw_base_epoch(&self) -> u64 {
+        self.base_epoch
     }
 
     pub fn base_epoch(&self) -> Option<u64> {

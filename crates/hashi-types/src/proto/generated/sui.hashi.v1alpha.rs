@@ -617,6 +617,44 @@ pub struct WithdrawalState {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}
+/// Hashi-signed wrapper for the withdrawal request.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignedStandardWithdrawalRequest {
+    #[prost(message, optional, tag = "1")]
+    pub data: ::core::option::Option<StandardWithdrawalRequestData>,
+    /// Committee signature over the request.
+    #[prost(message, optional, tag = "2")]
+    pub committee_signature: ::core::option::Option<CommitteeSignature>,
+}
+/// Withdrawal request payload.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StandardWithdrawalRequestData {
+    /// Unique withdrawal ID assigned by Hashi.
+    #[prost(uint64, optional, tag = "1")]
+    pub wid: ::core::option::Option<u64>,
+    /// Transaction UTXOs (inputs and outputs).
+    #[prost(message, optional, tag = "2")]
+    pub utxos: ::core::option::Option<TxUtxos>,
+}
+/// Guardian-signed response.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignedStandardWithdrawalResponse {
+    #[prost(message, optional, tag = "1")]
+    pub data: ::core::option::Option<StandardWithdrawalResponseData>,
+    /// Milliseconds since Unix epoch.
+    #[prost(uint64, optional, tag = "2")]
+    pub timestamp_ms: ::core::option::Option<u64>,
+    /// Guardian signature over (intent || data || timestamp).
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Unsigned response payload.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StandardWithdrawalResponseData {
+    /// Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
+    #[prost(bytes = "bytes", repeated, tag = "1")]
+    pub enclave_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum Network {
@@ -851,6 +889,36 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Standard withdrawal: request immediate withdrawal signature.
+        pub async fn standard_withdrawal(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignedStandardWithdrawalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedStandardWithdrawalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "StandardWithdrawal",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -896,6 +964,14 @@ pub mod guardian_service_server {
             request: tonic::Request<super::ProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
+            tonic::Status,
+        >;
+        /// Standard withdrawal: request immediate withdrawal signature.
+        async fn standard_withdrawal(
+            &self,
+            request: tonic::Request<super::SignedStandardWithdrawalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedStandardWithdrawalResponse>,
             tonic::Status,
         >;
     }
@@ -1142,6 +1218,54 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ProvisionerInitSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal" => {
+                    #[allow(non_camel_case_types)]
+                    struct StandardWithdrawalSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::SignedStandardWithdrawalRequest>
+                    for StandardWithdrawalSvc<T> {
+                        type Response = super::SignedStandardWithdrawalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignedStandardWithdrawalRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::standard_withdrawal(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = StandardWithdrawalSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1905,4 +2029,64 @@ pub struct Utxo {
     pub amount: ::core::option::Option<u64>,
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub derivation_path: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// All UTXOs associated with a withdrawal transaction.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TxUtxos {
+    #[prost(message, repeated, tag = "1")]
+    pub inputs: ::prost::alloc::vec::Vec<InputUtxo>,
+    #[prost(message, repeated, tag = "2")]
+    pub outputs: ::prost::alloc::vec::Vec<OutputUtxo>,
+}
+/// (Hashi+Guardian)-owned input UTXO.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InputUtxo {
+    /// Transaction outpoint.
+    #[prost(message, optional, tag = "1")]
+    pub outpoint: ::core::option::Option<UtxoId>,
+    /// Amount in satoshis.
+    #[prost(uint64, optional, tag = "2")]
+    pub amount: ::core::option::Option<u64>,
+    /// Bitcoin address.
+    #[prost(string, optional, tag = "3")]
+    pub address: ::core::option::Option<::prost::alloc::string::String>,
+    /// Taproot leaf hash (32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub leaf_hash: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Output UTXO (either external or internal).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OutputUtxo {
+    #[prost(oneof = "output_utxo::Output", tags = "1, 2")]
+    pub output: ::core::option::Option<output_utxo::Output>,
+}
+/// Nested message and enum types in `OutputUTXO`.
+pub mod output_utxo {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Output {
+        #[prost(message, tag = "1")]
+        External(super::ExternalOutputUtxo),
+        #[prost(message, tag = "2")]
+        Internal(super::InternalOutputUtxo),
+    }
+}
+/// External output to a user-provided Bitcoin address.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExternalOutputUtxo {
+    /// Bitcoin address to withdraw to.
+    #[prost(string, optional, tag = "1")]
+    pub address: ::core::option::Option<::prost::alloc::string::String>,
+    /// Amount in satoshis.
+    #[prost(uint64, optional, tag = "2")]
+    pub amount: ::core::option::Option<u64>,
+}
+/// Internal output with derivation path (e.g., change address).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InternalOutputUtxo {
+    /// Derivation path (Sui address format, 32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub derivation_path: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Amount in satoshis.
+    #[prost(uint64, optional, tag = "2")]
+    pub amount: ::core::option::Option<u64>,
 }

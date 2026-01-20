@@ -5,10 +5,18 @@ pub mod errors;
 pub mod proto_conversions;
 pub mod test_utils;
 
+use crate::bitcoin_utils::InputUTXO;
+use crate::bitcoin_utils::OutputUTXO;
+use crate::bitcoin_utils::TxUTXOs;
+use crate::bitcoin_utils::TxUTXOsWire;
+use crate::epoch_store::ConsecutiveEpochStore;
+use crate::epoch_store::ConsecutiveEpochStoreRepr;
+use crate::epoch_store::EpochWindow;
 use crate::GuardianError::*;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
+pub use bitcoin::Address as BitcoinAddress;
 use bitcoin::*;
 use blake2::digest::consts::U32;
 use blake2::Blake2b;
@@ -30,14 +38,9 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::bitcoin_utils::TxUTXOs;
-use crate::epoch_store::ConsecutiveEpochStore;
-use crate::epoch_store::ConsecutiveEpochStoreRepr;
-use crate::epoch_store::EpochWindow;
-use crate::proto_conversions::provisioner_init_state_to_pb;
 use hashi_types::committee::CommitteeSignature;
-use prost::Message;
 use tracing::info;
+
 // ---------------------------------
 //     Serialization Abstraction
 // ---------------------------------
@@ -68,8 +71,8 @@ pub enum IntentType {
     LogMessage = 0,
     /// Intent for SetupNewKeyResponse
     SetupNewKeyResponse = 1,
-    /// Intent for NormalWithdrawalResponse
-    NormalWithdrawalResponse = 2,
+    /// Intent for StandardWithdrawalResponse
+    StandardWithdrawalResponse = 2,
 }
 
 /// Trait for types that can be signed, providing domain separation via an intent.
@@ -151,9 +154,10 @@ pub struct GetGuardianInfoResponse {
 }
 
 /// An "immediate withdrawal" request. `HashiSigned<T>.`
-/// Note that epoch number is present in the wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NormalWithdrawalRequest {
+/// Note: Deserialize is not implemented because UTXOs contain validated addresses.
+/// StandardWithdrawalRequestWire is the mock of this type with unverified addresses and Deserialize trait.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StandardWithdrawalRequest {
     /// Unique withdrawal ID assigned by Hashi
     wid: WithdrawalID,
     /// BTC transaction input and output utxos
@@ -161,9 +165,8 @@ pub struct NormalWithdrawalRequest {
 }
 
 /// `EnclaveSigned<T>`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NormalWithdrawalResponse {
-    /// Enclave's BTC signatures
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StandardWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
 
@@ -196,14 +199,14 @@ pub enum LogMessage {
     EnclaveFullyInitialized,
     /// Immediate withdraw success
     NormalWithdrawalSuccess {
-        request_data: NormalWithdrawalRequest,
+        request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
-        response: NormalWithdrawalResponse,
+        response: StandardWithdrawalResponse,
     },
     /// Immediate withdraw failure
     /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
     NormalWithdrawalFailure {
-        request_data: NormalWithdrawalRequest,
+        request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         error: GuardianError,
     },
@@ -226,7 +229,7 @@ pub struct S3Config {
     pub bucket_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
     pub committee_threshold: u64,
@@ -237,7 +240,7 @@ pub struct WithdrawalConfig {
 }
 
 /// Rate limiter
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RateLimiter {
     // State: (epoch_number, amount_withdrawn) for the last X epochs
     state: ConsecutiveEpochStore<Amount>,
@@ -245,7 +248,7 @@ pub struct RateLimiter {
     max_withdrawable_per_epoch: Amount,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WithdrawalState {
     limiter: RateLimiter,
 }
@@ -265,8 +268,8 @@ impl SigningIntent for SetupNewKeyResponse {
     const INTENT: IntentType = IntentType::SetupNewKeyResponse;
 }
 
-impl SigningIntent for NormalWithdrawalResponse {
-    const INTENT: IntentType = IntentType::NormalWithdrawalResponse;
+impl SigningIntent for StandardWithdrawalResponse {
+    const INTENT: IntentType = IntentType::StandardWithdrawalResponse;
 }
 
 impl SetupNewKeyRequest {
@@ -318,13 +321,6 @@ impl OperatorInitRequest {
 
     pub fn network(&self) -> Network {
         self.network
-    }
-}
-
-// TODO: Implement custom serializer since proto buf serializer is not deterministic
-impl ToBytes for ProvisionerInitRequestState {
-    fn to_bytes(&self) -> Vec<u8> {
-        provisioner_init_state_to_pb(self.clone()).encode_to_vec()
     }
 }
 
@@ -411,7 +407,7 @@ impl ProvisionerInitRequest {
     }
 }
 
-impl NormalWithdrawalRequest {
+impl StandardWithdrawalRequest {
     pub fn new(wid: WithdrawalID, utxos: TxUTXOs) -> Self {
         // TODO: Validate that UTXOs belong to the correct network
         Self { wid, utxos }
@@ -590,6 +586,128 @@ impl CommitteeStore {
 
     pub fn into_owned_iter(self) -> impl Iterator<Item = (u64, HashiCommittee)> {
         self.0.into_owned_iter()
+    }
+}
+
+// ---------------------------------
+//    Serialize / Deserialize
+// ---------------------------------
+
+/// StandardWithdrawalRequest with unchecked addresses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandardWithdrawalRequestWire {
+    pub wid: WithdrawalID,
+    pub utxos: TxUTXOsWire,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitteeSignatureWire {
+    pub epoch: u64,
+    pub signature: Vec<u8>,
+    pub bitmap: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignedStandardWithdrawalRequestWire {
+    pub data: StandardWithdrawalRequestWire,
+    pub signature: CommitteeSignatureWire,
+}
+
+pub trait AddressValidation<T>: Sized {
+    fn validate_addr(value: T, network: Network) -> GuardianResult<Self>;
+}
+
+impl AddressValidation<SignedStandardWithdrawalRequestWire>
+    for HashiSigned<StandardWithdrawalRequest>
+{
+    fn validate_addr(
+        wire_value: SignedStandardWithdrawalRequestWire,
+        network: Network,
+    ) -> GuardianResult<Self> {
+        HashiSigned::<StandardWithdrawalRequest>::new(
+            wire_value.signature.epoch,
+            StandardWithdrawalRequest::validate_addr(wire_value.data, network)?,
+            &wire_value.signature.signature,
+            &wire_value.signature.bitmap,
+        )
+        .map_err(|e| InvalidInputs(format!("{:?}", e)))
+    }
+}
+
+impl AddressValidation<StandardWithdrawalRequestWire> for StandardWithdrawalRequest {
+    fn validate_addr(
+        value: StandardWithdrawalRequestWire,
+        network: Network,
+    ) -> GuardianResult<Self> {
+        let utxos = value.utxos;
+        let inputs = utxos
+            .inputs
+            .into_iter()
+            .map(|utxo| InputUTXO::from_wire(utxo, network))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let outputs = utxos
+            .outputs
+            .into_iter()
+            .map(|utxo| OutputUTXO::from_wire(utxo, network))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            wid: value.wid,
+            utxos: TxUTXOs::new(inputs, outputs)?,
+        })
+    }
+}
+
+impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
+    fn from(m: StandardWithdrawalRequest) -> Self {
+        Self {
+            wid: m.wid,
+            utxos: m.utxos.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<hashi_types::move_types::Committee>);
+
+impl From<CommitteeStore> for CommitteeStoreRepr {
+    fn from(store: CommitteeStore) -> Self {
+        CommitteeStoreRepr(
+            ConsecutiveEpochStoreRepr::<hashi_types::move_types::Committee> {
+                base_epoch: store.0.raw_base_epoch(),
+                entries: store.0.iter().map(|(_, c)| c.into()).collect(),
+                capacity: store.0.capacity(),
+            },
+        )
+    }
+}
+
+#[derive(Serialize)]
+struct ProvisionerInitRequestStateRepr {
+    pub hashi_committees: CommitteeStoreRepr,
+    pub withdrawal_config: WithdrawalConfig,
+    pub withdrawal_state: WithdrawalState,
+    pub hashi_btc_master_pubkey: BitcoinPubkey,
+}
+
+impl From<&ProvisionerInitRequestState> for ProvisionerInitRequestStateRepr {
+    fn from(state: &ProvisionerInitRequestState) -> Self {
+        let (a, b, c, d) = state.clone().into_parts();
+
+        Self {
+            hashi_committees: CommitteeStoreRepr::from(a),
+            withdrawal_config: b,
+            withdrawal_state: c,
+            hashi_btc_master_pubkey: d,
+        }
+    }
+}
+
+impl ToBytes for ProvisionerInitRequestState {
+    fn to_bytes(&self) -> Vec<u8> {
+        bcs::to_bytes(&ProvisionerInitRequestStateRepr::from(self))
+            .expect("serialization should work")
     }
 }
 

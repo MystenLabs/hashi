@@ -172,7 +172,6 @@ impl EnclaveConfig {
     pub fn btc_sign(
         &self,
         tx_utxos: &TxUTXOs,
-        network: Network,
     ) -> GuardianResult<Vec<BitcoinSignature>> {
         let enclave_keypair = self
             .enclave_btc_keypair
@@ -187,7 +186,6 @@ impl EnclaveConfig {
             tx_utxos,
             &enclave_keypair.x_only_public_key().0,
             hashi_btc_pk,
-            network,
         );
         Ok(sign_btc_tx(&messages, enclave_keypair))
     }

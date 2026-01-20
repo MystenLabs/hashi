@@ -1,6 +1,6 @@
 use crate::Enclave;
 use bitcoin::Amount;
-use hashi_guardian_shared::GuardianError;
+use hashi_guardian_shared::{GuardianError, StandardWithdrawalRequestWire};
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::GuardianResult;
@@ -8,23 +8,22 @@ use hashi_guardian_shared::GuardianSigned;
 use hashi_guardian_shared::HashiCommittee;
 use hashi_guardian_shared::HashiSigned;
 use hashi_guardian_shared::LogMessage;
-use hashi_guardian_shared::NormalWithdrawalRequest;
-use hashi_guardian_shared::NormalWithdrawalResponse;
+use hashi_guardian_shared::StandardWithdrawalRequest;
+use hashi_guardian_shared::StandardWithdrawalResponse;
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::error;
 use tracing::info;
 
-#[allow(dead_code)]
-pub async fn normal_withdrawal(
+pub async fn standard_withdrawal(
     enclave: Arc<Enclave>,
-    signed_request: HashiSigned<NormalWithdrawalRequest>,
-) -> GuardianResult<GuardianSigned<NormalWithdrawalResponse>> {
-    info!("/normal_withdrawal - Received request.");
+    signed_request: HashiSigned<StandardWithdrawalRequest>,
+) -> GuardianResult<GuardianSigned<StandardWithdrawalResponse>> {
+    info!("/standard_withdrawal - Received request.");
 
-    let unsigned_request = signed_request.message().clone(); // for logging
+    let unsigned_request = StandardWithdrawalRequestWire::from(signed_request.message().clone()); // for logging
     let request_signature = signed_request.committee_signature().clone(); // for logging
-    let wid = *unsigned_request.wid();
+    let wid = unsigned_request.wid;
 
     match normal_withdrawal_inner(enclave.clone(), signed_request) {
         Ok((response, limiter_guard)) => {
@@ -60,8 +59,8 @@ struct LimiterGuard {
 
 fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
-    signed_request: HashiSigned<NormalWithdrawalRequest>,
-) -> GuardianResult<(NormalWithdrawalResponse, LimiterGuard)> {
+    signed_request: HashiSigned<StandardWithdrawalRequest>,
+) -> GuardianResult<(StandardWithdrawalResponse, LimiterGuard)> {
     // 0) Validation
     if !enclave.is_fully_initialized() {
         return Err(InvalidInputs("Enclave is not fully initialized".into()));
@@ -88,15 +87,11 @@ fn normal_withdrawal_inner(
 
     // 2) Sign tx
     info!("Generating BTC signatures.");
-    let network = enclave
-        .config
-        .bitcoin_network()
-        .expect("BTC network should be set");
     let signatures = enclave
         .config
-        .btc_sign(request.utxos(), network)
+        .btc_sign(request.utxos())
         .expect("All BTC keys should be set");
-    let response = NormalWithdrawalResponse {
+    let response = StandardWithdrawalResponse {
         enclave_signatures: signatures,
     };
     info!("BTC signatures generated.");
@@ -139,7 +134,6 @@ impl Drop for LimiterGuard {
     }
 }
 
-#[allow(dead_code)]
 pub fn verify_hashi_cert<T: Serialize>(
     committee: Arc<HashiCommittee>,
     threshold: u64,

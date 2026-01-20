@@ -3,6 +3,7 @@ syntax = "proto3";
 package sui.hashi.v1alpha;
 
 import "sui/hashi/v1alpha/signature.proto";
+import "sui/hashi/v1alpha/utxo.proto";
 
 service GuardianService {
   // Query the service for general information about its current state.
@@ -16,6 +17,9 @@ service GuardianService {
 
   // Provisioner initialization: submit encrypted share and readiness info.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
+
+  // Standard withdrawal: request immediate withdrawal signature.
+  rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
 }
 
 message GetGuardianInfoRequest {}
@@ -176,3 +180,41 @@ message WithdrawalState {
 }
 
 message ProvisionerInitResponse {}
+
+// ============================
+//    StandardWithdrawal
+// ============================
+
+// Hashi-signed wrapper for the withdrawal request.
+message SignedStandardWithdrawalRequest {
+  StandardWithdrawalRequestData data = 1;
+
+  // Committee signature over the request.
+  CommitteeSignature committee_signature = 2;
+}
+
+// Withdrawal request payload.
+message StandardWithdrawalRequestData {
+  // Unique withdrawal ID assigned by Hashi.
+  optional uint64 wid = 1;
+
+  // Transaction UTXOs (inputs and outputs).
+  TxUtxos utxos = 2;
+}
+
+// Guardian-signed response.
+message SignedStandardWithdrawalResponse {
+  StandardWithdrawalResponseData data = 1;
+
+  // Milliseconds since Unix epoch.
+  optional uint64 timestamp_ms = 2;
+
+  // Guardian signature over (intent || data || timestamp).
+  optional bytes signature = 3;
+}
+
+// Unsigned response payload.
+message StandardWithdrawalResponseData {
+  // Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
+  repeated bytes enclave_signatures = 1;
+}
