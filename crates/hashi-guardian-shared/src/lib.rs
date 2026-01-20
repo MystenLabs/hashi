@@ -593,7 +593,7 @@ impl CommitteeStore {
 //    Serialize / Deserialize
 // ---------------------------------
 
-/// StandardWithdrawalRequest with unchecked addresses
+/// Mock of StandardWithdrawalRequest with unchecked addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StandardWithdrawalRequestWire {
     pub wid: WithdrawalID,
@@ -613,6 +613,19 @@ pub struct SignedStandardWithdrawalRequestWire {
     pub signature: CommitteeSignatureWire,
 }
 
+#[derive(Serialize)]
+struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<hashi_types::move_types::Committee>);
+
+/// Mock of ProvisionerInitRequestState with Serialize. Used for computing digest of ProvisionerInitRequestState.
+#[derive(Serialize)]
+struct ProvisionerInitRequestStateRepr {
+    pub hashi_committees: CommitteeStoreRepr,
+    pub withdrawal_config: WithdrawalConfig,
+    pub withdrawal_state: WithdrawalState,
+    pub hashi_btc_master_pubkey: BitcoinPubkey,
+}
+
+/// Converter from T -> Self that internally validates addresses
 pub trait AddressValidation<T>: Sized {
     fn validate_addr(value: T, network: Network) -> GuardianResult<Self>;
 }
@@ -668,9 +681,6 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
     }
 }
 
-#[derive(Serialize)]
-struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<hashi_types::move_types::Committee>);
-
 impl From<CommitteeStore> for CommitteeStoreRepr {
     fn from(store: CommitteeStore) -> Self {
         CommitteeStoreRepr(
@@ -681,14 +691,6 @@ impl From<CommitteeStore> for CommitteeStoreRepr {
             },
         )
     }
-}
-
-#[derive(Serialize)]
-struct ProvisionerInitRequestStateRepr {
-    pub hashi_committees: CommitteeStoreRepr,
-    pub withdrawal_config: WithdrawalConfig,
-    pub withdrawal_state: WithdrawalState,
-    pub hashi_btc_master_pubkey: BitcoinPubkey,
 }
 
 impl From<&ProvisionerInitRequestState> for ProvisionerInitRequestStateRepr {
