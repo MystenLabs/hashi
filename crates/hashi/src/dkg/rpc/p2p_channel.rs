@@ -2,19 +2,13 @@ use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
 use crate::dkg::types::ComplainRequest;
-use crate::dkg::types::ComplainResponse;
+use crate::dkg::types::ComplaintResponses;
 use crate::dkg::types::GetPublicDkgOutputRequest;
 use crate::dkg::types::GetPublicDkgOutputResponse;
-use crate::dkg::types::RetrieveMessageRequest;
-use crate::dkg::types::RetrieveMessageResponse;
-use crate::dkg::types::RetrieveRotationMessagesRequest;
-use crate::dkg::types::RetrieveRotationMessagesResponse;
-use crate::dkg::types::RotationComplainRequest;
-use crate::dkg::types::RotationComplainResponse;
-use crate::dkg::types::SendMessageRequest;
-use crate::dkg::types::SendMessageResponse;
-use crate::dkg::types::SendRotationMessagesRequest;
-use crate::dkg::types::SendRotationMessagesResponse;
+use crate::dkg::types::RetrieveMessagesRequest;
+use crate::dkg::types::RetrieveMessagesResponse;
+use crate::dkg::types::SendMessagesRequest;
+use crate::dkg::types::SendMessagesResponse;
 use crate::grpc::Client;
 use crate::onchain::OnchainState;
 use async_trait::async_trait;
@@ -45,24 +39,24 @@ impl RpcP2PChannel {
 
 #[async_trait]
 impl P2PChannel for RpcP2PChannel {
-    async fn send_dkg_message(
+    async fn send_messages(
         &self,
         recipient: &Address,
-        request: &SendMessageRequest,
-    ) -> ChannelResult<SendMessageResponse> {
+        request: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse> {
         self.get_client(recipient)?
-            .send_message(self.epoch, request)
+            .send_messages(self.epoch, request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
-    async fn retrieve_message(
+    async fn retrieve_messages(
         &self,
         party: &Address,
-        request: &RetrieveMessageRequest,
-    ) -> ChannelResult<RetrieveMessageResponse> {
+        request: &RetrieveMessagesRequest,
+    ) -> ChannelResult<RetrieveMessagesResponse> {
         self.get_client(party)?
-            .retrieve_message(self.epoch, request)
+            .retrieve_messages(self.epoch, request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -71,31 +65,9 @@ impl P2PChannel for RpcP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplainResponse> {
+    ) -> ChannelResult<ComplaintResponses> {
         self.get_client(party)?
             .complain(self.epoch, request)
-            .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
-    }
-
-    async fn send_rotation_messages(
-        &self,
-        recipient: &Address,
-        request: &SendRotationMessagesRequest,
-    ) -> ChannelResult<SendRotationMessagesResponse> {
-        self.get_client(recipient)?
-            .send_rotation_messages(self.epoch, request)
-            .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
-    }
-
-    async fn retrieve_rotation_messages(
-        &self,
-        party: &Address,
-        request: &RetrieveRotationMessagesRequest,
-    ) -> ChannelResult<RetrieveRotationMessagesResponse> {
-        self.get_client(party)?
-            .retrieve_rotation_messages(self.epoch, request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -107,17 +79,6 @@ impl P2PChannel for RpcP2PChannel {
     ) -> ChannelResult<GetPublicDkgOutputResponse> {
         self.get_client(party)?
             .get_public_dkg_output(request)
-            .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
-    }
-
-    async fn rotation_complain(
-        &self,
-        party: &Address,
-        request: &RotationComplainRequest,
-    ) -> ChannelResult<RotationComplainResponse> {
-        self.get_client(party)?
-            .rotation_complain(self.epoch, request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }

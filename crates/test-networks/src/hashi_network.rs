@@ -33,6 +33,9 @@ use crate::SuiNetworkHandle;
 
 const HTTPS_SCHEME: &str = "https://";
 const HTTP_SCHEME: &str = "http://";
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const THRESHOLD_NUMERATOR: u64 = 2;
+const THRESHOLD_DENOMINATOR: u64 = 3;
 
 pub struct HashiNodeHandle(pub Arc<Hashi>);
 
@@ -70,6 +73,55 @@ impl HashiNodeHandle {
 
     pub fn metrics_address(&self) -> SocketAddr {
         self.0.config.metrics_http_address()
+    }
+
+    pub async fn wait_for_dkg_completion(&self, timeout: std::time::Duration) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_dkg_completion_inner())
+            .await
+            .map_err(|_| anyhow::anyhow!("DKG completion timed out after {:?}", timeout))
+    }
+
+    async fn wait_for_dkg_completion_inner(&self) {
+        loop {
+            // Wait for hashi to finish initializing
+            let onchain_state = match self.0.onchain_state_opt() {
+                Some(state) => state,
+                None => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let epoch_threshold_and_committee = {
+                let state = onchain_state.state();
+                let epoch = state.hashi().committees.epoch();
+                state.hashi().committees.current_committee().map(|c| {
+                    let threshold = c.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
+                    (epoch, threshold, c.clone())
+                })
+            };
+            let (epoch, threshold, committee) = match epoch_threshold_and_committee {
+                Some(et) => et,
+                None => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let raw_certs = match onchain_state.fetch_dkg_certs(epoch).await {
+                Ok(certs) => certs,
+                Err(_) => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let certified_weight: u64 = raw_certs
+                .iter()
+                .filter_map(|(dealer, _)| committee.weight_of(dealer).ok())
+                .sum();
+            if certified_weight >= threshold {
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 }
 
@@ -127,14 +179,17 @@ impl HashiNetworkBuilder {
             config.operator_private_key = Some(private_key.to_pem()?);
             config.sui_rpc = Some(sui_rpc.clone());
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
-            config.db = Some(dir.join(validator_address.to_string()));
-
-            config.sui_chain_id = service_info.chain_id.clone();
+            config.bitcoin_rpc_auth = Some(hashi_btc::config::BtcRpcAuth::UserPass(
+                crate::bitcoin_node::RPC_USER.into(),
+                crate::bitcoin_node::RPC_PASSWORD.into(),
+            ));
+            config.bitcoin_trusted_peers = Some(vec![bitcoin.p2p_address()]);
             // Bitcoin regtest chain id, from https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki
             config.bitcoin_chain_id = Some(
                 "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206".to_string(),
             );
-
+            config.sui_chain_id = service_info.chain_id.clone();
+            config.db = Some(dir.join(validator_address.to_string()));
             configs.push(config);
         }
 
@@ -144,7 +199,8 @@ impl HashiNetworkBuilder {
         }
 
         // Init the initial committee
-        bootstrap(sui, hashi_ids).await?;
+        start_reconfig(sui, hashi_ids).await?;
+        end_reconfig(sui, hashi_ids).await?;
 
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
@@ -392,7 +448,7 @@ pub async fn update_tls_public_key(
     Ok(())
 }
 
-async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
+async fn start_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
     let mut client = sui.client.clone();
     let private_key = sui.user_keys.first().unwrap();
     let sender = private_key.public_key().derive_address();
@@ -432,8 +488,8 @@ async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
         ],
         commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
             package: hashi_ids.package_id,
-            module: Identifier::from_static("hashi"),
-            function: Identifier::from_static("bootstrap"),
+            module: Identifier::from_static("reconfig"),
+            function: Identifier::from_static("start_reconfig"),
             type_arguments: vec![],
             arguments: vec![Argument::Input(1), Argument::Input(0)],
         })],
@@ -466,9 +522,88 @@ async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
         .await?
         .into_inner();
 
+    if let Some(status) = response.transaction().effects().status().error_opt() {
+        dbg!(status);
+    }
+
     assert!(
         response.transaction().effects().status().success(),
-        "bootstrap failed"
+        "start_reconfig failed"
+    );
+
+    Ok(())
+}
+
+async fn end_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
+    let mut client = sui.client.clone();
+    let private_key = sui.user_keys.first().unwrap();
+    let sender = private_key.public_key().derive_address();
+    let price = client.get_reference_gas_price().await?;
+
+    let gas_objects = client
+        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
+        .await?;
+
+    let system_objects = client
+        .ledger_client()
+        .batch_get_objects(
+            BatchGetObjectsRequest::default()
+                .with_requests(vec![
+                    GetObjectRequest::new(&Address::from_static("0x5")),
+                    GetObjectRequest::new(&hashi_ids.hashi_object_id),
+                ])
+                .with_read_mask(FieldMask::from_str("*")),
+        )
+        .await?
+        .into_inner();
+    let _sui_system = system_objects.objects[0].object();
+    let hashi_system = system_objects.objects[1].object();
+
+    let pt = ProgrammableTransaction {
+        inputs: vec![Input::Shared(SharedInput::new(
+            hashi_system.object_id().parse()?,
+            hashi_system.owner().version(),
+            true,
+        ))],
+        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
+            package: hashi_ids.package_id,
+            module: Identifier::from_static("reconfig"),
+            function: Identifier::from_static("end_reconfig"),
+            type_arguments: vec![],
+            arguments: vec![Argument::Input(0)],
+        })],
+    };
+
+    let transaction = Transaction {
+        kind: TransactionKind::ProgrammableTransaction(pt),
+        sender,
+        gas_payment: GasPayment {
+            objects: gas_objects
+                .iter()
+                .map(|o| (&o.object_reference()).try_into())
+                .collect::<Result<_, _>>()?,
+            owner: sender,
+            price,
+            budget: 1_000_000_000,
+        },
+        expiration: TransactionExpiration::None,
+    };
+
+    let signature = private_key.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    assert!(
+        response.transaction().effects().status().success(),
+        "end_reconfig failed"
     );
 
     Ok(())

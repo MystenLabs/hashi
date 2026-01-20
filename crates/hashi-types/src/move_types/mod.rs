@@ -23,7 +23,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
-    pub proposals: ProposalSet,
+    pub proposals: Bag,
     pub tob: Bag,
 }
 
@@ -34,6 +34,7 @@ pub struct CommitteeSet {
     /// The current epoch.
     pub epoch: u64,
     pub committees: Bag,
+    pub pending_epoch_change: Option<u64>,
 }
 
 /// Rust version of the Move sui::bag::Bag type.
@@ -51,13 +52,6 @@ pub struct Field<N, V> {
     pub id: Address,
     pub name: N,
     pub value: V,
-}
-
-/// Rust version of the Move hashi::proposal_set::ProposalSet type.
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct ProposalSet {
-    pub proposals: Bag,
-    pub seq_num: u64,
 }
 
 /// Rust version of the Move hashi::committee_set::MemberInfo type.
@@ -283,6 +277,9 @@ pub enum HashiEvent {
     BurnEvent(BurnEvent),
     DepositRequestedEvent(DepositRequestedEvent),
     DepositConfirmedEvent(DepositConfirmedEvent),
+    StartReconfigEvent(StartReconfigEvent),
+    EndReconfigEvent(EndReconfigEvent),
+    AbortReconfigEvent(AbortReconfigEvent),
 }
 
 impl HashiEvent {
@@ -317,6 +314,9 @@ impl HashiEvent {
             DepositConfirmedEvent::MODULE_NAME => {
                 DepositConfirmedEvent::from_bcs(bcs.value())?.into()
             }
+            StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
+            EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
+            AbortReconfigEvent::MODULE_NAME => AbortReconfigEvent::from_bcs(bcs.value())?.into(),
             _ => {
                 return Ok(None);
             }
@@ -560,5 +560,53 @@ impl MoveType for DepositConfirmedEvent {
 impl From<DepositConfirmedEvent> for HashiEvent {
     fn from(value: DepositConfirmedEvent) -> Self {
         Self::DepositConfirmedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct StartReconfigEvent {
+    pub epoch: u64,
+}
+
+impl MoveType for StartReconfigEvent {
+    const MODULE: &'static str = "reconfig";
+    const NAME: &'static str = "StartReconfigEvent";
+}
+
+impl From<StartReconfigEvent> for HashiEvent {
+    fn from(value: StartReconfigEvent) -> Self {
+        Self::StartReconfigEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct EndReconfigEvent {
+    pub epoch: u64,
+}
+
+impl MoveType for EndReconfigEvent {
+    const MODULE: &'static str = "reconfig";
+    const NAME: &'static str = "EndReconfigEvent";
+}
+
+impl From<EndReconfigEvent> for HashiEvent {
+    fn from(value: EndReconfigEvent) -> Self {
+        Self::EndReconfigEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct AbortReconfigEvent {
+    pub epoch: u64,
+}
+
+impl MoveType for AbortReconfigEvent {
+    const MODULE: &'static str = "reconfig";
+    const NAME: &'static str = "AbortReconfigEvent";
+}
+
+impl From<AbortReconfigEvent> for HashiEvent {
+    fn from(value: AbortReconfigEvent) -> Self {
+        Self::AbortReconfigEvent(value)
     }
 }

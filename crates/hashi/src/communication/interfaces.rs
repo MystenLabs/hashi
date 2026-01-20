@@ -1,19 +1,13 @@
 //! Communication channel interfaces
 
 use crate::dkg::ComplainRequest;
-use crate::dkg::ComplainResponse;
+use crate::dkg::ComplaintResponses;
 use crate::dkg::GetPublicDkgOutputRequest;
 use crate::dkg::GetPublicDkgOutputResponse;
-use crate::dkg::RetrieveMessageRequest;
-use crate::dkg::RetrieveMessageResponse;
-use crate::dkg::RetrieveRotationMessagesRequest;
-use crate::dkg::RetrieveRotationMessagesResponse;
-use crate::dkg::RotationComplainRequest;
-use crate::dkg::RotationComplainResponse;
-use crate::dkg::SendMessageRequest;
-use crate::dkg::SendMessageResponse;
-use crate::dkg::SendRotationMessagesRequest;
-use crate::dkg::SendRotationMessagesResponse;
+use crate::dkg::RetrieveMessagesRequest;
+use crate::dkg::RetrieveMessagesResponse;
+use crate::dkg::SendMessagesRequest;
+use crate::dkg::SendMessagesResponse;
 use async_trait::async_trait;
 use sui_sdk_types::Address;
 use thiserror::Error;
@@ -43,41 +37,23 @@ pub enum ChannelError {
 /// Point-to-point channel for direct validator-to-validator messaging
 #[async_trait]
 pub trait P2PChannel: Send + Sync {
-    async fn send_dkg_message(
+    async fn send_messages(
         &self,
         recipient: &Address,
-        request: &SendMessageRequest,
-    ) -> ChannelResult<SendMessageResponse>;
+        request: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse>;
 
-    async fn retrieve_message(
+    async fn retrieve_messages(
         &self,
         party: &Address,
-        request: &RetrieveMessageRequest,
-    ) -> ChannelResult<RetrieveMessageResponse>;
+        request: &RetrieveMessagesRequest,
+    ) -> ChannelResult<RetrieveMessagesResponse>;
 
     async fn complain(
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplainResponse>;
-
-    async fn rotation_complain(
-        &self,
-        party: &Address,
-        request: &RotationComplainRequest,
-    ) -> ChannelResult<RotationComplainResponse>;
-
-    async fn send_rotation_messages(
-        &self,
-        recipient: &Address,
-        request: &SendRotationMessagesRequest,
-    ) -> ChannelResult<SendRotationMessagesResponse>;
-
-    async fn retrieve_rotation_messages(
-        &self,
-        party: &Address,
-        request: &RetrieveRotationMessagesRequest,
-    ) -> ChannelResult<RetrieveRotationMessagesResponse>;
+    ) -> ChannelResult<ComplaintResponses>;
 
     async fn get_public_dkg_output(
         &self,

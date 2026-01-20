@@ -23,7 +23,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
-    pub proposals: ProposalSet,
+    pub proposals: Proposals,
     pub tob_id: Address,
 }
 
@@ -35,6 +35,7 @@ pub struct CommitteeSet {
     tls_public_key_to_address: BTreeMap<[u8; 32], Address>,
     /// The current epoch.
     epoch: u64,
+    pending_epoch_change: Option<u64>,
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
     committees: BTreeMap<u64, Committee>,
@@ -50,6 +51,7 @@ impl CommitteeSet {
             members: BTreeMap::new(),
             tls_public_key_to_address: BTreeMap::new(),
             epoch: 0,
+            pending_epoch_change: None,
             committees_id,
             committees: BTreeMap::new(),
             tls_private_key: None,
@@ -65,8 +67,16 @@ impl CommitteeSet {
         &self.members
     }
 
+    pub fn committees_id(&self) -> Address {
+        self.committees_id
+    }
+
     pub fn committees(&self) -> &BTreeMap<u64, Committee> {
         &self.committees
+    }
+
+    pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, Committee> {
+        &mut self.committees
     }
 
     pub fn current_committee(&self) -> Option<&Committee> {
@@ -179,6 +189,11 @@ impl CommitteeSet {
         self
     }
 
+    pub fn set_pending_epoch_change(&mut self, pending_epoch_change: Option<u64>) -> &mut Self {
+        self.pending_epoch_change = pending_epoch_change;
+        self
+    }
+
     pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
         self.committees = committees;
         self
@@ -258,11 +273,11 @@ impl MemberInfo {
     }
 }
 
+/// Proposals bag - stores governance proposals by ID
 #[derive(Debug)]
-pub struct ProposalSet {
+pub struct Proposals {
     pub id: Address,
     pub size: u64,
-    pub seq_num: u64,
 }
 
 #[derive(Debug)]

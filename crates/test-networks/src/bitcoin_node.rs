@@ -19,8 +19,8 @@ use tracing::warn;
 const DEFAULT_INITIAL_BLOCKS: u64 = 101;
 const BITCOIN_CORE_STARTUP_TIMEOUT_SECS: u64 = 60;
 const STARTUP_LOG_INTERVAL_SECS: u64 = 5;
-const RPC_USER: &str = "test";
-const RPC_PASSWORD: &str = "test";
+pub const RPC_USER: &str = "test";
+pub const RPC_PASSWORD: &str = "test";
 
 pub struct BitcoinNodeHandle {
     rpc_client: Client,
@@ -60,6 +60,7 @@ impl BitcoinNodeHandle {
             .arg("-acceptnonstdtxn=1")
             .arg("-blockfilterindex=1") // Enable compact block filters (BIP-158)
             .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
+            .arg("-txindex=1") // Enable transaction index for RPC queries
             .stdout(stdout)
             .stderr(stderr)
             .spawn()

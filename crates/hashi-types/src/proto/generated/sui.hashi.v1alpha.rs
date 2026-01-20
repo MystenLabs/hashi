@@ -453,513 +453,6 @@ pub mod bridge_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendMessageRequest {
-    /// The epoch for this DKG instance.
-    #[prost(uint64, optional, tag = "1")]
-    pub epoch: ::core::option::Option<u64>,
-    /// The AVSS dealer message containing encrypted shares.
-    #[prost(message, optional, tag = "2")]
-    pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendMessageResponse {
-    /// The BLS12-381 signature from the receiving validator.
-    #[prost(bytes = "bytes", optional, tag = "1")]
-    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RetrieveMessageRequest {
-    /// The epoch for this DKG instance.
-    #[prost(uint64, optional, tag = "1")]
-    pub epoch: ::core::option::Option<u64>,
-    /// The hex-encoded Sui address of the dealer whose message is requested.
-    #[prost(string, optional, tag = "2")]
-    pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RetrieveMessageResponse {
-    /// The AVSS dealer message.
-    #[prost(message, optional, tag = "1")]
-    pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ComplainRequest {
-    /// The epoch for this DKG instance.
-    #[prost(uint64, optional, tag = "1")]
-    pub epoch: ::core::option::Option<u64>,
-    /// The hex-encoded Sui address of the dealer who sent invalid shares.
-    #[prost(string, optional, tag = "2")]
-    pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-    /// The complaint containing proof of invalid shares.
-    #[prost(message, optional, tag = "3")]
-    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ComplainResponse {
-    /// The complaint response containing the correct shares.
-    #[prost(message, optional, tag = "1")]
-    pub response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-/// Generated client implementations.
-pub mod dkg_service_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct DkgServiceClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl DkgServiceClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> DkgServiceClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> DkgServiceClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            DkgServiceClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        /// Send a dealer message to a party and receive their signature.
-        pub async fn send_message(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SendMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SendMessageResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.DkgService/SendMessage",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("sui.hashi.v1alpha.DkgService", "SendMessage"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Retrieve a dealer's message from the certificate signers.
-        pub async fn retrieve_message(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RetrieveMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RetrieveMessageResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.DkgService/RetrieveMessage",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("sui.hashi.v1alpha.DkgService", "RetrieveMessage"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        /// Send a complaint about invalid shares and receive the correct shares.
-        pub async fn complain(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ComplainRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ComplainResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.DkgService/Complain",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("sui.hashi.v1alpha.DkgService", "Complain"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod dkg_service_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with DkgServiceServer.
-    #[async_trait]
-    pub trait DkgService: std::marker::Send + std::marker::Sync + 'static {
-        /// Send a dealer message to a party and receive their signature.
-        async fn send_message(
-            &self,
-            request: tonic::Request<super::SendMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SendMessageResponse>,
-            tonic::Status,
-        >;
-        /// Retrieve a dealer's message from the certificate signers.
-        async fn retrieve_message(
-            &self,
-            request: tonic::Request<super::RetrieveMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RetrieveMessageResponse>,
-            tonic::Status,
-        >;
-        /// Send a complaint about invalid shares and receive the correct shares.
-        async fn complain(
-            &self,
-            request: tonic::Request<super::ComplainRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ComplainResponse>,
-            tonic::Status,
-        >;
-    }
-    #[derive(Debug)]
-    pub struct DkgServiceServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> DkgServiceServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for DkgServiceServer<T>
-    where
-        T: DkgService,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/sui.hashi.v1alpha.DkgService/SendMessage" => {
-                    #[allow(non_camel_case_types)]
-                    struct SendMessageSvc<T: DkgService>(pub Arc<T>);
-                    impl<
-                        T: DkgService,
-                    > tonic::server::UnaryService<super::SendMessageRequest>
-                    for SendMessageSvc<T> {
-                        type Response = super::SendMessageResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SendMessageRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as DkgService>::send_message(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SendMessageSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sui.hashi.v1alpha.DkgService/RetrieveMessage" => {
-                    #[allow(non_camel_case_types)]
-                    struct RetrieveMessageSvc<T: DkgService>(pub Arc<T>);
-                    impl<
-                        T: DkgService,
-                    > tonic::server::UnaryService<super::RetrieveMessageRequest>
-                    for RetrieveMessageSvc<T> {
-                        type Response = super::RetrieveMessageResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RetrieveMessageRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as DkgService>::retrieve_message(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RetrieveMessageSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sui.hashi.v1alpha.DkgService/Complain" => {
-                    #[allow(non_camel_case_types)]
-                    struct ComplainSvc<T: DkgService>(pub Arc<T>);
-                    impl<
-                        T: DkgService,
-                    > tonic::server::UnaryService<super::ComplainRequest>
-                    for ComplainSvc<T> {
-                        type Response = super::ComplainResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ComplainRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as DkgService>::complain(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ComplainSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for DkgServiceServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "sui.hashi.v1alpha.DkgService";
-    impl<T> tonic::server::NamedService for DkgServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetGuardianInfoRequest {}
 /// TODO: Add more info
@@ -1705,23 +1198,39 @@ pub mod guardian_service_server {
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SendRotationMessagesRequest {
-    /// The epoch for this rotation instance.
-    #[prost(uint64, optional, tag = "1")]
-    pub epoch: ::core::option::Option<u64>,
-    /// The rotation messages keyed by share index.
-    #[prost(map = "uint32, message", tag = "2")]
+pub struct RotationMessages {
+    #[prost(map = "uint32, message", tag = "1")]
     pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SendMessagesRequest {
+    /// The epoch for this MPC instance.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
+    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3")]
+    pub messages: ::core::option::Option<send_messages_request::Messages>,
+}
+/// Nested message and enum types in `SendMessagesRequest`.
+pub mod send_messages_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Messages {
+        /// For DKG: single dealer message.
+        #[prost(message, tag = "2")]
+        DkgMessage(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For key rotation: messages keyed by share index.
+        #[prost(message, tag = "3")]
+        RotationMessages(super::RotationMessages),
+    }
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendRotationMessagesResponse {
+pub struct SendMessagesResponse {
     /// The BLS12-381 signature from the receiving validator.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RetrieveRotationMessagesRequest {
-    /// The epoch for this rotation instance.
+pub struct RetrieveMessagesRequest {
+    /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
     /// The hex-encoded Sui address of the dealer whose messages are requested.
@@ -1729,10 +1238,59 @@ pub struct RetrieveRotationMessagesRequest {
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RetrieveRotationMessagesResponse {
-    /// The rotation messages keyed by share index.
+pub struct RetrieveMessagesResponse {
+    #[prost(oneof = "retrieve_messages_response::Messages", tags = "1, 2")]
+    pub messages: ::core::option::Option<retrieve_messages_response::Messages>,
+}
+/// Nested message and enum types in `RetrieveMessagesResponse`.
+pub mod retrieve_messages_response {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Messages {
+        /// For DKG: single dealer message.
+        #[prost(message, tag = "1")]
+        DkgMessage(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For key rotation: messages keyed by share index.
+        #[prost(message, tag = "2")]
+        RotationMessages(super::RotationMessages),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ComplainRequest {
+    /// The epoch for this MPC instance.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
+    /// The hex-encoded Sui address of the dealer who sent invalid shares.
+    #[prost(string, optional, tag = "2")]
+    pub dealer: ::core::option::Option<::prost::alloc::string::String>,
+    /// For DKG: not set.
+    /// For key rotation: the specific share index that triggered the complaint.
+    #[prost(uint32, optional, tag = "3")]
+    pub share_index: ::core::option::Option<u32>,
+    /// The complaint containing proof of invalid share.
+    #[prost(message, optional, tag = "4")]
+    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RotationResponses {
     #[prost(map = "uint32, message", tag = "1")]
-    pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    pub responses: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ComplainResponse {
+    #[prost(oneof = "complain_response::Responses", tags = "1, 2")]
+    pub responses: ::core::option::Option<complain_response::Responses>,
+}
+/// Nested message and enum types in `ComplainResponse`.
+pub mod complain_response {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Responses {
+        /// For DKG: single response.
+        #[prost(message, tag = "1")]
+        DkgResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For key rotation: responses keyed by share index.
+        #[prost(message, tag = "2")]
+        RotationResponses(super::RotationResponses),
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPublicDkgOutputRequest {
@@ -1752,39 +1310,8 @@ pub struct GetPublicDkgOutputResponse {
         ::sui_rpc::proto::sui::rpc::v2::Bcs,
     >,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RotationComplainRequest {
-    /// The epoch for this rotation instance.
-    #[prost(uint64, optional, tag = "1")]
-    pub epoch: ::core::option::Option<u64>,
-    /// The hex-encoded Sui address of the dealer who sent invalid shares.
-    #[prost(string, optional, tag = "2")]
-    pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-    /// The share index that triggered the complaint.
-    #[prost(uint32, optional, tag = "3")]
-    pub share_index: ::core::option::Option<u32>,
-    /// The complaint containing proof of invalid share.
-    #[prost(message, optional, tag = "4")]
-    pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RotationShareComplaintResponse {
-    /// The share index for which the response is provided.
-    #[prost(uint32, optional, tag = "1")]
-    pub share_index: ::core::option::Option<u32>,
-    /// The complaint response containing the responder's share.
-    #[prost(message, optional, tag = "2")]
-    pub response: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotationComplainResponse {
-    /// Response containing complaint responses for all shares the responder has.
-    /// May not include all dealer's shares if responder is also missing some.
-    #[prost(message, repeated, tag = "1")]
-    pub responses: ::prost::alloc::vec::Vec<RotationShareComplaintResponse>,
-}
 /// Generated client implementations.
-pub mod key_rotation_service_client {
+pub mod mpc_service_client {
     #![allow(
         unused_variables,
         dead_code,
@@ -1795,10 +1322,10 @@ pub mod key_rotation_service_client {
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
     #[derive(Debug, Clone)]
-    pub struct KeyRotationServiceClient<T> {
+    pub struct MpcServiceClient<T> {
         inner: tonic::client::Grpc<T>,
     }
-    impl KeyRotationServiceClient<tonic::transport::Channel> {
+    impl MpcServiceClient<tonic::transport::Channel> {
         /// Attempt to create a new client by connecting to a given endpoint.
         pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
         where
@@ -1809,7 +1336,7 @@ pub mod key_rotation_service_client {
             Ok(Self::new(conn))
         }
     }
-    impl<T> KeyRotationServiceClient<T>
+    impl<T> MpcServiceClient<T>
     where
         T: tonic::client::GrpcService<tonic::body::Body>,
         T::Error: Into<StdError>,
@@ -1827,7 +1354,7 @@ pub mod key_rotation_service_client {
         pub fn with_interceptor<F>(
             inner: T,
             interceptor: F,
-        ) -> KeyRotationServiceClient<InterceptedService<T, F>>
+        ) -> MpcServiceClient<InterceptedService<T, F>>
         where
             F: tonic::service::Interceptor,
             T::ResponseBody: Default,
@@ -1841,7 +1368,7 @@ pub mod key_rotation_service_client {
                 http::Request<tonic::body::Body>,
             >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
         {
-            KeyRotationServiceClient::new(InterceptedService::new(inner, interceptor))
+            MpcServiceClient::new(InterceptedService::new(inner, interceptor))
         }
         /// Compress requests with the given encoding.
         ///
@@ -1874,12 +1401,12 @@ pub mod key_rotation_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Send rotation messages to a party and receive their signature.
-        pub async fn send_rotation_messages(
+        /// Send dealer messages and receive signature.
+        pub async fn send_messages(
             &mut self,
-            request: impl tonic::IntoRequest<super::SendRotationMessagesRequest>,
+            request: impl tonic::IntoRequest<super::SendMessagesRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SendRotationMessagesResponse>,
+            tonic::Response<super::SendMessagesResponse>,
             tonic::Status,
         > {
             self.inner
@@ -1892,24 +1419,19 @@ pub mod key_rotation_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.KeyRotationService/SendRotationMessages",
+                "/sui.hashi.v1alpha.MpcService/SendMessages",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.KeyRotationService",
-                        "SendRotationMessages",
-                    ),
-                );
+                .insert(GrpcMethod::new("sui.hashi.v1alpha.MpcService", "SendMessages"));
             self.inner.unary(req, path, codec).await
         }
-        /// Retrieve a dealer's rotation messages from the certificate signers.
-        pub async fn retrieve_rotation_messages(
+        /// Retrieve a dealer's messages.
+        pub async fn retrieve_messages(
             &mut self,
-            request: impl tonic::IntoRequest<super::RetrieveRotationMessagesRequest>,
+            request: impl tonic::IntoRequest<super::RetrieveMessagesRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::RetrieveRotationMessagesResponse>,
+            tonic::Response<super::RetrieveMessagesResponse>,
             tonic::Status,
         > {
             self.inner
@@ -1922,19 +1444,41 @@ pub mod key_rotation_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.KeyRotationService/RetrieveRotationMessages",
+                "/sui.hashi.v1alpha.MpcService/RetrieveMessages",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.KeyRotationService",
-                        "RetrieveRotationMessages",
-                    ),
+                    GrpcMethod::new("sui.hashi.v1alpha.MpcService", "RetrieveMessages"),
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Get public DKG output for an epoch.
+        /// Send complaints about invalid shares and receive correct shares.
+        pub async fn complain(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ComplainRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ComplainResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.MpcService/Complain",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sui.hashi.v1alpha.MpcService", "Complain"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get public DKG output.
         pub async fn get_public_dkg_output(
             &mut self,
             request: impl tonic::IntoRequest<super::GetPublicDkgOutputRequest>,
@@ -1952,52 +1496,19 @@ pub mod key_rotation_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.KeyRotationService/GetPublicDkgOutput",
+                "/sui.hashi.v1alpha.MpcService/GetPublicDkgOutput",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.KeyRotationService",
-                        "GetPublicDkgOutput",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        /// Send a complaint about invalid shares for a specific share index and receive the correct shares.
-        pub async fn rotation_complain(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RotationComplainRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RotationComplainResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.KeyRotationService/RotationComplain",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.KeyRotationService",
-                        "RotationComplain",
-                    ),
+                    GrpcMethod::new("sui.hashi.v1alpha.MpcService", "GetPublicDkgOutput"),
                 );
             self.inner.unary(req, path, codec).await
         }
     }
 }
 /// Generated server implementations.
-pub mod key_rotation_service_server {
+pub mod mpc_service_server {
     #![allow(
         unused_variables,
         dead_code,
@@ -2006,26 +1517,34 @@ pub mod key_rotation_service_server {
         clippy::let_unit_value,
     )]
     use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with KeyRotationServiceServer.
+    /// Generated trait containing gRPC methods that should be implemented for use with MpcServiceServer.
     #[async_trait]
-    pub trait KeyRotationService: std::marker::Send + std::marker::Sync + 'static {
-        /// Send rotation messages to a party and receive their signature.
-        async fn send_rotation_messages(
+    pub trait MpcService: std::marker::Send + std::marker::Sync + 'static {
+        /// Send dealer messages and receive signature.
+        async fn send_messages(
             &self,
-            request: tonic::Request<super::SendRotationMessagesRequest>,
+            request: tonic::Request<super::SendMessagesRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SendRotationMessagesResponse>,
+            tonic::Response<super::SendMessagesResponse>,
             tonic::Status,
         >;
-        /// Retrieve a dealer's rotation messages from the certificate signers.
-        async fn retrieve_rotation_messages(
+        /// Retrieve a dealer's messages.
+        async fn retrieve_messages(
             &self,
-            request: tonic::Request<super::RetrieveRotationMessagesRequest>,
+            request: tonic::Request<super::RetrieveMessagesRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::RetrieveRotationMessagesResponse>,
+            tonic::Response<super::RetrieveMessagesResponse>,
             tonic::Status,
         >;
-        /// Get public DKG output for an epoch.
+        /// Send complaints about invalid shares and receive correct shares.
+        async fn complain(
+            &self,
+            request: tonic::Request<super::ComplainRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ComplainResponse>,
+            tonic::Status,
+        >;
+        /// Get public DKG output.
         async fn get_public_dkg_output(
             &self,
             request: tonic::Request<super::GetPublicDkgOutputRequest>,
@@ -2033,24 +1552,16 @@ pub mod key_rotation_service_server {
             tonic::Response<super::GetPublicDkgOutputResponse>,
             tonic::Status,
         >;
-        /// Send a complaint about invalid shares for a specific share index and receive the correct shares.
-        async fn rotation_complain(
-            &self,
-            request: tonic::Request<super::RotationComplainRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RotationComplainResponse>,
-            tonic::Status,
-        >;
     }
     #[derive(Debug)]
-    pub struct KeyRotationServiceServer<T> {
+    pub struct MpcServiceServer<T> {
         inner: Arc<T>,
         accept_compression_encodings: EnabledCompressionEncodings,
         send_compression_encodings: EnabledCompressionEncodings,
         max_decoding_message_size: Option<usize>,
         max_encoding_message_size: Option<usize>,
     }
-    impl<T> KeyRotationServiceServer<T> {
+    impl<T> MpcServiceServer<T> {
         pub fn new(inner: T) -> Self {
             Self::from_arc(Arc::new(inner))
         }
@@ -2101,9 +1612,9 @@ pub mod key_rotation_service_server {
             self
         }
     }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for KeyRotationServiceServer<T>
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for MpcServiceServer<T>
     where
-        T: KeyRotationService,
+        T: MpcService,
         B: Body + std::marker::Send + 'static,
         B::Error: Into<StdError> + std::marker::Send + 'static,
     {
@@ -2118,29 +1629,25 @@ pub mod key_rotation_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/sui.hashi.v1alpha.KeyRotationService/SendRotationMessages" => {
+                "/sui.hashi.v1alpha.MpcService/SendMessages" => {
                     #[allow(non_camel_case_types)]
-                    struct SendRotationMessagesSvc<T: KeyRotationService>(pub Arc<T>);
+                    struct SendMessagesSvc<T: MpcService>(pub Arc<T>);
                     impl<
-                        T: KeyRotationService,
-                    > tonic::server::UnaryService<super::SendRotationMessagesRequest>
-                    for SendRotationMessagesSvc<T> {
-                        type Response = super::SendRotationMessagesResponse;
+                        T: MpcService,
+                    > tonic::server::UnaryService<super::SendMessagesRequest>
+                    for SendMessagesSvc<T> {
+                        type Response = super::SendMessagesResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::SendRotationMessagesRequest>,
+                            request: tonic::Request<super::SendMessagesRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as KeyRotationService>::send_rotation_messages(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
+                                <T as MpcService>::send_messages(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -2151,7 +1658,7 @@ pub mod key_rotation_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = SendRotationMessagesSvc(inner);
+                        let method = SendMessagesSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -2167,33 +1674,25 @@ pub mod key_rotation_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.KeyRotationService/RetrieveRotationMessages" => {
+                "/sui.hashi.v1alpha.MpcService/RetrieveMessages" => {
                     #[allow(non_camel_case_types)]
-                    struct RetrieveRotationMessagesSvc<T: KeyRotationService>(
-                        pub Arc<T>,
-                    );
+                    struct RetrieveMessagesSvc<T: MpcService>(pub Arc<T>);
                     impl<
-                        T: KeyRotationService,
-                    > tonic::server::UnaryService<super::RetrieveRotationMessagesRequest>
-                    for RetrieveRotationMessagesSvc<T> {
-                        type Response = super::RetrieveRotationMessagesResponse;
+                        T: MpcService,
+                    > tonic::server::UnaryService<super::RetrieveMessagesRequest>
+                    for RetrieveMessagesSvc<T> {
+                        type Response = super::RetrieveMessagesResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<
-                                super::RetrieveRotationMessagesRequest,
-                            >,
+                            request: tonic::Request<super::RetrieveMessagesRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as KeyRotationService>::retrieve_rotation_messages(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
+                                <T as MpcService>::retrieve_messages(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -2204,7 +1703,7 @@ pub mod key_rotation_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = RetrieveRotationMessagesSvc(inner);
+                        let method = RetrieveMessagesSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -2220,11 +1719,56 @@ pub mod key_rotation_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.KeyRotationService/GetPublicDkgOutput" => {
+                "/sui.hashi.v1alpha.MpcService/Complain" => {
                     #[allow(non_camel_case_types)]
-                    struct GetPublicDkgOutputSvc<T: KeyRotationService>(pub Arc<T>);
+                    struct ComplainSvc<T: MpcService>(pub Arc<T>);
                     impl<
-                        T: KeyRotationService,
+                        T: MpcService,
+                    > tonic::server::UnaryService<super::ComplainRequest>
+                    for ComplainSvc<T> {
+                        type Response = super::ComplainResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ComplainRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MpcService>::complain(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ComplainSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.MpcService/GetPublicDkgOutput" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPublicDkgOutputSvc<T: MpcService>(pub Arc<T>);
+                    impl<
+                        T: MpcService,
                     > tonic::server::UnaryService<super::GetPublicDkgOutputRequest>
                     for GetPublicDkgOutputSvc<T> {
                         type Response = super::GetPublicDkgOutputResponse;
@@ -2238,10 +1782,7 @@ pub mod key_rotation_service_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as KeyRotationService>::get_public_dkg_output(
-                                        &inner,
-                                        request,
-                                    )
+                                <T as MpcService>::get_public_dkg_output(&inner, request)
                                     .await
                             };
                             Box::pin(fut)
@@ -2254,55 +1795,6 @@ pub mod key_rotation_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetPublicDkgOutputSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sui.hashi.v1alpha.KeyRotationService/RotationComplain" => {
-                    #[allow(non_camel_case_types)]
-                    struct RotationComplainSvc<T: KeyRotationService>(pub Arc<T>);
-                    impl<
-                        T: KeyRotationService,
-                    > tonic::server::UnaryService<super::RotationComplainRequest>
-                    for RotationComplainSvc<T> {
-                        type Response = super::RotationComplainResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RotationComplainRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KeyRotationService>::rotation_complain(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RotationComplainSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -2340,7 +1832,7 @@ pub mod key_rotation_service_server {
             }
         }
     }
-    impl<T> Clone for KeyRotationServiceServer<T> {
+    impl<T> Clone for MpcServiceServer<T> {
         fn clone(&self) -> Self {
             let inner = self.inner.clone();
             Self {
@@ -2353,8 +1845,8 @@ pub mod key_rotation_service_server {
         }
     }
     /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "sui.hashi.v1alpha.KeyRotationService";
-    impl<T> tonic::server::NamedService for KeyRotationServiceServer<T> {
+    pub const SERVICE_NAME: &str = "sui.hashi.v1alpha.MpcService";
+    impl<T> tonic::server::NamedService for MpcServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

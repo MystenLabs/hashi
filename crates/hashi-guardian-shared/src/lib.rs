@@ -163,8 +163,6 @@ pub struct NormalWithdrawalRequest {
 /// `EnclaveSigned<T>`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalWithdrawalResponse {
-    /// A copy of the unsigned request
-    pub request: NormalWithdrawalRequest,
     /// Enclave's BTC signatures
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
@@ -198,14 +196,15 @@ pub enum LogMessage {
     EnclaveFullyInitialized,
     /// Immediate withdraw success
     NormalWithdrawalSuccess {
+        request_data: NormalWithdrawalRequest,
+        request_sign: CommitteeSignature,
         response: NormalWithdrawalResponse,
-        request_signature: CommitteeSignature,
     },
     /// Immediate withdraw failure
     /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
     NormalWithdrawalFailure {
-        unsigned_request: NormalWithdrawalRequest,
-        request_signature: CommitteeSignature,
+        request_data: NormalWithdrawalRequest,
+        request_sign: CommitteeSignature,
         error: GuardianError,
     },
 }
@@ -215,6 +214,7 @@ pub enum LogMessage {
 // ---------------------------------
 
 /// Unique identifier for a withdrawal request
+/// It is used to correlate events across sui & guardian. And to uniquely identify a delayed withdrawal.
 pub type WithdrawalID = u64;
 
 pub type Attestation = Vec<u8>;

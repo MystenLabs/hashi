@@ -16,6 +16,7 @@ use std::process::Command;
 use anyhow::Result;
 
 pub mod bitcoin_node;
+pub mod deposit_flow;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
@@ -176,6 +177,27 @@ impl Default for TestNetworksBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::SocketAddr;
+
+    const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Recursively copy a directory and its contents.
+    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let dest_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_all(&entry.path(), &dest_path)?;
+            } else {
+                std::fs::copy(entry.path(), dest_path)?;
+            }
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
@@ -222,6 +244,11 @@ mod tests {
         checkpoint_subscriber.changed().await.unwrap();
         assert!(*checkpoint_subscriber.borrow_and_update() > ckpt);
 
+        // Wait for DKG to complete before modifying shared state to avoid lock conflicts
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_dkg_completion(DKG_TIMEOUT)
+            .await?;
+
         // Validate subscribing works by just updating a validator's onchain info
         let mut reciever = state.subscribe();
 
@@ -240,6 +267,88 @@ mod tests {
             panic!("unexpected notification");
         }
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dkg_completes() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let dkg_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dkg_recovery_after_restart() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+        const LOCALHOST_ANY_PORT: SocketAddr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for DKG to complete on all nodes
+        let nodes = test_networks.hashi_network().nodes();
+        let dkg_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .collect();
+
+        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        // Save the config of the first node and copy its DB for recovery test
+        let mut saved_config = nodes[0].0.config.clone();
+        let original_db_path = saved_config.db.as_ref().unwrap().clone();
+
+        // TODO: Use graceful shutdown/restart instead of copying the database and spinning up a duplicate node.
+        let recovery_db_path = original_db_path.with_file_name(format!(
+            "{}-recovery",
+            original_db_path.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&recovery_db_path)?;
+        for entry in std::fs::read_dir(&original_db_path)? {
+            let entry = entry?;
+            let dest = recovery_db_path.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir_all(&entry.path(), &dest)?;
+            } else {
+                std::fs::copy(entry.path(), dest)?;
+            }
+        }
+        saved_config.db = Some(recovery_db_path);
+
+        // Use different ports for the restarted node to avoid conflicts with
+        // the original node (which may still be holding the ports)
+        saved_config.https_address = Some(LOCALHOST_ANY_PORT);
+        saved_config.http_address = Some(LOCALHOST_ANY_PORT);
+        saved_config.metrics_http_address = Some(LOCALHOST_ANY_PORT);
+
+        // Create a new node with the copied DB (simulating restart with same data)
+        let restarted_node = HashiNodeHandle::new(saved_config)?;
+        restarted_node.start();
+
+        // Wait for the restarted node to see DKG completion via on-chain certificates
+        restarted_node
+            .wait_for_dkg_completion(DKG_TIMEOUT)
+            .await
+            .expect("DKG recovery should complete within timeout");
         Ok(())
     }
 }

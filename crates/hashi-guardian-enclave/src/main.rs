@@ -2,6 +2,9 @@ use anyhow::Result;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
+use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
+use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
+use hashi_guardian_shared::bitcoin_utils::TxUTXOs;
 use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
@@ -153,28 +156,40 @@ impl EnclaveConfig {
             .map_err(|_| InvalidInputs("Network is already initialized".into()))
     }
 
-    pub fn btc_keypair(&self) -> GuardianResult<&Keypair> {
-        self.enclave_btc_keypair
-            .get()
-            .ok_or(InternalError("Bitcoin key is not initialized".into()))
-    }
-
     pub fn set_btc_keypair(&self, keypair: Keypair) -> GuardianResult<()> {
         self.enclave_btc_keypair
             .set(keypair)
             .map_err(|_| InvalidInputs("Bitcoin key already set".into()))
     }
 
-    pub fn hashi_btc_pk(&self) -> GuardianResult<&BitcoinPubkey> {
-        self.hashi_btc_master_pubkey
-            .get()
-            .ok_or(InternalError("Hashi BTC key is not initialized".into()))
-    }
-
     pub fn set_hashi_btc_pk(&self, pk: BitcoinPubkey) -> GuardianResult<()> {
         self.hashi_btc_master_pubkey
             .set(pk)
             .map_err(|e| InvalidInputs(format!("Hashi BTC key is already set: {}", e)))
+    }
+
+    /// Sign a BTC tx. Returns an Err if enclave btc keypair or hashi btc pk is not set.
+    pub fn btc_sign(
+        &self,
+        tx_utxos: &TxUTXOs,
+        network: Network,
+    ) -> GuardianResult<Vec<BitcoinSignature>> {
+        let enclave_keypair = self
+            .enclave_btc_keypair
+            .get()
+            .ok_or(InternalError("Bitcoin key is not initialized".into()))?;
+        let hashi_btc_pk = self
+            .hashi_btc_master_pubkey
+            .get()
+            .ok_or(InternalError("Hashi BTC public key not set".into()))?;
+
+        let messages = construct_signing_messages(
+            tx_utxos,
+            &enclave_keypair.x_only_public_key().0,
+            hashi_btc_pk,
+            network,
+        );
+        Ok(sign_btc_tx(&messages, enclave_keypair))
     }
 
     // ========================================================================
@@ -459,18 +474,13 @@ impl Enclave {
         self.config.eph_keys.encryption_keys.public_key()
     }
 
-    /// Get the enclave's signing keypair
-    pub fn signing_keypair(&self) -> &GuardianSignKeyPair {
-        &self.config.eph_keys.signing_keys
-    }
-
     /// Get the enclave's verification key
     pub fn signing_pubkey(&self) -> GuardianPubKey {
         self.config.eph_keys.signing_keys.verification_key()
     }
 
     pub fn sign<T: ToBytes + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
-        let kp = self.signing_keypair();
+        let kp = &self.config.eph_keys.signing_keys;
         let timestamp = SystemTime::now();
         GuardianSigned::new(data, kp, timestamp)
     }

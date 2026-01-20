@@ -2,7 +2,9 @@ use crate::Hashi;
 use crate::onchain::types::DepositRequest;
 use anyhow::anyhow;
 use anyhow::bail;
+use bitcoin::ScriptBuf;
 use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::proto::MemberSignature;
 
@@ -19,36 +21,13 @@ impl Hashi {
         &self,
         deposit_request: &DepositRequest,
     ) -> anyhow::Result<()> {
+        self.validate_deposit_request_on_sui(deposit_request)?;
         self.validate_deposit_request_on_bitcoin(deposit_request)
             .await?;
-        self.validate_deposit_request_on_sui(deposit_request)?;
         Ok(())
     }
 
-    async fn validate_deposit_request_on_bitcoin(
-        &self,
-        deposit_request: &DepositRequest,
-    ) -> anyhow::Result<()> {
-        let outpoint = bitcoin::OutPoint {
-            txid: bitcoin::Txid::from_byte_array(deposit_request.utxo.id.txid.into()),
-            vout: deposit_request.utxo.id.vout,
-        };
-        let txout = self
-            .btc_monitor()
-            .confirm_deposit(outpoint)
-            .await
-            .map_err(|e| anyhow!("Failed to confirm Bitcoin deposit: {}", e))?;
-        if txout.value.to_sat() != deposit_request.utxo.amount {
-            bail!(
-                "Bitcoin deposit amount mismatch: got {}, onchain is {}",
-                deposit_request.utxo.amount,
-                txout.value
-            );
-        }
-        // TODO: check derivation_path/deposit address?
-        Ok(())
-    }
-
+    /// Validate that the deposit requests exists on Sui
     fn validate_deposit_request_on_sui(
         &self,
         deposit_request: &DepositRequest,
@@ -73,6 +52,89 @@ impl Hashi {
             }
         }
         Ok(())
+    }
+
+    /// Validate that there is a txout on Bitcoin that matches the deposit request
+    async fn validate_deposit_request_on_bitcoin(
+        &self,
+        deposit_request: &DepositRequest,
+    ) -> anyhow::Result<()> {
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array(deposit_request.utxo.id.txid.into()),
+            vout: deposit_request.utxo.id.vout,
+        };
+        let txout = self
+            .btc_monitor()
+            .confirm_deposit(outpoint)
+            .await
+            .map_err(|e| anyhow!("Failed to confirm Bitcoin deposit: {}", e))?;
+        if txout.value.to_sat() != deposit_request.utxo.amount {
+            bail!(
+                "Bitcoin deposit amount mismatch: got {}, onchain is {}",
+                deposit_request.utxo.amount,
+                txout.value
+            );
+        }
+
+        let deposit_address = self.bitcoin_address_from_script_pubkey(&txout.script_pubkey)?;
+        self.validate_deposit_request_derivation_path(deposit_address, deposit_request)
+            .await?;
+        Ok(())
+    }
+
+    async fn validate_deposit_request_derivation_path(
+        &self,
+        deposit_address: bitcoin::Address,
+        deposit_request: &DepositRequest,
+    ) -> anyhow::Result<()> {
+        let hashi_pubkey = self.get_hashi_pubkey();
+        let expected_address =
+            self.get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref());
+
+        if deposit_address != expected_address {
+            bail!(
+                "Deposit address mismatch. Expected: {}, got: {}",
+                expected_address,
+                deposit_address
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn get_deposit_address(
+        &self,
+        hashi_pubkey: &XOnlyPublicKey,
+        derivation_path: Option<&sui_sdk_types::Address>,
+    ) -> bitcoin::Address {
+        let pubkey = if let Some(path) = derivation_path {
+            hashi_guardian_shared::bitcoin_utils::get_derived_pubkey(
+                hashi_pubkey,
+                &path.into_inner(),
+            )
+        } else {
+            *hashi_pubkey
+        };
+        self.bitcoin_address_from_pubkey(&pubkey)
+    }
+    fn bitcoin_address_from_script_pubkey(
+        &self,
+        script_pubkey: &ScriptBuf,
+    ) -> anyhow::Result<bitcoin::Address> {
+        bitcoin::Address::from_script(script_pubkey, self.config.bitcoin_network())
+            .map_err(|e| anyhow!("Failed to extract address from script_pubkey: {}", e))
+    }
+
+    fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
+        let network = self.config.bitcoin_network();
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        bitcoin::Address::p2tr(&secp, *pubkey, None, network)
+    }
+
+    /// TODO: Use the real key
+    pub fn get_hashi_pubkey(&self) -> XOnlyPublicKey {
+        let hardcoded_key_hex = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        XOnlyPublicKey::from_slice(&hex::decode(hardcoded_key_hex).unwrap()).unwrap()
     }
 
     fn sign_deposit_confirmation(

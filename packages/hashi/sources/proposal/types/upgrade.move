@@ -15,9 +15,9 @@
 ///    - Commits the upgrade to the `UpgradeCap` and auto-enables the new version
 module hashi::upgrade;
 
-use hashi::{hashi::Hashi, proposal::{Self, Proposal}};
+use hashi::{hashi::Hashi, proposal};
 use std::string::String;
-use sui::{package::{UpgradeTicket, UpgradeReceipt}, vec_map::VecMap};
+use sui::{clock::Clock, package::{UpgradeTicket, UpgradeReceipt}, vec_map::VecMap};
 
 const THRESHOLD_BPS: u64 = 10000;
 
@@ -29,10 +29,11 @@ public fun propose(
     hashi: &mut Hashi,
     digest: vector<u8>,
     metadata: VecMap<String, String>,
+    clock: &Clock,
     ctx: &mut TxContext,
-) {
+): ID {
     hashi.config().assert_version_enabled();
-    proposal::create(hashi, Upgrade { digest }, THRESHOLD_BPS, metadata, ctx)
+    proposal::create(hashi, Upgrade { digest }, THRESHOLD_BPS, metadata, clock, ctx)
 }
 
 /// Executes an approved upgrade proposal.
@@ -40,8 +41,8 @@ public fun propose(
 /// Returns an `UpgradeTicket` that must be used in the same transaction
 /// to publish the new package. The Sui runtime will return an `UpgradeReceipt`
 /// which must then be passed to `finalize_upgrade()` to finalize the upgrade.
-public fun execute(hashi: &mut Hashi, self: Proposal<Upgrade>): UpgradeTicket {
-    let Upgrade { digest } = self.execute(hashi);
+public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): UpgradeTicket {
+    let Upgrade { digest } = proposal::execute(hashi, proposal_id, clock);
     hashi.config_mut().authorize_upgrade(digest)
 }
 

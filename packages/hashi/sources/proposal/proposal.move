@@ -5,7 +5,9 @@ module hashi::proposal;
 
 use hashi::{hashi::Hashi, proposal_events};
 use std::string::String;
-use sui::vec_map::VecMap;
+use sui::{clock::Clock, vec_map::VecMap};
+
+const MAX_PROPOSAL_DURATION_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -14,6 +16,7 @@ public struct Proposal<T> has key, store {
     creator: address,
     votes: vector<address>,
     quorum_threshold_bps: u64,
+    timestamp_ms: u64,
     metadata: VecMap<String, String>,
     data: T,
 }
@@ -27,6 +30,10 @@ const EVoteAlreadyCounted: vector<u8> = b"Vote already counted";
 const EQuorumNotReached: vector<u8> = b"Quorum not reached";
 #[error(code = 3)]
 const ENoVoteFound: vector<u8> = b"Vote doesn't exist";
+#[error(code = 4)]
+const EProposalNotExpired: vector<u8> = b"Proposal not expired";
+#[error(code = 5)]
+const EProposalExpired: vector<u8> = b"Proposal expired";
 
 // ~~~~~~~ Public Functions ~~~~~~~
 
@@ -35,8 +42,9 @@ public(package) fun create<T: store>(
     data: T,
     quorum_threshold_bps: u64,
     metadata: VecMap<String, String>,
+    clock: &Clock,
     ctx: &mut TxContext,
-) {
+): ID {
     // only voters can create proposal
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
@@ -47,37 +55,48 @@ public(package) fun create<T: store>(
         creator: ctx.sender(),
         votes,
         quorum_threshold_bps,
+        timestamp_ms: clock.timestamp_ms(),
         metadata,
         data,
     };
 
-    hashi.proposals_mut().add(proposal);
+    let proposal_id = object::id(&proposal);
+    hashi.proposals_mut().add(proposal_id, proposal);
+    proposal_id
 }
 
-public(package) fun execute<T>(proposal: Proposal<T>, hashi: &Hashi): T {
+public(package) fun execute<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
+    let proposal: Proposal<T> = hashi.proposals_mut().remove(proposal_id);
+
     assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
+    assert!(!proposal.is_expired(clock), EProposalExpired);
+
     hashi.config().assert_version_enabled();
 
     proposal_events::emit_proposal_executed_event(proposal.id.to_inner());
     proposal.delete()
 }
 
-public fun vote<T>(proposal: &mut Proposal<T>, hashi: &Hashi, ctx: &mut TxContext) {
+public fun vote<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &mut TxContext) {
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
+
+    let proposal: &mut Proposal<T> = hashi.proposals_mut().borrow_mut(proposal_id);
+
     assert!(!proposal.votes.contains(&ctx.sender()), EVoteAlreadyCounted);
+    assert!(!proposal.is_expired(clock), EProposalExpired);
 
     proposal.votes.push_back(ctx.sender());
-    proposal_events::emit_vote_cast_event(proposal.id.to_inner(), ctx.sender());
 
+    proposal_events::emit_vote_cast_event(proposal_id, ctx.sender());
     if (proposal.quorum_reached(hashi)) {
-        // assign sequence number
-        proposal_events::emit_quorum_reached_event(proposal.id.to_inner());
+        proposal_events::emit_quorum_reached_event(proposal_id);
     }
 }
 
-public fun remove_vote<T>(proposal: &mut Proposal<T>, hashi: &mut Hashi, ctx: &mut TxContext) {
+public fun remove_vote<T: store>(hashi: &mut Hashi, proposal_id: ID, ctx: &mut TxContext) {
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
+    let proposal: &mut Proposal<T> = hashi.proposals_mut().borrow_mut(proposal_id);
     let index = proposal.votes.find_index!(|v| v == &ctx.sender()).destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
@@ -95,6 +114,17 @@ public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
     let total_weight = hashi.current_committee().total_weight();
 
     (valid_voting_power * 10000 / total_weight) as u64 >= proposal.quorum_threshold_bps
+}
+
+public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
+    clock.timestamp_ms() > proposal.timestamp_ms + MAX_PROPOSAL_DURATION_MS
+}
+
+public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
+    let proposal: Proposal<T> = hashi.proposals_mut().remove(proposal_id);
+
+    assert!(proposal.is_expired(clock), EProposalNotExpired);
+    proposal.delete()
 }
 
 public(package) fun delete<T>(proposal: Proposal<T>): T {

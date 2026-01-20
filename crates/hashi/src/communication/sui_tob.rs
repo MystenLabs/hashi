@@ -27,19 +27,13 @@ use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
 use thiserror::Error;
 
-use crate::dkg::types::Certificate;
-use crate::dkg::types::DkgDealerMessageHash;
-use crate::dkg::types::MpcMessageV1;
-use crate::onchain::OnchainState;
-use hashi_types::committee::Committee;
-use hashi_types::move_types::CertifiedMessage;
-use hashi_types::move_types::DkgDealerMessageHashV1;
-
-type DkgCertV1 = CertifiedMessage<DkgDealerMessageHashV1>;
-
 use super::ChannelError;
 use super::ChannelResult;
 use super::OrderedBroadcastChannel;
+use crate::dkg::types::CertificateV1;
+use crate::dkg::types::DkgDealerMessageHash;
+use crate::onchain::OnchainState;
+use hashi_types::committee::Committee;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GAS_BUDGET: u64 = 50_000_000;
@@ -87,7 +81,7 @@ pub struct SuiTobChannel {
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
-    pending_certs: VecDeque<Certificate>,
+    pending_certs: VecDeque<CertificateV1>,
     committee: Committee,
 }
 
@@ -115,23 +109,20 @@ impl SuiTobChannel {
 
     async fn build_certificate_submission_transaction(
         &self,
-        cert: &Certificate,
+        cert: &CertificateV1,
     ) -> Result<Transaction, TobError> {
         let sender = self.signer.public_key().derive_address();
-        let (dealer, message_hash) = match cert.message() {
-            MpcMessageV1::Dkg(DkgDealerMessageHash {
-                dealer_address,
-                message_hash,
-            }) => (*dealer_address, message_hash.to_vec()),
-            MpcMessageV1::Rotation(_) => {
-                return Err(TobError::InvalidCertificate(
-                    "Rotation certificates not supported yet".into(),
-                ));
-            }
+        let CertificateV1::Dkg(dkg_cert) = cert else {
+            return Err(TobError::InvalidCertificate(
+                "Rotation certificates not supported yet".into(),
+            ));
         };
-        let epoch = cert.epoch();
-        let signature = cert.signature_bytes().to_vec();
-        let signers_bitmap = cert.signers_bitmap_bytes().to_vec();
+        let message = dkg_cert.message();
+        let dealer = message.dealer_address;
+        let message_hash = message.message_hash.inner().to_vec();
+        let epoch = dkg_cert.epoch();
+        let signature = dkg_cert.signature_bytes().to_vec();
+        let signers_bitmap = dkg_cert.signers_bitmap_bytes().to_vec();
         let mut client = self.onchain_state.client();
         let hashi_id = self.onchain_state.hashi_id();
         let price = client
@@ -240,7 +231,7 @@ impl SuiTobChannel {
     }
 
     /// Fetches all certificates in insertion order by following the LinkedTable's linked list.
-    async fn fetch_all_certificates(&self) -> Result<Vec<(Address, Certificate)>, TobError> {
+    async fn fetch_all_certificates(&self) -> Result<Vec<(Address, CertificateV1)>, TobError> {
         let raw_certs = self
             .onchain_state
             .fetch_dkg_certs(self.epoch)
@@ -248,35 +239,22 @@ impl SuiTobChannel {
             .map_err(|e| TobError::RpcError(e.to_string()))?;
         let mut certificates = Vec::with_capacity(raw_certs.len());
         for (dealer, dkg_cert) in raw_certs {
-            let cert = self.convert_to_internal_cert(dkg_cert)?;
-            certificates.push((dealer, cert));
+            let inner_cert = DkgDealerMessageHash::from_onchain_cert(
+                &dkg_cert,
+                self.epoch,
+                &self.committee,
+                self.threshold(),
+            )
+            .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
+            certificates.push((dealer, CertificateV1::Dkg(inner_cert)));
         }
         Ok(certificates)
-    }
-
-    fn convert_to_internal_cert(&self, dkg_cert: DkgCertV1) -> Result<Certificate, TobError> {
-        let message =
-            MpcMessageV1::Dkg(DkgDealerMessageHash {
-                dealer_address: dkg_cert.message.dealer_address,
-                message_hash: dkg_cert.message.message_hash.try_into().map_err(|_| {
-                    TobError::InvalidCertificate("invalid message_hash length".into())
-                })?,
-            });
-        Certificate::try_from_parts(
-            self.epoch,
-            message,
-            &dkg_cert.signature.signature,
-            &dkg_cert.signature.signers_bitmap,
-            &self.committee,
-            self.threshold(),
-        )
-        .map_err(|e| TobError::InvalidCertificate(e.to_string()))
     }
 }
 
 #[async_trait]
-impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
-    async fn publish(&self, cert: Certificate) -> ChannelResult<()> {
+impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
+    async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let tx = self
             .build_certificate_submission_transaction(&cert)
             .await
@@ -305,7 +283,7 @@ impl OrderedBroadcastChannel<Certificate> for SuiTobChannel {
         Ok(())
     }
 
-    async fn receive(&mut self) -> ChannelResult<Certificate> {
+    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
         loop {
             if let Some(cert) = self.pending_certs.pop_front() {
                 return Ok(cert);

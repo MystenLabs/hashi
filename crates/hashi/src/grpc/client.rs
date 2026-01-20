@@ -6,25 +6,18 @@ use tonic_rustls::Channel;
 use tonic_rustls::Endpoint;
 
 use crate::dkg::types::ComplainRequest;
-use crate::dkg::types::ComplainResponse;
+use crate::dkg::types::ComplaintResponses;
 use crate::dkg::types::GetPublicDkgOutputRequest;
 use crate::dkg::types::GetPublicDkgOutputResponse;
-use crate::dkg::types::RetrieveMessageRequest;
-use crate::dkg::types::RetrieveMessageResponse;
-use crate::dkg::types::RetrieveRotationMessagesRequest;
-use crate::dkg::types::RetrieveRotationMessagesResponse;
-use crate::dkg::types::RotationComplainRequest;
-use crate::dkg::types::RotationComplainResponse;
-use crate::dkg::types::SendMessageRequest;
-use crate::dkg::types::SendMessageResponse;
-use crate::dkg::types::SendRotationMessagesRequest;
-use crate::dkg::types::SendRotationMessagesResponse;
+use crate::dkg::types::RetrieveMessagesRequest;
+use crate::dkg::types::RetrieveMessagesResponse;
+use crate::dkg::types::SendMessagesRequest;
+use crate::dkg::types::SendMessagesResponse;
 use crate::tls::make_client_config_no_verification;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
-use hashi_types::proto::dkg_service_client::DkgServiceClient;
-use hashi_types::proto::key_rotation_service_client::KeyRotationServiceClient;
+use hashi_types::proto::mpc_service_client::MpcServiceClient;
 
 type Result<T, E = tonic::Status> = std::result::Result<T, E>;
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -77,12 +70,8 @@ impl Client {
         BridgeServiceClient::new(self.channel.clone())
     }
 
-    pub fn dkg_service_client(&self) -> DkgServiceClient<Channel> {
-        DkgServiceClient::new(self.channel.clone())
-    }
-
-    pub fn key_rotation_service_client(&self) -> KeyRotationServiceClient<Channel> {
-        KeyRotationServiceClient::new(self.channel.clone())
+    pub fn mpc_service_client(&self) -> MpcServiceClient<Channel> {
+        MpcServiceClient::new(self.channel.clone())
     }
 
     pub async fn get_service_info(&self) -> Result<Response<GetServiceInfoResponse>> {
@@ -91,31 +80,31 @@ impl Client {
             .await
     }
 
-    pub async fn send_message(
+    pub async fn send_messages(
         &self,
         epoch: u64,
-        request: &SendMessageRequest,
-    ) -> Result<SendMessageResponse> {
+        request: &SendMessagesRequest,
+    ) -> Result<SendMessagesResponse> {
         let proto_request = request.to_proto(epoch);
         let response = self
-            .dkg_service_client()
-            .send_message(proto_request)
+            .mpc_service_client()
+            .send_messages(proto_request)
             .await?;
-        SendMessageResponse::try_from(response.get_ref())
+        SendMessagesResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
-    pub async fn retrieve_message(
+    pub async fn retrieve_messages(
         &self,
         epoch: u64,
-        request: &RetrieveMessageRequest,
-    ) -> Result<RetrieveMessageResponse> {
+        request: &RetrieveMessagesRequest,
+    ) -> Result<RetrieveMessagesResponse> {
         let proto_request = request.to_proto(epoch);
         let response = self
-            .dkg_service_client()
-            .retrieve_message(proto_request)
+            .mpc_service_client()
+            .retrieve_messages(proto_request)
             .await?;
-        RetrieveMessageResponse::try_from(response.get_ref())
+        RetrieveMessagesResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
@@ -123,10 +112,10 @@ impl Client {
         &self,
         epoch: u64,
         request: &ComplainRequest,
-    ) -> Result<ComplainResponse> {
+    ) -> Result<ComplaintResponses> {
         let proto_request = request.to_proto(epoch);
-        let response = self.dkg_service_client().complain(proto_request).await?;
-        ComplainResponse::try_from(response.get_ref())
+        let response = self.mpc_service_client().complain(proto_request).await?;
+        ComplaintResponses::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
@@ -136,52 +125,10 @@ impl Client {
     ) -> Result<GetPublicDkgOutputResponse> {
         let proto_request = request.to_proto();
         let response = self
-            .key_rotation_service_client()
+            .mpc_service_client()
             .get_public_dkg_output(proto_request)
             .await?;
         GetPublicDkgOutputResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn send_rotation_messages(
-        &self,
-        epoch: u64,
-        request: &SendRotationMessagesRequest,
-    ) -> Result<SendRotationMessagesResponse> {
-        let proto_request = request.to_proto(epoch);
-        let response = self
-            .key_rotation_service_client()
-            .send_rotation_messages(proto_request)
-            .await?;
-        SendRotationMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn retrieve_rotation_messages(
-        &self,
-        epoch: u64,
-        request: &RetrieveRotationMessagesRequest,
-    ) -> Result<RetrieveRotationMessagesResponse> {
-        let proto_request = request.to_proto(epoch);
-        let response = self
-            .key_rotation_service_client()
-            .retrieve_rotation_messages(proto_request)
-            .await?;
-        RetrieveRotationMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn rotation_complain(
-        &self,
-        epoch: u64,
-        request: &RotationComplainRequest,
-    ) -> Result<RotationComplainResponse> {
-        let proto_request = request.to_proto(epoch);
-        let response = self
-            .key_rotation_service_client()
-            .rotation_complain(proto_request)
-            .await?;
-        RotationComplainResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 }

@@ -5,8 +5,9 @@ use hashi::{
     committee::Committee,
     committee_set::CommitteeSet,
     config::Config,
-    proposal_set::{Self, ProposalSet},
-    treasury::Treasury
+    deposit_queue::DepositRequestQueue,
+    treasury::Treasury,
+    utxo_pool::UtxoPool
 };
 use sui::bag::{Self, Bag};
 
@@ -15,9 +16,9 @@ public struct Hashi has key {
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    deposit_queue: hashi::deposit_queue::DepositRequestQueue,
-    utxo_pool: hashi::utxo_pool::UtxoPool,
-    proposals: ProposalSet,
+    deposit_queue: DepositRequestQueue,
+    utxo_pool: UtxoPool,
+    proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     tob: Bag,
 }
@@ -31,11 +32,23 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
-        proposals: proposal_set::create(ctx),
+        proposals: bag::new(ctx),
         tob: bag::new(ctx),
     };
 
     sui::transfer::share_object(hashi);
+}
+
+public(package) fun assert_unpaused(self: &Hashi) {
+    // Check if state is PAUSED
+    assert!(!self.config().paused());
+}
+
+public(package) fun assert_not_reconfiguring(self: &Hashi) {
+    // Check that we are not reconfiguring
+    assert!(!self.committee_set().is_reconfiguring());
+    // Check that we still don't need to do genesis
+    assert!(self.committee_set().has_committee(self.committee_set().epoch()));
 }
 
 entry fun register_btc(
@@ -62,19 +75,6 @@ entry fun register_upgrade_cap(
     assert!(upgrade_cap.package() == this_package_id);
 
     self.config_mut().set_upgrade_cap(upgrade_cap);
-}
-
-entry fun bootstrap(
-    self: &mut Hashi,
-    sui_system: &sui_system::sui_system::SuiSystemState,
-    ctx: &TxContext,
-) {
-    self.config.assert_version_enabled();
-
-    assert!(self.committee_set.epoch() == 0);
-    assert!(!self.committee_set.has_committee(ctx.epoch()));
-
-    self.committee_set.bootstrap(sui_system, ctx);
 }
 
 public(package) fun config(self: &Hashi): &Config {
@@ -105,7 +105,11 @@ public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
     &mut self.treasury
 }
 
-public(package) fun proposals_mut(self: &mut Hashi): &mut ProposalSet {
+public(package) fun proposals(self: &Hashi): &Bag {
+    &self.proposals
+}
+
+public(package) fun proposals_mut(self: &mut Hashi): &mut Bag {
     &mut self.proposals
 }
 
@@ -140,4 +144,30 @@ public(package) fun epoch_certs_and_committee(
         self.tob.add(epoch, hashi::tob::create(epoch, ctx));
     };
     (self.tob.borrow_mut(epoch), self.committee_set.current_committee())
+}
+
+// ======== Test-only Functions ========
+
+#[test_only]
+/// Creates a Hashi instance for testing with all components provided
+public fun create_for_testing(
+    committee_set: CommitteeSet,
+    config: Config,
+    treasury: Treasury,
+    deposit_queue: hashi::deposit_queue::DepositRequestQueue,
+    utxo_pool: hashi::utxo_pool::UtxoPool,
+    proposals: Bag,
+    tob: Bag,
+    ctx: &mut TxContext,
+): Hashi {
+    Hashi {
+        id: object::new(ctx),
+        committee_set,
+        config,
+        treasury,
+        deposit_queue,
+        utxo_pool,
+        proposals,
+        tob,
+    }
 }
