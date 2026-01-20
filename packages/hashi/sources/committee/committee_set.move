@@ -379,3 +379,60 @@ public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u
     self.remove_committee(next_epoch);
     next_epoch
 }
+
+// ======== Test-only Functions ========
+
+#[test_only]
+/// Creates a CommitteeSet for testing with a pre-built committee
+public fun create_for_testing(
+    committee: Committee,
+    member_addresses: vector<address>,
+    bls_pubkey_bytes: vector<u8>,
+    encryption_key: vector<u8>,
+    ctx: &mut TxContext,
+): CommitteeSet {
+    let mut committee_set = CommitteeSet {
+        members: sui::bag::new(ctx),
+        epoch: committee.epoch(),
+        committees: sui::bag::new(ctx),
+        pending_epoch_change: option::none(),
+    };
+
+    // Add member info for each address so has_member checks pass
+    member_addresses.do!(|addr| {
+        let member_info = create_member_info_for_testing(
+            addr,
+            bls_pubkey_bytes,
+            encryption_key,
+        );
+        committee_set.members.add(addr, member_info);
+    });
+
+    // Insert the committee
+    committee_set.committees.add(committee.epoch(), committee);
+
+    committee_set
+}
+
+#[test_only]
+/// Creates member info for testing with provided keys
+fun create_member_info_for_testing(
+    validator_address: address,
+    bls_pubkey_bytes: vector<u8>,
+    encryption_key: vector<u8>,
+): MemberInfo {
+    use sui::bls12381;
+
+    let public_key = bls12381::g1_to_uncompressed_g1(
+        &bls12381::g1_from_bytes(&bls_pubkey_bytes),
+    );
+
+    MemberInfo {
+        validator_address,
+        operator_address: validator_address,
+        next_epoch_public_key: public_key,
+        https_address: std::vector::empty().to_string(),
+        tls_public_key: std::vector::empty(),
+        next_epoch_encryption_public_key: encryption_key,
+    }
+}

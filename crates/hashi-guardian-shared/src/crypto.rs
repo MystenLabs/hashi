@@ -32,7 +32,7 @@ use tracing::info;
 
 pub type EncSecKey = <X25519HkdfSha256 as Kem>::PrivateKey;
 pub type EncPubKey = <X25519HkdfSha256 as Kem>::PublicKey;
-pub struct EncKeyPair {
+pub struct GuardianEncKeyPair {
     sk: EncSecKey,
     pk: EncPubKey,
 }
@@ -40,7 +40,7 @@ pub type EncapsulatedKey = <X25519HkdfSha256 as Kem>::EncappedKey;
 
 pub type ShareID = NonZeroU16; // Share IDs are assigned from 1, e.g., 1, 2, 3 and so on.
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct Share {
     pub id: ShareID,
     pub value: Scalar,
@@ -75,7 +75,7 @@ pub struct Ciphertext {
 //          Helper impl's
 // ---------------------------------
 
-impl EncKeyPair {
+impl GuardianEncKeyPair {
     pub fn random<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
         let (sk, pk) = X25519HkdfSha256::gen_keypair(rng);
         Self { sk, pk }
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_encrypt_and_decrypt() {
         let bytes = b"Let's encrypt some stuff!";
-        let keypair = EncKeyPair::random(&mut rand::thread_rng());
+        let keypair = GuardianEncKeyPair::random(&mut rand::thread_rng());
         let aad = Some(&[0; 32]);
         let ciphertext =
             encrypt(bytes, keypair.public_key(), aad, &mut rand::thread_rng()).unwrap();
@@ -430,7 +430,7 @@ mod tests {
         let shares = split_secret(&sk, &mut rand::thread_rng());
 
         // Create a list with duplicate share IDs: [shares[0], shares[1], shares[0]]
-        let duplicate_shares = vec![shares[0].clone(), shares[1].clone(), shares[0].clone()];
+        let duplicate_shares = vec![shares[0], shares[1], shares[0]];
 
         let result = combine_shares(&duplicate_shares);
         assert!(

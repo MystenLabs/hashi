@@ -1,11 +1,13 @@
 //! Definitions of the raw Move structs in the hashi package
 
+use fastcrypto::traits::ToFromBytes;
 use std::collections::BTreeSet;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::FromBcs;
+use sui_sdk_types::bcs::ToBcs;
 
 pub trait MoveType {
     const PACKAGE_VERSION: u64 = 1;
@@ -99,7 +101,7 @@ impl MoveType for MemberInfo {
 }
 
 /// Rust version of the Move hashi::committee::CommitteeMember type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct CommitteeMember {
     pub validator_address: Address,
     pub public_key: Vec<u8>, //Element<UncompressedG1>,
@@ -110,7 +112,8 @@ pub struct CommitteeMember {
 /// This represents a BLS signing committee for a given epoch.
 ///
 /// Rust version of the Move hashi::committee::Committee type.
-#[derive(Debug, serde_derive::Deserialize)]
+/// Also used in the guardian to serialize Committee.
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Committee {
     /// The epoch in which the committee is active.
     pub epoch: u64,
@@ -608,5 +611,54 @@ impl MoveType for AbortReconfigEvent {
 impl From<AbortReconfigEvent> for HashiEvent {
     fn from(value: AbortReconfigEvent) -> Self {
         Self::AbortReconfigEvent(value)
+    }
+}
+
+impl From<&crate::committee::CommitteeMember> for CommitteeMember {
+    fn from(m: &crate::committee::CommitteeMember) -> Self {
+        Self {
+            validator_address: m.validator_address(),
+            public_key: m.public_key().as_bytes().to_vec(),
+            encryption_public_key: m.encryption_public_key().to_bcs().expect("should not fail"),
+            weight: m
+                .weight()
+                .try_into()
+                .expect("committee member weight should fit into u16"),
+        }
+    }
+}
+
+impl TryFrom<CommitteeMember> for crate::committee::CommitteeMember {
+    type Error = anyhow::Error;
+
+    fn try_from(m: CommitteeMember) -> Result<Self, Self::Error> {
+        let public_key = crate::committee::BLS12381PublicKey::from_bytes(&m.public_key)
+            .map_err(|e| anyhow::anyhow!("invalid public key {}", e))?;
+
+        let encryption_public_key =
+            crate::committee::EncryptionPublicKey::from_bcs(&m.encryption_public_key)
+                .map_err(|e| anyhow::anyhow!("invalid encryption public key {}", e))?;
+
+        Ok(crate::committee::CommitteeMember::new(
+            m.validator_address,
+            public_key,
+            encryption_public_key,
+            m.weight as u64,
+        ))
+    }
+}
+
+impl From<&crate::committee::Committee> for Committee {
+    fn from(c: &crate::committee::Committee) -> Self {
+        Self {
+            epoch: c.epoch(),
+            members: c.members().iter().map(Into::into).collect(),
+            total_weight: c
+                .total_weight()
+                .try_into()
+                .expect("committee total_weight should fit into u16"),
+            // TODO: implement aggregation if needed
+            total_aggregated_key: vec![],
+        }
     }
 }

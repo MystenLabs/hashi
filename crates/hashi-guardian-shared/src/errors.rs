@@ -2,10 +2,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::Json;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use tracing::error;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GuardianError {
     InternalError(String),
     InvalidInputs(String),

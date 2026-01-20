@@ -1,6 +1,5 @@
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use hashi_types::committee::EncryptionPrivateKey;
 use sui_sdk_types::Address;
 
 pub use crate::dkg::types::RotationMessages;
@@ -37,18 +36,4 @@ pub trait PublicMessagesStore: Send + Sync {
 
     /// List all stored rotation messages for the current epoch.
     fn list_all_rotation_messages(&self) -> Result<Vec<(Address, RotationMessages)>>;
-}
-
-pub trait SecretsStore: Send + Sync {
-    /// Store encryption private key
-    ///
-    /// Fails if called more than once.
-    // TODO: Apply at node initialization
-    fn store_encryption_key(&mut self, key: &EncryptionPrivateKey) -> Result<()>;
-
-    /// Retrieve encryption private key
-    fn get_encryption_key(&self) -> Result<Option<EncryptionPrivateKey>>;
-
-    /// Clear all secrets (called at epoch transitions)
-    fn clear(&mut self) -> Result<()>;
 }
