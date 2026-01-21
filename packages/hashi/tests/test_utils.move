@@ -17,17 +17,6 @@ use hashi::{
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
 
-// ======== Test Fixtures ========
-// TODO: add proper signing and encryption fixtures for signature verification tests
-
-/// BLS12-381 G1 generator point - valid public key for testing committee membership
-const TEST_BLS_PUBKEY: vector<u8> =
-    x"97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
-
-/// 32-byte dummy encryption key for testing
-const TEST_ENCRYPTION_KEY: vector<u8> =
-    x"0000000000000000000000000000000000000000000000000000000000000001";
-
 // ======== Transaction Context Helpers ========
 
 /// Creates a new TxContext with the specified sender address
@@ -39,6 +28,58 @@ public fun new_tx_context(sender: address, epoch: u64): TxContext {
         0, // epoch_timestamp_ms
         0, // ids_created
     )
+}
+
+// === BLS Helpers ===
+
+public fun bls_min_pk_sign(msg: &vector<u8>, sk: &vector<u8>): vector<u8> {
+    let sk_element = bls12381::scalar_from_bytes(sk);
+    let hashed_msg = bls12381::hash_to_g2(msg);
+    let sig = bls12381::g2_mul(&sk_element, &hashed_msg);
+    *sig.bytes()
+}
+
+public fun bls_min_pk_from_sk(sk: &vector<u8>): vector<u8> {
+    let sk_element = bls12381::scalar_from_bytes(sk);
+    let g1 = bls12381::g1_generator();
+    let pk = bls12381::g1_mul(&sk_element, &g1);
+    *pk.bytes()
+}
+
+// Prepends the key with zeros to get 32 bytes.
+public fun pad_bls_sk(sk: &vector<u8>): vector<u8> {
+    let mut sk = *sk;
+    if (sk.length() < 32) {
+        // Prepend with zeros to get 32 bytes.
+        sk.reverse();
+        (32 - sk.length()).do!(|_| sk.push_back(0));
+        sk.reverse();
+    };
+    sk
+}
+
+/// Returns the secret key scalar 117.
+public fun bls_sk_for_testing(): vector<u8> {
+    pad_bls_sk(&x"75")
+}
+
+/// Returns 10 bls secret keys.
+public fun bls_secret_keys_for_testing(): vector<vector<u8>> {
+    let mut res = vector[];
+    10u64.do!(|i| {
+        let sk = bls12381::scalar_from_u64(1 + (i as u64));
+        res.push_back(*sk.bytes());
+    });
+    res
+}
+
+/// Aggregates the given signatures into one signature.
+public fun bls_aggregate_sigs(signatures: &vector<vector<u8>>): vector<u8> {
+    let mut aggregate = bls12381::g2_identity();
+    signatures.do_ref!(
+        |sig| aggregate = bls12381::g2_add(&aggregate, &bls12381::g2_from_bytes(sig)),
+    );
+    *aggregate.bytes()
 }
 
 // ======== Hashi Creation ========
@@ -70,12 +111,15 @@ public fun create_hashi_with_weighted_committee(
     // Create the committee
     let committee = committee::new_committee(ctx.epoch(), members);
 
+    let sk = bls_sk_for_testing();
+    let pub_key = bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk));
+
     // Create committee set with the test committee
     let committee_set = hashi::committee_set::create_for_testing(
         committee,
         voters,
-        TEST_BLS_PUBKEY,
-        TEST_ENCRYPTION_KEY,
+        *pub_key.bytes(),
+        sk,
         ctx,
     );
 
@@ -110,14 +154,15 @@ public fun create_hashi_with_weighted_committee(
 }
 
 fun create_test_committee_member(validator_address: address, weight: u16): CommitteeMember {
-    let public_key = bls12381::g1_to_uncompressed_g1(
-        &bls12381::g1_from_bytes(&TEST_BLS_PUBKEY),
+    let sk = bls_sk_for_testing();
+    let pub_key = bls12381::g1_to_uncompressed_g1(
+        &bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk)),
     );
 
     committee::new_committee_member(
         validator_address,
-        public_key,
-        TEST_ENCRYPTION_KEY,
+        pub_key,
+        sk,
         weight,
     )
 }
