@@ -1,20 +1,17 @@
 //! Bitcoin utilities shared between Hashi and Guardian.
 //!
-//! ## Validation model
-//! Types in this module may be:
-//! - **constructed locally** (e.g. by an SDK / external library), or
-//! - **deserialized from untrusted input** (e.g. a request coming off the wire).
-//!
-//! To support both flows, types typically provide two layers of validation:
-//! - `*_::validate_invariants()` checks network-independent structural invariants (e.g. non-empty vectors,
-//!   no duplicate inputs). This is called by `new()` so library users fail fast, and also called by
-//!   `validate(...)` to cover serde-based construction.
-//! - `*_::validate(network)` should be called at request boundaries. It checks invariants and also enforces
-//!   network-dependent constraints (e.g. that all provided addresses match `network`).
+//! Two classes of types exist in this file:
+//! - Types with checked addresses that implement Serialize but not Deserialize
+//! - Types with unchecked addresses implement both Serialize and Deserialize
 
+use crate::BitcoinAddress;
+use crate::BitcoinKeypair;
+use crate::BitcoinPubkey;
+use crate::BitcoinSignature;
 use crate::GuardianError::InvalidInputs;
 use crate::GuardianResult;
 use bitcoin::absolute::LockTime;
+use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::*;
@@ -23,7 +20,6 @@ use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
 use bitcoin::transaction::Version;
-use bitcoin::Address as BitcoinAddress;
 use bitcoin::*;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr;
@@ -36,7 +32,6 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::LazyLock;
-
 // ---------------------------------
 //    Constants & Type Aliases
 // ---------------------------------
@@ -50,41 +45,41 @@ pub type DerivationPath = SuiAddress;
 
 /// (Hashi+Guardian)-owned input UTXO
 /// TODO: Should we take derivation path as input instead of address & leaf_hash? Investigate later.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct InputUTXO {
     outpoint: OutPoint,
     amount: Amount,
-    address: BitcoinAddress<NetworkUnchecked>,
+    address: BitcoinAddress<NetworkChecked>,
     leaf_hash: TapLeafHash,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct ExternalOutputUTXO {
     /// Bitcoin address to withdraw to
-    pub address: BitcoinAddress<NetworkUnchecked>,
+    address: BitcoinAddress<NetworkChecked>,
     /// Amount in satoshis
-    pub amount: Amount,
+    amount: Amount,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InternalOutputUTXO {
     /// The derivation path
-    pub derivation_path: DerivationPath,
+    derivation_path: DerivationPath,
     /// Amount in satoshis
-    pub amount: Amount,
+    amount: Amount,
 }
 
 /// Withdrawal destination and amount.
 /// External amounts count towards rate limits whereas internal amounts don't.
 /// Internal address is derived inside the enclave to ensure that it is actually internal.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub enum OutputUTXO {
     External(ExternalOutputUTXO),
     Internal(InternalOutputUTXO),
 }
 
 /// All the UTXOs associated with a withdrawal transaction
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct TxUTXOs {
     /// Inputs: internal
     inputs: Vec<InputUTXO>,
@@ -96,62 +91,55 @@ pub struct TxUTXOs {
 //    Implementations
 // ---------------------------------
 
-/// Validates that an unchecked address is appropriate for `network`.
-pub fn validate_address_for_network(
+/// Validates that an unchecked address is valid for `network` and returns a checked address.
+fn validate_address_for_network(
     address: &BitcoinAddress<NetworkUnchecked>,
     network: Network,
-) -> GuardianResult<()> {
-    if !address.is_valid_for_network(network) {
-        return Err(InvalidInputs(format!(
-            "invalid output address {:?} for network {}",
+) -> GuardianResult<BitcoinAddress<NetworkChecked>> {
+    // Prefer the library's checked conversion to avoid accidentally assuming correctness.
+    address.clone().require_network(network).map_err(|_| {
+        InvalidInputs(format!(
+            "invalid address {:?} for network {}",
             address, network
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 /// Represents an input to be spent.
 ///
 /// All inputs are expected to be P2TR (Pay-to-Taproot) since spending is done via taproot script path.
 impl InputUTXO {
-    /// Constructs a new `InputUTXO` and validates structural invariants.
-    ///
-    /// To validate the address for a specific network, call `validate(network)`.
+    /// Constructs a new `InputUTXO` and validates all invariants.
     pub fn new(
         outpoint: OutPoint,
         amount: Amount,
         address: BitcoinAddress<NetworkUnchecked>,
         leaf_hash: TapLeafHash,
+        network: Network,
     ) -> GuardianResult<Self> {
-        let utxo = Self {
+        // TODO: Validate amount > 0.
+        let address = validate_address_for_network(&address, network)?;
+
+        if !address.script_pubkey().is_p2tr() {
+            return Err(InvalidInputs("input address is not p2tr".to_string()));
+        }
+
+        Ok(Self {
             outpoint,
             amount,
             address,
             leaf_hash,
-        };
-        utxo.validate_invariants()?;
-        Ok(utxo)
+        })
     }
 
-    /// Validates this value, including that the address is valid for `network`.
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        self.validate_invariants()?;
-        validate_address_for_network(&self.address, network)
-    }
-
-    /// Validates network-independent structural invariants.
-    fn validate_invariants(&self) -> GuardianResult<()> {
-        // TODO: Validate amount > 0.
-        if !self
-            .address
-            .clone()
-            .assume_checked()
-            .script_pubkey()
-            .is_p2tr()
-        {
-            return Err(InvalidInputs("input address is not p2tr".to_string()));
-        }
-        Ok(())
+    pub fn from_wire(input: InputUTXOWire, network: Network) -> GuardianResult<Self> {
+        Self::new(
+            input.outpoint,
+            input.amount,
+            input.address,
+            input.leaf_hash,
+            network,
+        )
     }
 
     /// Returns a `TxIn` for this UTXO with placeholder witness data.
@@ -170,37 +158,76 @@ impl InputUTXO {
     }
 
     /// Returns the previous output as a `TxOut` (for sighash computation).
-    pub fn prevout(&self, network: Network) -> TxOut {
+    pub fn prevout(&self) -> TxOut {
         TxOut {
             value: self.amount,
-            script_pubkey: self
-                .address
-                .clone()
-                .require_network(network)
-                .expect("address does not match network")
-                .script_pubkey(),
+            script_pubkey: self.address.script_pubkey(),
         }
+    }
+}
+
+impl InternalOutputUTXO {
+    pub fn new(derivation_path: DerivationPath, amount: Amount) -> Self {
+        Self {
+            derivation_path,
+            amount,
+        }
+    }
+
+    pub fn derivation_path_bytes(&self) -> DerivationPath {
+        self.derivation_path
+    }
+    pub fn amount(&self) -> Amount {
+        self.amount
     }
 }
 
 impl ExternalOutputUTXO {
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
+    /// Constructs a new `ExternalOutputUTXO` and validates the address for the network.
+    pub fn new(
+        address: BitcoinAddress<NetworkUnchecked>,
+        amount: Amount,
+        network: Network,
+    ) -> GuardianResult<Self> {
         // TODO: Validate amount > 0
-        validate_address_for_network(&self.address, network)
+        let address = validate_address_for_network(&address, network)?;
+        Ok(Self { address, amount })
+    }
+
+    pub fn from_wire(input: ExternalOutputUTXOWire, network: Network) -> GuardianResult<Self> {
+        Self::new(input.address, input.amount, network)
     }
 }
-
 /// Represents an output destination for a withdrawal.
 ///
 /// Outputs can be **external** (to a user-provided address) or **internal** (change, derived inside enclave).
 impl OutputUTXO {
-    /// Validates this value, including external addresses against `network`.
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        // TODO: Validate amount > 0 (and optionally enforce dust rules for External outputs).
-        if let OutputUTXO::External(x) = self {
-            x.validate(network)?
-        }
-        Ok(())
+    /// Constructs a new `OutputUTXO::External` variant.
+    pub fn new_external(
+        address: BitcoinAddress<NetworkUnchecked>,
+        amount: Amount,
+        network: Network,
+    ) -> GuardianResult<Self> {
+        Ok(OutputUTXO::External(ExternalOutputUTXO::new(
+            address, amount, network,
+        )?))
+    }
+
+    /// Constructs a new `OutputUTXO::Internal` variant.
+    pub fn new_internal(derivation_path: DerivationPath, amount: Amount) -> Self {
+        OutputUTXO::Internal(InternalOutputUTXO {
+            derivation_path,
+            amount,
+        })
+    }
+
+    pub fn from_wire(output: OutputUTXOWire, network: Network) -> GuardianResult<Self> {
+        Ok(match output {
+            OutputUTXOWire::External(external) => {
+                OutputUTXO::External(ExternalOutputUTXO::from_wire(external, network)?)
+            }
+            OutputUTXOWire::Internal(internal) => OutputUTXO::Internal(internal),
+        })
     }
 
     /// Returns the output amount in satoshis.
@@ -212,22 +239,11 @@ impl OutputUTXO {
     }
 
     /// Constructs a `TxOut` for this output.
-    ///
-    /// Requires that `validate(network)` has been called; panics if address doesn't match `network`.
-    pub fn to_txout(
-        &self,
-        enclave_pubkey: &XOnlyPublicKey,
-        hashi_pubkey: &XOnlyPublicKey,
-        network: Network,
-    ) -> TxOut {
+    pub fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_pubkey: &BitcoinPubkey) -> TxOut {
         match self {
             OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
                 value: *amount,
-                script_pubkey: address
-                    .clone()
-                    .require_network(network)
-                    .expect("address should be validated before calling compute_all_outputs")
-                    .script_pubkey(),
+                script_pubkey: address.script_pubkey(),
             },
             OutputUTXO::Internal(InternalOutputUTXO {
                 derivation_path,
@@ -245,38 +261,18 @@ impl OutputUTXO {
 }
 
 impl TxUTXOs {
-    /// Constructs a new `TxUTXOs` and validates structural invariants.
-    ///
-    /// To validate addresses for a specific network, call `validate(network)`.
+    /// Constructs a new `TxUTXOs` and validates all invariants.
     pub fn new(inputs: Vec<InputUTXO>, outputs: Vec<OutputUTXO>) -> GuardianResult<Self> {
-        let tx_info = Self { inputs, outputs };
-        tx_info.validate_invariants()?;
-        Ok(tx_info)
-    }
-
-    /// Validates this value, including that all inputs and outputs are valid for `network`.
-    pub fn validate(&self, network: Network) -> GuardianResult<()> {
-        self.validate_invariants()?;
-        self.inputs
-            .iter()
-            .try_for_each(|utxo| utxo.validate(network))?;
-        self.outputs
-            .iter()
-            .try_for_each(|utxo| utxo.validate(network))
-    }
-
-    /// Validates network-independent structural invariants.
-    fn validate_invariants(&self) -> GuardianResult<()> {
-        if self.inputs.is_empty() {
+        if inputs.is_empty() {
             return Err(InvalidInputs("input utxos must not be empty".into()));
         }
-        if self.outputs.is_empty() {
+        if outputs.is_empty() {
             return Err(InvalidInputs("output utxos must not be empty".into()));
         }
 
         // Disallow duplicate inputs (same txid,vout), which would result in an invalid transaction.
-        let mut seen_inputs: HashSet<OutPoint> = HashSet::with_capacity(self.inputs.len());
-        for utxo in &self.inputs {
+        let mut seen_inputs: HashSet<OutPoint> = HashSet::with_capacity(inputs.len());
+        for utxo in &inputs {
             if !seen_inputs.insert(utxo.outpoint) {
                 return Err(InvalidInputs(format!(
                     "duplicate input outpoint: {}",
@@ -285,10 +281,12 @@ impl TxUTXOs {
             }
         }
 
-        // Enforce the intended invariant: fees > 0.
-        let _ = self.fees()?;
+        let tx_info = Self { inputs, outputs };
 
-        Ok(())
+        // Enforce the intended invariant: fees > 0.
+        tx_info.assert_positive_fees()?;
+
+        Ok(tx_info)
     }
 
     /// Returns a reference to the inputs.
@@ -305,17 +303,14 @@ impl TxUTXOs {
     ///
     /// For `External` outputs, uses the user-provided address. For `Internal` outputs,
     /// derives a taproot address using the enclave and hashi keys.
-    ///
-    /// Requires that `validate(network)` has been called.
     pub fn compute_all_outputs(
         &self,
-        enclave_pubkey: &XOnlyPublicKey,
-        hashi_pubkey: &XOnlyPublicKey,
-        network: Network,
+        enclave_pubkey: &BitcoinPubkey,
+        hashi_pubkey: &BitcoinPubkey,
     ) -> Vec<TxOut> {
         self.outputs
             .iter()
-            .map(|utxo| utxo.to_txout(enclave_pubkey, hashi_pubkey, network))
+            .map(|utxo| utxo.to_txout(enclave_pubkey, hashi_pubkey))
             .collect()
     }
 
@@ -339,7 +334,7 @@ impl TxUTXOs {
             .sum()
     }
 
-    fn fees(&self) -> GuardianResult<Amount> {
+    fn assert_positive_fees(&self) -> GuardianResult<()> {
         let input_sum = self.inputs.iter().map(|utxo| utxo.amount).sum::<Amount>();
         let output_sum = self.outputs.iter().map(|utxo| utxo.amount()).sum();
         if input_sum <= output_sum {
@@ -348,7 +343,7 @@ impl TxUTXOs {
                 input_sum, output_sum
             )));
         }
-        Ok(input_sum - output_sum)
+        Ok(())
     }
 }
 
@@ -359,7 +354,7 @@ impl TxUTXOs {
 /// Signs messages using Schnorr signatures (suitable for taproot script-spend).
 ///
 /// Each message is signed and wrapped in a `Signature` with `TapSighashType::Default`.
-pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
+pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSignature> {
     messages
         .iter()
         // Not using aux randomness which only provides side-channel protection
@@ -374,25 +369,22 @@ pub fn sign_btc_tx(messages: &[Message], kp: &Keypair) -> Vec<Signature> {
 /// Constructs sighash messages for each input, ready for signing.
 ///
 /// Uses `taproot_script_spend_signature_hash` for script-path spending.
-///
-/// Requires that `tx_info.validate(network)` has been called.
 pub fn construct_signing_messages(
     tx_info: &TxUTXOs,
-    enclave_pubkey: &XOnlyPublicKey,
-    hashi_pubkey: &XOnlyPublicKey,
-    network: Network,
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_pubkey: &BitcoinPubkey,
 ) -> Vec<Message> {
     let inputs = tx_info.get_inputs();
 
     // Construct tx
-    let all_outputs = tx_info.compute_all_outputs(enclave_pubkey, hashi_pubkey, network);
+    let all_outputs = tx_info.compute_all_outputs(enclave_pubkey, hashi_pubkey);
     let tx = construct_tx(
         inputs.iter().map(|input| input.txin()).collect(),
         all_outputs,
     );
 
     // Construct signing messages
-    let prevouts: Vec<TxOut> = inputs.iter().map(|input| input.prevout(network)).collect();
+    let prevouts: Vec<TxOut> = inputs.iter().map(|input| input.prevout()).collect();
 
     inputs
         .iter()
@@ -436,17 +428,16 @@ fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 /// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
 /// 3. Place the tapscript as the sole leaf with a NUMS internal key
 pub fn compute_taproot_descriptor(
-    enclave_pubkey: &XOnlyPublicKey,
-    hashi_master_pubkey: &XOnlyPublicKey,
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_pubkey: &BitcoinPubkey,
     hashi_derivation_path: &DerivationPath,
-) -> Tr<XOnlyPublicKey> {
+) -> Tr<BitcoinPubkey> {
     let derived_hashi_pubkey = get_derived_pubkey(hashi_master_pubkey, hashi_derivation_path);
 
     // Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
-    let internal = XOnlyPublicKey::from_str(
-        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
-    )
-    .expect("valid nums key");
+    let internal =
+        BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
+            .expect("valid nums key");
 
     // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
     // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
@@ -455,7 +446,7 @@ pub fn compute_taproot_descriptor(
         internal, enclave_pubkey, derived_hashi_pubkey
     );
 
-    match Descriptor::<XOnlyPublicKey>::from_str(&desc_str).expect("valid descriptor") {
+    match Descriptor::<BitcoinPubkey>::from_str(&desc_str).expect("valid descriptor") {
         Descriptor::Tr(tr) => tr,
         _ => panic!("unexpected descriptor"),
     }
@@ -463,8 +454,8 @@ pub fn compute_taproot_descriptor(
 
 /// Computes both the address and leaf script for a given derivation path and network.
 fn compute_taproot_artifacts(
-    enclave_pubkey: &XOnlyPublicKey,
-    hashi_master_pubkey: &XOnlyPublicKey,
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_pubkey: &BitcoinPubkey,
     hashi_derivation_path: &DerivationPath,
 ) -> (ScriptBuf, TapLeafHash) {
     let desc =
@@ -484,9 +475,9 @@ fn compute_taproot_artifacts(
 ///
 /// Uses the provided derivation path to compute a new public key.
 pub fn get_derived_pubkey(
-    parent_pubkey: &XOnlyPublicKey,
+    parent_pubkey: &BitcoinPubkey,
     derivation_path: &DerivationPath,
-) -> XOnlyPublicKey {
+) -> BitcoinPubkey {
     // Get x-only public key bytes (32 bytes)
     let x_bytes = parent_pubkey.serialize();
 
@@ -500,8 +491,85 @@ pub fn get_derived_pubkey(
     // Get the x-coordinate of the derived key (schnorr keys are x-only with even y)
     let derived_x_bytes = derived_schnorr.to_byte_array();
 
-    // Convert to Bitcoin XOnlyPublicKey
-    XOnlyPublicKey::from_slice(&derived_x_bytes).expect("valid x-only key")
+    // Convert to Bitcoin BitcoinPubkey
+    BitcoinPubkey::from_slice(&derived_x_bytes).expect("valid x-only key")
+}
+
+// ---------------------------------
+//    Serialize / Deserialize
+// ---------------------------------
+
+/// Copy of bitcoin_utils::InputUTXO with unchecked address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputUTXOWire {
+    pub outpoint: OutPoint,
+    pub amount: Amount,
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    pub leaf_hash: TapLeafHash,
+}
+
+impl From<InputUTXO> for InputUTXOWire {
+    fn from(input: InputUTXO) -> Self {
+        Self {
+            outpoint: input.outpoint,
+            amount: input.amount,
+            address: input.address.into_unchecked(),
+            leaf_hash: input.leaf_hash,
+        }
+    }
+}
+
+/// Copy of bitcoin_utils::ExternalOutputUTXOWire with unchecked address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalOutputUTXOWire {
+    /// Bitcoin address to withdraw to
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
+impl From<ExternalOutputUTXO> for ExternalOutputUTXOWire {
+    fn from(o: ExternalOutputUTXO) -> Self {
+        Self {
+            address: o.address.into_unchecked(),
+            amount: o.amount,
+        }
+    }
+}
+
+/// Copy of bitcoin_utils::OutputUTXO with unchecked address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OutputUTXOWire {
+    External(ExternalOutputUTXOWire),
+    Internal(InternalOutputUTXO),
+}
+
+impl From<OutputUTXO> for OutputUTXOWire {
+    fn from(o: OutputUTXO) -> Self {
+        match o {
+            OutputUTXO::External(o) => OutputUTXOWire::External(o.into()),
+            OutputUTXO::Internal(o) => OutputUTXOWire::Internal(o),
+        }
+    }
+}
+
+/// Copy of bitcoin_utils::TxUTXOs with unchecked address
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxUTXOsWire {
+    /// Inputs: internal
+    pub inputs: Vec<InputUTXOWire>,
+    /// Outputs: either external or internal
+    pub outputs: Vec<OutputUTXOWire>,
+}
+
+impl From<TxUTXOs> for TxUTXOsWire {
+    fn from(utxos: TxUTXOs) -> Self {
+        Self {
+            inputs: utxos.inputs.into_iter().map(Into::into).collect(),
+            outputs: utxos.outputs.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 // ---------------------------------
@@ -523,7 +591,7 @@ mod bitcoin_tests {
     fn gen_keypair_and_address(
         bytes: Option<[u8; 32]>,
         network: Network,
-    ) -> (Keypair, BitcoinAddress) {
+    ) -> (BitcoinKeypair, BitcoinAddress) {
         let mut rng = rand::thread_rng();
         let bytes = bytes.unwrap_or({
             let mut bytes = [0u8; 32];
@@ -558,8 +626,8 @@ mod bitcoin_tests {
     }
 
     fn create_taproot_artifacts_for_test(
-        enclave_pubkey: &XOnlyPublicKey,
-        hashi_master_pubkey: &XOnlyPublicKey,
+        enclave_pubkey: &BitcoinPubkey,
+        hashi_master_pubkey: &BitcoinPubkey,
         hashi_derivation_path: &DerivationPath,
         network: Network,
     ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
@@ -588,7 +656,7 @@ mod bitcoin_tests {
         let (hashi_keypair, _) = gen_keypair_and_address(None, Regtest);
         let hashi_pk = hashi_keypair.x_only_public_key().0;
 
-        // Convert Bitcoin XOnlyPublicKey -> fastcrypto G -> Bitcoin XOnlyPublicKey
+        // Convert Bitcoin BitcoinPubkey -> fastcrypto G -> Bitcoin BitcoinPubkey
         let x_bytes = hashi_pk.serialize();
         let g_point = threshold_schnorr::G::with_even_y_from_x_be_bytes(&x_bytes)
             .expect("valid x coordinate");
@@ -599,7 +667,7 @@ mod bitcoin_tests {
             "Round-trip conversion should preserve the key"
         );
         let reconstructed_pk =
-            XOnlyPublicKey::from_slice(&reconstructed_x_bytes).expect("valid x-only key");
+            BitcoinPubkey::from_slice(&reconstructed_x_bytes).expect("valid x-only key");
         assert_eq!(
             hashi_pk, reconstructed_pk,
             "Round-trip conversion should preserve the key"
@@ -649,6 +717,7 @@ mod bitcoin_tests {
             input_amount,
             address.as_unchecked().clone(),
             leaf_hash,
+            Regtest,
         )
         .unwrap();
 
@@ -657,7 +726,7 @@ mod bitcoin_tests {
             vec![input_utxo.clone()],
             vec![
                 OutputUTXO::External(ExternalOutputUTXO {
-                    address: dest_address.as_unchecked().clone(),
+                    address: dest_address,
                     amount: Amount::from_sat(100), // 100 sats is sent
                 }),
                 OutputUTXO::Internal(InternalOutputUTXO {
@@ -668,10 +737,7 @@ mod bitcoin_tests {
         )
         .unwrap();
 
-        // Validate early (fail fast)
-        tx_info.validate(Regtest).unwrap();
-
-        let messages = construct_signing_messages(&tx_info, &enclave_pk, &hashi_pk, Regtest);
+        let messages = construct_signing_messages(&tx_info, &enclave_pk, &hashi_pk);
         let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair);
 
         // D) Hashi signs the transaction.
@@ -691,7 +757,7 @@ mod bitcoin_tests {
         let mut input_txin = input_utxo.txin();
         input_txin.witness = witness;
 
-        let all_outputs = tx_info.compute_all_outputs(&enclave_pk, &hashi_pk, Regtest);
+        let all_outputs = tx_info.compute_all_outputs(&enclave_pk, &hashi_pk);
         let signed_tx = construct_tx(vec![input_txin], all_outputs);
         println!("Signed TX: {:#?}", signed_tx);
         println!("TXID: {}", signed_tx.compute_txid());

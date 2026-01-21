@@ -2,7 +2,16 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use crate::bitcoin_utils::ExternalOutputUTXOWire;
+use crate::bitcoin_utils::InputUTXOWire;
+use crate::bitcoin_utils::InternalOutputUTXO;
+use crate::bitcoin_utils::OutputUTXOWire;
+use crate::bitcoin_utils::TxUTXOsWire;
+use crate::epoch_store::EpochWindow;
+use crate::BitcoinSignature;
 use crate::Ciphertext;
+use crate::CommitteeSignatureWire;
+use crate::CommitteeStore;
 use crate::EncPubKey;
 use crate::EncryptedShare;
 use crate::GetGuardianInfoResponse;
@@ -13,28 +22,35 @@ use crate::GuardianSignature;
 use crate::GuardianSigned;
 use crate::HashiCommittee;
 use crate::HashiCommitteeMember;
+use crate::HashiSigned;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
 use crate::ProvisionerInitRequestState;
+use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
 use crate::ShareCommitment;
 use crate::ShareID;
+use crate::SignedStandardWithdrawalRequestWire;
+use crate::StandardWithdrawalRequest;
+use crate::StandardWithdrawalRequestWire;
+use crate::StandardWithdrawalResponse;
 use crate::WithdrawalConfig;
 use crate::WithdrawalState;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::hashes::Hash as _;
+use bitcoin::Address as BitcoinAddress;
+use bitcoin::Amount;
+use bitcoin::OutPoint;
+use bitcoin::TapLeafHash;
+use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
-use fastcrypto::traits::ToFromBytes;
-use hashi_types::committee::BLS12381PublicKey;
-use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 use std::time::Duration;
-use sui_sdk_types::bcs::FromBcs;
-use sui_sdk_types::bcs::ToBcs;
-use sui_sdk_types::Address as SuiAddress;
 
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
@@ -124,10 +140,15 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         // State
         let state_pb = req.state.ok_or_else(|| missing("state"))?;
 
-        let committee_pb = state_pb
-            .hashi_committee
-            .ok_or_else(|| missing("hashi_committee"))?;
-        let hashi_committee = pb_to_hashi_committee(committee_pb)?;
+        let epoch_window_pb = state_pb
+            .epoch_window
+            .ok_or_else(|| missing("epoch_window"))?;
+        let epoch_window = pb_to_epoch_window(epoch_window_pb)?;
+
+        let committees_pb = state_pb
+            .hashi_committees
+            .ok_or_else(|| missing("committees"))?;
+        let hashi_committees = pb_to_hashi_committee_store(committees_pb, epoch_window)?;
 
         let withdrawal_config_pb = state_pb
             .withdrawal_config
@@ -137,7 +158,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         let withdrawal_state_pb = state_pb
             .withdrawal_state
             .ok_or_else(|| missing("withdrawal_state"))?;
-        let withdrawal_state = pb_to_withdrawal_state(withdrawal_state_pb)?;
+        let withdrawal_state = pb_to_withdrawal_state(withdrawal_state_pb, epoch_window)?;
 
         let master_pk_bytes = state_pb
             .hashi_btc_master_pubkey
@@ -149,11 +170,11 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         Ok(ProvisionerInitRequest::new(
             encrypted_share,
             ProvisionerInitRequestState::new(
-                hashi_committee,
+                hashi_committees,
                 withdrawal_config,
                 withdrawal_state,
                 hashi_btc_master_pubkey,
-            ),
+            )?,
         ))
     }
 }
@@ -167,6 +188,61 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         Ok(GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
             server_version,
+        })
+    }
+}
+
+// TODO: Replace with TryFrom<> after moving it to hashi-types.
+pub fn pb_to_signed_standard_withdrawal_request_wire(
+    req: pb::SignedStandardWithdrawalRequest,
+) -> GuardianResult<SignedStandardWithdrawalRequestWire> {
+    let data = req.data.ok_or_else(|| missing("data"))?;
+    let committee_signature_pb = req
+        .committee_signature
+        .ok_or_else(|| missing("committee_signature"))?;
+    let (epoch, signature, bitmap) = pb_to_committee_signature(committee_signature_pb)?;
+
+    let wid = data.wid.ok_or_else(|| missing("wid"))?;
+    let utxos_pb = data.utxos.ok_or_else(|| missing("utxos"))?;
+    let utxos_wire = pb_to_tx_utxos_wire(utxos_pb)?;
+
+    Ok(SignedStandardWithdrawalRequestWire {
+        data: StandardWithdrawalRequestWire {
+            wid,
+            utxos: utxos_wire,
+        },
+        signature: CommitteeSignatureWire {
+            epoch,
+            signature,
+            bitmap,
+        },
+    })
+}
+
+impl TryFrom<pb::SignedStandardWithdrawalResponse> for GuardianSigned<StandardWithdrawalResponse> {
+    type Error = GuardianError;
+
+    fn try_from(resp: pb::SignedStandardWithdrawalResponse) -> Result<Self, Self::Error> {
+        let data = resp.data.ok_or_else(|| missing("data"))?;
+        let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
+        let signature_bytes = resp.signature.ok_or_else(|| missing("signature"))?;
+
+        let signature = GuardianSignature::try_from(signature_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
+
+        let enclave_signatures: Vec<BitcoinSignature> = data
+            .enclave_signatures
+            .iter()
+            .map(|sig_bytes| {
+                BitcoinSignature::from_slice(sig_bytes.as_ref())
+                    .map_err(|e| InvalidInputs(format!("invalid bitcoin signature: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(GuardianSigned {
+            data: StandardWithdrawalResponse { enclave_signatures },
+            timestamp_ms,
+            signature,
         })
     }
 }
@@ -222,11 +298,20 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::ProvisionerInitState {
+    // Shared window metadata.
+    let window = s.hashi_committees.epoch_window();
+    debug_assert_eq!(
+        window,
+        s.withdrawal_state.rate_limiter().epoch_window(),
+        "committee store and rate limiter must use the same EpochWindow"
+    );
+
     pb::ProvisionerInitState {
-        hashi_committee: Some(hashi_committee_to_pb(s.hashi_committee)),
+        hashi_committees: Some(hashi_committee_store_to_pb(s.hashi_committees)),
         withdrawal_config: Some(withdrawal_config_to_pb(s.withdrawal_config)),
         withdrawal_state: Some(withdrawal_state_to_pb(s.withdrawal_state)),
         hashi_btc_master_pubkey: Some(s.hashi_btc_master_pubkey.serialize().to_vec().into()),
+        epoch_window: Some(epoch_window_to_pb(window)),
     }
 }
 
@@ -237,12 +322,58 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
     }
 }
 
+pub fn signed_standard_withdrawal_request_to_pb(
+    req: &HashiSigned<StandardWithdrawalRequest>,
+) -> pb::SignedStandardWithdrawalRequest {
+    let data: StandardWithdrawalRequestWire = req.message().clone().into();
+
+    pb::SignedStandardWithdrawalRequest {
+        data: Some(standard_withdrawal_request_wire_to_pb(data)),
+        committee_signature: Some(pb::CommitteeSignature {
+            epoch: Some(req.epoch()),
+            signature: Some(req.signature_bytes().to_vec().into()),
+            bitmap: Some(req.signers_bitmap_bytes().to_vec().into()),
+        }),
+    }
+}
+
+pub fn standard_withdrawal_response_signed_to_pb(
+    s: GuardianSigned<StandardWithdrawalResponse>,
+) -> pb::SignedStandardWithdrawalResponse {
+    let signature = s.signature.to_bytes().to_vec();
+
+    pb::SignedStandardWithdrawalResponse {
+        data: Some(pb::StandardWithdrawalResponseData {
+            enclave_signatures: s
+                .data
+                .enclave_signatures
+                .iter()
+                .map(|sig| sig.to_vec().into())
+                .collect(),
+        }),
+        timestamp_ms: Some(s.timestamp_ms),
+        signature: Some(signature.into()),
+    }
+}
+
 // ----------------------------------
 //              Helpers
 // ----------------------------------
 
 fn missing(field: &str) -> GuardianError {
     InvalidInputs(format!("missing {field}"))
+}
+
+fn pb_to_committee_signature(s: pb::CommitteeSignature) -> GuardianResult<(u64, Vec<u8>, Vec<u8>)> {
+    let epoch = s.epoch.ok_or_else(|| missing("epoch"))?;
+    let signature_bytes = s.signature.ok_or_else(|| missing("signature"))?;
+    let signer_bitmap_bytes = s.bitmap.ok_or_else(|| missing("signer_bitmap"))?;
+
+    Ok((
+        epoch,
+        signature_bytes.to_vec(),
+        signer_bitmap_bytes.to_vec(),
+    ))
 }
 
 fn pb_share_commitments_to_domain(
@@ -258,6 +389,29 @@ fn pb_share_commitments_to_domain(
             })
         })
         .collect::<GuardianResult<Vec<_>>>()
+}
+
+fn pb_to_epoch_window(w: pb::EpochWindow) -> GuardianResult<EpochWindow> {
+    let base_epoch = w
+        .base_epoch
+        .ok_or_else(|| missing("epoch_window.base_epoch"))?;
+    let num_epochs = w
+        .num_epochs
+        .ok_or_else(|| missing("epoch_window.num_epochs"))?;
+
+    let num_epochs = u16::try_from(num_epochs)
+        .map_err(|_| InvalidInputs("num_epochs: out of range for u16".into()))?;
+    let num_epochs = NonZeroU16::new(num_epochs)
+        .ok_or_else(|| InvalidInputs("num_epochs must be >= 1".into()))?;
+
+    Ok(EpochWindow::new(base_epoch, num_epochs))
+}
+
+fn epoch_window_to_pb(w: EpochWindow) -> pb::EpochWindow {
+    pb::EpochWindow {
+        base_epoch: Some(w.base_epoch),
+        num_epochs: Some(w.num_epochs.get() as u32),
+    }
 }
 
 fn pb_to_share_id(id_pb_opt: Option<pb::GuardianShareId>) -> GuardianResult<ShareID> {
@@ -397,17 +551,67 @@ fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
     }
 }
 
-fn pb_to_withdrawal_state(st: pb::WithdrawalState) -> GuardianResult<WithdrawalState> {
-    let num_withdrawals = st
-        .num_withdrawals
-        .ok_or_else(|| missing("num_withdrawals"))?;
+// TODO: Do we need to handle the case of an empty rate limiter? Yes: below might need change. No: insert_strict in epoch_store might be better.
+fn pb_to_withdrawal_state(
+    st: pb::WithdrawalState,
+    epoch_window: EpochWindow,
+) -> GuardianResult<WithdrawalState> {
+    let rl = st
+        .rate_limiter_state
+        .ok_or_else(|| missing("rate_limiter_state"))?;
 
-    Ok(WithdrawalState { num_withdrawals })
+    let withdrawn: Vec<Amount> = rl
+        .withdrawn_sats
+        .into_iter()
+        .map(Amount::from_sat)
+        .collect();
+
+    let max_withdrawable_per_epoch_sats = rl
+        .max_withdrawable_per_epoch_sats
+        .ok_or_else(|| missing("rate_limiter_state.max_withdrawable_per_epoch_sats"))?;
+
+    Ok(WithdrawalState::new(RateLimiter::new(
+        epoch_window,
+        withdrawn,
+        Amount::from_sat(max_withdrawable_per_epoch_sats),
+    )?))
 }
 
 fn withdrawal_state_to_pb(st: WithdrawalState) -> pb::WithdrawalState {
+    let limiter = st.rate_limiter();
+
     pb::WithdrawalState {
-        num_withdrawals: Some(st.num_withdrawals),
+        rate_limiter_state: Some(pb::RateLimiter {
+            withdrawn_sats: limiter
+                .state
+                .iter()
+                .map(|(_, x)| Amount::to_sat(*x))
+                .collect(),
+            max_withdrawable_per_epoch_sats: Some(limiter.max_withdrawable_per_epoch.to_sat()),
+        }),
+    }
+}
+
+fn pb_to_hashi_committee_store(
+    c: pb::CommitteeStore,
+    epoch_window: EpochWindow,
+) -> GuardianResult<CommitteeStore> {
+    CommitteeStore::new(
+        epoch_window,
+        c.committees
+            .into_iter()
+            .map(pb_to_hashi_committee)
+            .collect::<GuardianResult<Vec<_>>>()?,
+    )
+}
+
+fn hashi_committee_store_to_pb(c: CommitteeStore) -> pb::CommitteeStore {
+    pb::CommitteeStore {
+        committees: c
+            .0
+            .into_owned_iter()
+            .map(|(_, x)| hashi_committee_to_pb(x))
+            .collect(),
     }
 }
 
@@ -448,45 +652,183 @@ fn hashi_committee_to_pb(c: HashiCommittee) -> pb::Committee {
 
 fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiCommitteeMember> {
     let address = m.address.ok_or_else(|| missing("address"))?;
-    let sui_address = SuiAddress::from_str(&address.to_string())
+    let validator_address = sui_sdk_types::Address::from_str(&address)
         .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
 
     let public_key = m.public_key.ok_or_else(|| missing("public_key"))?;
-    let public_key = BLS12381PublicKey::from_bytes(public_key.as_ref())
-        .map_err(|e| InvalidInputs(format!("invalid public_key: {e}")))?;
-
     let encryption_public_key = m
         .encryption_public_key
         .ok_or_else(|| missing("encryption_public_key"))?;
-    let encryption_public_key = EncryptionPublicKey::from_bcs(&encryption_public_key)
-        .map_err(|e| InvalidInputs(format!("invalid encryption_public_key: {e}")))?;
 
     let weight = m.weight.ok_or_else(|| missing("weight"))?;
+    let weight: u16 = weight
+        .try_into()
+        .map_err(|_| InvalidInputs(format!("invalid weight (must fit in u16): {weight}")))?;
 
-    Ok(HashiCommitteeMember::new(
-        sui_address,
-        public_key,
-        encryption_public_key,
+    let x = hashi_types::move_types::CommitteeMember {
+        validator_address,
+        public_key: public_key.to_vec(),
+        encryption_public_key: encryption_public_key.to_vec(),
         weight,
-    ))
+    };
+
+    HashiCommitteeMember::try_from(x)
+        .map_err(|e| InvalidInputs(format!("invalid committee member: {e}")))
 }
 
 fn hashi_committee_member_to_pb(m: HashiCommitteeMember) -> pb::CommitteeMember {
-    let pk = BLS12381PublicKey::as_bytes(m.public_key()).to_vec();
-    let enc_pk = EncryptionPublicKey::to_bcs(m.encryption_public_key())
-        .expect("serialization should not fail");
+    let x = hashi_types::move_types::CommitteeMember::from(&m);
     pb::CommitteeMember {
-        address: Some(m.validator_address().to_string()),
-        public_key: Some(pk.into()),
-        encryption_public_key: Some(enc_pk.into()),
-        weight: Some(m.weight()),
+        address: Some(x.validator_address.to_string()),
+        public_key: Some(x.public_key.into()),
+        encryption_public_key: Some(x.encryption_public_key.into()),
+        weight: Some(x.weight as u64),
+    }
+}
+
+// -----------------------------------------
+//    Standard Withdrawal Helper Functions
+// -----------------------------------------
+
+fn pb_to_tx_utxos_wire(utxos_pb: pb::TxUtxos) -> GuardianResult<TxUTXOsWire> {
+    let inputs = utxos_pb
+        .inputs
+        .into_iter()
+        .map(pb_to_input_utxo_wire)
+        .collect::<GuardianResult<Vec<_>>>()?;
+
+    let outputs = utxos_pb
+        .outputs
+        .into_iter()
+        .map(pb_to_output_utxo_wire)
+        .collect::<GuardianResult<Vec<_>>>()?;
+
+    Ok(TxUTXOsWire { inputs, outputs })
+}
+
+fn pb_to_input_utxo_wire(input_pb: pb::InputUtxo) -> GuardianResult<InputUTXOWire> {
+    let outpoint_pb = input_pb.outpoint.ok_or_else(|| missing("outpoint"))?;
+    let txid_bytes = outpoint_pb.txid.ok_or_else(|| missing("txid"))?;
+    let vout = outpoint_pb.vout.ok_or_else(|| missing("vout"))?;
+
+    let txid = Txid::from_slice(txid_bytes.as_ref())
+        .map_err(|e| InvalidInputs(format!("invalid txid: {e}")))?;
+    let outpoint = OutPoint { txid, vout };
+
+    let amount = input_pb.amount.ok_or_else(|| missing("amount"))?;
+    let address_str = input_pb.address.ok_or_else(|| missing("address"))?;
+    let address = BitcoinAddress::<NetworkUnchecked>::from_str(&address_str)
+        .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
+
+    let leaf_hash_bytes = input_pb.leaf_hash.ok_or_else(|| missing("leaf_hash"))?;
+    let leaf_hash = TapLeafHash::from_slice(leaf_hash_bytes.as_ref())
+        .map_err(|e| InvalidInputs(format!("invalid leaf_hash: {e}")))?;
+
+    Ok(InputUTXOWire {
+        outpoint,
+        amount: Amount::from_sat(amount),
+        address,
+        leaf_hash,
+    })
+}
+
+fn pb_to_output_utxo_wire(output_pb: pb::OutputUtxo) -> GuardianResult<OutputUTXOWire> {
+    let output = output_pb.output.ok_or_else(|| missing("output"))?;
+
+    match output {
+        pb::output_utxo::Output::External(ext) => {
+            let address_str = ext.address.ok_or_else(|| missing("address"))?;
+            let address = BitcoinAddress::<NetworkUnchecked>::from_str(&address_str)
+                .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
+            let amount = ext.amount.ok_or_else(|| missing("amount"))?;
+
+            Ok(OutputUTXOWire::External(ExternalOutputUTXOWire {
+                address,
+                amount: Amount::from_sat(amount),
+            }))
+        }
+        pb::output_utxo::Output::Internal(int) => {
+            let derivation_path_bytes = int
+                .derivation_path
+                .ok_or_else(|| missing("derivation_path"))?;
+            let derivation_path: [u8; 32] = derivation_path_bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
+            let amount = int.amount.ok_or_else(|| missing("amount"))?;
+
+            Ok(OutputUTXOWire::Internal(InternalOutputUTXO::new(
+                derivation_path,
+                Amount::from_sat(amount),
+            )))
+        }
+    }
+}
+
+pub fn standard_withdrawal_request_wire_to_pb(
+    req: StandardWithdrawalRequestWire,
+) -> pb::StandardWithdrawalRequestData {
+    pb::StandardWithdrawalRequestData {
+        wid: Some(req.wid),
+        utxos: Some(tx_utxos_wire_to_pb(req.utxos)),
+    }
+}
+
+fn tx_utxos_wire_to_pb(utxos: TxUTXOsWire) -> pb::TxUtxos {
+    pb::TxUtxos {
+        inputs: utxos
+            .inputs
+            .into_iter()
+            .map(input_utxo_wire_to_pb)
+            .collect(),
+        outputs: utxos
+            .outputs
+            .into_iter()
+            .map(output_utxo_wire_to_pb)
+            .collect(),
+    }
+}
+
+fn input_utxo_wire_to_pb(input: InputUTXOWire) -> pb::InputUtxo {
+    pb::InputUtxo {
+        outpoint: Some(pb::UtxoId {
+            txid: Some(input.outpoint.txid.as_byte_array().to_vec().into()),
+            vout: Some(input.outpoint.vout),
+        }),
+        amount: Some(input.amount.to_sat()),
+        address: Some(input.address.assume_checked_ref().to_string()),
+        leaf_hash: Some(input.leaf_hash.as_byte_array().to_vec().into()),
+    }
+}
+
+fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
+    let output_enum = match output {
+        OutputUTXOWire::External(ext) => {
+            pb::output_utxo::Output::External(pb::ExternalOutputUtxo {
+                address: Some(ext.address.assume_checked_ref().to_string()),
+                amount: Some(ext.amount.to_sat()),
+            })
+        }
+        OutputUTXOWire::Internal(int) => {
+            pb::output_utxo::Output::Internal(pb::InternalOutputUtxo {
+                derivation_path: Some(int.derivation_path_bytes().to_vec().into()),
+                amount: Some(int.amount().to_sat()),
+            })
+        }
+    };
+
+    pb::OutputUtxo {
+        output: Some(output_enum),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AddressValidation;
+    use crate::StandardWithdrawalRequest;
     use crate::ToBytes;
+    use bitcoin::Network;
 
     #[test]
     fn get_guardian_info_response_round_trip() {
@@ -529,5 +871,42 @@ mod tests {
         let pb = provisioner_init_request_to_pb(req.clone()).unwrap();
         let back = ProvisionerInitRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn standard_withdrawal_request_round_trip() {
+        // 1) Create mock *domain* request and sign it.
+        let signed_domain = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+
+        // 2) Convert to pb.
+        let signed_pb = signed_standard_withdrawal_request_to_pb(&signed_domain);
+
+        // 3) Convert back from pb -> wire.
+        let signed_wire = pb_to_signed_standard_withdrawal_request_wire(signed_pb).unwrap();
+
+        // 4) Convert wire -> HashiSigned<StandardWithdrawalRequest> using AddressValidation.
+        let signed_back =
+            HashiSigned::<StandardWithdrawalRequest>::validate_addr(signed_wire, Network::Regtest)
+                .unwrap();
+
+        // 5) Compare the signed messages by their canonical bytes.
+        assert_eq!(signed_domain.epoch(), signed_back.epoch());
+        assert_eq!(
+            signed_domain.signature_bytes(),
+            signed_back.signature_bytes()
+        );
+        assert_eq!(
+            signed_domain.signers_bitmap_bytes(),
+            signed_back.signers_bitmap_bytes()
+        );
+        assert_eq!(signed_domain.message(), signed_back.message());
+    }
+
+    #[test]
+    fn standard_withdrawal_response_round_trip() {
+        let resp = GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing();
+        let pb = standard_withdrawal_response_signed_to_pb(resp.clone());
+        let back = GuardianSigned::<StandardWithdrawalResponse>::try_from(pb).unwrap();
+        assert_eq!(resp, back);
     }
 }

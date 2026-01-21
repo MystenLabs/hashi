@@ -69,6 +69,7 @@ pub struct Committee {
     epoch: u64,
     members: Vec<CommitteeMember>,
     address_to_index: HashMap<Address, usize>,
+    // TODO: move_types::Committee's total_weight has type u16. Align the two.
     total_weight: u64,
 }
 
@@ -372,6 +373,26 @@ impl<T> SignedMessage<T> {
 }
 
 impl<T: Serialize> SignedMessage<T> {
+    pub fn new(
+        epoch: u64,
+        message: T,
+        signature_bytes: &[u8],
+        signers_bitmap_bytes: &[u8],
+    ) -> Result<Self, SignatureError> {
+        let signature = BLS12381AggregateSignature::from_bytes(signature_bytes)
+            .map_err(SignatureError::from_source)?;
+        let signers_bitmap = BitMap::from_bytes(signers_bitmap_bytes);
+        let committee_signature = CommitteeSignature {
+            epoch,
+            signature,
+            signers_bitmap,
+        };
+        Ok(SignedMessage {
+            signature: committee_signature,
+            message,
+        })
+    }
+
     pub fn try_from_parts(
         epoch: u64,
         message: T,

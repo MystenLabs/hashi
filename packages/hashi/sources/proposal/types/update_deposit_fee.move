@@ -19,7 +19,7 @@ public fun propose(
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
-) {
+): ID {
     hashi.config().assert_version_enabled();
     proposal::create(hashi, UpdateDepositFee { fee }, THRESHOLD_BPS, metadata, clock, ctx)
 }

@@ -1,5 +1,4 @@
 use crate::Enclave;
-use ed25519_consensus::VerificationKey;
 use hashi_guardian_shared::*;
 use std::sync::Arc;
 use tracing::info;
@@ -31,7 +30,7 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
 }
 
 #[cfg(not(test))]
-pub fn get_attestation(signing_pk: &VerificationKey) -> GuardianResult<Attestation> {
+pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestation> {
     let signing_pk_bytes = signing_pk.to_bytes();
 
     info!("Initializing NSM driver.");
@@ -63,7 +62,7 @@ pub fn get_attestation(signing_pk: &VerificationKey) -> GuardianResult<Attestati
 }
 
 #[cfg(test)]
-pub fn get_attestation(_: &VerificationKey) -> GuardianResult<Attestation> {
+pub fn get_attestation(_: &GuardianPubKey) -> GuardianResult<Attestation> {
     // Return a mock attestation for testing
     Ok("mock_attestation_document_hex".as_bytes().to_vec())
 }

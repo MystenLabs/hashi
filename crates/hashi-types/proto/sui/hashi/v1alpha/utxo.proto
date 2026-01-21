@@ -12,3 +12,50 @@ message Utxo {
   optional uint64 amount = 2;
   optional bytes derivation_path = 3;
 }
+
+// All UTXOs associated with a withdrawal transaction.
+message TxUtxos {
+  repeated InputUTXO inputs = 1;
+  repeated OutputUTXO outputs = 2;
+}
+
+// (Hashi+Guardian)-owned input UTXO.
+message InputUTXO {
+  // Transaction outpoint.
+  UtxoId outpoint = 1;
+
+  // Amount in satoshis.
+  optional uint64 amount = 2;
+
+  // Bitcoin address.
+  optional string address = 3;
+
+  // Taproot leaf hash (32 bytes).
+  optional bytes leaf_hash = 4;
+}
+
+// Output UTXO (either external or internal).
+message OutputUTXO {
+  oneof output {
+    ExternalOutputUTXO external = 1;
+    InternalOutputUTXO internal = 2;
+  }
+}
+
+// External output to a user-provided Bitcoin address.
+message ExternalOutputUTXO {
+  // Bitcoin address to withdraw to.
+  optional string address = 1;
+
+  // Amount in satoshis.
+  optional uint64 amount = 2;
+}
+
+// Internal output with derivation path (e.g., change address).
+message InternalOutputUTXO {
+  // Derivation path (Sui address format, 32 bytes).
+  optional bytes derivation_path = 1;
+
+  // Amount in satoshis.
+  optional uint64 amount = 2;
+}

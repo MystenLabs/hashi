@@ -199,7 +199,8 @@ impl HashiNetworkBuilder {
         }
 
         // Init the initial committee
-        bootstrap(sui, hashi_ids).await?;
+        start_reconfig(sui, hashi_ids).await?;
+        end_reconfig(sui, hashi_ids).await?;
 
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
@@ -447,7 +448,7 @@ pub async fn update_tls_public_key(
     Ok(())
 }
 
-async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
+async fn start_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
     let mut client = sui.client.clone();
     let private_key = sui.user_keys.first().unwrap();
     let sender = private_key.public_key().derive_address();
@@ -487,8 +488,8 @@ async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
         ],
         commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
             package: hashi_ids.package_id,
-            module: Identifier::from_static("hashi"),
-            function: Identifier::from_static("bootstrap"),
+            module: Identifier::from_static("reconfig"),
+            function: Identifier::from_static("start_reconfig"),
             type_arguments: vec![],
             arguments: vec![Argument::Input(1), Argument::Input(0)],
         })],
@@ -521,9 +522,88 @@ async fn bootstrap(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
         .await?
         .into_inner();
 
+    if let Some(status) = response.transaction().effects().status().error_opt() {
+        dbg!(status);
+    }
+
     assert!(
         response.transaction().effects().status().success(),
-        "bootstrap failed"
+        "start_reconfig failed"
+    );
+
+    Ok(())
+}
+
+async fn end_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
+    let mut client = sui.client.clone();
+    let private_key = sui.user_keys.first().unwrap();
+    let sender = private_key.public_key().derive_address();
+    let price = client.get_reference_gas_price().await?;
+
+    let gas_objects = client
+        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
+        .await?;
+
+    let system_objects = client
+        .ledger_client()
+        .batch_get_objects(
+            BatchGetObjectsRequest::default()
+                .with_requests(vec![
+                    GetObjectRequest::new(&Address::from_static("0x5")),
+                    GetObjectRequest::new(&hashi_ids.hashi_object_id),
+                ])
+                .with_read_mask(FieldMask::from_str("*")),
+        )
+        .await?
+        .into_inner();
+    let _sui_system = system_objects.objects[0].object();
+    let hashi_system = system_objects.objects[1].object();
+
+    let pt = ProgrammableTransaction {
+        inputs: vec![Input::Shared(SharedInput::new(
+            hashi_system.object_id().parse()?,
+            hashi_system.owner().version(),
+            true,
+        ))],
+        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
+            package: hashi_ids.package_id,
+            module: Identifier::from_static("reconfig"),
+            function: Identifier::from_static("end_reconfig"),
+            type_arguments: vec![],
+            arguments: vec![Argument::Input(0)],
+        })],
+    };
+
+    let transaction = Transaction {
+        kind: TransactionKind::ProgrammableTransaction(pt),
+        sender,
+        gas_payment: GasPayment {
+            objects: gas_objects
+                .iter()
+                .map(|o| (&o.object_reference()).try_into())
+                .collect::<Result<_, _>>()?,
+            owner: sender,
+            price,
+            budget: 1_000_000_000,
+        },
+        expiration: TransactionExpiration::None,
+    };
+
+    let signature = private_key.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    assert!(
+        response.transaction().effects().status().success(),
+        "end_reconfig failed"
     );
 
     Ok(())

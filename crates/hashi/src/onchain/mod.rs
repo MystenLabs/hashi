@@ -335,6 +335,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         types::CommitteeSet::new(committees.members.id, committees.committees.id);
     committee_set
         .set_epoch(committees.epoch)
+        .set_pending_epoch_change(committees.pending_epoch_change)
         .set_members(member_info)
         .set_committees(committees_per_epoch);
 
@@ -581,6 +582,42 @@ async fn scrape_committees(
         .await?;
 
     Ok(committees)
+}
+
+async fn scrape_committee(
+    mut client: Client,
+    committees_id: Address,
+    epoch: u64,
+) -> Result<Committee> {
+    let field_id = committees_id.derive_dynamic_child_id(&TypeTag::U64, &epoch.to_bcs().unwrap());
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().owner().finish(),
+                Object::path_builder().contents().finish(),
+                Object::path_builder().object_id(),
+                Object::path_builder().version(),
+            ])),
+        )
+        .await?
+        .into_inner();
+
+    let field: move_types::Field<u64, move_types::Committee> = response
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| tonic::Status::from_error(e.into()))?;
+
+    let members = field
+        .value
+        .members
+        .into_iter()
+        .map(convert_move_committee_member)
+        .collect();
+    let committee = Committee::new(members, field.value.epoch);
+    Ok(committee)
 }
 
 fn convert_move_committee_member(

@@ -19,6 +19,8 @@ public struct CommitteeSet has store {
     /// The current epoch.
     epoch: u64,
     committees: Bag,
+    //TODO do we want more info for this?
+    pending_epoch_change: Option<u64>,
 }
 
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
@@ -26,6 +28,7 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         members: sui::bag::new(ctx),
         epoch: 0,
         committees: sui::bag::new(ctx),
+        pending_epoch_change: option::none(),
     }
 }
 
@@ -55,6 +58,10 @@ public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
 
 fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
     self.committees.add(committee.epoch(), committee)
+}
+
+fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
+    self.committees.remove(epoch)
 }
 
 public(package) fun current_committee(self: &CommitteeSet): &Committee {
@@ -320,13 +327,23 @@ fun new_committee_from_validator_set(
     committee::new_committee(epoch, committee_members)
 }
 
-public(package) fun bootstrap(
+public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
+    self.pending_epoch_change.is_some()
+}
+
+public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
-) {
-    assert!(self.epoch() == 0);
+): u64 {
+    // We can't trigger reconfig if we are already reconfiguring
+    assert!(!self.is_reconfiguring());
+    // Don't start a reconfig for an epoch where we already have a committee
+    // determined.
     assert!(!self.has_committee(ctx.epoch()));
+    // We can only trigger reconfig if the current epoch is 0 (for genesis) or
+    // our current epoch is not the same as Sui's epoch
+    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
 
     let committee = self.new_committee_from_validator_set(sui_system, ctx);
 
@@ -340,6 +357,82 @@ public(package) fun bootstrap(
     // Ensure 95% of stake has registered
     assert!(committee.total_weight() as u64 >= ((9500 * sui_system_weight) / 10000));
 
-    self.epoch = committee.epoch();
-    self.insert_committee(committee)
+    let epoch = committee.epoch();
+    self.pending_epoch_change = option::some(epoch);
+    self.insert_committee(committee);
+    epoch
+}
+
+//TODO include a cert from the next committee to confirm the handover.
+public(package) fun end_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+    assert!(self.is_reconfiguring());
+    let next_epoch = self.pending_epoch_change.extract();
+    assert!(self.has_committee(next_epoch));
+    self.epoch = next_epoch;
+    next_epoch
+}
+
+// TODO include a cert from the current committee to abort a failed reconfig.
+public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+    assert!(self.is_reconfiguring());
+    let next_epoch = self.pending_epoch_change.extract();
+    self.remove_committee(next_epoch);
+    next_epoch
+}
+
+// ======== Test-only Functions ========
+
+#[test_only]
+/// Creates a CommitteeSet for testing with a pre-built committee
+public fun create_for_testing(
+    committee: Committee,
+    member_addresses: vector<address>,
+    bls_pubkey_bytes: vector<u8>,
+    encryption_key: vector<u8>,
+    ctx: &mut TxContext,
+): CommitteeSet {
+    let mut committee_set = CommitteeSet {
+        members: sui::bag::new(ctx),
+        epoch: committee.epoch(),
+        committees: sui::bag::new(ctx),
+        pending_epoch_change: option::none(),
+    };
+
+    // Add member info for each address so has_member checks pass
+    member_addresses.do!(|addr| {
+        let member_info = create_member_info_for_testing(
+            addr,
+            bls_pubkey_bytes,
+            encryption_key,
+        );
+        committee_set.members.add(addr, member_info);
+    });
+
+    // Insert the committee
+    committee_set.committees.add(committee.epoch(), committee);
+
+    committee_set
+}
+
+#[test_only]
+/// Creates member info for testing with provided keys
+fun create_member_info_for_testing(
+    validator_address: address,
+    bls_pubkey_bytes: vector<u8>,
+    encryption_key: vector<u8>,
+): MemberInfo {
+    use sui::bls12381;
+
+    let public_key = bls12381::g1_to_uncompressed_g1(
+        &bls12381::g1_from_bytes(&bls_pubkey_bytes),
+    );
+
+    MemberInfo {
+        validator_address,
+        operator_address: validator_address,
+        next_epoch_public_key: public_key,
+        https_address: std::vector::empty().to_string(),
+        tls_public_key: std::vector::empty(),
+        next_epoch_encryption_public_key: encryption_key,
+    }
 }

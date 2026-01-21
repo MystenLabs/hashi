@@ -118,7 +118,7 @@ public(package) fun create(): Config {
     };
 
     // Set initial config values
-    config.upsert(PAUSED_KEY, config_value::new_bool(true));
+    config.upsert(PAUSED_KEY, config_value::new_bool(false));
     config.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(0));
 
     config

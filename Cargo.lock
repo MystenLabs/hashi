@@ -2545,7 +2545,6 @@ dependencies = [
  "hpke",
  "k256",
  "miniscript 13.0.0",
- "prost",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",

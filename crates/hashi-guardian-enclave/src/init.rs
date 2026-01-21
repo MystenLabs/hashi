@@ -35,10 +35,14 @@ pub async fn operator_init(
     info!("S3 connectivity check complete.");
 
     info!("Storing S3 configuration.");
-    enclave.set_s3_logger(logger).expect("Unable to set logger");
+    enclave
+        .config
+        .set_s3_logger(logger)
+        .expect("Unable to set logger");
 
     info!("Setting bitcoin network to {:?}.", network);
     enclave
+        .config
         .set_bitcoin_network(network)
         .expect("Unable to set network");
 
@@ -179,27 +183,27 @@ async fn finalize_init(
 
     info!("Setting enclave keypair.");
     enclave
+        .config
         .set_btc_keypair(enclave_btc_keypair)
         .expect("Unable to set enclave keypair");
 
     info!("Setting hashi public key.");
     enclave
-        .set_hashi_btc_pk(incoming_state.hashi_btc_master_pubkey)
+        .config
+        .set_hashi_btc_pk(incoming_state.hashi_btc_master_pubkey())
         .expect("Unable to set hashi public key");
 
     info!("Setting withdraw config.");
     enclave
-        .set_withdrawal_config(incoming_state.withdrawal_config)
+        .config
+        .set_withdrawal_config(incoming_state.withdrawal_config().clone())
         .expect("Unable to set withdraw config");
 
-    info!("Setting enclave state.");
+    info!("Setting enclave mutable state.");
     enclave
-        .set_state(
-            incoming_state.hashi_committee,
-            incoming_state.withdrawal_state,
-        )
-        .await
-        .expect("Unable to set state");
+        .state
+        .init(incoming_state)
+        .expect("Unable to init state");
 
     info!("Enclave initialization complete.");
 }
@@ -215,7 +219,6 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 mod tests {
     use super::*;
     use bitcoin::Network;
-    use bitcoin::XOnlyPublicKey;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use hashi_guardian_shared::test_utils::create_btc_keypair;
     use k256::SecretKey;
@@ -234,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let init_state = ProvisionerInitRequestState::mock_for_testing();
+        let init_state = ProvisionerInitRequestState::mock_for_testing(None);
 
         // Simulate THRESHOLD KPs calling provisioner_init
         for (i, share) in shares.iter().enumerate().take(NUM_OF_SHARES) {
@@ -256,11 +259,11 @@ mod tests {
                     i
                 );
                 assert!(
-                    enclave.btc_keypair().is_ok(),
+                    enclave.config.enclave_btc_keypair.get().is_some(),
                     "Bitcoin key should be set after threshold"
                 );
                 assert!(
-                    enclave.hashi_btc_pk().is_ok(),
+                    enclave.config.hashi_btc_master_pubkey.get().is_some(),
                     "Hashi BTC key should be set after threshold"
                 );
             } else if i >= THRESHOLD {
@@ -272,18 +275,18 @@ mod tests {
                     result
                 );
                 assert!(
-                    enclave.btc_keypair().is_ok(),
+                    enclave.config.enclave_btc_keypair.get().is_some(),
                     "Bitcoin key should still be set"
                 );
             } else {
                 // Before threshold, call should succeed
                 assert!(result.is_ok(), "Init should succeed before threshold");
                 assert!(
-                    enclave.btc_keypair().is_err(),
+                    enclave.config.enclave_btc_keypair.get().is_none(),
                     "Bitcoin key should not be set before threshold"
                 );
                 assert!(
-                    enclave.hashi_btc_pk().is_err(),
+                    enclave.config.hashi_btc_master_pubkey.get().is_none(),
                     "Hashi BTC key should not be set before threshold"
                 );
             }
@@ -297,7 +300,7 @@ mod tests {
         // Create enclave without operator init
         let enclave = Enclave::create_with_random_keys();
 
-        let init_state = ProvisionerInitRequestState::mock_for_testing();
+        let init_state = ProvisionerInitRequestState::mock_for_testing(None);
         let share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::ONE,
@@ -321,7 +324,7 @@ mod tests {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
 
         // First KP sends with state1
-        let state1 = ProvisionerInitRequestState::mock_for_testing();
+        let state1 = ProvisionerInitRequestState::mock_for_testing(None);
         let request1 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[0],
             enclave.encryption_public_key(),
@@ -331,12 +334,11 @@ mod tests {
         provisioner_init(enclave.clone(), request1).await.unwrap();
 
         // Second KP tries to send with different state (different pub key)
-        let mut state2 = ProvisionerInitRequestState::mock_for_testing();
         let kp = create_btc_keypair(&[7u8; 32]);
-        state2.hashi_btc_master_pubkey = XOnlyPublicKey::from_keypair(&kp).0;
+        let state2 = ProvisionerInitRequestState::mock_for_testing(Some(kp));
         assert_ne!(
-            state1.hashi_btc_master_pubkey,
-            state2.hashi_btc_master_pubkey
+            state1.hashi_btc_master_pubkey(),
+            state2.hashi_btc_master_pubkey()
         );
         let request2 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[1],
@@ -358,7 +360,7 @@ mod tests {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32), // Random value that won't match commitment
         };
-        let state = ProvisionerInitRequestState::mock_for_testing();
+        let state = ProvisionerInitRequestState::mock_for_testing(None);
         let request = ProvisionerInitRequest::build_from_share_and_state(
             &bogus_share,
             enclave.encryption_public_key(),
@@ -374,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init_duplicate_share() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let state = ProvisionerInitRequestState::mock_for_testing();
+        let state = ProvisionerInitRequestState::mock_for_testing(None);
 
         // Send first share
         let request1 = ProvisionerInitRequest::build_from_share_and_state(
