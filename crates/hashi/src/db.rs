@@ -49,32 +49,37 @@ impl Database {
         }
     }
 
+    /// Store encryption key for the given epoch.
+    ///
+    /// No-op if a key already exists for this epoch (idempotent for restart safety).
+    /// Also cleans up old encryption keys (keeps only current and previous epoch).
     pub fn store_encryption_key(
         &self,
-        epoch: Option<u64>,
+        epoch: u64,
         encryption_key: &EncryptionPrivateKey,
     ) -> Result<()> {
-        let key = epoch.unwrap_or(u64::MAX).to_be_bytes();
-        let value = bcs::to_bytes(encryption_key).unwrap();
-
-        self.encryption_keys.insert(key, value)
+        let key = epoch.to_be_bytes();
+        if !self.encryption_keys.contains_key(key)? {
+            let value = bcs::to_bytes(encryption_key).unwrap();
+            self.encryption_keys.insert(key, value)?;
+        }
+        self.cleanup_old_encryption_keys(epoch)?;
+        Ok(())
     }
 
-    pub fn get_encryption_key(&self, epoch: Option<u64>) -> Result<Option<EncryptionPrivateKey>> {
-        let key = epoch.unwrap_or(u64::MAX).to_be_bytes();
+    pub fn get_encryption_key(&self, epoch: u64) -> Result<Option<EncryptionPrivateKey>> {
+        let key = epoch.to_be_bytes();
         let bytes = match self.encryption_keys.get(key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e),
         };
-
         let byte_array = (&*bytes).try_into().map_err(|_| {
             fjall::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid point",
             ))
         })?;
-
         let scalar = RistrettoScalar::from_byte_array(&byte_array).map_err(|_| {
             fjall::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -82,6 +87,26 @@ impl Database {
             ))
         })?;
         Ok(Some(EncryptionPrivateKey::from(scalar)))
+    }
+
+    /// Clear encryption keys older than `current_epoch - 1` to limit exposure if the node is
+    /// compromised.
+    fn cleanup_old_encryption_keys(&self, current_epoch: u64) -> Result<()> {
+        let cutoff = current_epoch.saturating_sub(1);
+        let keys_to_delete: Vec<_> = self
+            .encryption_keys
+            .iter()
+            .filter_map(|guard| {
+                let key = guard.key().ok()?;
+                let epoch_bytes: [u8; 8] = key.as_ref().try_into().ok()?;
+                let epoch = u64::from_be_bytes(epoch_bytes);
+                if epoch < cutoff { Some(epoch) } else { None }
+            })
+            .collect();
+        for epoch in keys_to_delete {
+            self.encryption_keys.remove(epoch.to_be_bytes())?;
+        }
+        Ok(())
     }
 
     pub fn store_dealer_message(
@@ -200,26 +225,62 @@ mod tests {
 
         let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
 
-        db.store_encryption_key(None, &private_key).unwrap();
-        let key_from_db = db.get_encryption_key(None).unwrap().unwrap();
+        db.store_encryption_key(100, &private_key).unwrap();
+        let key_from_db = db.get_encryption_key(100).unwrap().unwrap();
 
         assert_eq!(private_key, key_from_db);
 
-        db.store_encryption_key(Some(100), &private_key).unwrap();
-        let key_from_db = db.get_encryption_key(Some(100)).unwrap().unwrap();
-
-        assert_eq!(private_key, key_from_db);
-
-        assert!(db.get_encryption_key(Some(101)).unwrap().is_none());
+        assert!(db.get_encryption_key(101).unwrap().is_none());
         drop(db);
 
+        // Test persistence across reopen
         let db = Database::open(tmpdir.path());
-        assert_eq!(private_key, db.get_encryption_key(None).unwrap().unwrap());
-        assert_eq!(
-            private_key,
-            db.get_encryption_key(Some(100)).unwrap().unwrap()
-        );
-        assert!(db.get_encryption_key(Some(101)).unwrap().is_none());
+        assert_eq!(private_key, db.get_encryption_key(100).unwrap().unwrap());
+        assert!(db.get_encryption_key(101).unwrap().is_none());
+
+        // Test that storing twice is idempotent
+        let another_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        db.store_encryption_key(100, &another_key).unwrap();
+        assert_eq!(private_key, db.get_encryption_key(100).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_automatic_cleanup_on_store() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path());
+
+        let key1 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let key2 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let key3 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let key4 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let key5 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+
+        // Store epoch 1 - cleanup(1) is no-op (epoch < 2)
+        db.store_encryption_key(1, &key1).unwrap();
+        assert!(db.get_encryption_key(1).unwrap().is_some());
+
+        // Store epoch 2 - cleanup(2) cutoff=1, deletes nothing
+        db.store_encryption_key(2, &key2).unwrap();
+        assert!(db.get_encryption_key(1).unwrap().is_some());
+        assert!(db.get_encryption_key(2).unwrap().is_some());
+
+        // Store epoch 3 - cleanup(3) cutoff=2, deletes epoch 1
+        db.store_encryption_key(3, &key3).unwrap();
+        assert!(db.get_encryption_key(1).unwrap().is_none()); // deleted
+        assert!(db.get_encryption_key(2).unwrap().is_some());
+        assert!(db.get_encryption_key(3).unwrap().is_some());
+
+        // Store epoch 4 - cleanup(4) cutoff=3, deletes epoch 2
+        db.store_encryption_key(4, &key4).unwrap();
+        assert!(db.get_encryption_key(2).unwrap().is_none()); // deleted
+        assert!(db.get_encryption_key(3).unwrap().is_some());
+        assert!(db.get_encryption_key(4).unwrap().is_some());
+
+        // Store epoch 5 - cleanup(5) cutoff=4, deletes epoch 3
+        db.store_encryption_key(5, &key5).unwrap();
+        assert!(db.get_encryption_key(3).unwrap().is_none()); // deleted
+        assert_eq!(key4, db.get_encryption_key(4).unwrap().unwrap());
+        assert_eq!(key5, db.get_encryption_key(5).unwrap().unwrap());
     }
 
     #[test]

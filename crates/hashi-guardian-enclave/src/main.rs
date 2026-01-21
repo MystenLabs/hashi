@@ -10,6 +10,7 @@ use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
+use serde::Serialize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -260,7 +261,7 @@ impl EnclaveConfig {
 }
 
 impl EnclaveState {
-    pub fn init(&self, incoming_state: ProvisionerInitRequestState) -> GuardianResult<()> {
+    pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
         let (hashi_committees, _, withdrawal_state, _) = incoming_state.into_parts();
 
         self.set_committees(hashi_committees)?;
@@ -314,14 +315,14 @@ impl EnclaveState {
             .read()
             .expect("rwlock read should not fail")
             .as_ref()
-            .is_some_and(|s| s.is_initialized());
+            .is_some_and(|s| s.num_entries() > 0);
 
         let withdraw_state_init = self
             .withdraw_state
             .lock()
             .expect("mutex lock should not fail")
             .as_ref()
-            .is_some_and(|s| s.is_initialized());
+            .is_some_and(|s| s.rate_limiter().num_entries() > 0);
 
         (committees_init, withdraw_state_init)
     }
@@ -352,9 +353,8 @@ impl EnclaveState {
         let epoch = new_committee.epoch();
         info!("Adding new epoch {} to committee map.", epoch);
 
-        // TODO: Replace with insert_strict if we are certain store is always pre-initialized
         self.with_committees_mut(|committee_map| {
-            committee_map.insert_or_start(epoch, Arc::new(new_committee))
+            committee_map.insert(epoch, Arc::new(new_committee))
         })
     }
 
@@ -375,15 +375,12 @@ impl EnclaveState {
         }
 
         // Insert input committee. Iterate and create Arc's.
-        let capacity = hashi_committees.capacity();
-        let mut new_map = ArcCommitteeStore::empty(capacity);
-        for (e, committee) in hashi_committees.into_owned_iter() {
-            info!("Adding committee for epoch {}.", e);
-            new_map
-                .insert_or_start(e, Arc::new(committee))
-                .expect("Should not fail because we are reading from a ConsecutiveEpochStore");
-        }
-        *guard = Some(new_map);
+        let window = hashi_committees.epoch_window();
+        let arc_entries = hashi_committees
+            .into_owned_iter()
+            .map(|(_, committee)| Arc::new(committee))
+            .collect::<Vec<_>>();
+        *guard = Some(ArcCommitteeStore::new(window, arc_entries)?);
         Ok(())
     }
 
@@ -473,7 +470,7 @@ impl Enclave {
         self.config.eph_keys.signing_keys.verification_key()
     }
 
-    pub fn sign<T: ToBytes + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
+    pub fn sign<T: Serialize + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
         let kp = &self.config.eph_keys.signing_keys;
         let timestamp = now_timestamp_ms();
         GuardianSigned::new(data, kp, timestamp)
@@ -577,6 +574,27 @@ fn make_mock_s3_logger_for_testing() -> S3Logger {
     };
 
     S3Logger::from_client("test-session-id".to_string(), config, client)
+}
+
+// ---------------------------------
+//    Tracing utilities
+// ---------------------------------
+
+/// Initialize tracing subscriber with optional file/line number logging
+pub fn init_tracing_subscriber(with_file_line: bool) {
+    let mut builder = tracing_subscriber::FmtSubscriber::builder().with_env_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
+
+    if with_file_line {
+        builder = builder.with_file(true).with_line_number(true);
+    }
+
+    let subscriber = builder.finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("unable to initialize tracing subscriber");
 }
 
 #[cfg(test)]
