@@ -349,7 +349,7 @@ impl EnclaveState {
     }
 
     /// Adds one committee and prunes one if needed.
-    pub fn add_new_committee(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
+    fn add_new_committee(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
         let epoch = new_committee.epoch();
         info!("Adding new epoch {} to committee map.", epoch);
 
@@ -358,7 +358,7 @@ impl EnclaveState {
         })
     }
 
-    /// Set committees. Called only from init(ProvisionerInitRequestState)
+    /// Set committees. Called only from init(ProvisionerInitState)
     fn set_committees(&self, hashi_committees: CommitteeStore) -> GuardianResult<()> {
         info!(
             "Setting state with {} committees.",
@@ -408,7 +408,7 @@ impl EnclaveState {
         self.with_withdraw_state_mut(|st| st.revert_limiter(epoch, amount))
     }
 
-    pub fn add_epoch_to_limiter(&self, epoch: u64) -> GuardianResult<()> {
+    fn add_epoch_to_limiter(&self, epoch: u64) -> GuardianResult<()> {
         self.with_withdraw_state_mut(|st| st.add_epoch_to_limiter(epoch))
     }
 }
