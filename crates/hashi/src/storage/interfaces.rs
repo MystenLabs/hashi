@@ -2,6 +2,7 @@ use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
 
+pub use crate::dkg::types::Messages;
 pub use crate::dkg::types::RotationMessages;
 
 pub trait PublicMessagesStore: Send + Sync {
@@ -17,7 +18,7 @@ pub trait PublicMessagesStore: Send + Sync {
     fn get_dealer_message(&self, dealer: &Address) -> Result<Option<avss::Message>>;
 
     /// List all stored dealer messages for the current epoch.
-    fn list_all_dealer_messages(&self) -> Result<Vec<(Address, avss::Message)>>;
+    fn list_all_dealer_messages(&self) -> Result<Vec<(Address, Messages)>>;
 
     /// Store a dealer's rotation messages.
     ///
@@ -35,5 +36,5 @@ pub trait PublicMessagesStore: Send + Sync {
     fn get_rotation_messages(&self, dealer: &Address) -> Result<Option<RotationMessages>>;
 
     /// List all stored rotation messages for the current epoch.
-    fn list_all_rotation_messages(&self) -> Result<Vec<(Address, RotationMessages)>>;
+    fn list_all_rotation_messages(&self) -> Result<Vec<(Address, Messages)>>;
 }

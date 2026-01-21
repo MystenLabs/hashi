@@ -70,8 +70,9 @@ pub use types::SendMessagesResponse;
 pub use types::SessionId;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
-const EXPECT_THRESHOLD_VALIDATED: &str = "threshold already validated";
-const EXPECT_SERIALIZATION_SUCCESS: &str = "serialization should always succeed";
+const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
+const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
+const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
 
 // DKG protocol
 // 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
@@ -116,21 +117,8 @@ impl DkgManager {
             .current_committee()
             .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
             .clone();
-        let mut nodes_vec = Vec::with_capacity(committee.members().len());
-        for (index, member) in committee.members().iter().enumerate() {
-            let party_id = index as u16;
-            debug_assert_eq!(party_id as usize, nodes_vec.len());
-            nodes_vec.push(Node {
-                id: party_id,
-                pk: member.encryption_public_key().to_owned(),
-                weight: member.weight() as u16,
-            });
-        }
         // TODO: Pass t and f as arguments instead of computing them
-        let original_total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
-        let original_threshold = compute_bft_threshold(original_total_weight);
-        let (nodes, threshold) = Nodes::new_reduced(nodes_vec, original_threshold, 0, 1)
-            .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        let (nodes, threshold) = build_reduced_nodes(&committee)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
         let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
@@ -138,24 +126,13 @@ impl DkgManager {
             .index_of(&address)
             .expect("address not in committee") as u16;
         let previous_committee = committee_set.previous_committee().cloned();
-        let (previous_nodes, previous_threshold) = previous_committee
-            .as_ref()
-            .and_then(|prev_committee| {
-                let mut prev_nodes_vec = Vec::with_capacity(prev_committee.members().len());
-                for (index, member) in prev_committee.members().iter().enumerate() {
-                    prev_nodes_vec.push(Node {
-                        id: index as u16,
-                        pk: member.encryption_public_key().to_owned(),
-                        weight: member.weight() as u16,
-                    });
-                }
-                let prev_total_weight: u16 = prev_nodes_vec.iter().map(|n| n.weight).sum();
-                let prev_original_threshold = compute_bft_threshold(prev_total_weight);
-                Nodes::new_reduced(prev_nodes_vec, prev_original_threshold, 0, 1)
-                    .map(|(nodes, threshold)| (Some(nodes), Some(threshold)))
-                    .ok()
-            })
-            .unwrap_or((None, None));
+        let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
+            Some(prev_committee) => {
+                let (nodes, threshold) = build_reduced_nodes(prev_committee)?;
+                (Some(nodes), Some(threshold))
+            }
+            None => (None, None),
+        };
         let mut manager = Self {
             party_id,
             address,
@@ -922,7 +899,7 @@ impl DkgManager {
             .collect::<Result<_, DkgError>>()?;
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
-                .expect("checked that threshold is met");
+                .expect(EXPECT_THRESHOLD_MET);
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
@@ -1271,20 +1248,19 @@ impl DkgManager {
     }
 
     fn load_stored_messages(&mut self) -> DkgResult<()> {
-        let dkg_messages = self
+        for (dealer, message) in self
             .public_messages_store
             .list_all_dealer_messages()
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        for (dealer, message) in dkg_messages {
-            self.dealer_messages.insert(dealer, Messages::Dkg(message));
+            .map_err(|e| DkgError::StorageError(e.to_string()))?
+        {
+            self.dealer_messages.insert(dealer, message);
         }
-        let rotation_messages = self
+        for (dealer, message) in self
             .public_messages_store
             .list_all_rotation_messages()
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
-        for (dealer, messages) in rotation_messages {
-            self.dealer_messages
-                .insert(dealer, Messages::Rotation(messages));
+            .map_err(|e| DkgError::StorageError(e.to_string()))?
+        {
+            self.dealer_messages.insert(dealer, message);
         }
         Ok(())
     }
@@ -1496,7 +1472,8 @@ impl DkgManager {
             self.party_id,
             &self.dkg_config.nodes,
             &indexed_outputs,
-        )?;
+        )
+        .expect(EXPECT_THRESHOLD_MET);
         if combined.vk != previous_dkg_output.public_key {
             return Err(DkgError::ProtocolFailed(
                 "Key rotation produced different public key".into(),
@@ -1566,6 +1543,29 @@ impl DkgManager {
             self.process_certified_dkg_message(dealer_address)?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
+        // Unlike normal flow which accumulates until threshold in a loop, reconstruction
+        // receives all certificates at once. Check threshold for better error handling.
+        let total_weight: u16 = certified_dealers
+            .keys()
+            .map(|dealer| {
+                let party_id = self
+                    .committee
+                    .index_of(dealer)
+                    .expect("certified dealer must be committee member")
+                    as u16;
+                self.dkg_config
+                    .nodes
+                    .weight_of(party_id)
+                    .expect("party_id must be valid")
+            })
+            .sum();
+        let threshold = self.dkg_config.threshold;
+        if total_weight < threshold {
+            return Err(DkgError::NotEnoughApprovals {
+                needed: threshold as usize,
+                got: total_weight as usize,
+            });
+        }
         self.complete_dkg(certified_dealers.into_keys())
     }
 
@@ -1622,6 +1622,14 @@ impl DkgManager {
                 certified_share_indices.push(share_index);
             }
         }
+        // Unlike normal flow which accumulates until threshold in a loop, reconstruction
+        // receives all certificates at once. Check threshold for better error handling.
+        if certified_share_indices.len() < previous_threshold as usize {
+            return Err(DkgError::NotEnoughApprovals {
+                needed: previous_threshold as usize,
+                got: certified_share_indices.len(),
+            });
+        }
         self.complete_key_rotation_for_reconstruction(previous_threshold, &certified_share_indices)
     }
 
@@ -1654,7 +1662,8 @@ impl DkgManager {
             self.party_id,
             &self.dkg_config.nodes,
             &indexed_outputs,
-        )?;
+        )
+        .expect(EXPECT_THRESHOLD_MET);
         Ok(DkgOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
@@ -1761,8 +1770,29 @@ fn compute_messages_hash(messages: &Messages) -> MessageHash {
     MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
 
-fn compute_bft_threshold(total_weight: u16) -> u16 {
-    (total_weight - 1) / 3 + 1
+fn compute_bft_threshold(total_weight: u16) -> DkgResult<u16> {
+    if total_weight == 0 {
+        return Err(DkgError::InvalidConfig(
+            "committee has zero total weight".into(),
+        ));
+    }
+    Ok((total_weight - 1) / 3 + 1)
+}
+
+fn build_reduced_nodes(committee: &Committee) -> DkgResult<(Nodes<EncryptionGroupElement>, u16)> {
+    let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
+        .members()
+        .iter()
+        .enumerate()
+        .map(|(index, member)| Node {
+            id: index as u16,
+            pk: member.encryption_public_key().to_owned(),
+            weight: member.weight() as u16,
+        })
+        .collect();
+    let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
+    let threshold = compute_bft_threshold(total_weight)?;
+    Nodes::new_reduced(nodes_vec, threshold, 0, 1).map_err(|e| DkgError::CryptoError(e.to_string()))
 }
 
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
@@ -1908,7 +1938,7 @@ mod tests {
             Ok(None)
         }
 
-        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(vec![])
         }
 
@@ -1927,7 +1957,7 @@ mod tests {
             Ok(None)
         }
 
-        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, RotationMessages)>> {
+        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(vec![])
         }
     }
@@ -2816,8 +2846,12 @@ mod tests {
             Ok(self.stored.get(dealer).cloned())
         }
 
-        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
-            Ok(self.stored.iter().map(|(k, v)| (*k, v.clone())).collect())
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+            Ok(self
+                .stored
+                .iter()
+                .map(|(k, v)| (*k, Messages::Dkg(v.clone())))
+                .collect())
         }
 
         fn store_rotation_messages(
@@ -2836,11 +2870,11 @@ mod tests {
             Ok(self.rotation_stored.get(dealer).cloned())
         }
 
-        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, RotationMessages)>> {
+        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(self
                 .rotation_stored
                 .iter()
-                .map(|(k, v)| (*k, v.clone()))
+                .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
                 .collect())
         }
     }
@@ -2860,7 +2894,7 @@ mod tests {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
-        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(vec![])
         }
 
@@ -2879,7 +2913,7 @@ mod tests {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
-        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, RotationMessages)>> {
+        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(vec![])
         }
     }
@@ -6018,8 +6052,12 @@ mod tests {
             Ok(self.stored.get(dealer).cloned())
         }
 
-        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
-            Ok(self.stored.iter().map(|(k, v)| (*k, v.clone())).collect())
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+            Ok(self
+                .stored
+                .iter()
+                .map(|(k, v)| (*k, Messages::Dkg(v.clone())))
+                .collect())
         }
 
         fn store_rotation_messages(
@@ -6038,11 +6076,11 @@ mod tests {
             Ok(self.rotation_stored.get(dealer).cloned())
         }
 
-        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, RotationMessages)>> {
+        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(self
                 .rotation_stored
                 .iter()
-                .map(|(k, v)| (*k, v.clone()))
+                .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
                 .collect())
         }
     }
@@ -7407,7 +7445,7 @@ mod tests {
             self.inner.lock().unwrap().get_dealer_message(dealer)
         }
 
-        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+        fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             self.inner.lock().unwrap().list_all_dealer_messages()
         }
 
@@ -7429,7 +7467,7 @@ mod tests {
             self.inner.lock().unwrap().get_rotation_messages(dealer)
         }
 
-        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, RotationMessages)>> {
+        fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             self.inner.lock().unwrap().list_all_rotation_messages()
         }
     }

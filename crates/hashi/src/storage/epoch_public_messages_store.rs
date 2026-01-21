@@ -4,6 +4,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
 
 use crate::db::Database;
+use crate::dkg::types::Messages;
 use crate::dkg::types::RotationMessages;
 use crate::storage::PublicMessagesStore;
 
@@ -35,9 +36,14 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to get dealer message: {e}"))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         self.db
             .list_all_dealer_messages(self.epoch)
+            .map(|msgs| {
+                msgs.into_iter()
+                    .map(|(addr, msg)| (addr, Messages::Dkg(msg)))
+                    .collect()
+            })
             .map_err(|e| anyhow::anyhow!("failed to list dealer messages: {e}"))
     }
 
@@ -57,9 +63,14 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to get rotation messages: {e}"))
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, RotationMessages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         self.db
             .list_all_rotation_messages(self.epoch)
+            .map(|msgs| {
+                msgs.into_iter()
+                    .map(|(addr, msg)| (addr, Messages::Rotation(msg)))
+                    .collect()
+            })
             .map_err(|e| anyhow::anyhow!("failed to list rotation messages: {e}"))
     }
 }
