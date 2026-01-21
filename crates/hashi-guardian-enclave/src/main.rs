@@ -551,6 +551,31 @@ impl Enclave {
     }
 }
 
+// ---------------------------------
+//    Tracing utilities
+// ---------------------------------
+
+/// Initialize tracing subscriber with optional file/line number logging
+pub fn init_tracing_subscriber(with_file_line: bool) {
+    let mut builder = tracing_subscriber::FmtSubscriber::builder().with_env_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
+
+    if with_file_line {
+        builder = builder.with_file(true).with_line_number(true);
+    }
+
+    let subscriber = builder.finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("unable to initialize tracing subscriber");
+}
+
+// ---------------------------------
+//    Tests and related utilities
+// ---------------------------------
+
 // Mock S3 logger for use in APIs calls post operator_init, e.g., provisioner_init, withdrawals.
 #[cfg(test)]
 fn make_mock_s3_logger_for_testing() -> S3Logger {
@@ -573,28 +598,7 @@ fn make_mock_s3_logger_for_testing() -> S3Logger {
         secret_key: "test-secret-key".to_string(),
     };
 
-    S3Logger::from_client("test-session-id".to_string(), config, client)
-}
-
-// ---------------------------------
-//    Tracing utilities
-// ---------------------------------
-
-/// Initialize tracing subscriber with optional file/line number logging
-pub fn init_tracing_subscriber(with_file_line: bool) {
-    let mut builder = tracing_subscriber::FmtSubscriber::builder().with_env_filter(
-        tracing_subscriber::EnvFilter::builder()
-            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-            .from_env_lossy(),
-    );
-
-    if with_file_line {
-        builder = builder.with_file(true).with_line_number(true);
-    }
-
-    let subscriber = builder.finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("unable to initialize tracing subscriber");
+    S3Logger::from_client_for_tests("test-session-id".to_string(), config, client)
 }
 
 #[cfg(test)]

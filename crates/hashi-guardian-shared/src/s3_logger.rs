@@ -20,16 +20,18 @@ const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 pub struct S3Logger {
     /// A unique session ID. Used as a prefix in log keys.
-    pub session_id: String,
-    pub client: S3Client,
-    pub config: S3Config,
+    session_id: String,
+    /// S3 config: bucket name, API keys
+    config: S3Config,
+    /// S3 client
+    client: S3Client,
 }
 
 impl S3Logger {
     /// Construct an `S3Logger` from an already-configured S3 client.
-    ///
-    /// This is primarily intended for unit tests (e.g. using aws-smithy-mocks).
-    pub fn from_client(session_id: String, config: S3Config, client: S3Client) -> Self {
+    /// This is intended for unit tests that use a mock S3 Client.
+    /// This is not put behind cfg(test) as tests in the enclave crate also use it.
+    pub fn from_client_for_tests(session_id: String, config: S3Config, client: S3Client) -> Self {
         Self {
             session_id,
             client,
@@ -49,7 +51,7 @@ impl S3Logger {
 
         let retry_config = RetryConfig::standard().with_max_attempts(MAX_RETRY_ATTEMPTS); // default is 3
 
-        // TODO: Add `region` to `S3Config` and use it here (instead of hardcoding).
+        // TODO: Add `region` to `S3Config` and use it here (instead of hardcoding)?
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new("us-east-1"))
             .credentials_provider(SharedCredentialsProvider::new(creds))
@@ -229,7 +231,7 @@ mod tests {
             secret_key: "test-secret-key".to_string(),
             bucket_name: "bucket".to_string(),
         };
-        S3Logger::from_client("session".to_string(), config, client)
+        S3Logger::from_client_for_tests("session".to_string(), config, client)
     }
 
     #[derive(Serialize)]
