@@ -26,3 +26,12 @@ ed25519-consensus = "2.1"
 miniscript = "13.0.0"
 fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
+
+# AWS dependencies
+aws-config = "1.1.7"
+aws-sdk-s3 = "1.12.0"
+aws-credential-types = "1"
+
+[dev-dependencies]
+dotenvy = "0.15"
+tokio = { version = "1.43.0", features = ["full"] }

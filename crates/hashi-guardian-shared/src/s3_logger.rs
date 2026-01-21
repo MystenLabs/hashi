@@ -1,25 +1,29 @@
+use crate::S3Config;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
-use hashi_guardian_shared::S3Config;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::GuardianError::InternalError;
+use crate::GuardianError::S3Error;
 use crate::GuardianResult;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
-use hashi_guardian_shared::GuardianError::InternalError;
-use hashi_guardian_shared::GuardianError::S3Error;
 use serde::Serialize;
 use tracing::info;
 
 #[derive(Debug)]
 pub struct S3Logger {
+    /// A unique session ID. Used as a prefix in log keys.
     pub session_id: String,
     pub client: S3Client,
     pub config: S3Config,
+    /// If false, all S3 operations become no-ops. Intended for tests that want to avoid S3 access.
+    /// Currently, it is enabled only in mock_for_testing() that is used in tests.
+    enabled: bool,
 }
 
 impl S3Logger {
@@ -44,6 +48,7 @@ impl S3Logger {
             session_id,
             client,
             config,
+            enabled: true,
         }
     }
 
@@ -55,6 +60,10 @@ impl S3Logger {
     ///     key: session-id/<random>.json
     ///     value: JSON representation of value
     pub async fn write<T: Serialize>(&self, value: &T) -> GuardianResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -63,7 +72,7 @@ impl S3Logger {
         let key = format!("{}/{}.json", self.session_id, rand_suffix);
         info!("Logging to {}", key);
 
-        // TODO: change duration based on env (test/prod)
+        // TODO: change duration based on env or make it a config?
         let expiry_time = SystemTime::now()
             .checked_add(Duration::from_mins(5))
             .expect("Cant overflow");
@@ -86,10 +95,10 @@ impl S3Logger {
 
         // TODO: Implement retries
 
-        info!("📝 Logged entry {} to immutable storage", rand_suffix);
-        info!("🔒 Object locked until: {:?}", expiry_time);
+        info!("Logged entry {} to immutable storage", rand_suffix);
+        info!("Object locked until: {:?}", expiry_time);
         info!(
-            "🌐 Public URL: https://{}.s3.amazonaws.com/{}",
+            "Public URL: https://{}.s3.amazonaws.com/{}",
             &s3_config.bucket_name, key
         );
 
@@ -101,12 +110,19 @@ impl S3Logger {
     // ========================================================================
 
     pub async fn test_s3_connectivity(&self) -> GuardianResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
         self.assert_object_lock_enabled().await
     }
 
     /// Verify that the S3 bucket has object lock enabled and returns an Err if not.
     /// Can be used as a test for S3 connectivity.
     pub async fn assert_object_lock_enabled(&self) -> GuardianResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -146,6 +162,10 @@ impl S3Logger {
     /// List up to 10 objects in the bucket.
     /// This is intended as a lightweight connectivity/debug helper (primarily for testing).
     pub async fn list_objects(&self) -> GuardianResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -188,14 +208,9 @@ impl S3Logger {
         Ok(())
     }
 
-    /// Mock S3Logger
-    #[cfg(test)]
+    /// Mock S3Logger (no-op; does not perform any network calls).
+    /// Use this in test envs where we don't care about S3.
     pub async fn mock_for_testing() -> Self {
-        let mock_s3_config = S3Config {
-            bucket_name: "test-bucket".to_string(),
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-        };
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new("us-east-1"))
             .load()
@@ -203,7 +218,12 @@ impl S3Logger {
         Self {
             session_id: "test-session-id".to_string(),
             client: S3Client::new(&aws_config),
-            config: mock_s3_config,
+            config: S3Config {
+                bucket_name: "test-bucket".to_string(),
+                access_key: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+            },
+            enabled: false,
         }
     }
 }
@@ -211,11 +231,11 @@ impl S3Logger {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::init_tracing_subscriber;
+    use crate::now_timestamp_ms;
+    use crate::GuardianSigned;
+    use crate::LogMessage;
     use ed25519_consensus::SigningKey;
-    use hashi_guardian_shared::init_tracing_subscriber;
-    use hashi_guardian_shared::now_timestamp_ms;
-    use hashi_guardian_shared::GuardianSigned;
-    use hashi_guardian_shared::LogMessage;
     use std::num::NonZeroU16;
 
     async fn setup_s3_from_env_vars() -> S3Logger {
@@ -234,11 +254,6 @@ mod test {
             access_key,
             secret_key,
         };
-
-        // Nullify env vars to make sure they don't interfere with testing
-        std::env::set_var("AWS_BUCKET_NAME", "");
-        std::env::set_var("AWS_ACCESS_KEY_ID", "");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "");
 
         S3Logger::new("guardian-test-logs".into(), config).await
     }
@@ -264,6 +279,8 @@ mod test {
         logger.list_objects().await.unwrap();
     }
 
+    /// Integration test: loads AWS/S3 credentials from the workspace root `.env` and
+    /// attempts to write a log to S3.
     #[tokio::test]
     #[ignore]
     async fn test_s3_write() {
