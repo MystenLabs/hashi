@@ -280,6 +280,7 @@ pub enum HashiEvent {
     BurnEvent(BurnEvent),
     DepositRequestedEvent(DepositRequestedEvent),
     DepositConfirmedEvent(DepositConfirmedEvent),
+    ExpiredDepositDeletedEvent(ExpiredDepositDeletedEvent),
     StartReconfigEvent(StartReconfigEvent),
     EndReconfigEvent(EndReconfigEvent),
     AbortReconfigEvent(AbortReconfigEvent),
@@ -563,6 +564,22 @@ impl MoveType for DepositConfirmedEvent {
 impl From<DepositConfirmedEvent> for HashiEvent {
     fn from(value: DepositConfirmedEvent) -> Self {
         Self::DepositConfirmedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct ExpiredDepositDeletedEvent {
+    pub request_id: Address,
+}
+
+impl MoveType for ExpiredDepositDeletedEvent {
+    const MODULE: &'static str = "deposit";
+    const NAME: &'static str = "ExpiredDepositDeletedEvent";
+}
+
+impl From<ExpiredDepositDeletedEvent> for HashiEvent {
+    fn from(value: ExpiredDepositDeletedEvent) -> Self {
+        Self::ExpiredDepositDeletedEvent(value)
     }
 }
 

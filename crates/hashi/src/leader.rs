@@ -50,16 +50,19 @@ impl LeaderService {
                 error!("Error waiting for checkpoint change: {e}");
                 break;
             }
-            let checkpoint_height = *checkpoint_rx.borrow_and_update();
+            let (checkpoint_height, checkpoint_timestamp_ms) = {
+                let checkpoint_info = checkpoint_rx.borrow_and_update();
+                (checkpoint_info.height, checkpoint_info.timestamp_ms)
+            };
 
             if self.is_current_leader(checkpoint_height) {
-                info!("Checkpoint {}: We are the leader node", checkpoint_height);
+                info!("Checkpoint {checkpoint_height}: We are the leader node");
             } else {
                 trace!("We are not the leader node");
                 continue;
             }
 
-            self.process_deposit_requests().await;
+            self.process_deposit_requests(checkpoint_timestamp_ms).await;
         }
     }
 
@@ -97,7 +100,7 @@ impl LeaderService {
         is_leader
     }
 
-    async fn process_deposit_requests(&self) {
+    async fn process_deposit_requests(&self, checkpoint_timestamp_ms: u64) {
         let mut deposit_requests: Vec<_> = {
             let state = self.inner.onchain_state().state();
             state
@@ -118,7 +121,7 @@ impl LeaderService {
             self.process_deposit_request(deposit_request).await;
         }
 
-        self.check_delete_expired_deposit_requests(&deposit_requests)
+        self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms)
             .await;
     }
 
@@ -370,17 +373,17 @@ impl LeaderService {
     }
 
     // Deposit requests comes sorted in ascending order, from oldest to newest
-    async fn check_delete_expired_deposit_requests(&self, deposit_requests: &[DepositRequest]) {
+    async fn check_delete_expired_deposit_requests(
+        &self,
+        deposit_requests: &[DepositRequest],
+        checkpoint_timestamp_ms: u64,
+    ) {
         // Check if it's time to delete
         let Some(oldest_request) = deposit_requests.first() else {
             return;
         };
-        let current_time_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
         // If there aren't any deposit requests at least 4 days old, don't do anything
-        if current_time_ms
+        if checkpoint_timestamp_ms
             < oldest_request.timestamp_ms
                 + MAX_DEPOSIT_REQUEST_AGE_MS
                 + DEPOSIT_REQUEST_DELETE_DELAY_MS
@@ -391,7 +394,7 @@ impl LeaderService {
         // Find all expired requests (older than 3 days)
         let expired_requests = deposit_requests
             .iter()
-            .filter(|r| current_time_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
+            .filter(|r| checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
             .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
             .cloned()
             .collect::<Vec<_>>();

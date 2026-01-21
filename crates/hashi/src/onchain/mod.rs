@@ -50,13 +50,22 @@ pub enum Notification {
     ValidatorInfoUpdated(Address),
 }
 
+/// Information about the latest processed checkpoint
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CheckpointInfo {
+    /// The checkpoint height
+    pub height: u64,
+    /// The checkpoint timestamp in milliseconds since Unix epoch
+    pub timestamp_ms: u64,
+}
+
 struct Inner {
     #[allow(unused)]
     ids: HashiIds,
     client: Client,
     sender: broadcast::Sender<Notification>,
-    /// The checkpoint height that this state is recent to
-    checkpoint: watch::Sender<u64>,
+    /// The checkpoint information that this state is recent to
+    checkpoint: watch::Sender<CheckpointInfo>,
     state: RwLock<State>,
 }
 
@@ -115,16 +124,20 @@ impl OnchainState {
         self.0.state.write().unwrap()
     }
 
-    pub fn subscribe_checkpoint(&self) -> watch::Receiver<u64> {
+    pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {
         self.0.checkpoint.subscribe()
     }
 
-    pub fn latest_checkpoint(&self) -> u64 {
-        *self.0.checkpoint.borrow()
+    pub fn latest_checkpoint_height(&self) -> u64 {
+        self.0.checkpoint.borrow().height
     }
 
-    fn update_latest_checkpoint(&self, checkpoint: u64) {
-        self.0.checkpoint.send_replace(checkpoint);
+    pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {
+        self.0.checkpoint.borrow().timestamp_ms
+    }
+
+    fn update_latest_checkpoint_info(&self, info: CheckpointInfo) {
+        self.0.checkpoint.send_replace(info);
     }
 
     fn add_package_version(&self, version: u64, package_id: Address) {
@@ -250,8 +263,8 @@ impl State {
         &self.hashi
     }
 
-    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, u64)> {
-        let (package_versions, (checkpoint, hashi)) = tokio::try_join!(
+    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, CheckpointInfo)> {
+        let (package_versions, (checkpoint_info, hashi)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id),
         )?;
@@ -264,7 +277,7 @@ impl State {
                 package_ids,
                 hashi,
             },
-            checkpoint,
+            checkpoint_info,
         ))
     }
 }
@@ -293,7 +306,10 @@ async fn scrape_package_versions(
     Ok(package_versions)
 }
 
-async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u64, types::Hashi)> {
+async fn scrape_hashi(
+    mut client: Client,
+    hashi_object_id: Address,
+) -> Result<(CheckpointInfo, types::Hashi)> {
     let response = client
         .ledger_client()
         .get_object(
@@ -305,9 +321,14 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
             ])),
         )
         .await?;
-    let checkpoint = response
-        .checkpoint_height()
-        .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
+    let checkpoint_info = CheckpointInfo {
+        height: response
+            .checkpoint_height()
+            .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?,
+        timestamp_ms: response
+            .timestamp_ms()
+            .ok_or_else(|| anyhow!("response missing X_SUI_TIMESTAMP_MS header"))?,
+    };
 
     // Extract initial shared version from owner
     let initial_shared_version = response.get_ref().object().owner().version();
@@ -340,7 +361,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         .set_committees(committees_per_epoch);
 
     Ok((
-        checkpoint,
+        checkpoint_info,
         types::Hashi {
             id,
             initial_shared_version,
