@@ -554,6 +554,31 @@ impl Enclave {
     }
 }
 
+// Mock S3 logger for use in APIs calls post operator_init, e.g., provisioner_init, withdrawals.
+#[cfg(test)]
+fn make_mock_s3_logger_for_testing() -> S3Logger {
+    use aws_sdk_s3::operation::put_object::PutObjectOutput;
+    use aws_sdk_s3::Client;
+    use aws_smithy_mocks::mock;
+    use aws_smithy_mocks::mock_client;
+    use aws_smithy_mocks::RuleMode;
+    use hashi_guardian_shared::S3Config;
+
+    // For unit tests we only need PutObject to succeed, because `sign_and_log()` calls `S3Logger::write()`.
+    // The `then_output` helper creates a "simple" rule that repeats indefinitely.
+    let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
+
+    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
+
+    let config = S3Config {
+        bucket_name: "test-bucket".to_string(),
+        access_key: "test-access-key".to_string(),
+        secret_key: "test-secret-key".to_string(),
+    };
+
+    S3Logger::from_client("test-session-id".to_string(), config, client)
+}
+
 #[cfg(test)]
 impl Enclave {
     pub fn create_with_random_keys() -> Arc<Self> {
@@ -570,7 +595,7 @@ impl Enclave {
         let enclave = Self::create_with_random_keys();
 
         // Initialize S3 logger
-        let mock_s3_logger = S3Logger::mock_for_testing().await;
+        let mock_s3_logger = make_mock_s3_logger_for_testing();
         enclave.config.set_s3_logger(mock_s3_logger).unwrap();
 
         // Set bitcoin network
