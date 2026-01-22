@@ -112,13 +112,14 @@ impl DkgManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
+        allowed_delta: u16,
     ) -> DkgResult<Self> {
         let committee = committee_set
             .current_committee()
             .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
             .clone();
         // TODO: Pass t and f as arguments instead of computing them
-        let (nodes, threshold) = build_reduced_nodes(&committee)?;
+        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
         let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
@@ -128,7 +129,7 @@ impl DkgManager {
         let previous_committee = committee_set.previous_committee().cloned();
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold) = build_reduced_nodes(prev_committee)?;
+                let (nodes, threshold) = build_reduced_nodes(prev_committee, allowed_delta)?;
                 (Some(nodes), Some(threshold))
             }
             None => (None, None),
@@ -1779,7 +1780,10 @@ fn compute_bft_threshold(total_weight: u16) -> DkgResult<u16> {
     Ok((total_weight - 1) / 3 + 1)
 }
 
-fn build_reduced_nodes(committee: &Committee) -> DkgResult<(Nodes<EncryptionGroupElement>, u16)> {
+fn build_reduced_nodes(
+    committee: &Committee,
+    allowed_delta: u16,
+) -> DkgResult<(Nodes<EncryptionGroupElement>, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
         .iter()
@@ -1792,7 +1796,8 @@ fn build_reduced_nodes(committee: &Committee) -> DkgResult<(Nodes<EncryptionGrou
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
     let threshold = compute_bft_threshold(total_weight)?;
-    Nodes::new_reduced(nodes_vec, threshold, 0, 1).map_err(|e| DkgError::CryptoError(e.to_string()))
+    Nodes::new_reduced(nodes_vec, threshold, allowed_delta, 1)
+        .map_err(|e| DkgError::CryptoError(e.to_string()))
 }
 
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
@@ -1922,6 +1927,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+
+    /// Use 0 for allowed_delta in tests to disable weight reduction.
+    const TEST_ALLOWED_DELTA: u16 = 0;
 
     struct MockPublicMessagesStore;
 
@@ -2137,6 +2145,7 @@ mod tests {
                 self.encryption_keys[validator_index].clone(),
                 self.signing_keys[validator_index].clone(),
                 store,
+                TEST_ALLOWED_DELTA,
             )
             .unwrap()
         }
@@ -2712,6 +2721,7 @@ mod tests {
             encryption_key,
             signing_key,
             Box::new(MockPublicMessagesStore),
+            TEST_ALLOWED_DELTA,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -2770,6 +2780,7 @@ mod tests {
             encryption_keys[0].clone(),
             signing_keys[0].clone(),
             Box::new(MockPublicMessagesStore),
+            TEST_ALLOWED_DELTA,
         );
 
         let err = match result {
@@ -6918,6 +6929,7 @@ mod tests {
             new_member_encryption_key,
             new_member_signing_key,
             Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_ALLOWED_DELTA,
         )
         .unwrap();
 
