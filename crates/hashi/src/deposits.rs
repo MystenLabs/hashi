@@ -34,7 +34,7 @@ impl Hashi {
     ) -> anyhow::Result<()> {
         let state = self.onchain_state().state();
         let deposit_queue = &state.hashi().deposit_queue;
-        match deposit_queue.requests().get(&deposit_request.utxo.id) {
+        match deposit_queue.requests().get(&deposit_request.id) {
             None => {
                 bail!(
                     "Deposit request not found on Sui: {:?}",

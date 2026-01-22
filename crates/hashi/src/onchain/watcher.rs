@@ -170,7 +170,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .hashi
                     .deposit_queue
                     .requests
-                    .insert(deposit_request.utxo.id, deposit_request);
+                    .insert(deposit_request.id, deposit_request);
                 // TODO notify
             }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
@@ -185,12 +185,21 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     derivation_path: deposit_confirmed_event.derivation_path,
                 };
 
-                state.hashi.deposit_queue.requests.remove(&utxo.id);
+                state
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .remove(&deposit_confirmed_event.request_id);
                 state.hashi.utxo_pool.utxos.insert(utxo.id, utxo);
                 // TODO notify
             }
-            HashiEvent::ExpiredDepositDeletedEvent(_) => {
-                // TODO: delete from the the deposit queue
+            HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .remove(&expired_deposit_deleted_event.request_id);
             }
             HashiEvent::StartReconfigEvent(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;

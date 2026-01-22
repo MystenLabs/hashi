@@ -672,7 +672,7 @@ async fn scrape_deposit_requests(
     client: Client,
     deposit_queue_id: Address,
 ) -> Result<types::DepositRequestQueue> {
-    let requests: BTreeMap<types::UtxoId, types::DepositRequest> = client
+    let requests: BTreeMap<Address, types::DepositRequest> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(deposit_queue_id)
@@ -697,7 +697,7 @@ async fn scrape_deposit_requests(
              }| {
                 let utxo = convert_move_utxo(utxo);
                 (
-                    utxo.id,
+                    id,
                     types::DepositRequest {
                         id,
                         utxo,
