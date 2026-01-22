@@ -24,13 +24,51 @@ service GuardianService {
 
 message GetGuardianInfoRequest {}
 
-// TODO: Add more info
 message GetGuardianInfoResponse {
-  // AWS Nitro attestation
+  // AWS Nitro attestation document.
   optional bytes attestation = 1;
 
-  // Software version of the service. Similar to the `server` http header.
-  optional string server = 2;
+  // Guardian signing public key (Ed25519, 32 bytes).
+  optional bytes signing_pub_key = 2;
+
+  // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
+  SignedGuardianInfo signed_info = 3;
+}
+
+// Guardian-signed wrapper around `GuardianInfoData`.
+message SignedGuardianInfo {
+  GuardianInfoData data = 1;
+
+  // Milliseconds since Unix epoch.
+  optional uint64 timestamp_ms = 2;
+
+  // Guardian signature over (intent || data || timestamp).
+  optional bytes signature = 3;
+}
+
+// Information about the guardian enclave.
+message GuardianInfoData {
+  // Share commitments (if set). Used by key provisioners to check that right key will be used.
+  optional GuardianShareCommitments share_commitments = 1;
+
+  // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
+  optional S3BucketInfo bucket_info = 2;
+
+  // Guardian encryption public key (32 bytes).
+  optional bytes encryption_pubkey = 3;
+
+  // Server version.
+  optional string server_version = 4;
+}
+
+// Wrapper to allow presence for a repeated field.
+message GuardianShareCommitments {
+  repeated GuardianShareCommitment share_commitments = 1;
+}
+
+message S3BucketInfo {
+  optional string bucket = 1;
+  optional string region = 2;
 }
 
 // =======================
@@ -104,6 +142,7 @@ message S3Config {
   optional string access_key = 1;
   optional string secret_key = 2;
   optional string bucket_name = 3;
+  optional string region = 4;
 }
 
 enum Network {

@@ -54,7 +54,7 @@ pub async fn operator_init(
         );
     }
     enclave
-        .set_share_commitments(commitments.clone())
+        .set_share_commitments(commitments)
         .expect("Unable to set share commitments");
 
     // Log to S3!
@@ -70,9 +70,9 @@ pub async fn operator_init(
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
-        .sign_and_log(LogMessage::OperatorInitShareCommitments(commitments))
+        .sign_and_log(LogMessage::GuardianInfo(enclave.info()))
         .await
-        .expect("Unable to log OperatorInitShareCommitments");
+        .expect("Unable to log GuardianInfo");
 
     info!("Operator initialization complete.");
     Ok(())

@@ -1,3 +1,4 @@
+use crate::S3BucketInfo;
 use crate::S3Config;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
@@ -21,27 +22,21 @@ const MAX_RETRY_ATTEMPTS: u32 = 5;
 pub struct S3Logger {
     /// A unique session ID. Used as a prefix in log keys.
     session_id: String,
-    /// S3 config: bucket name, API keys
+    /// S3 config: bucket name, region, API keys
     config: S3Config,
     /// S3 client
     client: S3Client,
 }
 
 impl S3Logger {
-    /// Construct an `S3Logger` from an already-configured S3 client.
-    /// This is intended for unit tests that use a mock S3 Client.
-    /// This is not put behind cfg(test) as tests in the enclave crate also use it.
-    pub fn from_client_for_tests(session_id: String, config: S3Config, client: S3Client) -> Self {
-        Self {
-            session_id,
-            client,
-            config,
-        }
-    }
+    // ========================================================================
+    // Constructors
+    // ========================================================================
 
     pub async fn new(session_id: String, config: S3Config) -> Self {
         info!("S3 Configuration:");
-        info!("   Bucket: {}", config.bucket_name);
+        info!("   Bucket: {}", config.bucket_name());
+        info!("   Region: {}", config.region());
 
         let creds = CredentialsBuilder::default()
             .access_key_id(config.access_key.clone())
@@ -51,9 +46,8 @@ impl S3Logger {
 
         let retry_config = RetryConfig::standard().with_max_attempts(MAX_RETRY_ATTEMPTS); // default is 3
 
-        // TODO: Add `region` to `S3Config` and use it here (instead of hardcoding)?
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new("us-east-1"))
+            .region(aws_config::Region::new(config.region().to_string()))
             .credentials_provider(SharedCredentialsProvider::new(creds))
             .retry_config(retry_config)
             .load()
@@ -65,6 +59,25 @@ impl S3Logger {
             client,
             config,
         }
+    }
+
+    /// Construct an `S3Logger` from an already-configured S3 client.
+    /// This is intended for unit tests that use a mock S3 Client.
+    /// This is not put behind cfg(test) as tests in the enclave crate also use it.
+    pub fn from_client_for_tests(session_id: String, config: S3Config, client: S3Client) -> Self {
+        Self {
+            session_id,
+            client,
+            config,
+        }
+    }
+
+    // ========================================================================
+    // Getters
+    // ========================================================================
+
+    pub fn bucket_info(&self) -> &S3BucketInfo {
+        &self.config.bucket_info
     }
 
     // ========================================================================
@@ -95,7 +108,7 @@ impl S3Logger {
         // TODO(integration-test): Verify on a real S3 bucket with Object Lock enabled that an object written with `Compliance` + `retain_until` cannot be deleted/overwritten before expiry.
         let _result = s3_client
             .put_object()
-            .bucket(&s3_config.bucket_name)
+            .bucket(s3_config.bucket_name())
             .key(&key)
             .content_type("application/json")
             .object_lock_mode(ObjectLockMode::Compliance)
@@ -109,7 +122,8 @@ impl S3Logger {
         info!("Object locked until: {:?}", expiry_time);
         info!(
             "Public URL: https://{}.s3.amazonaws.com/{}",
-            &s3_config.bucket_name, key
+            s3_config.bucket_name(),
+            key
         );
 
         Ok(())
@@ -132,7 +146,7 @@ impl S3Logger {
         // Verify bucket exists and has Object Lock enabled
         let bucket_config = s3_client
             .get_object_lock_configuration()
-            .bucket(&s3_config.bucket_name)
+            .bucket(s3_config.bucket_name())
             .send()
             .await;
 
@@ -149,7 +163,7 @@ impl S3Logger {
 
                 match object_lock_enabled_config {
                     ObjectLockEnabled::Enabled => {
-                        info!("Bucket {} has Object Lock enabled", s3_config.bucket_name);
+                        info!("Bucket {} has Object Lock enabled", s3_config.bucket_name());
                     }
                     other => {
                         return Err(S3Error(format!(
@@ -178,7 +192,7 @@ impl S3Logger {
 
         let bucket_objects = s3_client
             .list_objects_v2()
-            .bucket(&s3_config.bucket_name)
+            .bucket(s3_config.bucket_name())
             .max_keys(10)
             .send()
             .await
@@ -189,14 +203,14 @@ impl S3Logger {
         if objects.is_empty() {
             info!(
                 "Bucket {} has no objects (or no access to list)",
-                s3_config.bucket_name
+                s3_config.bucket_name()
             );
             return Ok(());
         }
 
         info!(
             "Bucket {}: listing {} object(s) (max 10)",
-            s3_config.bucket_name,
+            s3_config.bucket_name(),
             objects.len()
         );
 
@@ -229,7 +243,10 @@ mod tests {
         let config = S3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
-            bucket_name: "bucket".to_string(),
+            bucket_info: crate::S3BucketInfo {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+            },
         };
         S3Logger::from_client_for_tests("session".to_string(), config, client)
     }

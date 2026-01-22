@@ -30,6 +30,7 @@ use tracing::info;
 
 pub type EncSecKey = <X25519HkdfSha256 as Kem>::PrivateKey;
 pub type EncPubKey = <X25519HkdfSha256 as Kem>::PublicKey;
+pub type EncPubKeyBytes = Vec<u8>; // Use as an alternative to EncPubKey where Serialize is needed
 pub struct GuardianEncKeyPair {
     sk: EncSecKey,
     pk: EncPubKey,

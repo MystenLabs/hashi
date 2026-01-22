@@ -10,6 +10,7 @@ use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
+use hpke::Serializable;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -477,6 +478,24 @@ impl Enclave {
     }
 
     // ========================================================================
+    // Enclave Info
+    // ========================================================================
+
+    pub fn info(&self) -> GuardianInfo {
+        GuardianInfo {
+            share_commitments: self.share_commitments().ok().cloned(),
+            bucket_info: self
+                .config
+                .s3_logger()
+                .ok()
+                .map(|l| l.bucket_info().clone()),
+            encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
+            // TODO: Change it
+            server_version: "v1".to_string(),
+        }
+    }
+
+    // ========================================================================
     // S3 Logging
     // ========================================================================
 
@@ -593,7 +612,10 @@ fn make_mock_s3_logger_for_testing() -> S3Logger {
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
 
     let config = S3Config {
-        bucket_name: "test-bucket".to_string(),
+        bucket_info: S3BucketInfo {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+        },
         access_key: "test-access-key".to_string(),
         secret_key: "test-secret-key".to_string(),
     };
