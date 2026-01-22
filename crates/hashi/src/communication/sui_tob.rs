@@ -255,6 +255,14 @@ impl SuiTobChannel {
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
+        let dealer = cert.dealer_address();
+        let existing = self
+            .fetch_all_certificates()
+            .await
+            .map_err(ChannelError::from)?;
+        if existing.iter().any(|(d, _)| *d == dealer) {
+            return Ok(());
+        }
         let tx = self
             .build_certificate_submission_transaction(&cert)
             .await

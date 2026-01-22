@@ -236,6 +236,13 @@ impl CertificateV1 {
         }
     }
 
+    pub fn dealer_address(&self) -> Address {
+        match self {
+            CertificateV1::Dkg(cert) => cert.message().dealer_address,
+            CertificateV1::Rotation(cert) => cert.message().dealer_address,
+        }
+    }
+
     pub fn signature_bytes(&self) -> &[u8] {
         match self {
             CertificateV1::Dkg(cert) => cert.signature_bytes(),

@@ -433,7 +433,6 @@ impl DkgManager {
                 .finish()
                 .expect("signatures should always be valid");
             let cert = CertificateV1::Dkg(dkg_cert);
-            // TODO: do not fail in case my certificate is already published
             with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
                 .await
                 .map_err(|e| {
