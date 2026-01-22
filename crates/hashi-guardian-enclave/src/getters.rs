@@ -1,6 +1,5 @@
 use crate::Enclave;
 use hashi_guardian_shared::*;
-use hpke::Serializable;
 use std::sync::Arc;
 use tracing::info;
 
@@ -24,23 +23,10 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
 
     let signing_pub_key = enclave.signing_pubkey();
     let attestation = get_attestation(&signing_pub_key)?;
-
-    let share_commitments = enclave.share_commitments().ok().cloned();
-    let bucket_info = enclave
-        .config
-        .s3_logger()
-        .ok()
-        .map(|l| l.bucket_info().clone());
-
     Ok(GetGuardianInfoResponse {
         attestation,
         signing_pub_key,
-        signed_info: enclave.sign(GuardianInfo {
-            share_commitments,
-            bucket_info,
-            encryption_pubkey: enclave.encryption_public_key().to_bytes().to_vec(),
-            server_version: "v1".to_string(),
-        }),
+        signed_info: enclave.sign(enclave.info()),
     })
 }
 
