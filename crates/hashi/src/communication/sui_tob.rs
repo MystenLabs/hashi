@@ -31,7 +31,7 @@ use super::ChannelError;
 use super::ChannelResult;
 use super::OrderedBroadcastChannel;
 use crate::dkg::types::CertificateV1;
-use crate::dkg::types::DkgDealerMessageHash;
+use crate::dkg::types::DealerMessagesHash;
 use crate::onchain::OnchainState;
 use hashi_types::committee::Committee;
 
@@ -119,7 +119,7 @@ impl SuiTobChannel {
         };
         let message = dkg_cert.message();
         let dealer = message.dealer_address;
-        let message_hash = message.message_hash.inner().to_vec();
+        let message_hash = message.messages_hash.inner().to_vec();
         let epoch = dkg_cert.epoch();
         let signature = dkg_cert.signature_bytes().to_vec();
         let signers_bitmap = dkg_cert.signers_bitmap_bytes().to_vec();
@@ -239,7 +239,7 @@ impl SuiTobChannel {
             .map_err(|e| TobError::RpcError(e.to_string()))?;
         let mut certificates = Vec::with_capacity(raw_certs.len());
         for (dealer, dkg_cert) in raw_certs {
-            let inner_cert = DkgDealerMessageHash::from_onchain_cert(
+            let inner_cert = DealerMessagesHash::from_onchain_dkg_cert(
                 &dkg_cert,
                 self.epoch,
                 &self.committee,

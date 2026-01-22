@@ -175,18 +175,18 @@ pub enum ComplaintResponses {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgDealerMessageHash {
+pub struct DealerMessagesHash {
     pub dealer_address: Address,
-    pub message_hash: MessageHash,
+    pub messages_hash: MessageHash,
 }
 
-impl DkgDealerMessageHash {
-    pub fn from_onchain_cert(
+impl DealerMessagesHash {
+    pub fn from_onchain_dkg_cert(
         cert: &CertifiedMessage<DkgDealerMessageHashV1>,
         epoch: u64,
         committee: &Committee,
         threshold: u64,
-    ) -> Result<DkgCertificate, DkgError> {
+    ) -> Result<DealerCertificate, DkgError> {
         let hash_bytes: [u8; 32] =
             cert.message
                 .message_hash
@@ -199,7 +199,7 @@ impl DkgDealerMessageHash {
 
         let message = Self {
             dealer_address: cert.message.dealer_address,
-            message_hash: hash_bytes.into(),
+            messages_hash: hash_bytes.into(),
         };
         SignedMessage::try_from_parts(
             epoch,
@@ -213,20 +213,13 @@ impl DkgDealerMessageHash {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RotationDealerMessagesHash {
-    pub dealer_address: Address,
-    pub messages_hash: MessageHash,
-}
-
-pub type DkgCertificate = SignedMessage<DkgDealerMessageHash>;
-pub type RotationCertificate = SignedMessage<RotationDealerMessagesHash>;
+pub type DealerCertificate = SignedMessage<DealerMessagesHash>;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum CertificateV1 {
-    Dkg(DkgCertificate),
-    Rotation(RotationCertificate),
+    Dkg(DealerCertificate),
+    Rotation(DealerCertificate),
 }
 
 impl CertificateV1 {
@@ -279,17 +272,10 @@ impl CertificateV1 {
         }
     }
 
-    pub fn dkg_message_hash(&self) -> Option<&DkgDealerMessageHash> {
+    pub fn message(&self) -> &DealerMessagesHash {
         match self {
-            CertificateV1::Dkg(cert) => Some(cert.message()),
-            CertificateV1::Rotation(_) => None,
-        }
-    }
-
-    pub fn rotation_message_hash(&self) -> Option<&RotationDealerMessagesHash> {
-        match self {
-            CertificateV1::Dkg(_) => None,
-            CertificateV1::Rotation(cert) => Some(cert.message()),
+            CertificateV1::Dkg(cert) => cert.message(),
+            CertificateV1::Rotation(cert) => cert.message(),
         }
     }
 }
@@ -351,11 +337,9 @@ impl From<crate::communication::ChannelError> for DkgError {
 }
 
 pub struct DealerFlowData {
-    pub messages: Messages,
     pub request: SendMessagesRequest,
     pub recipients: Vec<Address>,
-    pub dkg_message_hash: DkgDealerMessageHash,
-    pub my_address: Address,
+    pub messages_hash: DealerMessagesHash,
     pub my_signature: MemberSignature,
     pub required_weight: u16,
     pub committee: Committee,
@@ -582,12 +566,12 @@ mod tests {
             .collect();
         let committee = Committee::new(members, epoch);
 
-        // Create a DkgDealerMessageHash
+        // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);
-        let message_hash: [u8; 32] = [42u8; 32];
-        let dkg_message = DkgDealerMessageHash {
+        let messages_hash: [u8; 32] = [42u8; 32];
+        let dkg_message = DealerMessagesHash {
             dealer_address,
-            message_hash: message_hash.into(),
+            messages_hash: messages_hash.into(),
         };
 
         // Sign with committee members to create a valid certificate
@@ -603,7 +587,7 @@ mod tests {
         let onchain_cert = CertifiedMessage {
             message: DkgDealerMessageHashV1 {
                 dealer_address,
-                message_hash: message_hash.to_vec(),
+                message_hash: messages_hash.to_vec(),
             },
             signature: MoveCommitteeSignature {
                 epoch,
@@ -613,9 +597,9 @@ mod tests {
             stake_support: 3,
         };
 
-        // Parse back using from_onchain_cert
+        // Parse back using from_onchain_dkg_cert
         let result =
-            DkgDealerMessageHash::from_onchain_cert(&onchain_cert, epoch, &committee, threshold);
+            DealerMessagesHash::from_onchain_dkg_cert(&onchain_cert, epoch, &committee, threshold);
         assert!(
             result.is_ok(),
             "Should parse valid certificate: {:?}",
@@ -625,8 +609,8 @@ mod tests {
         let parsed = result.unwrap();
         assert_eq!(parsed.message().dealer_address, dealer_address);
         assert_eq!(
-            <MessageHash as AsRef<[u8; 32]>>::as_ref(&parsed.message().message_hash),
-            &message_hash
+            <MessageHash as AsRef<[u8; 32]>>::as_ref(&parsed.message().messages_hash),
+            &messages_hash
         );
     }
 
@@ -662,7 +646,7 @@ mod tests {
         };
 
         let result =
-            DkgDealerMessageHash::from_onchain_cert(&onchain_cert, epoch, &committee, threshold);
+            DealerMessagesHash::from_onchain_dkg_cert(&onchain_cert, epoch, &committee, threshold);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
