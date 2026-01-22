@@ -138,10 +138,11 @@ public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
 public(package) fun epoch_certs_and_committee(
     self: &mut Hashi,
     epoch: u64,
+    protocol_type: hashi::tob::ProtocolType,
     ctx: &mut TxContext,
 ): (&mut hashi::tob::EpochCertsV1, &Committee) {
     if (!self.tob.contains(epoch)) {
-        self.tob.add(epoch, hashi::tob::create(epoch, ctx));
+        self.tob.add(epoch, hashi::tob::create(epoch, protocol_type, ctx));
     };
     (self.tob.borrow_mut(epoch), self.committee_set.current_committee())
 }

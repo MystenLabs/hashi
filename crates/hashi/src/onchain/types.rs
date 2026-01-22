@@ -93,6 +93,10 @@ impl CommitteeSet {
         self.epoch
     }
 
+    pub fn pending_epoch_change(&self) -> Option<u64> {
+        self.pending_epoch_change
+    }
+
     pub fn client(&self, validator: &Address) -> Option<Client> {
         self.clients.get(validator).cloned()
     }

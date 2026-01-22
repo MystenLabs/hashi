@@ -185,13 +185,16 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 let committee = super::scrape_committee(client.clone(), committees_id, epoch)
                     .await
                     .unwrap();
-                let mut state = state.state_mut();
-                state
-                    .hashi
-                    .committees
-                    .committees_mut()
-                    .insert(epoch, committee);
-                state.hashi.committees.set_pending_epoch_change(Some(epoch));
+                {
+                    let mut state = state.state_mut();
+                    state
+                        .hashi
+                        .committees
+                        .committees_mut()
+                        .insert(epoch, committee);
+                    state.hashi.committees.set_pending_epoch_change(Some(epoch));
+                }
+                state.notify_start_reconfig(epoch);
             }
             HashiEvent::EndReconfigEvent(end_reconfig_event) => {
                 let mut state = state.state_mut();

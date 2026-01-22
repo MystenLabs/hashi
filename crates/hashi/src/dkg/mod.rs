@@ -2105,11 +2105,8 @@ mod tests {
             store: Box<dyn PublicMessagesStore>,
         ) -> DkgManager {
             let address = Address::new([validator_index as u8; 32]);
-            let session_id = SessionId::new(
-                "testchain",
-                self.committee_set.epoch(),
-                &ProtocolType::DkgKeyGeneration,
-            );
+            let session_id =
+                SessionId::new("testchain", self.committee_set.epoch(), &ProtocolType::Dkg);
             DkgManager::new(
                 address,
                 &self.committee_set,
@@ -2126,11 +2123,7 @@ mod tests {
         }
 
         fn session_id(&self) -> SessionId {
-            SessionId::new(
-                "testchain",
-                self.committee_set.epoch(),
-                &ProtocolType::DkgKeyGeneration,
-            )
+            SessionId::new("testchain", self.committee_set.epoch(), &ProtocolType::Dkg)
         }
 
         fn committee(&self) -> &Committee {
@@ -2742,7 +2735,7 @@ mod tests {
             .set_members(members)
             .set_committees(BTreeMap::new()); // Empty!
 
-        let session_id = SessionId::new("test", epoch, &ProtocolType::DkgKeyGeneration);
+        let session_id = SessionId::new("test", epoch, &ProtocolType::Dkg);
         let result = DkgManager::new(
             Address::new([0; 32]),
             &committee_set,
@@ -6890,7 +6883,7 @@ mod tests {
             .set_committees(committees);
 
         // Create new member's DkgManager
-        let session_id = SessionId::new("testchain", epoch, &ProtocolType::DkgKeyGeneration);
+        let session_id = SessionId::new("testchain", epoch, &ProtocolType::Dkg);
         let new_member_manager = DkgManager::new(
             new_member_addr,
             &new_committee_set,

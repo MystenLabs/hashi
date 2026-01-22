@@ -5,6 +5,7 @@ use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
@@ -22,6 +23,7 @@ use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::ToBcs;
 use tap::Pipe;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
@@ -58,6 +60,10 @@ struct Inner {
     /// The checkpoint height that this state is recent to
     checkpoint: watch::Sender<u64>,
     state: RwLock<State>,
+    /// Channel for notifying `MpcService` of reconfig events.
+    reconfig_tx: mpsc::Sender<u64>,
+    /// Receiver taken once by `MpcService`.
+    reconfig_rx: Mutex<Option<mpsc::Receiver<u64>>>,
 }
 
 #[derive(Debug)]
@@ -82,12 +88,15 @@ impl OnchainState {
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
+        let (reconfig_tx, reconfig_rx) = mpsc::channel(1);
         let state = Inner {
             ids,
             client: client.clone(),
             sender,
             checkpoint,
             state: RwLock::new(state),
+            reconfig_tx,
+            reconfig_rx: Mutex::new(Some(reconfig_rx)),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -103,6 +112,14 @@ impl OnchainState {
 
     fn notify(&self, notification: Notification) {
         let _ = self.0.sender.send(notification);
+    }
+
+    pub fn notify_start_reconfig(&self, epoch: u64) {
+        let _ = self.0.reconfig_tx.try_send(epoch);
+    }
+
+    pub fn take_reconfig_receiver(&self) -> Option<mpsc::Receiver<u64>> {
+        self.0.reconfig_rx.lock().unwrap().take()
     }
 
     pub fn state(&self) -> RwLockReadGuard<'_, State> {
@@ -183,29 +200,32 @@ impl OnchainState {
         Ok(None)
     }
 
-    /// Fetches all DKG certificates for the given epoch from on-chain.
-    /// Returns raw move types; caller is responsible for conversion.
-    pub async fn fetch_dkg_certs(
+    /// Fetches all certificates for the given epoch from on-chain.
+    /// Returns the protocol type and raw move types; caller is responsible for conversion.
+    pub async fn fetch_certs(
         &self,
         epoch: u64,
     ) -> Result<
-        Vec<(
-            Address,
-            move_types::CertifiedMessage<move_types::DkgDealerMessageHashV1>,
+        Option<(
+            move_types::ProtocolType,
+            Vec<(
+                Address,
+                move_types::CertifiedMessage<move_types::DealerMessagesHashV1>,
+            )>,
         )>,
     > {
         let epoch_certs = match self.fetch_epoch_certs(epoch).await? {
             Some(certs) => certs,
-            None => return Ok(vec![]),
+            None => return Ok(None),
         };
-        let Some(head) = epoch_certs.dkg_certs.head else {
-            return Ok(vec![]);
+        let Some(head) = epoch_certs.certs.head else {
+            return Ok(Some((epoch_certs.protocol_type, vec![])));
         };
         let mut nodes: std::collections::HashMap<
             Address,
             move_types::LinkedTableNode<
                 Address,
-                move_types::CertifiedMessage<move_types::DkgDealerMessageHashV1>,
+                move_types::CertifiedMessage<move_types::DealerMessagesHashV1>,
             >,
         > = std::collections::HashMap::new();
         let mut stream = self
@@ -214,7 +234,7 @@ impl OnchainState {
             .clone()
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.dkg_certs.id)
+                    .with_parent(epoch_certs.certs.id)
                     .with_page_size(u32::MAX)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -237,7 +257,7 @@ impl OnchainState {
             certificates.push((dealer, node.value));
             current = node.next;
         }
-        Ok(certificates)
+        Ok(Some((epoch_certs.protocol_type, certificates)))
     }
 }
 

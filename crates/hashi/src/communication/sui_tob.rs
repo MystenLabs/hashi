@@ -32,6 +32,7 @@ use super::ChannelResult;
 use super::OrderedBroadcastChannel;
 use crate::dkg::types::CertificateV1;
 use crate::dkg::types::DealerMessagesHash;
+use crate::dkg::types::ProtocolType;
 use crate::onchain::OnchainState;
 use hashi_types::committee::Committee;
 
@@ -102,27 +103,35 @@ impl SuiTobChannel {
         }
     }
 
-    // This matches the Move contract's threshold computation.
-    fn threshold(&self) -> u64 {
-        self.committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
-    }
-
     async fn build_certificate_submission_transaction(
         &self,
         cert: &CertificateV1,
     ) -> Result<Transaction, TobError> {
         let sender = self.signer.public_key().derive_address();
-        let CertificateV1::Dkg(dkg_cert) = cert else {
-            return Err(TobError::InvalidCertificate(
-                "Rotation certificates not supported yet".into(),
-            ));
+        let (dealer, message_hash, epoch, signature, signers_bitmap, protocol_type) = match cert {
+            CertificateV1::Dkg(dkg_cert) => {
+                let message = dkg_cert.message();
+                (
+                    message.dealer_address,
+                    message.messages_hash.inner().to_vec(),
+                    dkg_cert.epoch(),
+                    dkg_cert.signature_bytes().to_vec(),
+                    dkg_cert.signers_bitmap_bytes().to_vec(),
+                    ProtocolType::Dkg,
+                )
+            }
+            CertificateV1::Rotation(rotation_cert) => {
+                let message = rotation_cert.message();
+                (
+                    message.dealer_address,
+                    message.messages_hash.inner().to_vec(),
+                    rotation_cert.epoch(),
+                    rotation_cert.signature_bytes().to_vec(),
+                    rotation_cert.signers_bitmap_bytes().to_vec(),
+                    ProtocolType::KeyRotation,
+                )
+            }
         };
-        let message = dkg_cert.message();
-        let dealer = message.dealer_address;
-        let message_hash = message.messages_hash.inner().to_vec();
-        let epoch = dkg_cert.epoch();
-        let signature = dkg_cert.signature_bytes().to_vec();
-        let signers_bitmap = dkg_cert.signers_bitmap_bytes().to_vec();
         let mut client = self.onchain_state.client();
         let hashi_id = self.onchain_state.hashi_id();
         let price = client
@@ -145,13 +154,14 @@ impl SuiTobChannel {
             .await
             .map_err(|e| TobError::RpcError(e.to_string()))?
             .into_inner();
-        let pt = self.build_dkg_cert_submission_ptb(
+        let pt = self.build_cert_submission_ptb(
             hashi_obj.object().owner().version(),
             epoch,
             dealer,
             message_hash,
             signature,
             signers_bitmap,
+            protocol_type,
         )?;
         Ok(Transaction {
             kind: TransactionKind::ProgrammableTransaction(pt),
@@ -166,7 +176,8 @@ impl SuiTobChannel {
         })
     }
 
-    fn build_dkg_cert_submission_ptb(
+    #[allow(clippy::too_many_arguments)]
+    fn build_cert_submission_ptb(
         &self,
         hashi_initial_shared_version: u64,
         epoch: u64,
@@ -174,12 +185,22 @@ impl SuiTobChannel {
         message_hash: Vec<u8>,
         signature: Vec<u8>,
         signers_bitmap: Vec<u8>,
+        protocol_type: ProtocolType,
     ) -> Result<ProgrammableTransaction, TobError> {
         let hashi_id = self.onchain_state.hashi_id();
         let package_id = self
             .onchain_state
             .package_id()
             .ok_or_else(|| TobError::InvalidState("no package id available".into()))?;
+        let function_name = match protocol_type {
+            ProtocolType::Dkg => "submit_dkg_cert",
+            ProtocolType::KeyRotation => "submit_rotation_cert",
+            _ => {
+                return Err(TobError::InvalidCertificate(
+                    "Only DKG and KeyRotation certificates can be submitted".into(),
+                ));
+            }
+        };
         Ok(ProgrammableTransaction {
             inputs: vec![
                 Input::Shared(SharedInput::new(
@@ -216,7 +237,7 @@ impl SuiTobChannel {
             commands: vec![Command::MoveCall(MoveCall {
                 package: package_id,
                 module: Identifier::from_static("cert_submission"),
-                function: Identifier::from_static("submit_dkg_cert"),
+                function: Identifier::new(function_name).expect("valid identifier"),
                 type_arguments: vec![],
                 arguments: vec![
                     Argument::Input(0),
@@ -229,27 +250,35 @@ impl SuiTobChannel {
             })],
         })
     }
+}
 
-    /// Fetches all certificates in insertion order by following the LinkedTable's linked list.
-    async fn fetch_all_certificates(&self) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-        let raw_certs = self
-            .onchain_state
-            .fetch_dkg_certs(self.epoch)
-            .await
-            .map_err(|e| TobError::RpcError(e.to_string()))?;
-        let mut certificates = Vec::with_capacity(raw_certs.len());
-        for (dealer, dkg_cert) in raw_certs {
-            let inner_cert = DealerMessagesHash::from_onchain_dkg_cert(
-                &dkg_cert,
-                self.epoch,
-                &self.committee,
-                self.threshold(),
-            )
+pub async fn fetch_certificates(
+    onchain_state: &OnchainState,
+    epoch: u64,
+    committee: &Committee,
+) -> Result<Vec<(Address, CertificateV1)>, TobError> {
+    // This matches the Move contract's threshold computation.
+    let threshold = committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
+    let Some((protocol_type, raw_certs)) = onchain_state
+        .fetch_certs(epoch)
+        .await
+        .map_err(|e| TobError::RpcError(e.to_string()))?
+    else {
+        return Ok(vec![]);
+    };
+    let mut certificates = Vec::with_capacity(raw_certs.len());
+    for (dealer, cert) in raw_certs {
+        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch, committee, threshold)
             .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
-            certificates.push((dealer, CertificateV1::Dkg(inner_cert)));
-        }
-        Ok(certificates)
+        let cert = match protocol_type {
+            hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(inner_cert),
+            hashi_types::move_types::ProtocolType::KeyRotation => {
+                CertificateV1::Rotation(inner_cert)
+            }
+        };
+        certificates.push((dealer, cert));
     }
+    Ok(certificates)
 }
 
 #[async_trait]
@@ -289,8 +318,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = self
-                .fetch_all_certificates()
+            let all_certs = fetch_certificates(&self.onchain_state, self.epoch, &self.committee)
                 .await
                 .map_err(ChannelError::from)?;
             for (dealer, cert) in all_certs {

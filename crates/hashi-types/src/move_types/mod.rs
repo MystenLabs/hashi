@@ -217,12 +217,21 @@ pub struct UtxoPool {
     pub utxos: Bag,
 }
 
+/// Rust version of the Move hashi::tob::ProtocolType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub enum ProtocolType {
+    Dkg,
+    KeyRotation,
+}
+
 /// Rust version of the Move hashi::tob::EpochCertsV1 type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCertsV1 {
     pub epoch: u64,
-    // LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>
-    pub dkg_certs: LinkedTable<Address>,
+    pub protocol_type: ProtocolType,
+    /// Certificates indexed by dealer address (first-cert-wins).
+    // LinkedTable<address, CertifiedMessage<DealerMessagesHashV1>>
+    pub certs: LinkedTable<Address>,
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.
@@ -243,11 +252,11 @@ pub struct LinkedTableNode<K, V> {
     pub value: V,
 }
 
-/// Rust version of the Move hashi::tob::DkgDealerMessageHashV1 type.
+/// Rust version of the Move hashi::tob::DealerMessagesHashV1 type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct DkgDealerMessageHashV1 {
+pub struct DealerMessagesHashV1 {
     pub dealer_address: Address,
-    pub message_hash: Vec<u8>,
+    pub messages_hash: Vec<u8>,
 }
 
 /// Rust version of the Move hashi::committee::CommitteeSignature type.

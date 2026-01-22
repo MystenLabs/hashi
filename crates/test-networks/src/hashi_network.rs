@@ -106,9 +106,9 @@ impl HashiNodeHandle {
                     continue;
                 }
             };
-            let raw_certs = match onchain_state.fetch_dkg_certs(epoch).await {
-                Ok(certs) => certs,
-                Err(_) => {
+            let raw_certs = match onchain_state.fetch_certs(epoch).await {
+                Ok(Some((_, certs))) => certs,
+                Ok(None) | Err(_) => {
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
                 }

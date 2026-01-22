@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use anyhow::anyhow;
 
@@ -29,7 +30,8 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    dkg_manager: OnceLock<Arc<Mutex<dkg::DkgManager>>>,
+    // `OnceLock` ensures initialization happens once, and `RwLock` allows updates for rotation.
+    dkg_manager: OnceLock<RwLock<Arc<Mutex<dkg::DkgManager>>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
@@ -82,8 +84,22 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn dkg_manager(&self) -> &Arc<Mutex<dkg::DkgManager>> {
-        self.dkg_manager.get().expect("DkgManager not initialized")
+    pub fn dkg_manager(&self) -> Arc<Mutex<dkg::DkgManager>> {
+        self.dkg_manager
+            .get()
+            .expect("DkgManager not initialized")
+            .read()
+            .unwrap()
+            .clone()
+    }
+
+    pub fn set_dkg_manager(&self, manager: Arc<Mutex<dkg::DkgManager>>) {
+        *self
+            .dkg_manager
+            .get()
+            .expect("DkgManager not initialized")
+            .write()
+            .unwrap() = manager;
     }
 
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
@@ -101,15 +117,14 @@ impl Hashi {
         self.onchain_state.set(onchain_state).unwrap();
     }
 
-    fn create_dkg_manager(&self) -> anyhow::Result<dkg::DkgManager> {
+    pub fn create_dkg_manager(
+        &self,
+        epoch: u64,
+        protocol_type: dkg::types::ProtocolType,
+    ) -> anyhow::Result<dkg::DkgManager> {
         let state = self.onchain_state().state();
         let committee_set = &state.hashi().committees;
-        let epoch = committee_set.epoch();
-        let session_id = dkg::SessionId::new(
-            self.config.sui_chain_id(),
-            epoch,
-            &dkg::types::ProtocolType::DkgKeyGeneration,
-        );
+        let session_id = dkg::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let encryption_key = self.config.encryption_private_key()?;
         self.db
             .store_encryption_key(epoch, &encryption_key)
@@ -120,7 +135,7 @@ impl Hashi {
             .ok_or_else(|| anyhow!("no protocol_private_key configured"))?;
         let store = Box::new(storage::EpochPublicMessagesStore::new(
             self.db.clone(),
-            committee_set.epoch(),
+            epoch,
         ));
         Ok(dkg::DkgManager::new(
             self.config.validator_address()?,
@@ -164,17 +179,18 @@ impl Hashi {
             // Initialize
             self.initialize_onchain_state().await;
 
-            let dkg_manager = match self.create_dkg_manager() {
+            let epoch = self.onchain_state().state().hashi().committees.epoch();
+            let dkg_manager = match self.create_dkg_manager(epoch, dkg::types::ProtocolType::Dkg) {
                 Ok(m) => Arc::new(Mutex::new(m)),
                 Err(e) => {
                     tracing::error!("Failed to create DkgManager: {e}");
                     return;
                 }
             };
-            if self.dkg_manager.set(dkg_manager.clone()).is_err() {
+            if self.dkg_manager.set(RwLock::new(dkg_manager)).is_err() {
                 panic!("DkgManager already set");
             }
-            let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone(), dkg_manager);
+            let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone());
             self.mpc_handle
                 .set(mpc_handle)
                 .expect("MpcHandle already set");

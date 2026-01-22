@@ -9,18 +9,21 @@ use tracing::error;
 
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
+use crate::communication::fetch_certificates;
 use crate::dkg::DkgManager;
 use crate::dkg::DkgOutput;
 use crate::dkg::rpc::RpcP2PChannel;
+use crate::dkg::types::CertificateV1;
+use crate::dkg::types::ProtocolType;
 use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::committee::Committee;
 
-const DKG_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct MpcHandle {
-    dkg_completion_rx: watch::Receiver<Option<G>>,
+    key_ready_rx: watch::Receiver<Option<G>>,
 }
 
 impl std::fmt::Debug for MpcHandle {
@@ -30,8 +33,8 @@ impl std::fmt::Debug for MpcHandle {
 }
 
 impl MpcHandle {
-    pub async fn wait_for_dkg_completion(&self) -> G {
-        let mut rx = self.dkg_completion_rx.clone();
+    pub async fn wait_for_key_ready(&self) -> G {
+        let mut rx = self.key_ready_rx.clone();
         loop {
             {
                 let value = rx.borrow();
@@ -40,61 +43,154 @@ impl MpcHandle {
                 }
             }
             if rx.changed().await.is_err() {
-                panic!("DKG completion channel closed before DKG completed");
+                panic!("Key ready channel closed unexpectedly");
             }
         }
     }
 
-    pub fn dkg_completed(&self) -> Option<G> {
-        *self.dkg_completion_rx.borrow()
+    pub fn public_key(&self) -> Option<G> {
+        *self.key_ready_rx.borrow()
     }
 }
 
 pub struct MpcService {
     inner: Arc<Hashi>,
-    dkg_manager: Arc<Mutex<DkgManager>>,
-    dkg_completion_tx: watch::Sender<Option<G>>,
+    key_ready_tx: watch::Sender<Option<G>>,
 }
 
 impl MpcService {
-    pub fn new(hashi: Arc<Hashi>, dkg_manager: Arc<Mutex<DkgManager>>) -> (Self, MpcHandle) {
-        let (dkg_completion_tx, dkg_completion_rx) = watch::channel(None);
+    pub fn new(hashi: Arc<Hashi>) -> (Self, MpcHandle) {
+        let (key_ready_tx, key_ready_rx) = watch::channel(None);
         let service = Self {
             inner: hashi,
-            dkg_manager,
-            dkg_completion_tx,
+            key_ready_tx,
         };
-        let handle = MpcHandle { dkg_completion_rx };
+        let handle = MpcHandle { key_ready_rx };
         (service, handle)
     }
 
     pub async fn start(self) {
-        loop {
-            // TODO: Store DKG public key on-chain, and read it from there if it already exists.
-            // Note that restart is already supported in `DkgManager`, so the latter is not strictly necessary despite more direct.
-            match self.run_dkg().await {
-                Ok(output) => {
-                    let _ = self.dkg_completion_tx.send(Some(output.public_key));
-                    return;
+        if let Some(epoch) = self.get_pending_epoch_change() {
+            self.handle_reconfig(epoch).await;
+        } else {
+            loop {
+                // TODO: Store DKG public key on-chain, and read it from there if it already exists.
+                // Note that restart is already supported in `DkgManager`, so the latter is not strictly necessary despite more direct.
+                match self.run_dkg().await {
+                    Ok(output) => {
+                        let _ = self.key_ready_tx.send(Some(output.public_key));
+                        break;
+                    }
+                    Err(e) => {
+                        error!("DKG failed: {e:?}");
+                    }
                 }
-                Err(e) => {
-                    error!("DKG failed: {e:?}");
-                }
+                tokio::time::sleep(RETRY_INTERVAL).await;
             }
-            tokio::time::sleep(DKG_RETRY_INTERVAL).await;
         }
+        let mut reconfig_rx = self
+            .inner
+            .onchain_state()
+            .take_reconfig_receiver()
+            .expect("reconfig receiver already taken");
+        while let Some(epoch) = reconfig_rx.recv().await {
+            self.handle_reconfig(epoch).await;
+        }
+    }
+
+    fn get_pending_epoch_change(&self) -> Option<u64> {
+        self.inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .pending_epoch_change()
     }
 
     async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let (epoch, committee) = get_epoch_and_committee(&onchain_state)?;
+        let dkg_manager = self.inner.dkg_manager();
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(onchain_state, epoch, signer, committee);
-        let output = DkgManager::run(&self.dkg_manager, &p2p_channel, &mut tob_channel)
+        let output = DkgManager::run(&dkg_manager, &p2p_channel, &mut tob_channel)
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
         Ok(output)
+    }
+
+    async fn handle_reconfig(&self, target_epoch: u64) {
+        loop {
+            if self.get_pending_epoch_change() != Some(target_epoch) {
+                return;
+            }
+            match self.run_key_rotation(target_epoch).await {
+                Ok(output) => {
+                    let _ = self.key_ready_tx.send(Some(output.public_key));
+                    self.submit_end_reconfig(target_epoch, &output).await;
+                    return;
+                }
+                Err(e) => {
+                    error!(
+                        "Key rotation to epoch {} failed: {e}, retrying...",
+                        target_epoch
+                    );
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                }
+            }
+        }
+    }
+
+    async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let previous_certs = self.fetch_previous_certificates().await?;
+        let target_committee = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&target_epoch)
+            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {}", target_epoch))?
+            .clone();
+        let rotation_manager = self
+            .inner
+            .create_dkg_manager(target_epoch, ProtocolType::KeyRotation)?;
+        let rotation_manager = Arc::new(Mutex::new(rotation_manager));
+        self.inner.set_dkg_manager(rotation_manager.clone());
+        let signer = self.inner.config.operator_private_key()?;
+        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
+        let mut tob_channel =
+            SuiTobChannel::new(onchain_state, target_epoch, signer, target_committee);
+        let output = DkgManager::run_key_rotation(
+            &rotation_manager,
+            &previous_certs,
+            &p2p_channel,
+            &mut tob_channel,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;
+        Ok(output)
+    }
+
+    async fn fetch_previous_certificates(&self) -> anyhow::Result<Vec<CertificateV1>> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let source_epoch = onchain_state.state().hashi().committees.epoch();
+        let source_committee = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .current_committee()
+            .ok_or_else(|| anyhow::anyhow!("No source committee"))?
+            .clone();
+        let certs = fetch_certificates(&onchain_state, source_epoch, &source_committee)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch certificates: {e}"))?;
+        Ok(certs.into_iter().map(|(_, cert)| cert).collect())
+    }
+
+    async fn submit_end_reconfig(&self, _epoch: u64, _output: &DkgOutput) {
+        todo!("Generate completion cert and submit on-chain")
     }
 }
 
