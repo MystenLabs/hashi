@@ -4944,9 +4944,9 @@ dependencies = [
 
 [[package]]
 name = "sui-rpc"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b736e6ff95a01381bf5c91c2c55a7fd1a38783811eb2b4f4f2693a94dc98da54"
+checksum = "f0bb04b65ca3db83c28aebc5066cdfe8e898b49b9cd56aafc523b80e210824a7"
 dependencies = [
  "base64 0.22.1",
  "bcs",
@@ -4966,9 +4966,9 @@ dependencies = [
 
 [[package]]
 name = "sui-sdk-types"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b2d924d4fb30062d54dfeb95ba3ef3ab2794709e2296655c85f56358853b60"
+checksum = "381a36877c9d3beabceb289002784750f7cd1bff93be2d943d3394d343c889bd"
 dependencies = [
  "base64ct",
  "bcs",
@@ -4988,14 +4988,13 @@ dependencies = [
 
 [[package]]
 name = "sui-transaction-builder"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3277b142a5af5696de0be8e0a9e679bd8e8acda9e3d0f127065e3ae390172388"
+checksum = "c53d6cc3c48c1602c3ead73efefaf01df78fb3082bafacde0bd82128871aa02f"
 dependencies = [
  "async-trait",
  "bcs",
  "serde",
- "serde_with",
  "sui-rpc",
  "sui-sdk-types",
  "thiserror 2.0.17",

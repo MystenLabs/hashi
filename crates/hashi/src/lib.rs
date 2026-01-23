@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod mpc;
 pub mod onchain;
 pub mod storage;
+pub mod sui_tx_executor;
 pub mod tls;
 
 /// The allowed delta for weight reduction in basis points (800 means 8%).
