@@ -91,7 +91,7 @@ impl MpcService {
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(
-            self.inner.config.clone(),
+            self.inner.config.hashi_ids(),
             onchain_state,
             epoch,
             signer,

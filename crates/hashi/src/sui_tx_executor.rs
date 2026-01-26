@@ -5,13 +5,16 @@
 //! # Example
 //!
 //! ```ignore
-//! use hashi::sui_tx_executor::SuiTransactionExecutor;
+//! use hashi::sui_tx_executor::SuiTxExecutor;
 //!
-//! // Using config and onchain_state
-//! let mut executor = SuiTransactionExecutor::new(&config, onchain_state)?;
+//! // Minimal usage with client, signer, and hashi_ids
+//! let mut executor = SuiTxExecutor::new(client, signer, hashi_ids);
+//!
+//! // Or from config and onchain_state (convenience constructor)
+//! let mut executor = SuiTxExecutor::from_config(&config, &onchain_state)?;
 //!
 //! // Or from an Arc<Hashi>
-//! let mut executor = SuiTransactionExecutor::from_hashi(hashi.clone())?;
+//! let mut executor = SuiTxExecutor::from_hashi(hashi.clone())?;
 //!
 //! // Execute domain-specific transactions
 //! executor.execute_confirm_deposit(&deposit_request, signed_message).await?;
@@ -29,19 +32,13 @@ use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
-use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_sdk_types::Address;
-use sui_sdk_types::GasPayment;
 use sui_sdk_types::Identifier;
-use sui_sdk_types::ProgrammableTransaction;
-use sui_sdk_types::StructTag;
-use sui_sdk_types::Transaction;
-use sui_sdk_types::TransactionExpiration;
-use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::FromBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
@@ -49,44 +46,47 @@ use sui_transaction_builder::TransactionBuilder;
 
 use crate::Hashi;
 use crate::config::Config;
+use crate::config::HashiIds;
 use crate::dkg::types::CertificateV1;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
 
-const DEFAULT_GAS_BUDGET: u64 = 1_000_000_000;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
+const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 
 /// A reusable executor for submitting Sui transactions.
 ///
-/// Handles gas selection, transaction construction, signing, and execution.
-/// Can be configured with custom signer, gas budget, and timeout,
-/// or use defaults from the config.
+/// Uses `TransactionBuilder::build()` with the Sui RPC client to handle
+/// dry-running, gas selection, budget calculation, and object version resolution
+/// automatically.
 pub struct SuiTxExecutor {
-    config: Config,
-    onchain_state: OnchainState,
+    client: Client,
     signer: Ed25519PrivateKey,
-    gas_budget: u64,
+    hashi_ids: HashiIds,
     timeout: Duration,
 }
 
 impl SuiTxExecutor {
+    /// Create a new executor with minimal dependencies.
+    pub fn new(client: Client, signer: Ed25519PrivateKey, hashi_ids: HashiIds) -> Self {
+        Self {
+            client,
+            signer,
+            hashi_ids,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        }
+    }
+
     /// Create a new executor from config and onchain state.
     ///
-    /// Uses:
-    /// - `onchain_state.client()` for the RPC client
-    /// - `config.operator_private_key()` for signing
-    /// - Default gas budget of 1 SUI
-    /// - Default timeout of 10 seconds
-    pub fn new(config: &Config, onchain_state: OnchainState) -> anyhow::Result<Self> {
+    /// This is a convenience constructor for use within the Hashi system.
+    pub fn from_config(config: &Config, onchain_state: &OnchainState) -> anyhow::Result<Self> {
         let signer = config.operator_private_key()?;
-
-        Ok(Self {
-            config: config.clone(),
-            onchain_state,
+        Ok(Self::new(
+            onchain_state.client(),
             signer,
-            gas_budget: DEFAULT_GAS_BUDGET,
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        })
+            config.hashi_ids(),
+        ))
     }
 
     /// Create a new executor from an `Arc<Hashi>`.
@@ -94,18 +94,12 @@ impl SuiTxExecutor {
     /// This is a convenience constructor that extracts the config and onchain_state
     /// from the Hashi instance.
     pub fn from_hashi(hashi: Arc<Hashi>) -> anyhow::Result<Self> {
-        Self::new(&hashi.config, hashi.onchain_state().clone())
+        Self::from_config(&hashi.config, hashi.onchain_state())
     }
 
     /// Override the signer.
     pub fn with_signer(mut self, signer: Ed25519PrivateKey) -> Self {
         self.signer = signer;
-        self
-    }
-
-    /// Override the gas budget (in MIST).
-    pub fn with_gas_budget(mut self, budget: u64) -> Self {
-        self.gas_budget = budget;
         self
     }
 
@@ -119,89 +113,26 @@ impl SuiTxExecutor {
     // Generic execution methods
     // ========================================================================
 
-    /// Execute a `ProgrammableTransaction`.
-    ///
-    /// This method:
-    /// 1. Selects gas coins from the signer's account
-    /// 2. Gets the current reference gas price
-    /// 3. Constructs a full `Transaction` with gas payment
-    /// 4. Signs and submits the transaction
-    /// 5. Waits for checkpoint inclusion
-    ///
-    /// Returns the execution response, which includes effects and events.
-    pub async fn execute_pt(
-        &mut self,
-        pt: ProgrammableTransaction,
-    ) -> anyhow::Result<ExecuteTransactionResponse> {
-        let mut client = self.onchain_state.client();
-        let sender = self.signer.public_key().derive_address();
-        let price = client.get_reference_gas_price().await?;
-        let gas_objects = client
-            .select_coins(&sender, &StructTag::sui().into(), self.gas_budget, &[])
-            .await?;
-
-        let transaction = Transaction {
-            kind: TransactionKind::ProgrammableTransaction(pt),
-            sender,
-            gas_payment: GasPayment {
-                objects: gas_objects
-                    .iter()
-                    .map(|o| (&o.object_reference()).try_into())
-                    .collect::<Result<_, _>>()?,
-                owner: sender,
-                price,
-                budget: self.gas_budget,
-            },
-            expiration: TransactionExpiration::None,
-        };
-
-        let signature = self.signer.sign_transaction(&transaction)?;
-
-        let response = client
-            .execute_transaction_and_wait_for_checkpoint(
-                ExecuteTransactionRequest::new(transaction.into())
-                    .with_signatures(vec![signature.into()])
-                    .with_read_mask(FieldMask::from_str("*")),
-                self.timeout,
-            )
-            .await?
-            .into_inner();
-
-        Ok(response)
-    }
-
     /// Execute a transaction built with `TransactionBuilder`.
     ///
-    /// This method configures the builder with gas objects, price, budget, and sender,
-    /// then builds and executes the transaction.
+    /// This method sets the sender on the builder and uses `build()` with the client,
+    /// which handles dry-running the transaction, setting a budget, doing coin selection,
+    /// and resolving object versions/digests automatically.
     ///
-    /// Note: The builder is consumed because `TransactionBuilder::try_build()` takes ownership.
+    /// Note: The builder is consumed because `TransactionBuilder::build()` takes ownership.
     pub async fn execute(
         &mut self,
         mut builder: TransactionBuilder,
     ) -> anyhow::Result<ExecuteTransactionResponse> {
-        let mut client = self.onchain_state.client();
         let sender = self.signer.public_key().derive_address();
-        let price = client.get_reference_gas_price().await?;
-        let gas_objects = client
-            .select_coins(&sender, &StructTag::sui().into(), self.gas_budget, &[])
-            .await?;
 
         builder.set_sender(sender);
-        builder.set_gas_price(price);
-        builder.set_gas_budget(self.gas_budget);
-        builder.add_gas_objects(gas_objects.iter().map(|o| {
-            ObjectInput::owned(
-                o.object_id().parse().unwrap(),
-                o.version(),
-                o.digest().parse().unwrap(),
-            )
-        }));
 
-        let transaction = builder.try_build()?;
+        let transaction = builder.build(&mut self.client).await?;
         let signature = self.signer.sign_transaction(&transaction)?;
 
-        let response = client
+        let response = self
+            .client
             .execute_transaction_and_wait_for_checkpoint(
                 ExecuteTransactionRequest::new(transaction.into())
                     .with_signatures(vec![signature.into()])
@@ -228,11 +159,6 @@ impl SuiTxExecutor {
         deposit_request: &DepositRequest,
         signed_message: SignedMessage<DepositRequest>,
     ) -> anyhow::Result<()> {
-        let hashi_ids = self.config.hashi_ids();
-        let hashi_initial_shared_version = {
-            let state = self.onchain_state.state();
-            state.hashi().initial_shared_version
-        };
         let committee_sig = signed_message.committee_signature();
 
         // Build a PTB that:
@@ -248,22 +174,22 @@ impl SuiTxExecutor {
         // Call new_committee_signature to get the properly serialized CommitteeSignature
         let committee_sig_arg = builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("committee"),
                 Identifier::from_static("new_committee_signature"),
             ),
             vec![epoch_arg, signature_arg, bitmap_arg],
         );
 
-        // Call confirm deposit
-        let hashi_arg = builder.object(ObjectInput::shared(
-            hashi_ids.hashi_object_id,
-            hashi_initial_shared_version,
-            true,
-        ));
+        // Call confirm deposit - server will resolve the shared object version
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("confirm_deposit"),
             ),
@@ -288,29 +214,19 @@ impl SuiTxExecutor {
         &mut self,
         expired_requests: &[DepositRequest],
     ) -> anyhow::Result<()> {
-        let hashi_ids = self.config.hashi_ids();
-        let hashi_initial_shared_version = {
-            let state = self.onchain_state.state();
-            state.hashi().initial_shared_version
-        };
-
         // Build a PTB that calls delete_expired_deposit for each expired request
         let mut builder = TransactionBuilder::new();
 
-        let hashi_arg = builder.object(ObjectInput::shared(
-            hashi_ids.hashi_object_id,
-            hashi_initial_shared_version,
-            true,
-        ));
-
-        // Get Clock object (0x6 is the Clock object ID on Sui)
-        let clock_arg = builder.object(ObjectInput::shared(
-            Address::from_static(
-                "0x0000000000000000000000000000000000000000000000000000000000000006",
-            ),
-            1,     // Clock's initial shared version is always 1
-            false, // Clock is immutable
-        ));
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
 
         // Add a move call for each expired deposit request
         for deposit_request in expired_requests {
@@ -318,7 +234,7 @@ impl SuiTxExecutor {
 
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    self.hashi_ids.package_id,
                     Identifier::from_static("deposit"),
                     Identifier::from_static("delete_expired_deposit"),
                 ),
@@ -352,37 +268,18 @@ impl SuiTxExecutor {
         amount_sats: u64,
         derivation_path: Option<Address>,
     ) -> anyhow::Result<Address> {
-        let hashi_ids = self.config.hashi_ids();
-
-        // Fetch the hashi object's initial shared version via RPC
-        // (we can't use onchain_state.state() here because it may not be initialized yet)
-        let hashi_obj = self
-            .onchain_state
-            .client()
-            .ledger_client()
-            .get_object(
-                GetObjectRequest::new(&hashi_ids.hashi_object_id)
-                    .with_read_mask(FieldMask::from_paths(["object_id", "owner"])),
-            )
-            .await?
-            .into_inner();
-        let hashi_initial_shared_version = hashi_obj.object().owner().version();
-
         let mut builder = TransactionBuilder::new();
 
-        // Shared objects
-        let hashi_arg = builder.object(ObjectInput::shared(
-            hashi_ids.hashi_object_id,
-            hashi_initial_shared_version,
-            true,
-        ));
-        let clock_arg = builder.object(ObjectInput::shared(
-            Address::from_static(
-                "0x0000000000000000000000000000000000000000000000000000000000000006",
-            ),
-            1,     // Clock's initial shared version is always 1
-            false, // immutable
-        ));
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
 
         // Pure inputs
         let txid_arg = builder.pure(&txid);
@@ -393,7 +290,7 @@ impl SuiTxExecutor {
         // 1. Create UtxoId: utxo::utxo_id(txid, vout)
         let utxo_id_arg = builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("utxo"),
                 Identifier::from_static("utxo_id"),
             ),
@@ -403,7 +300,7 @@ impl SuiTxExecutor {
         // 2. Create Utxo: utxo::utxo(utxo_id, amount, derivation_path)
         let utxo_arg = builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("utxo"),
                 Identifier::from_static("utxo"),
             ),
@@ -413,7 +310,7 @@ impl SuiTxExecutor {
         // 3. Create DepositRequest: deposit_queue::deposit_request(utxo, clock)
         let deposit_request_arg = builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("deposit_queue"),
                 Identifier::from_static("deposit_request"),
             ),
@@ -429,7 +326,7 @@ impl SuiTxExecutor {
         // 5. Call deposit(hashi, request, fee)
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("deposit"),
             ),
@@ -478,20 +375,14 @@ impl SuiTxExecutor {
         let signature = dkg_cert.signature_bytes().to_vec();
         let signers_bitmap = dkg_cert.signers_bitmap_bytes().to_vec();
 
-        let hashi_ids = self.config.hashi_ids();
-        let hashi_initial_shared_version = {
-            let state = self.onchain_state.state();
-            state.hashi().initial_shared_version
-        };
-
         let mut builder = TransactionBuilder::new();
 
-        // Build inputs for the move call
-        let hashi_arg = builder.object(ObjectInput::shared(
-            hashi_ids.hashi_object_id,
-            hashi_initial_shared_version,
-            true,
-        ));
+        // Build inputs for the move call - server will resolve shared object version
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
         let epoch_arg = builder.pure(&epoch);
         let dealer_arg = builder.pure(&dealer);
         let message_hash_arg = builder.pure(&message_hash);
@@ -500,7 +391,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                self.hashi_ids.package_id,
                 Identifier::from_static("cert_submission"),
                 Identifier::from_static("submit_dkg_cert"),
             ),

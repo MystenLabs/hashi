@@ -210,8 +210,8 @@ mod tests {
             None,
         )
         .await?;
-        let mut executor =
-            SuiTxExecutor::new(&hashi.config, onchain_state)?.with_signer(user_key.clone());
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, &onchain_state)?
+            .with_signer(user_key.clone());
         let request_id = executor
             .execute_create_deposit_request(
                 txid_to_address(&txid),

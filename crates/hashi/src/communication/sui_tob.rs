@@ -12,7 +12,7 @@ use thiserror::Error;
 use super::ChannelError;
 use super::ChannelResult;
 use super::OrderedBroadcastChannel;
-use crate::config::Config;
+use crate::config::HashiIds;
 use crate::dkg::types::CertificateV1;
 use crate::dkg::types::DkgDealerMessageHash;
 use crate::onchain::OnchainState;
@@ -20,7 +20,6 @@ use crate::sui_tx_executor::SuiTxExecutor;
 use hashi_types::committee::Committee;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const GAS_BUDGET: u64 = 50_000_000;
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 // TODO: Read threshold from on-chain config once it is made configurable.
@@ -49,7 +48,7 @@ impl From<TobError> for ChannelError {
 }
 
 pub struct SuiTobChannel {
-    config: Config,
+    hashi_ids: HashiIds,
     onchain_state: OnchainState,
     epoch: u64,
     signer: Ed25519PrivateKey,
@@ -62,14 +61,14 @@ pub struct SuiTobChannel {
 
 impl SuiTobChannel {
     pub fn new(
-        config: Config,
+        hashi_ids: HashiIds,
         onchain_state: OnchainState,
         epoch: u64,
         signer: Ed25519PrivateKey,
         committee: Committee,
     ) -> Self {
         Self {
-            config,
+            hashi_ids,
             onchain_state,
             epoch,
             signer,
@@ -84,14 +83,13 @@ impl SuiTobChannel {
         self.committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
     }
 
-    fn create_executor(&self) -> Result<SuiTxExecutor, TobError> {
-        let executor = SuiTxExecutor::new(&self.config, self.onchain_state.clone())
-            .map_err(|e| TobError::InvalidState(e.to_string()))?;
-
-        Ok(executor
-            .with_signer(self.signer.clone())
-            .with_gas_budget(GAS_BUDGET)
-            .with_timeout(TX_CONFIRMATION_TIMEOUT))
+    fn create_executor(&self) -> SuiTxExecutor {
+        SuiTxExecutor::new(
+            self.onchain_state.client(),
+            self.signer.clone(),
+            self.hashi_ids,
+        )
+        .with_timeout(TX_CONFIRMATION_TIMEOUT)
     }
 
     /// Fetches all certificates in insertion order by following the LinkedTable's linked list.
@@ -119,7 +117,6 @@ impl SuiTobChannel {
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
-        // Check if certificate is already on-chain (idempotency)
         let dealer = cert.dealer_address();
         let existing = self
             .fetch_all_certificates()
@@ -129,7 +126,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
             return Ok(());
         }
 
-        let mut executor = self.create_executor().map_err(ChannelError::from)?;
+        let mut executor = self.create_executor();
         executor
             .execute_submit_dkg_certificate(&cert)
             .await
