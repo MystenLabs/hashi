@@ -10,6 +10,8 @@ use sui_sdk_types::Address;
 
 use hashi_types::committee::EncryptionPrivateKey;
 
+use crate::dkg::types::RotationMessages;
+
 pub struct Database {
     #[allow(unused)]
     db: fjall::Database,
@@ -21,31 +23,40 @@ pub struct Database {
     // value: 32-byte RistrettoScalar
     encryption_keys: Keyspace,
 
-    // Column Family used to store dealer messages for DKG and key rotation.
+    // Column Family used to store dealer messages for DKG.
     //
     // key: (big endian u64 epoch) + (32-byte validator address)
     // value: avss::Message
     dealer_messages: Keyspace,
+
+    // Column Family used to store rotation messages for key rotation.
+    //
+    // key: (big endian u64 epoch) + (32-byte validator address)
+    // value: BCS-serialized RotationMessages (BTreeMap<ShareIndex, avss::Message>)
+    rotation_messages: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
+const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 
 impl Database {
     pub fn open(path: &Path) -> Self {
         let db = fjall::Database::builder(path).open().unwrap();
-
         let encryption_keys = db
             .keyspace(ENCRYPTION_KEYS_CF_NAME, KeyspaceCreateOptions::default)
             .unwrap();
         let dealer_messages = db
             .keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)
             .unwrap();
-
+        let rotation_messages = db
+            .keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)
+            .unwrap();
         Self {
             db,
             encryption_keys,
             dealer_messages,
+            rotation_messages,
         }
     }
 
@@ -117,7 +128,8 @@ impl Database {
     ) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         let value = bcs::to_bytes(message).unwrap();
-        self.dealer_messages.insert(key, value)
+        self.dealer_messages.insert(key, value)?;
+        clean_up_old_epochs(&self.dealer_messages, epoch)
     }
 
     pub fn get_dealer_message(
@@ -143,15 +155,6 @@ impl Database {
         Ok(Some(message))
     }
 
-    pub fn clear_dealer_messages(&self, epoch: u64) -> Result<()> {
-        let prefix = epoch.to_be_bytes();
-        for guard in self.dealer_messages.prefix(prefix) {
-            let key = guard.key()?;
-            self.dealer_messages.remove(key)?;
-        }
-        Ok(())
-    }
-
     pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
         let prefix = epoch.to_be_bytes();
         let mut results = Vec::new();
@@ -175,6 +178,88 @@ impl Database {
         }
         Ok(results)
     }
+
+    pub fn store_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+        messages: &RotationMessages,
+    ) -> Result<()> {
+        let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
+        let value = bcs::to_bytes(messages).unwrap();
+        self.rotation_messages.insert(key, value)?;
+        clean_up_old_epochs(&self.rotation_messages, epoch)
+    }
+
+    pub fn get_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> Result<Option<RotationMessages>> {
+        let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
+        let bytes = match self.rotation_messages.get(key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let messages = bcs::from_bytes(&bytes).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid rotation messages",
+            ))
+        })?;
+        Ok(Some(messages))
+    }
+
+    pub fn list_all_rotation_messages(
+        &self,
+        epoch: u64,
+    ) -> Result<Vec<(Address, RotationMessages)>> {
+        let prefix = epoch.to_be_bytes();
+        let mut results = Vec::new();
+        for guard in self.rotation_messages.prefix(prefix) {
+            let (key, value) = guard.into_inner()?;
+            // Key format: [epoch (8 bytes) | address (32 bytes)]
+            let address_bytes: [u8; 32] = key[8..].try_into().map_err(|_| {
+                fjall::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid key length",
+                ))
+            })?;
+            let address = Address::new(address_bytes);
+            let messages: RotationMessages = bcs::from_bytes(&value).map_err(|_| {
+                fjall::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid rotation messages",
+                ))
+            })?;
+            results.push((address, messages));
+        }
+        Ok(results)
+    }
+}
+
+/// Delete entries from keyspace where key starts with epoch (big-endian u64) < cutoff.
+/// Cutoff is `current_epoch - 1`, keeping current and previous epoch.
+fn clean_up_old_epochs(keyspace: &Keyspace, current_epoch: u64) -> Result<()> {
+    let cutoff = current_epoch.saturating_sub(1);
+    let keys_to_delete: Vec<_> = keyspace
+        .iter()
+        .filter_map(|guard| {
+            let key = guard.key().ok()?;
+            let epoch_bytes: [u8; 8] = key.as_ref().get(..8)?.try_into().ok()?;
+            let epoch = u64::from_be_bytes(epoch_bytes);
+            if epoch < cutoff {
+                Some(key.to_vec())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for key in keys_to_delete {
+        keyspace.remove(key)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -318,17 +403,44 @@ mod tests {
         // Store in different epoch
         db.store_dealer_message(2, &dealer1, &message1).unwrap();
 
-        // Clear epoch 1 - should only clear epoch 1
-        db.clear_dealer_messages(1).unwrap();
-        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_none());
-        assert!(db.get_dealer_message(1, &dealer2).unwrap().is_none());
-        assert!(db.get_dealer_message(2, &dealer1).unwrap().is_some());
-
         // Verify persistence across reopen
         drop(db);
         let db = Database::open(tmpdir.path());
-        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_none());
+        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_some());
         assert!(db.get_dealer_message(2, &dealer1).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_dealer_messages_auto_cleanup() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path());
+
+        let dealer = Address::new([1u8; 32]);
+        let message = create_test_message();
+
+        // Store in epoch 5 - cleanup happens for epochs < 4, but nothing exists yet
+        db.store_dealer_message(5, &dealer, &message).unwrap();
+        assert!(db.get_dealer_message(5, &dealer).unwrap().is_some());
+
+        // Store in epoch 6 - cleanup happens for epochs < 5, so epoch 5 remains
+        db.store_dealer_message(6, &dealer, &message).unwrap();
+        assert!(db.get_dealer_message(5, &dealer).unwrap().is_some());
+        assert!(db.get_dealer_message(6, &dealer).unwrap().is_some());
+
+        // Store in epoch 7 - cleanup happens for epochs < 6, so epoch 5 is deleted
+        db.store_dealer_message(7, &dealer, &message).unwrap();
+        assert!(
+            db.get_dealer_message(5, &dealer).unwrap().is_none(),
+            "epoch 5 should be cleaned up"
+        );
+        assert!(
+            db.get_dealer_message(6, &dealer).unwrap().is_some(),
+            "epoch 6 should remain"
+        );
+        assert!(
+            db.get_dealer_message(7, &dealer).unwrap().is_some(),
+            "epoch 7 should remain"
+        );
     }
 
     #[test]
@@ -381,14 +493,132 @@ mod tests {
         // List non-existent epoch - should return empty
         let result = db.list_all_dealer_messages(99).unwrap();
         assert!(result.is_empty());
+    }
 
-        // Clear epoch 1 and verify list is empty
-        db.clear_dealer_messages(1).unwrap();
-        let result = db.list_all_dealer_messages(1).unwrap();
+    #[test]
+    fn test_rotation_messages() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path());
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+
+        // Create rotation messages (multiple messages per dealer, keyed by share index)
+        let mut messages1: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        messages1.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+        messages1.insert(NonZeroU16::new(2).unwrap(), create_test_message());
+
+        let mut messages2: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        messages2.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        // Initially empty
+        assert!(db.list_all_rotation_messages(1).unwrap().is_empty());
+
+        // Store and list
+        db.store_rotation_messages(1, &dealer1, &messages1).unwrap();
+        let all = db.list_all_rotation_messages(1).unwrap();
+        assert_eq!(all.len(), 1);
+        let retrieved = &all[0].1;
+        assert_eq!(retrieved.len(), 2);
+        assert!(retrieved.contains_key(&NonZeroU16::new(1).unwrap()));
+        assert!(retrieved.contains_key(&NonZeroU16::new(2).unwrap()));
+
+        // Different epoch, same dealer - should be empty
+        assert!(db.list_all_rotation_messages(2).unwrap().is_empty());
+
+        // Store multiple dealers in same epoch
+        db.store_rotation_messages(1, &dealer2, &messages2).unwrap();
+        let all = db.list_all_rotation_messages(1).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Verify persistence across reopen
+        drop(db);
+        let db = Database::open(tmpdir.path());
+        let all = db.list_all_rotation_messages(1).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_rotation_messages_auto_cleanup() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path());
+
+        let dealer = Address::new([1u8; 32]);
+        let mut messages: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        messages.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        // Store in epoch 5 - cleanup happens for epochs < 4, but nothing exists yet
+        db.store_rotation_messages(5, &dealer, &messages).unwrap();
+        assert_eq!(db.list_all_rotation_messages(5).unwrap().len(), 1);
+
+        // Store in epoch 6 - cleanup happens for epochs < 5, so epoch 5 remains
+        db.store_rotation_messages(6, &dealer, &messages).unwrap();
+        assert_eq!(db.list_all_rotation_messages(5).unwrap().len(), 1);
+        assert_eq!(db.list_all_rotation_messages(6).unwrap().len(), 1);
+
+        // Store in epoch 7 - cleanup happens for epochs < 6, so epoch 5 is deleted
+        db.store_rotation_messages(7, &dealer, &messages).unwrap();
+        assert!(
+            db.list_all_rotation_messages(5).unwrap().is_empty(),
+            "epoch 5 should be cleaned up"
+        );
+        assert_eq!(
+            db.list_all_rotation_messages(6).unwrap().len(),
+            1,
+            "epoch 6 should remain"
+        );
+        assert_eq!(
+            db.list_all_rotation_messages(7).unwrap().len(),
+            1,
+            "epoch 7 should remain"
+        );
+    }
+
+    #[test]
+    fn test_list_all_rotation_messages() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path());
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+
+        let mut messages1: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        messages1.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        let mut messages2: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        messages2.insert(NonZeroU16::new(2).unwrap(), create_test_message());
+
+        // Empty epoch returns empty list
+        let result = db.list_all_rotation_messages(1).unwrap();
         assert!(result.is_empty());
 
-        // Epoch 2 should still have its message
-        let result = db.list_all_dealer_messages(2).unwrap();
-        assert_eq!(result.len(), 1);
+        // Store messages in epoch 1
+        db.store_rotation_messages(1, &dealer1, &messages1).unwrap();
+        db.store_rotation_messages(1, &dealer2, &messages2).unwrap();
+
+        // List epoch 1 - should return 2 entries
+        let result = db.list_all_rotation_messages(1).unwrap();
+        assert_eq!(result.len(), 2);
+
+        let result_map: std::collections::HashMap<_, _> = result.into_iter().collect();
+        assert!(result_map.contains_key(&dealer1));
+        assert!(result_map.contains_key(&dealer2));
+
+        // Verify content
+        assert!(result_map[&dealer1].contains_key(&NonZeroU16::new(1).unwrap()));
+        assert!(result_map[&dealer2].contains_key(&NonZeroU16::new(2).unwrap()));
+
+        // List non-existent epoch - should return empty
+        let result = db.list_all_rotation_messages(99).unwrap();
+        assert!(result.is_empty());
     }
 }

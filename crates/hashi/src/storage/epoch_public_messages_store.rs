@@ -4,6 +4,8 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
 
 use crate::db::Database;
+use crate::dkg::types::Messages;
+use crate::dkg::types::RotationMessages;
 use crate::storage::PublicMessagesStore;
 
 pub struct EpochPublicMessagesStore {
@@ -34,15 +36,41 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to get dealer message: {e}"))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, avss::Message)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         self.db
             .list_all_dealer_messages(self.epoch)
+            .map(|msgs| {
+                msgs.into_iter()
+                    .map(|(addr, msg)| (addr, Messages::Dkg(msg)))
+                    .collect()
+            })
             .map_err(|e| anyhow::anyhow!("failed to list dealer messages: {e}"))
     }
 
-    fn clear(&mut self) -> anyhow::Result<()> {
+    fn store_rotation_messages(
+        &mut self,
+        dealer: &Address,
+        messages: &RotationMessages,
+    ) -> anyhow::Result<()> {
         self.db
-            .clear_dealer_messages(self.epoch)
-            .map_err(|e| anyhow::anyhow!("failed to clear dealer messages: {e}"))
+            .store_rotation_messages(self.epoch, dealer, messages)
+            .map_err(|e| anyhow::anyhow!("failed to store rotation messages: {e}"))
+    }
+
+    fn get_rotation_messages(&self, dealer: &Address) -> anyhow::Result<Option<RotationMessages>> {
+        self.db
+            .get_rotation_messages(self.epoch, dealer)
+            .map_err(|e| anyhow::anyhow!("failed to get rotation messages: {e}"))
+    }
+
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+        self.db
+            .list_all_rotation_messages(self.epoch)
+            .map(|msgs| {
+                msgs.into_iter()
+                    .map(|(addr, msg)| (addr, Messages::Rotation(msg)))
+                    .collect()
+            })
+            .map_err(|e| anyhow::anyhow!("failed to list rotation messages: {e}"))
     }
 }

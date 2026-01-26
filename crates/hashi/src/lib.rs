@@ -17,6 +17,10 @@ pub mod onchain;
 pub mod storage;
 pub mod tls;
 
+/// The allowed delta for weight reduction in basis points (800 means 8%).
+/// This matches Sui's `random_beacon_reduction_allowed_delta` configuration.
+const WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
+
 fn init_crypto_provider() {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -129,6 +133,7 @@ impl Hashi {
             encryption_key,
             signing_key,
             store,
+            WEIGHT_REDUCTION_ALLOWED_DELTA,
         )?)
     }
 
