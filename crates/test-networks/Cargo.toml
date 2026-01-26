@@ -4,8 +4,6 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-bcs = "0.1"
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
 hashi = { path = "../hashi" }
 hashi-btc = { path = "../hashi-btc" }
 hashi-types = { path = "../hashi-types" }

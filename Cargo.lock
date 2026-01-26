@@ -5060,10 +5060,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64ct",
- "bcs",
  "bitcoin",
  "bitcoincore-rpc",
- "fastcrypto-tbls",
  "futures",
  "hashi",
  "hashi-btc",

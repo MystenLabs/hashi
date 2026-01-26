@@ -3,6 +3,12 @@ use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
+use hashi_types::committee::Bls12381PrivateKey;
+use hashi_types::committee::BlsSignatureAggregator;
+use hashi_types::committee::Committee;
+use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::EncryptionPublicKey;
+use serde;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,6 +33,29 @@ use sui_sdk_types::TransactionExpiration;
 use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
 use tracing::info;
+
+#[derive(Clone, Debug)]
+pub struct ReconfigCompletionMessage {}
+
+impl serde::Serialize for ReconfigCompletionMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Move's BCS serializes an empty struct as a single 0x00 byte
+        serializer.serialize_u8(0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReconfigCompletionMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let _: u8 = serde::Deserialize::deserialize(deserializer)?;
+        Ok(ReconfigCompletionMessage {})
+    }
+}
 
 use crate::BitcoinNodeHandle;
 use crate::SuiNetworkHandle;
@@ -193,6 +222,17 @@ impl HashiNetworkBuilder {
             configs.push(config);
         }
 
+        let bls_keys: Vec<(Address, Bls12381PrivateKey, EncryptionPublicKey)> = configs
+            .iter()
+            .map(|c| {
+                (
+                    c.validator_address().unwrap(),
+                    c.protocol_private_key().unwrap(),
+                    c.encryption_public_key().unwrap(),
+                )
+            })
+            .collect();
+
         for config in &configs {
             let client = sui.client.clone();
             register_onchain(client, config).await?;
@@ -200,7 +240,7 @@ impl HashiNetworkBuilder {
 
         // Init the initial committee
         start_reconfig(sui, hashi_ids).await?;
-        end_reconfig(sui, hashi_ids).await?;
+        end_reconfig(sui, hashi_ids, &bls_keys).await?;
 
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
@@ -534,46 +574,72 @@ async fn start_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<(
     Ok(())
 }
 
-async fn end_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
+async fn end_reconfig(
+    sui: &SuiNetworkHandle,
+    hashi_ids: HashiIds,
+    bls_keys: &[(Address, Bls12381PrivateKey, EncryptionPublicKey)],
+) -> Result<()> {
     let mut client = sui.client.clone();
     let private_key = sui.user_keys.first().unwrap();
     let sender = private_key.public_key().derive_address();
     let price = client.get_reference_gas_price().await?;
-
+    let service_info = client
+        .clone()
+        .ledger_client()
+        .get_service_info(GetServiceInfoRequest::default())
+        .await?
+        .into_inner();
+    let epoch = service_info.epoch.unwrap_or(0);
+    let committee_members: Vec<CommitteeMember> = bls_keys
+        .iter()
+        .map(|(addr, bls_key, enc_key)| {
+            CommitteeMember::new(*addr, bls_key.public_key(), enc_key.clone(), 1)
+        })
+        .collect();
+    let committee = Committee::new(committee_members, epoch);
+    let message = ReconfigCompletionMessage {};
+    let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+    for (addr, bls_key, _) in bls_keys {
+        let member_sig = bls_key.sign(epoch, *addr, &message);
+        aggregator.add_signature(member_sig)?;
+    }
+    let signed_message = aggregator.finish()?;
+    committee
+        .verify_signature(&signed_message)
+        .expect("Local signature verification failed");
+    let signature_bytes = signed_message.signature_bytes();
+    let signers_bitmap_bytes = signed_message.signers_bitmap_bytes();
     let gas_objects = client
         .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
         .await?;
-
-    let system_objects = client
+    let hashi_object = client
         .ledger_client()
         .batch_get_objects(
             BatchGetObjectsRequest::default()
-                .with_requests(vec![
-                    GetObjectRequest::new(&Address::from_static("0x5")),
-                    GetObjectRequest::new(&hashi_ids.hashi_object_id),
-                ])
+                .with_requests(vec![GetObjectRequest::new(&hashi_ids.hashi_object_id)])
                 .with_read_mask(FieldMask::from_str("*")),
         )
         .await?
         .into_inner();
-    let _sui_system = system_objects.objects[0].object();
-    let hashi_system = system_objects.objects[1].object();
-
+    let hashi_system = hashi_object.objects[0].object();
     let pt = ProgrammableTransaction {
-        inputs: vec![Input::Shared(SharedInput::new(
-            hashi_system.object_id().parse()?,
-            hashi_system.owner().version(),
-            true,
-        ))],
+        inputs: vec![
+            Input::Shared(SharedInput::new(
+                hashi_system.object_id().parse()?,
+                hashi_system.owner().version(),
+                true,
+            )),
+            Input::Pure(signature_bytes.to_vec().to_bcs()?),
+            Input::Pure(signers_bitmap_bytes.to_vec().to_bcs()?),
+        ],
         commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
             package: hashi_ids.package_id,
             module: Identifier::from_static("reconfig"),
             function: Identifier::from_static("end_reconfig"),
             type_arguments: vec![],
-            arguments: vec![Argument::Input(0)],
+            arguments: vec![Argument::Input(0), Argument::Input(1), Argument::Input(2)],
         })],
     };
-
     let transaction = Transaction {
         kind: TransactionKind::ProgrammableTransaction(pt),
         sender,
@@ -588,23 +654,20 @@ async fn end_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()>
         },
         expiration: TransactionExpiration::None,
     };
-
-    let signature = private_key.sign_transaction(&transaction)?;
-
+    let tx_signature = private_key.sign_transaction(&transaction)?;
     let response = client
         .execute_transaction_and_wait_for_checkpoint(
             ExecuteTransactionRequest::new(transaction.into())
-                .with_signatures(vec![signature.into()])
+                .with_signatures(vec![tx_signature.into()])
                 .with_read_mask(FieldMask::from_str("*")),
             std::time::Duration::from_secs(10),
         )
         .await?
         .into_inner();
-
     assert!(
         response.transaction().effects().status().success(),
-        "end_reconfig failed"
+        "end_reconfig failed: {:?}",
+        response.transaction().effects().status().error_opt()
     );
-
     Ok(())
 }
