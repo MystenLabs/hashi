@@ -4907,8 +4907,7 @@ checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
 [[package]]
 name = "sui-crypto"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3c368e14e5deb195c61a000da397f03ec9d66ccb84fea4f6d4d4eb4a6fe528c"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=b160100865f53f0ef8e9bc9c5ec51a74c2d2736a#b160100865f53f0ef8e9bc9c5ec51a74c2d2736a"
 dependencies = [
  "ed25519-dalek",
  "k256",
@@ -4945,8 +4944,7 @@ dependencies = [
 [[package]]
 name = "sui-rpc"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0bb04b65ca3db83c28aebc5066cdfe8e898b49b9cd56aafc523b80e210824a7"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=b160100865f53f0ef8e9bc9c5ec51a74c2d2736a#b160100865f53f0ef8e9bc9c5ec51a74c2d2736a"
 dependencies = [
  "base64 0.22.1",
  "bcs",
@@ -4967,8 +4965,7 @@ dependencies = [
 [[package]]
 name = "sui-sdk-types"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381a36877c9d3beabceb289002784750f7cd1bff93be2d943d3394d343c889bd"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=b160100865f53f0ef8e9bc9c5ec51a74c2d2736a#b160100865f53f0ef8e9bc9c5ec51a74c2d2736a"
 dependencies = [
  "base64ct",
  "bcs",
@@ -4989,8 +4986,7 @@ dependencies = [
 [[package]]
 name = "sui-transaction-builder"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c53d6cc3c48c1602c3ead73efefaf01df78fb3082bafacde0bd82128871aa02f"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=b160100865f53f0ef8e9bc9c5ec51a74c2d2736a#b160100865f53f0ef8e9bc9c5ec51a74c2d2736a"
 dependencies = [
  "async-trait",
  "bcs",

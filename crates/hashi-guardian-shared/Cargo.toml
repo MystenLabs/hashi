@@ -9,7 +9,7 @@ serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1.41"
 bcs = "0.1.6"
 hashi-types = { path = "../hashi-types" }
-sui-sdk-types = { version = "0.2"}
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
 
 # Crypto dependencies
 # Note: bitcoin v0.32.7 and k256 v0.13 both require rand_core 0.6.4
