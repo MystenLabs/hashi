@@ -20,6 +20,8 @@ public fun deposit(
 
     // Check that the provided UTXO doesn't already exist in the system
     assert!(!hashi.utxo_pool().contains(request.utxo().id()));
+    // Check that the UTXO hasn't been withdrawn before (replay protection)
+    assert!(!hashi.withdrawn_utxo_pool().contains(request.utxo().id()));
 
     let deposit_requested_event = DepositRequestedEvent {
         request_id: request.id(),

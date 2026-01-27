@@ -345,16 +345,26 @@ async fn scrape_hashi(
         treasury,
         deposit_queue,
         utxo_pool,
+        withdrawn_utxo_pool,
         proposals,
         tob,
     } = response.get_ref().object().contents().deserialize()?;
 
-    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool, proposals) = tokio::try_join!(
+    let (
+        member_info,
+        committees_per_epoch,
+        treasury,
+        deposit_queue,
+        utxo_pool,
+        withdrawn_utxo_pool,
+        proposals,
+    ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
         scrape_utxo_pool(client.clone(), utxo_pool.utxos.id),
+        scrape_utxo_pool(client.clone(), withdrawn_utxo_pool.utxos.id),
         scrape_proposals(client.clone(), proposals),
     )?;
 
@@ -376,6 +386,7 @@ async fn scrape_hashi(
             treasury,
             deposit_queue,
             utxo_pool,
+            withdrawn_utxo_pool,
             proposals,
             tob_id: tob.id,
         },

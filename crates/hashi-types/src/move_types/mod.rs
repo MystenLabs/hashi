@@ -25,6 +25,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
+    pub withdrawn_utxo_pool: UtxoPool,
     pub proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     pub tob: Bag,

@@ -23,6 +23,7 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
+    pub withdrawn_utxo_pool: UtxoPool,
     pub proposals: Proposals,
     pub tob_id: Address,
 }

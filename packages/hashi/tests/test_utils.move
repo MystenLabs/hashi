@@ -135,6 +135,9 @@ public fun create_hashi_with_weighted_committee(
     // Create utxo pool
     let utxo_pool = utxo_pool::create(ctx);
 
+    // Create withdrawn utxo pool for replay protection
+    let withdrawn_utxo_pool = utxo_pool::create(ctx);
+
     // Create proposals bag
     let proposals = bag::new(ctx);
 
@@ -147,6 +150,7 @@ public fun create_hashi_with_weighted_committee(
         treasury,
         deposit_queue,
         utxo_pool,
+        withdrawn_utxo_pool,
         proposals,
         tob,
         ctx,
