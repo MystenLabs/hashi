@@ -223,6 +223,16 @@ pub enum CertificateV1 {
 }
 
 impl CertificateV1 {
+    pub fn new(
+        protocol_type: hashi_types::move_types::ProtocolType,
+        cert: DealerCertificate,
+    ) -> Self {
+        match protocol_type {
+            hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
+            hashi_types::move_types::ProtocolType::KeyRotation => CertificateV1::Rotation(cert),
+        }
+    }
+
     pub fn epoch(&self) -> u64 {
         match self {
             CertificateV1::Dkg(cert) => cert.epoch(),
@@ -276,6 +286,13 @@ impl CertificateV1 {
         match self {
             CertificateV1::Dkg(cert) => cert.message(),
             CertificateV1::Rotation(cert) => cert.message(),
+        }
+    }
+
+    pub fn protocol_type(&self) -> ProtocolType {
+        match self {
+            CertificateV1::Dkg(_) => ProtocolType::Dkg,
+            CertificateV1::Rotation(_) => ProtocolType::KeyRotation,
         }
     }
 }

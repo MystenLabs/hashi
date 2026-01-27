@@ -108,30 +108,13 @@ impl SuiTobChannel {
         cert: &CertificateV1,
     ) -> Result<Transaction, TobError> {
         let sender = self.signer.public_key().derive_address();
-        let (dealer, message_hash, epoch, signature, signers_bitmap, protocol_type) = match cert {
-            CertificateV1::Dkg(dkg_cert) => {
-                let message = dkg_cert.message();
-                (
-                    message.dealer_address,
-                    message.messages_hash.inner().to_vec(),
-                    dkg_cert.epoch(),
-                    dkg_cert.signature_bytes().to_vec(),
-                    dkg_cert.signers_bitmap_bytes().to_vec(),
-                    ProtocolType::Dkg,
-                )
-            }
-            CertificateV1::Rotation(rotation_cert) => {
-                let message = rotation_cert.message();
-                (
-                    message.dealer_address,
-                    message.messages_hash.inner().to_vec(),
-                    rotation_cert.epoch(),
-                    rotation_cert.signature_bytes().to_vec(),
-                    rotation_cert.signers_bitmap_bytes().to_vec(),
-                    ProtocolType::KeyRotation,
-                )
-            }
-        };
+        let message = cert.message();
+        let dealer = message.dealer_address;
+        let message_hash = message.messages_hash.inner().to_vec();
+        let epoch = cert.epoch();
+        let signature = cert.signature_bytes().to_vec();
+        let signers_bitmap = cert.signers_bitmap_bytes().to_vec();
+        let protocol_type = cert.protocol_type();
         let mut client = self.onchain_state.client();
         let hashi_id = self.onchain_state.hashi_id();
         let price = client
@@ -270,12 +253,7 @@ pub async fn fetch_certificates(
     for (dealer, cert) in raw_certs {
         let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch, committee, threshold)
             .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
-        let cert = match protocol_type {
-            hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(inner_cert),
-            hashi_types::move_types::ProtocolType::KeyRotation => {
-                CertificateV1::Rotation(inner_cert)
-            }
-        };
+        let cert = CertificateV1::new(protocol_type, inner_cert);
         certificates.push((dealer, cert));
     }
     Ok(certificates)

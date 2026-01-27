@@ -89,6 +89,8 @@ impl Hashi {
             .get()
             .expect("DkgManager not initialized")
             .read()
+            // RwLock::read only fails if poisoned (a thread panicked while holding the lock).
+            // Poisoning indicates a bug, so we propagate the panic rather than recover.
             .unwrap()
             .clone()
     }
@@ -99,6 +101,8 @@ impl Hashi {
             .get()
             .expect("DkgManager not initialized")
             .write()
+            // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
+            // Poisoning indicates a bug, so we propagate the panic rather than recover.
             .unwrap() = manager;
     }
 
