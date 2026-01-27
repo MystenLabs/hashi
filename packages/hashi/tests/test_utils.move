@@ -141,9 +141,6 @@ public fun create_hashi_with_weighted_committee(
     // Create TOB bag
     let tob = bag::new(ctx);
 
-    // Create reconfig signatures bag
-    let reconfig_signatures = bag::new(ctx);
-
     hashi::hashi::create_for_testing(
         committee_set,
         config,
@@ -152,7 +149,6 @@ public fun create_hashi_with_weighted_committee(
         utxo_pool,
         proposals,
         tob,
-        reconfig_signatures,
         ctx,
     )
 }

@@ -347,7 +347,6 @@ async fn scrape_hashi(
         utxo_pool,
         proposals,
         tob,
-        reconfig_signatures: _,
     } = response.get_ref().object().contents().deserialize()?;
 
     let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(

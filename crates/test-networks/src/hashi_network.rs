@@ -34,27 +34,10 @@ use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
 use tracing::info;
 
-#[derive(Clone, Debug)]
-pub struct ReconfigCompletionMessage {}
-
-impl serde::Serialize for ReconfigCompletionMessage {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // Move's BCS serializes an empty struct as a single 0x00 byte
-        serializer.serialize_u8(0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ReconfigCompletionMessage {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let _: u8 = serde::Deserialize::deserialize(deserializer)?;
-        Ok(ReconfigCompletionMessage {})
-    }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReconfigCompletionMessage {
+    pub epoch: u64,
+    pub mpc_public_key: Vec<u8>,
 }
 
 use crate::BitcoinNodeHandle;
@@ -240,7 +223,9 @@ impl HashiNetworkBuilder {
 
         // Init the initial committee
         start_reconfig(sui, hashi_ids).await?;
-        end_reconfig(sui, hashi_ids, &bls_keys).await?;
+        // Use a placeholder MPC public key for test initialization
+        let placeholder_mpc_public_key = vec![0u8; 33];
+        end_reconfig(sui, hashi_ids, &bls_keys, placeholder_mpc_public_key).await?;
 
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
@@ -578,6 +563,7 @@ async fn end_reconfig(
     sui: &SuiNetworkHandle,
     hashi_ids: HashiIds,
     bls_keys: &[(Address, Bls12381PrivateKey, EncryptionPublicKey)],
+    mpc_public_key: Vec<u8>,
 ) -> Result<()> {
     let mut client = sui.client.clone();
     let private_key = sui.user_keys.first().unwrap();
@@ -597,7 +583,10 @@ async fn end_reconfig(
         })
         .collect();
     let committee = Committee::new(committee_members, epoch);
-    let message = ReconfigCompletionMessage {};
+    let message = ReconfigCompletionMessage {
+        epoch,
+        mpc_public_key: mpc_public_key.clone(),
+    };
     let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
     for (addr, bls_key, _) in bls_keys {
         let member_sig = bls_key.sign(epoch, *addr, &message);
@@ -629,6 +618,7 @@ async fn end_reconfig(
                 hashi_system.owner().version(),
                 true,
             )),
+            Input::Pure(mpc_public_key.to_bcs()?),
             Input::Pure(signature_bytes.to_vec().to_bcs()?),
             Input::Pure(signers_bitmap_bytes.to_vec().to_bcs()?),
         ],
@@ -637,7 +627,12 @@ async fn end_reconfig(
             module: Identifier::from_static("reconfig"),
             function: Identifier::from_static("end_reconfig"),
             type_arguments: vec![],
-            arguments: vec![Argument::Input(0), Argument::Input(1), Argument::Input(2)],
+            arguments: vec![
+                Argument::Input(0),
+                Argument::Input(1),
+                Argument::Input(2),
+                Argument::Input(3),
+            ],
         })],
     };
     let transaction = Transaction {

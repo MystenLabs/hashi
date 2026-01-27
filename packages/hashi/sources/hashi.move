@@ -21,8 +21,6 @@ public struct Hashi has key {
     proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     tob: Bag,
-    /// Reconfig completion signatures by epoch (epoch -> Table<address, ReconfigCompletionSignature>)
-    reconfig_signatures: Bag,
 }
 
 #[allow(unused_function)]
@@ -36,7 +34,6 @@ fun init(ctx: &mut TxContext) {
         utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: bag::new(ctx),
         tob: bag::new(ctx),
-        reconfig_signatures: bag::new(ctx),
     };
 
     sui::transfer::share_object(hashi);
@@ -138,10 +135,6 @@ public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
     &mut self.tob
 }
 
-public(package) fun reconfig_signatures_mut(self: &mut Hashi): &mut Bag {
-    &mut self.reconfig_signatures
-}
-
 public(package) fun epoch_certs_and_committee(
     self: &mut Hashi,
     epoch: u64,
@@ -166,7 +159,6 @@ public fun create_for_testing(
     utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: Bag,
     tob: Bag,
-    reconfig_signatures: Bag,
     ctx: &mut TxContext,
 ): Hashi {
     Hashi {
@@ -178,6 +170,5 @@ public fun create_for_testing(
         utxo_pool,
         proposals,
         tob,
-        reconfig_signatures,
     }
 }

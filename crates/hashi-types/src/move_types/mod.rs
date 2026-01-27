@@ -28,8 +28,6 @@ pub struct Hashi {
     pub proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     pub tob: Bag,
-    /// Reconfig completion signatures by epoch (epoch -> Table<address, ReconfigCompletionSignature>)
-    pub reconfig_signatures: Bag,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
