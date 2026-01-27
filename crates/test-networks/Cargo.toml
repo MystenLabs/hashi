@@ -16,9 +16,9 @@ prometheus = "0.13"
 bitcoin = "0.32"
 bitcoincore-rpc = "0.19"
 tempfile = "3.0"
-sui-rpc = "0.2"
-sui-crypto = { version = "0.2", features = ["ed25519"] }
-sui-sdk-types = "0.2"
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["ed25519"] }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
 base64ct = { version = "1.8.0", features = ["std"] }
 serde_yaml = "0.9.34"
 serde = { version = "1.0.228", features = ["derive"] }

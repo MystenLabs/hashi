@@ -3,7 +3,7 @@ module hashi::committee;
 
 use sui::{
     bcs,
-    bls12381::{Self, bls12381_min_pk_verify, G1, UncompressedG1},
+    bls12381::{Self, bls12381_min_pk_verify, UncompressedG1},
     group_ops::{Self, Element},
     vec_map::{Self, VecMap}
 };
@@ -22,7 +22,7 @@ public struct CommitteeMember has copy, drop, store {
     validator_address: address,
     public_key: Element<UncompressedG1>,
     encryption_public_key: vector<u8>,
-    weight: u16,
+    weight: u64,
 }
 
 /// This represents a BLS signing committee for a given epoch.
@@ -32,8 +32,7 @@ public struct Committee has copy, drop, store {
     /// A vector of committee members
     members: vector<CommitteeMember>,
     /// Total voting weight of the committee.
-    total_weight: u16,
-    total_aggregated_key: Element<G1>,
+    total_weight: u64,
 }
 
 /// Constructor for committee.
@@ -48,14 +47,7 @@ public(package) fun new_committee(epoch: u64, members: vector<CommitteeMember>):
         total_weight = total_weight + weight;
     });
 
-    // Compute the total aggregated key, e.g. the sum of all public keys in the committee.
-    let total_aggregated_key = bls12381::uncompressed_g1_to_g1(
-        &bls12381::uncompressed_g1_sum(
-            &members.map!(|member| member.public_key),
-        ),
-    );
-
-    Committee { members, total_weight, epoch, total_aggregated_key }
+    Committee { members, total_weight, epoch }
 }
 
 /// Constructor for committee member.
@@ -63,7 +55,7 @@ public(package) fun new_committee_member(
     validator_address: address,
     public_key: Element<UncompressedG1>,
     encryption_public_key: vector<u8>,
-    weight: u16,
+    weight: u64,
 ): CommitteeMember {
     assert!(weight > 0, EIncorrectCommittee);
     CommitteeMember {
@@ -89,7 +81,7 @@ public(package) fun epoch(self: &Committee): u64 {
 }
 
 /// Returns the number of total_weight held by the committee.
-public(package) fun total_weight(self: &Committee): u16 {
+public(package) fun total_weight(self: &Committee): u64 {
     self.total_weight
 }
 
@@ -109,7 +101,7 @@ public(package) fun has_member(self: &Committee, validator_address: &address): b
 }
 
 /// Returns the member weight if it is part of the committee or 0 otherwise
-public(package) fun get_member_weight(self: &Committee, validator_address: &address): u16 {
+public(package) fun get_member_weight(self: &Committee, validator_address: &address): u64 {
     self.find_index(validator_address).map!(|idx| self.members[idx].weight).destroy_or!(0)
 }
 
@@ -119,7 +111,7 @@ public(package) fun find_index(self: &Committee, validator_address: &address): O
 }
 
 /// Returns the members of the committee with their weights.
-public(package) fun to_vec_map(self: &Committee): VecMap<address, u16> {
+public(package) fun to_vec_map(self: &Committee): VecMap<address, u64> {
     let mut result = vec_map::empty();
     self.members.do_ref!(|member| {
         result.insert(member.validator_address, member.weight)
@@ -131,8 +123,8 @@ public(package) fun to_vec_map(self: &Committee): VecMap<address, u16> {
 public(package) fun verify_proposal(
     self: &Committee,
     signers: sui::vec_set::VecSet<address>,
-    threshold: u16,
-): u16 {
+    threshold: u64,
+): u64 {
     // Compute the total signed weight
     let mut aggregate_weight = 0;
     signers.keys().do_ref!(|validator_address| {
@@ -148,20 +140,18 @@ public(package) fun verify_proposal(
 /// Verify an aggregate BLS signature is a certificate in the epoch, and return
 /// the total stake of the signers.
 /// The `signers_bitmap` is a bitmap of the indices of the signers in the committee.
-/// The `weight_verification_type` is the type of weight verification to perform,
-/// either check that the signers forms a quorum or includes at least one correct node.
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
 public(package) fun verify_certificate<T>(
     self: &Committee,
     message: T,
     signature: CommitteeSignature,
-    threshold: u16, //XXX threshold could be lookedup by type in the config
+    threshold: u64, //XXX threshold could be lookedup by type in the config
 ): CertifiedMessage<T> {
     assert!(signature.epoch == self.epoch());
 
     // Use the signers_bitmap to construct the key and the weights.
-    let mut non_signer_aggregate_weight = 0;
-    let mut non_signer_public_keys: vector<Element<UncompressedG1>> = vector::empty();
+    let mut aggregate_weight = 0;
+    let mut signer_public_keys: vector<Element<UncompressedG1>> = vector::empty();
     let mut offset: u64 = 0;
     let n_members = self.n_members();
     let max_bitmap_len_bytes = n_members.divide_and_round_up(8);
@@ -170,56 +160,35 @@ public(package) fun verify_certificate<T>(
     // It may be shorter, in which case the excluded members are treated as non-signers.
     assert!(signature.signers_bitmap.length() <= max_bitmap_len_bytes, EInvalidBitmap);
 
-    // Iterate over the signers bitmap and check if each member is a signer.
-    max_bitmap_len_bytes.do!(|i| {
-        // Get the current byte or 0 if we've reached the end of the bitmap.
-        let byte = if (i < signature.signers_bitmap.length()) {
-            signature.signers_bitmap[i]
-        } else {
-            0
-        };
-
-        (8u8).do!(|i| {
-            let index = offset + (i as u64);
-            let bitmask = 1 << (7 - i);
-            let is_signer = (byte & bitmask) != 0;
+    // Iterate over the bitmap, adding up signing weight and collecting public keys
+    signature.signers_bitmap.do!(|byte| {
+        (8u8).do!(|bit_index| {
+            // The member index
+            let index = offset + (bit_index as u64);
+            let is_signer = (byte & (1 << (7 - bit_index))) != 0;
 
             // If the index is out of bounds, the bit must be 0 to ensure
-            // uniqueness of the signers_bitmap.
+            // a wellformed bitmap.
             if (index >= n_members) {
                 assert!(!is_signer, EInvalidBitmap);
                 return
             };
 
-            // There will be fewer non-signers than signers, so we handle
-            // non-signers here.
-            if (!is_signer) {
+            if (is_signer) {
                 let member = self.members[index];
-                non_signer_aggregate_weight = non_signer_aggregate_weight + member.weight;
-                non_signer_public_keys.push_back(member.public_key);
+                aggregate_weight = aggregate_weight + member.weight;
+                signer_public_keys.push_back(member.public_key);
             };
         });
         offset = offset + 8;
     });
 
-    //XXX we should tally up both signers and non-signers and based on which is
-    //shorter we can either build up an aggregate_key from the signers or
-    //substract the non-signers from the total_aggregated_key in order to
-    //optimize for gas costs.
-
-    // Compute the aggregate weight as the difference between the total weight
-    // and the total weight of the non-signers.
-    let aggregate_weight = self.total_weight - non_signer_aggregate_weight;
-
     // Check if the aggregate weight is enough to satisfy the required weight.
     assert!(aggregate_weight >= threshold, ENotEnoughStake);
 
-    // Compute the aggregate public key as the difference between the total
-    // aggregated key and the sum of the non-signer public keys.
-    let aggregate_key = bls12381::g1_sub(
-        &self.total_aggregated_key,
-        &bls12381::uncompressed_g1_to_g1(
-            &bls12381::uncompressed_g1_sum(&non_signer_public_keys),
+    let aggregate_key = bls12381::uncompressed_g1_to_g1(
+        &bls12381::uncompressed_g1_sum(
+            &signer_public_keys,
         ),
     );
 
@@ -242,7 +211,7 @@ public(package) fun verify_certificate<T>(
     CertifiedMessage {
         message,
         signature,
-        stake_support: aggregate_weight as u16,
+        stake_support: aggregate_weight,
     }
 }
 
@@ -267,7 +236,7 @@ public fun new_committee_signature(
 public struct CertifiedMessage<T> has copy, drop, store {
     message: T,
     signature: CommitteeSignature,
-    stake_support: u16,
+    stake_support: u64,
 }
 
 // === Accessors for CertifiedMessage ===
@@ -280,7 +249,7 @@ public(package) fun cert_signature<T>(self: &CertifiedMessage<T>): &CommitteeSig
     &self.signature
 }
 
-public(package) fun stake_support<T>(self: &CertifiedMessage<T>): u16 {
+public(package) fun stake_support<T>(self: &CertifiedMessage<T>): u64 {
     self.stake_support
 }
 

@@ -17,6 +17,8 @@ use crate::EncryptedShare;
 use crate::GetGuardianInfoResponse;
 use crate::GuardianError;
 use crate::GuardianError::InvalidInputs;
+use crate::GuardianInfo;
+use crate::GuardianPubKey;
 use crate::GuardianResult;
 use crate::GuardianSignature;
 use crate::GuardianSigned;
@@ -25,7 +27,7 @@ use crate::HashiCommitteeMember;
 use crate::HashiSigned;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
-use crate::ProvisionerInitRequestState;
+use crate::ProvisionerInitState;
 use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
@@ -51,8 +53,7 @@ use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
@@ -98,16 +99,12 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
-        let timestamp = UNIX_EPOCH
-            .checked_add(Duration::from_millis(timestamp_ms))
-            .ok_or_else(|| InvalidInputs("invalid timestamp".to_string()))?;
-
         Ok(GuardianSigned {
             data: SetupNewKeyResponse {
                 encrypted_shares,
                 share_commitments,
             },
-            timestamp,
+            timestamp_ms,
             signature,
         })
     }
@@ -174,7 +171,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
 
         Ok(ProvisionerInitRequest::new(
             encrypted_share,
-            ProvisionerInitRequestState::new(
+            ProvisionerInitState::new(
                 hashi_committees,
                 withdrawal_config,
                 withdrawal_state,
@@ -186,13 +183,23 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
 
 impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
     type Error = GuardianError;
+
     fn try_from(resp: pb::GetGuardianInfoResponse) -> Result<Self, Self::Error> {
         let attestation = resp.attestation.ok_or_else(|| missing("attestation"))?;
-        let server_version = resp.server.ok_or_else(|| missing("server"))?;
+
+        let signing_pub_key_bytes = resp
+            .signing_pub_key
+            .ok_or_else(|| missing("signing_pub_key"))?;
+        let signing_pub_key = GuardianPubKey::try_from(signing_pub_key_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid signing_pub_key: {e}")))?;
+
+        let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
+        let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
 
         Ok(GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
-            server_version,
+            signing_pub_key,
+            signed_info,
         })
     }
 }
@@ -244,13 +251,9 @@ impl TryFrom<pb::SignedStandardWithdrawalResponse> for GuardianSigned<StandardWi
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let timestamp = UNIX_EPOCH
-            .checked_add(Duration::from_millis(timestamp_ms))
-            .ok_or_else(|| InvalidInputs("invalid timestamp".to_string()))?;
-
         Ok(GuardianSigned {
             data: StandardWithdrawalResponse { enclave_signatures },
-            timestamp,
+            timestamp_ms,
             signature,
         })
     }
@@ -267,7 +270,7 @@ pub fn setup_new_key_response_signed_to_pb(
 
     pb::SignedSetupNewKeyResponse {
         data: Some(setup_new_key_response_to_pb(s.data)),
-        timestamp_ms: Some(system_time_to_ms(s.timestamp)),
+        timestamp_ms: Some(s.timestamp_ms),
         signature: Some(signature.into()),
     }
 }
@@ -306,7 +309,7 @@ pub fn provisioner_init_request_to_pb(
     })
 }
 
-pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::ProvisionerInitState {
+pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
     // Shared window metadata.
     let window = s.hashi_committees.epoch_window();
     debug_assert_eq!(
@@ -327,7 +330,8 @@ pub fn provisioner_init_state_to_pb(s: ProvisionerInitRequestState) -> pb::Provi
 pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGuardianInfoResponse {
     pb::GetGuardianInfoResponse {
         attestation: Some(r.attestation.into()),
-        server: Some(r.server_version),
+        signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
+        signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
     }
 }
 
@@ -360,7 +364,7 @@ pub fn standard_withdrawal_response_signed_to_pb(
                 .map(|sig| sig.to_vec().into())
                 .collect(),
         }),
-        timestamp_ms: Some(system_time_to_ms(s.timestamp)),
+        timestamp_ms: Some(s.timestamp_ms),
         signature: Some(signature.into()),
     }
 }
@@ -400,6 +404,86 @@ fn pb_share_commitments_to_domain(
         .collect::<GuardianResult<Vec<_>>>()
 }
 
+fn pb_to_s3_bucket_info(info: pb::S3BucketInfo) -> GuardianResult<crate::S3BucketInfo> {
+    let bucket = info.bucket.ok_or_else(|| missing("bucket"))?;
+    let region = info.region.ok_or_else(|| missing("region"))?;
+    Ok(crate::S3BucketInfo { bucket, region })
+}
+
+fn s3_bucket_info_to_pb(info: crate::S3BucketInfo) -> pb::S3BucketInfo {
+    pb::S3BucketInfo {
+        bucket: Some(info.bucket),
+        region: Some(info.region),
+    }
+}
+
+fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<GuardianInfo> {
+    let share_commitments = match data.share_commitments {
+        None => None,
+        Some(wrapper) => Some(pb_share_commitments_to_domain(&wrapper.share_commitments)?),
+    };
+
+    let bucket_info = data.bucket_info.map(pb_to_s3_bucket_info).transpose()?;
+
+    let encryption_pubkey = data
+        .encryption_pubkey
+        .ok_or_else(|| missing("encryption_pubkey"))?
+        .to_vec();
+
+    let server_version = data
+        .server_version
+        .ok_or_else(|| missing("server_version"))?;
+
+    Ok(GuardianInfo {
+        share_commitments,
+        bucket_info,
+        encryption_pubkey,
+        server_version,
+    })
+}
+
+fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
+    pb::GuardianInfoData {
+        share_commitments: info
+            .share_commitments
+            .map(|v| pb::GuardianShareCommitments {
+                share_commitments: v.into_iter().map(share_commitment_to_pb).collect(),
+            }),
+        bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
+        encryption_pubkey: Some(info.encryption_pubkey.into()),
+        server_version: Some(info.server_version),
+    }
+}
+
+fn pb_to_signed_guardian_info(
+    s: pb::SignedGuardianInfo,
+) -> GuardianResult<GuardianSigned<GuardianInfo>> {
+    let data_pb = s.data.ok_or_else(|| missing("signed_info.data"))?;
+    let timestamp_ms = s
+        .timestamp_ms
+        .ok_or_else(|| missing("signed_info.timestamp_ms"))?;
+    let signature_bytes = s
+        .signature
+        .ok_or_else(|| missing("signed_info.signature"))?;
+
+    let signature = GuardianSignature::try_from(signature_bytes.as_ref())
+        .map_err(|e| InvalidInputs(format!("invalid signed_info.signature: {e}")))?;
+
+    Ok(GuardianSigned {
+        data: pb_to_guardian_info_data(data_pb)?,
+        timestamp_ms,
+        signature,
+    })
+}
+
+fn signed_guardian_info_to_pb(s: GuardianSigned<GuardianInfo>) -> pb::SignedGuardianInfo {
+    pb::SignedGuardianInfo {
+        data: Some(guardian_info_data_to_pb(s.data)),
+        timestamp_ms: Some(s.timestamp_ms),
+        signature: Some(s.signature.to_bytes().to_vec().into()),
+    }
+}
+
 fn pb_to_epoch_window(w: pb::EpochWindow) -> GuardianResult<EpochWindow> {
     let base_epoch = w
         .base_epoch
@@ -418,16 +502,9 @@ fn pb_to_epoch_window(w: pb::EpochWindow) -> GuardianResult<EpochWindow> {
 
 fn epoch_window_to_pb(w: EpochWindow) -> pb::EpochWindow {
     pb::EpochWindow {
-        base_epoch: Some(w.base_epoch),
+        base_epoch: Some(w.first_epoch),
         num_epochs: Some(w.num_epochs.get() as u32),
     }
-}
-
-fn system_time_to_ms(time: SystemTime) -> u64 {
-    // For signing, timestamps older than UNIX_EPOCH should not be possible.
-    time.duration_since(UNIX_EPOCH)
-        .expect("system_time cannot be before Unix epoch")
-        .as_millis() as u64
 }
 
 fn pb_to_share_id(id_pb_opt: Option<pb::GuardianShareId>) -> GuardianResult<ShareID> {
@@ -454,11 +531,15 @@ fn pb_to_s3_config(cfg: pb::S3Config) -> GuardianResult<crate::S3Config> {
     let access_key = cfg.access_key.ok_or_else(|| missing("access_key"))?;
     let secret_key = cfg.secret_key.ok_or_else(|| missing("secret_key"))?;
     let bucket_name = cfg.bucket_name.ok_or_else(|| missing("bucket_name"))?;
+    let region = cfg.region.ok_or_else(|| missing("region"))?;
 
     Ok(crate::S3Config {
         access_key: access_key.to_string(),
         secret_key: secret_key.to_string(),
-        bucket_name: bucket_name.to_string(),
+        bucket_info: crate::S3BucketInfo {
+            bucket: bucket_name.to_string(),
+            region: region.to_string(),
+        },
     })
 }
 
@@ -466,7 +547,8 @@ fn s3_config_to_pb(cfg: crate::S3Config) -> pb::S3Config {
     pb::S3Config {
         access_key: Some(cfg.access_key),
         secret_key: Some(cfg.secret_key),
-        bucket_name: Some(cfg.bucket_name),
+        bucket_name: Some(cfg.bucket_info.bucket),
+        region: Some(cfg.bucket_info.region),
     }
 }
 
@@ -677,9 +759,6 @@ fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiC
         .ok_or_else(|| missing("encryption_public_key"))?;
 
     let weight = m.weight.ok_or_else(|| missing("weight"))?;
-    let weight: u16 = weight
-        .try_into()
-        .map_err(|_| InvalidInputs(format!("invalid weight (must fit in u16): {weight}")))?;
 
     let x = hashi_types::move_types::CommitteeMember {
         validator_address,
@@ -698,7 +777,7 @@ fn hashi_committee_member_to_pb(m: HashiCommitteeMember) -> pb::CommitteeMember 
         address: Some(x.validator_address.to_string()),
         public_key: Some(x.public_key.into()),
         encryption_public_key: Some(x.encryption_public_key.into()),
-        weight: Some(x.weight as u64),
+        weight: Some(x.weight),
     }
 }
 
@@ -843,15 +922,11 @@ mod tests {
     use super::*;
     use crate::AddressValidation;
     use crate::StandardWithdrawalRequest;
-    use crate::ToBytes;
     use bitcoin::Network;
 
     #[test]
     fn get_guardian_info_response_round_trip() {
-        let resp = GetGuardianInfoResponse {
-            attestation: "abcd".to_bytes(),
-            server_version: "v1".into(),
-        };
+        let resp = GetGuardianInfoResponse::mock_for_testing();
         let pb = get_guardian_info_response_to_pb(resp.clone());
         let back = GetGuardianInfoResponse::try_from(pb).unwrap();
         assert_eq!(resp, back);

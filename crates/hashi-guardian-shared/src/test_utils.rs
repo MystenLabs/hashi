@@ -7,13 +7,15 @@ use crate::Ciphertext;
 use crate::CommitteeStore;
 use crate::EncPubKey;
 use crate::EncryptedShare;
+use crate::GetGuardianInfoResponse;
+use crate::GuardianInfo;
 use crate::GuardianSigned;
 use crate::HashiCommittee;
 use crate::HashiCommitteeMember;
 use crate::HashiSigned;
 use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
-use crate::ProvisionerInitRequestState;
+use crate::ProvisionerInitState;
 use crate::RateLimiter;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
@@ -44,13 +46,35 @@ use hashi_types::committee::EncryptionPublicKey;
 use hpke::Deserializable;
 use std::num::NonZeroU16;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::Address as SuiAddress;
 
 pub fn create_btc_keypair(sk: &[u8; 32]) -> Keypair {
     let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
     Keypair::from_secret_key(&BTC_LIB, &secret_key)
+}
+
+impl GetGuardianInfoResponse {
+    pub fn mock_for_testing() -> Self {
+        let signing_key = ed25519_consensus::SigningKey::from([1u8; 32]);
+        let signing_pub_key = signing_key.verification_key();
+
+        let info = GuardianInfo {
+            share_commitments: None,
+            bucket_info: Some(crate::S3BucketInfo {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+            }),
+            encryption_pubkey: vec![0u8; 32],
+            server_version: "v1".to_string(),
+        };
+
+        GetGuardianInfoResponse {
+            attestation: "abcd".as_bytes().to_vec(),
+            signing_pub_key,
+            signed_info: GuardianSigned::new(info, &signing_key, 1234),
+        }
+    }
 }
 
 impl SetupNewKeyRequest {
@@ -85,7 +109,7 @@ impl GuardianSigned<SetupNewKeyResponse> {
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, UNIX_EPOCH)
+        GuardianSigned::new(resp, &signing_kp, 0)
     }
 }
 
@@ -94,7 +118,10 @@ impl OperatorInitRequest {
         let s3_config = crate::S3Config {
             access_key: "ak".into(),
             secret_key: "sk".into(),
-            bucket_name: "bucket".into(),
+            bucket_info: crate::S3BucketInfo {
+                bucket: "bucket".into(),
+                region: "us-east-1".into(),
+            },
         };
 
         let mut share_commitments = vec![];
@@ -124,7 +151,7 @@ impl ProvisionerInitRequest {
                     aes_ciphertext: vec![0u8; 32],
                 },
             },
-            state: ProvisionerInitRequestState::mock_for_testing(None),
+            state: ProvisionerInitState::mock_for_testing(None),
         }
     }
 }
@@ -145,14 +172,14 @@ fn mock_committee_with_one_member() -> HashiCommittee {
     HashiCommittee::new(vec![mock_committee_member()], 0)
 }
 
-impl ProvisionerInitRequestState {
+impl ProvisionerInitState {
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let num_epochs_to_track = NonZeroU16::new(2).unwrap();
         let epoch_window = crate::epoch_store::EpochWindow::new(0, num_epochs_to_track);
         let max_withdrawable_per_epoch = Amount::from_sat(1000);
 
-        ProvisionerInitRequestState {
+        ProvisionerInitState {
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 0,
                 delayed_withdrawals_min_delay: Duration::from_secs(10),
@@ -241,6 +268,6 @@ impl GuardianSigned<StandardWithdrawalResponse> {
         let resp = StandardWithdrawalResponse { enclave_signatures };
 
         let signing_kp = SigningKey::from([4u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, UNIX_EPOCH)
+        GuardianSigned::new(resp, &signing_kp, 0)
     }
 }

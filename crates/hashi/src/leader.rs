@@ -1,6 +1,7 @@
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
 use crate::onchain::types::DepositRequest;
+use crate::sui_tx_executor::SuiTxExecutor;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::committee::BlsSignatureAggregator;
@@ -8,15 +9,8 @@ use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
-use prost_types::FieldMask;
 use std::sync::Arc;
-use sui_crypto::SuiSigner;
-use sui_rpc::field::FieldMaskUtil;
-use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_sdk_types::Address;
-use sui_transaction_builder::Function;
-use sui_transaction_builder::ObjectInput;
-use sui_transaction_builder::TransactionBuilder;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -24,6 +18,9 @@ use tracing::trace;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
+const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
+const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
+const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
 
 #[derive(Clone)]
 pub struct LeaderService {
@@ -47,16 +44,19 @@ impl LeaderService {
                 error!("Error waiting for checkpoint change: {e}");
                 break;
             }
-            let checkpoint_height = *checkpoint_rx.borrow_and_update();
+            let (checkpoint_height, checkpoint_timestamp_ms) = {
+                let checkpoint_info = checkpoint_rx.borrow_and_update();
+                (checkpoint_info.height, checkpoint_info.timestamp_ms)
+            };
 
             if self.is_current_leader(checkpoint_height) {
-                info!("Checkpoint {}: We are the leader node", checkpoint_height);
+                info!("Checkpoint {checkpoint_height}: We are the leader node");
             } else {
                 trace!("We are not the leader node");
                 continue;
             }
 
-            self.process_deposit_requests().await;
+            self.process_deposit_requests(checkpoint_timestamp_ms).await;
         }
     }
 
@@ -94,7 +94,7 @@ impl LeaderService {
         is_leader
     }
 
-    async fn process_deposit_requests(&self) {
+    async fn process_deposit_requests(&self, checkpoint_timestamp_ms: u64) {
         let mut deposit_requests: Vec<_> = {
             let state = self.inner.onchain_state().state();
             state
@@ -111,9 +111,12 @@ impl LeaderService {
         info!("Processing {} deposit requests", deposit_requests.len());
 
         // TODO: parallelize?
-        for deposit_request in deposit_requests {
-            self.process_deposit_request(&deposit_request).await;
+        for deposit_request in &deposit_requests {
+            self.process_deposit_request(deposit_request).await;
         }
+
+        self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms)
+            .await;
     }
 
     async fn process_deposit_request(&self, deposit_request: &DepositRequest) {
@@ -178,7 +181,7 @@ impl LeaderService {
             validator_address
         );
 
-        let mut client = {
+        let mut rpc_client = {
             let state = self.inner.onchain_state().state();
             state
                 .hashi()
@@ -194,7 +197,7 @@ impl LeaderService {
                 .bridge_service_client()
         };
 
-        let response = client
+        let response = rpc_client
             .sign_deposit_confirmation(proto_request.clone())
             .await
             .inspect_err(|e| {
@@ -258,8 +261,10 @@ impl LeaderService {
         }
 
         // Submit onchain
-        let aggregate_signature = signature_aggregator.finish()?;
-        self.submit_deposit_confirmation_onchain(&deposit_request, aggregate_signature)
+        let signed_message = signature_aggregator.finish()?;
+        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+        executor
+            .execute_confirm_deposit(&deposit_request, signed_message)
             .await?;
         info!(
             "Successfully submitted deposit confirmation for request: {:?}",
@@ -268,99 +273,54 @@ impl LeaderService {
         Ok(())
     }
 
-    async fn submit_deposit_confirmation_onchain(
+    // Deposit requests comes sorted in ascending order, from oldest to newest
+    async fn check_delete_expired_deposit_requests(
         &self,
-        deposit_request: &DepositRequest,
-        signed_message: hashi_types::committee::SignedMessage<DepositRequest>,
-    ) -> anyhow::Result<()> {
-        use sui_sdk_types::*;
-
-        let sui_rpc_url = self
-            .inner
-            .config
-            .sui_rpc
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No sui_rpc configured"))?;
-        let mut client = sui_rpc::Client::new(sui_rpc_url)?;
-
-        let operator_private_key = self.inner.config.operator_private_key()?;
-        let sender = operator_private_key.public_key().derive_address();
-        let price = client.get_reference_gas_price().await?;
-        let gas_objects = client
-            .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
-            .await?;
-
-        let hashi_ids = self.inner.config.hashi_ids();
-        let hashi_initial_shared_version = {
-            let state = self.inner.onchain_state().state();
-            state.hashi().initial_shared_version
+        deposit_requests: &[DepositRequest],
+        checkpoint_timestamp_ms: u64,
+    ) {
+        // Check if it's time to delete
+        let Some(oldest_request) = deposit_requests.first() else {
+            return;
         };
-        let committee_sig = signed_message.committee_signature();
+        // If there aren't any deposit requests at least 4 days old, don't do anything
+        if checkpoint_timestamp_ms
+            < oldest_request.timestamp_ms
+                + MAX_DEPOSIT_REQUEST_AGE_MS
+                + DEPOSIT_REQUEST_DELETE_DELAY_MS
+        {
+            return;
+        }
 
-        // Build a PTB that:
-        // 1. Calls committee::new_committee_signature to construct the CommitteeSignature
-        // 2. Passes the result to deposit::confirm_deposit
-        let mut builder = TransactionBuilder::new();
-        builder.set_sender(sender);
-        builder.set_gas_price(price);
-        builder.set_gas_budget(1_000_000_000);
-        builder.add_gas_objects(gas_objects.iter().map(|o| {
-            ObjectInput::owned(
-                o.object_id().parse().unwrap(),
-                o.version(),
-                o.digest().parse().unwrap(),
-            )
-        }));
+        // Find all expired requests (older than 3 days)
+        let expired_requests = deposit_requests
+            .iter()
+            .filter(|r| checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
+            .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
+            .cloned()
+            .collect::<Vec<_>>();
 
-        let request_id_arg = builder.pure(&deposit_request.id);
-        let epoch_arg = builder.pure(&committee_sig.epoch());
-        let signature_arg = builder.pure(&committee_sig.signature_bytes());
-        let bitmap_arg = builder.pure(&committee_sig.signers_bitmap_bytes());
-
-        // Call new_committee_signature to get the properly serialized CommitteeSignature
-        let committee_sig_arg = builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("committee"),
-                Identifier::from_static("new_committee_signature"),
-            ),
-            vec![epoch_arg, signature_arg, bitmap_arg],
+        info!(
+            "Deleting {} expired deposit requests",
+            expired_requests.len()
         );
 
-        // Call confirm deposit
-        let hashi_arg = builder.object(ObjectInput::shared(
-            hashi_ids.hashi_object_id,
-            hashi_initial_shared_version,
-            true,
-        ));
-        builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("deposit"),
-                Identifier::from_static("confirm_deposit"),
-            ),
-            vec![hashi_arg, request_id_arg, committee_sig_arg],
-        );
+        let result = async {
+            let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+            executor
+                .execute_delete_expired_deposit_requests(&expired_requests)
+                .await
+        }
+        .await;
 
-        let tx = builder.try_build()?;
-        let signature = operator_private_key.sign_transaction(&tx)?;
-
-        let response = client
-            .execute_transaction_and_wait_for_checkpoint(
-                ExecuteTransactionRequest::new(tx.into())
-                    .with_signatures(vec![signature.into()])
-                    .with_read_mask(FieldMask::from_str("*")),
-                std::time::Duration::from_secs(10),
-            )
-            .await?
-            .into_inner();
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "Transaction failed to confirm deposit for request {:?}",
-                deposit_request.id
+        if let Err(e) = result {
+            error!("Failed to delete expired deposit requests: {e}");
+        } else {
+            info!(
+                "Successfully deleted {} expired deposit requests",
+                expired_requests.len()
             );
         }
-        Ok(())
     }
 }
 

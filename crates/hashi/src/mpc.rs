@@ -90,7 +90,13 @@ impl MpcService {
         let (epoch, committee) = get_epoch_and_committee(&onchain_state)?;
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
-        let mut tob_channel = SuiTobChannel::new(onchain_state, epoch, signer, committee);
+        let mut tob_channel = SuiTobChannel::new(
+            self.inner.config.hashi_ids(),
+            onchain_state,
+            epoch,
+            signer,
+            committee,
+        );
         let output = DkgManager::run(&self.dkg_manager, &p2p_channel, &mut tob_channel)
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;

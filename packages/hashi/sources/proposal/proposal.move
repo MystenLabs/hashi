@@ -137,7 +137,7 @@ public(package) fun delete<T>(proposal: Proposal<T>): T {
     data
 }
 
-// ~~~~~~~ Getters ~~~~~~~                                                                                                                                                                                                                                                                                                                                                              ~~~~~~~
+// ~~~~~~~ Getters ~~~~~~~
 
 public fun votes<T>(proposal: &Proposal<T>): &vector<address> {
     &proposal.votes

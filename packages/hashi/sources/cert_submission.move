@@ -18,8 +18,7 @@ entry fun submit_dkg_cert(
     hashi.config().assert_version_enabled();
     assert!(epoch == hashi.committee_set().epoch());
     let (epoch_certs, committee) = hashi.epoch_certs_and_committee(epoch, ctx);
-    let threshold =
-        ((committee.total_weight() as u64) * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR) as u16;
+    let threshold = (committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR);
     hashi::tob::submit_dkg_cert(
         epoch_certs,
         committee,

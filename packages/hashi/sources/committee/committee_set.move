@@ -316,7 +316,7 @@ fun new_committee_from_validator_set(
             validator_address,
             member.next_epoch_public_key,
             member.next_epoch_encryption_public_key,
-            weight as u16, // XXX is this ok?
+            weight,
         );
 
         committee_members.push_back(committee_member);
@@ -355,7 +355,7 @@ public(package) fun start_reconfig(
     });
 
     // Ensure 95% of stake has registered
-    assert!(committee.total_weight() as u64 >= ((9500 * sui_system_weight) / 10000));
+    assert!(committee.total_weight() >= ((9500 * sui_system_weight) / 10000));
 
     let epoch = committee.epoch();
     self.pending_epoch_change = option::some(epoch);
