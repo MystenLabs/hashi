@@ -28,9 +28,11 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
-    let logger = S3Logger::new(request.s3_config())
-        .await
-        .expect("Unable to create logger");
+    let (config, commitments, network) = request.into_parts();
+    let s3_session_id = enclave.s3_session_id();
+    let logger = S3Logger::new(s3_session_id, config).await;
+    logger.test_s3_connectivity().await?;
+    info!("S3 connectivity check complete.");
 
     info!("Storing S3 configuration.");
     enclave
@@ -38,24 +40,21 @@ pub async fn operator_init(
         .set_s3_logger(logger)
         .expect("Unable to set logger");
 
-    info!("Setting bitcoin network to {:?}.", request.network());
+    info!("Setting bitcoin network to {:?}.", network);
     enclave
         .config
-        .set_bitcoin_network(request.network())
+        .set_bitcoin_network(network)
         .expect("Unable to set network");
 
-    info!(
-        "Storing {} share commitments.",
-        request.share_commitments().len()
-    );
-    for (i, share_commitment) in request.share_commitments().iter().enumerate() {
+    info!("Storing {} share commitments.", commitments.len());
+    for (i, share_commitment) in commitments.iter().enumerate() {
         info!(
             "Share {}: ID {} Digest {:x?}.",
             i, share_commitment.id, share_commitment.digest
         );
     }
     enclave
-        .set_share_commitments(request.share_commitments().to_vec())
+        .set_share_commitments(commitments)
         .expect("Unable to set share commitments");
 
     // Log to S3!
@@ -71,11 +70,9 @@ pub async fn operator_init(
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
-        .sign_and_log(LogMessage::OperatorInitShareCommitments(
-            request.share_commitments().to_vec(),
-        ))
+        .sign_and_log(LogMessage::GuardianInfo(enclave.info()))
         .await
-        .expect("Unable to log OperatorInitShareCommitments");
+        .expect("Unable to log GuardianInfo");
 
     info!("Operator initialization complete.");
     Ok(())
@@ -179,7 +176,7 @@ pub async fn provisioner_init(
 async fn finalize_init(
     shares: &[Share],
     enclave: &Arc<Enclave>,
-    incoming_state: ProvisionerInitRequestState,
+    incoming_state: ProvisionerInitState,
 ) {
     info!("Threshold reached, combining shares.");
     let enclave_btc_keypair = combine_shares(shares).expect("Unable to combine shares");
@@ -240,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let init_state = ProvisionerInitRequestState::mock_for_testing(None);
+        let init_state = ProvisionerInitState::mock_for_testing(None);
 
         // Simulate THRESHOLD KPs calling provisioner_init
         for (i, share) in shares.iter().enumerate().take(NUM_OF_SHARES) {
@@ -303,7 +300,7 @@ mod tests {
         // Create enclave without operator init
         let enclave = Enclave::create_with_random_keys();
 
-        let init_state = ProvisionerInitRequestState::mock_for_testing(None);
+        let init_state = ProvisionerInitState::mock_for_testing(None);
         let share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::ONE,
@@ -327,7 +324,7 @@ mod tests {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
 
         // First KP sends with state1
-        let state1 = ProvisionerInitRequestState::mock_for_testing(None);
+        let state1 = ProvisionerInitState::mock_for_testing(None);
         let request1 = ProvisionerInitRequest::build_from_share_and_state(
             &shares[0],
             enclave.encryption_public_key(),
@@ -338,7 +335,7 @@ mod tests {
 
         // Second KP tries to send with different state (different pub key)
         let kp = create_btc_keypair(&[7u8; 32]);
-        let state2 = ProvisionerInitRequestState::mock_for_testing(Some(kp));
+        let state2 = ProvisionerInitState::mock_for_testing(Some(kp));
         assert_ne!(
             state1.hashi_btc_master_pubkey(),
             state2.hashi_btc_master_pubkey()
@@ -363,7 +360,7 @@ mod tests {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32), // Random value that won't match commitment
         };
-        let state = ProvisionerInitRequestState::mock_for_testing(None);
+        let state = ProvisionerInitState::mock_for_testing(None);
         let request = ProvisionerInitRequest::build_from_share_and_state(
             &bogus_share,
             enclave.encryption_public_key(),
@@ -379,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init_duplicate_share() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let state = ProvisionerInitRequestState::mock_for_testing(None);
+        let state = ProvisionerInitState::mock_for_testing(None);
 
         // Send first share
         let request1 = ProvisionerInitRequest::build_from_share_and_state(

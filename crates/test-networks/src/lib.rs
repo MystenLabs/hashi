@@ -239,10 +239,10 @@ mod tests {
         assert!(state.state().hashi().treasury.coins.is_empty());
 
         // Validate subscribing to checkpoints functions
-        let ckpt = state.latest_checkpoint();
+        let ckpt = state.latest_checkpoint_height();
         let mut checkpoint_subscriber = state.subscribe_checkpoint();
         checkpoint_subscriber.changed().await.unwrap();
-        assert!(*checkpoint_subscriber.borrow_and_update() > ckpt);
+        assert!(checkpoint_subscriber.borrow_and_update().height > ckpt);
 
         // Wait for DKG to complete before modifying shared state to avoid lock conflicts
         test_networks.hashi_network().nodes()[0]

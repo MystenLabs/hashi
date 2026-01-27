@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -9,25 +10,25 @@ use hashi_guardian_shared::crypto::Share;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
+use hpke::Serializable;
+use serde::Serialize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
-use std::time::SystemTime;
 use tonic::transport::Server;
 use tracing::info;
 
 mod getters;
 mod init;
 mod rpc;
-mod s3_logger;
 mod setup;
 mod withdraw;
 
 use crate::rpc::GuardianGrpc;
-use crate::s3_logger::S3Logger;
 use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
+use hashi_guardian_shared::s3_logger::S3Logger;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
@@ -261,7 +262,7 @@ impl EnclaveConfig {
 }
 
 impl EnclaveState {
-    pub fn init(&self, incoming_state: ProvisionerInitRequestState) -> GuardianResult<()> {
+    pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
         let (hashi_committees, _, withdrawal_state, _) = incoming_state.into_parts();
 
         self.set_committees(hashi_committees)?;
@@ -315,14 +316,14 @@ impl EnclaveState {
             .read()
             .expect("rwlock read should not fail")
             .as_ref()
-            .is_some_and(|s| s.is_initialized());
+            .is_some_and(|s| s.num_entries() > 0);
 
         let withdraw_state_init = self
             .withdraw_state
             .lock()
             .expect("mutex lock should not fail")
             .as_ref()
-            .is_some_and(|s| s.is_initialized());
+            .is_some_and(|s| s.rate_limiter().num_entries() > 0);
 
         (committees_init, withdraw_state_init)
     }
@@ -349,17 +350,16 @@ impl EnclaveState {
     }
 
     /// Adds one committee and prunes one if needed.
-    pub fn add_new_committee(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
+    fn add_new_committee(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
         let epoch = new_committee.epoch();
         info!("Adding new epoch {} to committee map.", epoch);
 
-        // TODO: Replace with insert_strict if we are certain store is always pre-initialized
         self.with_committees_mut(|committee_map| {
-            committee_map.insert_or_start(epoch, Arc::new(new_committee))
+            committee_map.insert(epoch, Arc::new(new_committee))
         })
     }
 
-    /// Set committees. Called only from init(ProvisionerInitRequestState)
+    /// Set committees. Called only from init(ProvisionerInitState)
     fn set_committees(&self, hashi_committees: CommitteeStore) -> GuardianResult<()> {
         info!(
             "Setting state with {} committees.",
@@ -376,15 +376,12 @@ impl EnclaveState {
         }
 
         // Insert input committee. Iterate and create Arc's.
-        let capacity = hashi_committees.capacity();
-        let mut new_map = ArcCommitteeStore::empty(capacity);
-        for (e, committee) in hashi_committees.into_owned_iter() {
-            info!("Adding committee for epoch {}.", e);
-            new_map
-                .insert_or_start(e, Arc::new(committee))
-                .expect("Should not fail because we are reading from a ConsecutiveEpochStore");
-        }
-        *guard = Some(new_map);
+        let window = hashi_committees.epoch_window();
+        let arc_entries = hashi_committees
+            .into_owned_iter()
+            .map(|(_, committee)| Arc::new(committee))
+            .collect::<Vec<_>>();
+        *guard = Some(ArcCommitteeStore::new(window, arc_entries)?);
         Ok(())
     }
 
@@ -412,7 +409,7 @@ impl EnclaveState {
         self.with_withdraw_state_mut(|st| st.revert_limiter(epoch, amount))
     }
 
-    pub fn add_epoch_to_limiter(&self, epoch: u64) -> GuardianResult<()> {
+    fn add_epoch_to_limiter(&self, epoch: u64) -> GuardianResult<()> {
         self.with_withdraw_state_mut(|st| st.add_epoch_to_limiter(epoch))
     }
 }
@@ -474,33 +471,54 @@ impl Enclave {
         self.config.eph_keys.signing_keys.verification_key()
     }
 
-    pub fn sign<T: ToBytes + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
+    pub fn sign<T: Serialize + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
         let kp = &self.config.eph_keys.signing_keys;
-        let timestamp = SystemTime::now();
+        let timestamp = now_timestamp_ms();
         GuardianSigned::new(data, kp, timestamp)
+    }
+
+    // ========================================================================
+    // Enclave Info
+    // ========================================================================
+
+    pub fn info(&self) -> GuardianInfo {
+        GuardianInfo {
+            share_commitments: self.share_commitments().ok().cloned(),
+            bucket_info: self
+                .config
+                .s3_logger()
+                .ok()
+                .map(|l| l.bucket_info().clone()),
+            encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
+            // TODO: Change it
+            server_version: "v1".to_string(),
+        }
     }
 
     // ========================================================================
     // S3 Logging
     // ========================================================================
 
+    /// A unique session ID for the current enclave session.
+    /// Logs are organized as follows: SessionId/xyz.json
+    pub fn s3_session_id(&self) -> String {
+        self.signing_pubkey().as_bytes().to_lower_hex_string()
+    }
+
     /// Sign and log a LogMessage to S3.
     /// Only LogMessage variants can be logged to enforce consistency.
     pub async fn sign_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let signed = self.sign(data);
         // TODO: Add a session ID (e.g. eph pub key) to every log
-        self.config.s3_logger()?.log(signed).await
+        self.config.s3_logger()?.write(&signed).await
     }
 
     /// Log unsigned data to S3 with timestamp.
     /// Only LogMessage variants can be logged to enforce consistency.
     pub async fn timestamp_and_log(&self, data: LogMessage) -> GuardianResult<()> {
-        let timestamped = Timestamped {
-            data,
-            timestamp: SystemTime::now(),
-        };
-        // TODO: Add a session ID (e.g. eph pub key) to every log
-        self.config.s3_logger()?.log(timestamped).await
+        let timestamp_ms = now_timestamp_ms();
+        let timestamped = Timestamped { data, timestamp_ms };
+        self.config.s3_logger()?.write(&timestamped).await
     }
 
     // ========================================================================
@@ -552,6 +570,59 @@ impl Enclave {
     }
 }
 
+// ---------------------------------
+//    Tracing utilities
+// ---------------------------------
+
+/// Initialize tracing subscriber with optional file/line number logging
+pub fn init_tracing_subscriber(with_file_line: bool) {
+    let mut builder = tracing_subscriber::FmtSubscriber::builder().with_env_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
+
+    if with_file_line {
+        builder = builder.with_file(true).with_line_number(true);
+    }
+
+    let subscriber = builder.finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("unable to initialize tracing subscriber");
+}
+
+// ---------------------------------
+//    Tests and related utilities
+// ---------------------------------
+
+// Mock S3 logger for use in APIs calls post operator_init, e.g., provisioner_init, withdrawals.
+#[cfg(test)]
+fn make_mock_s3_logger_for_testing() -> S3Logger {
+    use aws_sdk_s3::operation::put_object::PutObjectOutput;
+    use aws_sdk_s3::Client;
+    use aws_smithy_mocks::mock;
+    use aws_smithy_mocks::mock_client;
+    use aws_smithy_mocks::RuleMode;
+    use hashi_guardian_shared::S3Config;
+
+    // For unit tests we only need PutObject to succeed, because `sign_and_log()` calls `S3Logger::write()`.
+    // The `then_output` helper creates a "simple" rule that repeats indefinitely.
+    let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
+
+    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
+
+    let config = S3Config {
+        bucket_info: S3BucketInfo {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+        },
+        access_key: "test-access-key".to_string(),
+        secret_key: "test-secret-key".to_string(),
+    };
+
+    S3Logger::from_client_for_tests("test-session-id".to_string(), config, client)
+}
+
 #[cfg(test)]
 impl Enclave {
     pub fn create_with_random_keys() -> Arc<Self> {
@@ -568,7 +639,7 @@ impl Enclave {
         let enclave = Self::create_with_random_keys();
 
         // Initialize S3 logger
-        let mock_s3_logger = S3Logger::mock_for_testing().await;
+        let mock_s3_logger = make_mock_s3_logger_for_testing();
         enclave.config.set_s3_logger(mock_s3_logger).unwrap();
 
         // Set bitcoin network

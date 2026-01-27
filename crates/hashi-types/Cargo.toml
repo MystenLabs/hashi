@@ -4,9 +4,9 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-sui-sdk-types = { version = "0.2", features = ["serde", "hash"] }
-sui-crypto = { version = "0.2", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
-sui-rpc = { version = "0.2" }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["serde", "hash"] }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
 
 serde = "1.0.219"
 serde_derive = "1.0.219"

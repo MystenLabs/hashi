@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
@@ -16,7 +15,12 @@ pub mod metrics;
 pub mod mpc;
 pub mod onchain;
 pub mod storage;
+pub mod sui_tx_executor;
 pub mod tls;
+
+/// The allowed delta for weight reduction in basis points (800 means 8%).
+/// This matches Sui's `random_beacon_reduction_allowed_delta` configuration.
+const WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 
 fn init_crypto_provider() {
     rustls::crypto::ring::default_provider()
@@ -30,8 +34,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    // `OnceLock` ensures initialization happens once, and `RwLock` allows updates for rotation.
-    dkg_manager: OnceLock<RwLock<Arc<Mutex<dkg::DkgManager>>>>,
+    dkg_manager: OnceLock<Arc<RwLock<dkg::DkgManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
 }
@@ -84,18 +87,14 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn dkg_manager(&self) -> Arc<Mutex<dkg::DkgManager>> {
+    pub fn dkg_manager(&self) -> Arc<RwLock<dkg::DkgManager>> {
         self.dkg_manager
             .get()
             .expect("DkgManager not initialized")
-            .read()
-            // RwLock::read only fails if poisoned (a thread panicked while holding the lock).
-            // Poisoning indicates a bug, so we propagate the panic rather than recover.
-            .unwrap()
             .clone()
     }
 
-    pub fn set_dkg_manager(&self, manager: Arc<Mutex<dkg::DkgManager>>) {
+    pub fn set_dkg_manager(&self, manager: dkg::DkgManager) {
         *self
             .dkg_manager
             .get()
@@ -148,6 +147,7 @@ impl Hashi {
             encryption_key,
             signing_key,
             store,
+            WEIGHT_REDUCTION_ALLOWED_DELTA,
         )?)
     }
 
@@ -185,13 +185,17 @@ impl Hashi {
 
             let epoch = self.onchain_state().state().hashi().committees.epoch();
             let dkg_manager = match self.create_dkg_manager(epoch, dkg::types::ProtocolType::Dkg) {
-                Ok(m) => Arc::new(Mutex::new(m)),
+                Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to create DkgManager: {e}");
                     return;
                 }
             };
-            if self.dkg_manager.set(RwLock::new(dkg_manager)).is_err() {
+            if self
+                .dkg_manager
+                .set(Arc::new(RwLock::new(dkg_manager)))
+                .is_err()
+            {
                 panic!("DkgManager already set");
             }
             let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone());

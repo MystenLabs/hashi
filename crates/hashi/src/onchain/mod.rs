@@ -5,7 +5,6 @@ use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
@@ -23,7 +22,6 @@ use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::ToBcs;
 use tap::Pipe;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
@@ -50,6 +48,17 @@ impl std::fmt::Debug for OnchainState {
 #[derive(Clone, Debug)]
 pub enum Notification {
     ValidatorInfoUpdated(Address),
+    /// Reconfig started, transitioning to the given epoch.
+    StartReconfig(u64),
+}
+
+/// Information about the latest processed checkpoint
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CheckpointInfo {
+    /// The checkpoint height
+    pub height: u64,
+    /// The checkpoint timestamp in milliseconds since Unix epoch
+    pub timestamp_ms: u64,
 }
 
 struct Inner {
@@ -57,13 +66,9 @@ struct Inner {
     ids: HashiIds,
     client: Client,
     sender: broadcast::Sender<Notification>,
-    /// The checkpoint height that this state is recent to
-    checkpoint: watch::Sender<u64>,
+    /// The checkpoint information that this state is recent to
+    checkpoint: watch::Sender<CheckpointInfo>,
     state: RwLock<State>,
-    /// Channel for notifying `MpcService` of reconfig events.
-    reconfig_tx: mpsc::Sender<u64>,
-    /// Receiver taken once by `MpcService`.
-    reconfig_rx: Mutex<Option<mpsc::Receiver<u64>>>,
 }
 
 #[derive(Debug)]
@@ -88,15 +93,12 @@ impl OnchainState {
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
-        let (reconfig_tx, reconfig_rx) = mpsc::channel(1);
         let state = Inner {
             ids,
             client: client.clone(),
             sender,
             checkpoint,
             state: RwLock::new(state),
-            reconfig_tx,
-            reconfig_rx: Mutex::new(Some(reconfig_rx)),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -114,14 +116,6 @@ impl OnchainState {
         let _ = self.0.sender.send(notification);
     }
 
-    pub fn notify_start_reconfig(&self, epoch: u64) {
-        let _ = self.0.reconfig_tx.try_send(epoch);
-    }
-
-    pub fn take_reconfig_receiver(&self) -> Option<mpsc::Receiver<u64>> {
-        self.0.reconfig_rx.lock().unwrap().take()
-    }
-
     pub fn state(&self) -> RwLockReadGuard<'_, State> {
         self.0.state.read().unwrap()
     }
@@ -132,16 +126,20 @@ impl OnchainState {
         self.0.state.write().unwrap()
     }
 
-    pub fn subscribe_checkpoint(&self) -> watch::Receiver<u64> {
+    pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {
         self.0.checkpoint.subscribe()
     }
 
-    pub fn latest_checkpoint(&self) -> u64 {
-        *self.0.checkpoint.borrow()
+    pub fn latest_checkpoint_height(&self) -> u64 {
+        self.0.checkpoint.borrow().height
     }
 
-    fn update_latest_checkpoint(&self, checkpoint: u64) {
-        self.0.checkpoint.send_replace(checkpoint);
+    pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {
+        self.0.checkpoint.borrow().timestamp_ms
+    }
+
+    fn update_latest_checkpoint_info(&self, info: CheckpointInfo) {
+        self.0.checkpoint.send_replace(info);
     }
 
     fn add_package_version(&self, version: u64, package_id: Address) {
@@ -270,8 +268,8 @@ impl State {
         &self.hashi
     }
 
-    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, u64)> {
-        let (package_versions, (checkpoint, hashi)) = tokio::try_join!(
+    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, CheckpointInfo)> {
+        let (package_versions, (checkpoint_info, hashi)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id),
         )?;
@@ -284,7 +282,7 @@ impl State {
                 package_ids,
                 hashi,
             },
-            checkpoint,
+            checkpoint_info,
         ))
     }
 }
@@ -313,7 +311,10 @@ async fn scrape_package_versions(
     Ok(package_versions)
 }
 
-async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u64, types::Hashi)> {
+async fn scrape_hashi(
+    mut client: Client,
+    hashi_object_id: Address,
+) -> Result<(CheckpointInfo, types::Hashi)> {
     let response = client
         .ledger_client()
         .get_object(
@@ -325,9 +326,14 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
             ])),
         )
         .await?;
-    let checkpoint = response
-        .checkpoint_height()
-        .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
+    let checkpoint_info = CheckpointInfo {
+        height: response
+            .checkpoint_height()
+            .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?,
+        timestamp_ms: response
+            .timestamp_ms()
+            .ok_or_else(|| anyhow!("response missing X_SUI_TIMESTAMP_MS header"))?,
+    };
 
     // Extract initial shared version from owner
     let initial_shared_version = response.get_ref().object().owner().version();
@@ -360,7 +366,7 @@ async fn scrape_hashi(mut client: Client, hashi_object_id: Address) -> Result<(u
         .set_committees(committees_per_epoch);
 
     Ok((
-        checkpoint,
+        checkpoint_info,
         types::Hashi {
             id,
             initial_shared_version,
@@ -656,7 +662,7 @@ fn convert_move_committee_member(
         crate::dkg::EncryptionGroupElement::try_from(encryption_public_key.as_slice())
             .map(Into::into)
             .unwrap_or_else(|_| fallback_encryption_public_key()),
-        weight.into(),
+        weight,
     )
 }
 
@@ -671,7 +677,7 @@ async fn scrape_deposit_requests(
     client: Client,
     deposit_queue_id: Address,
 ) -> Result<types::DepositRequestQueue> {
-    let requests: BTreeMap<types::UtxoId, types::DepositRequest> = client
+    let requests: BTreeMap<Address, types::DepositRequest> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(deposit_queue_id)
@@ -696,7 +702,7 @@ async fn scrape_deposit_requests(
              }| {
                 let utxo = convert_move_utxo(utxo);
                 (
-                    utxo.id,
+                    id,
                     types::DepositRequest {
                         id,
                         utxo,

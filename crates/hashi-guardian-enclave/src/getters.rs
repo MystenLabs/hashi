@@ -21,11 +21,12 @@ use tracing::error;
 pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
     info!("/get_guardian_info - Received request");
 
-    let attestation = get_attestation(&enclave.signing_pubkey())?;
-
+    let signing_pub_key = enclave.signing_pubkey();
+    let attestation = get_attestation(&signing_pub_key)?;
     Ok(GetGuardianInfoResponse {
         attestation,
-        server_version: "v1".to_string(),
+        signing_pub_key,
+        signed_info: enclave.sign(enclave.info()),
     })
 }
 

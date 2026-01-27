@@ -108,7 +108,9 @@ jobs:
           echo "SUI_BINARY=/usr/local/bin/sui" >> $GITHUB_ENV
 
       - name: Run tests
-        run: make test
+        run: |
+          cargo nextest run --all-features --profile ci
+          cargo test --all-features --doc
 
       - run: make is-dirty
 

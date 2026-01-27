@@ -9,6 +9,7 @@ use hashi_guardian_shared::AddressValidation;
 use hashi_guardian_shared::GuardianError;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
+use hashi_guardian_shared::GuardianError::S3Error;
 use hashi_guardian_shared::HashiSigned;
 use hashi_guardian_shared::OperatorInitRequest;
 use hashi_guardian_shared::SetupNewKeyRequest;
@@ -29,6 +30,7 @@ fn to_status(e: GuardianError) -> Status {
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
         InternalError(msg) => Status::internal(msg),
+        S3Error(msg) => Status::internal(msg),
     }
 }
 

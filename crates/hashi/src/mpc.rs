@@ -1,7 +1,6 @@
 //! MPC (Multi-Party Computation) Service
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -15,6 +14,7 @@ use crate::dkg::DkgOutput;
 use crate::dkg::rpc::RpcP2PChannel;
 use crate::dkg::types::CertificateV1;
 use crate::dkg::types::ProtocolType;
+use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::committee::Committee;
@@ -88,13 +88,11 @@ impl MpcService {
                 tokio::time::sleep(RETRY_INTERVAL).await;
             }
         }
-        let mut reconfig_rx = self
-            .inner
-            .onchain_state()
-            .take_reconfig_receiver()
-            .expect("reconfig receiver already taken");
-        while let Some(epoch) = reconfig_rx.recv().await {
-            self.handle_reconfig(epoch).await;
+        let mut notifications = self.inner.onchain_state().subscribe();
+        while let Ok(notification) = notifications.recv().await {
+            if let Notification::StartReconfig(epoch) = notification {
+                self.handle_reconfig(epoch).await;
+            }
         }
     }
 
@@ -113,7 +111,13 @@ impl MpcService {
         let dkg_manager = self.inner.dkg_manager();
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
-        let mut tob_channel = SuiTobChannel::new(onchain_state, epoch, signer, committee);
+        let mut tob_channel = SuiTobChannel::new(
+            self.inner.config.hashi_ids(),
+            onchain_state,
+            epoch,
+            signer,
+            committee,
+        );
         let output = DkgManager::run(&dkg_manager, &p2p_channel, &mut tob_channel)
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
@@ -156,14 +160,19 @@ impl MpcService {
         let rotation_manager = self
             .inner
             .create_dkg_manager(target_epoch, ProtocolType::KeyRotation)?;
-        let rotation_manager = Arc::new(Mutex::new(rotation_manager));
-        self.inner.set_dkg_manager(rotation_manager.clone());
+        self.inner.set_dkg_manager(rotation_manager);
+        let dkg_manager = self.inner.dkg_manager();
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
-        let mut tob_channel =
-            SuiTobChannel::new(onchain_state, target_epoch, signer, target_committee);
+        let mut tob_channel = SuiTobChannel::new(
+            self.inner.config.hashi_ids(),
+            onchain_state,
+            target_epoch,
+            signer,
+            target_committee,
+        );
         let output = DkgManager::run_key_rotation(
-            &rotation_manager,
+            &dkg_manager,
             &previous_certs,
             &p2p_channel,
             &mut tob_channel,

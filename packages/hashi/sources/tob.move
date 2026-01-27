@@ -65,7 +65,7 @@ public(package) fun submit_cert(
     messages_hash: vector<u8>,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,
-    threshold: u16,
+    threshold: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.certs.contains(dealer)) {

@@ -38,3 +38,7 @@ public fun amount(self: &Utxo): u64 {
 public fun derivation_path(self: &Utxo): Option<address> {
     self.derivation_path
 }
+
+public(package) fun delete(utxo: Utxo) {
+    let Utxo { id: _, amount: _, derivation_path: _ } = utxo;
+}

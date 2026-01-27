@@ -77,6 +77,20 @@ public fun confirm_deposit(
     sui::event::emit(deposit_confirmed_event);
 }
 
+public fun delete_expired_deposit(
+    hashi: &mut Hashi,
+    request_id: address,
+    clock: &sui::clock::Clock,
+) {
+    hashi.config().assert_version_enabled();
+    hashi.deposit_queue_mut().delete_expired(request_id, clock);
+
+    let expired_deposit_deleted_event = ExpiredDepositDeletedEvent {
+        request_id,
+    };
+    sui::event::emit(expired_deposit_deleted_event);
+}
+
 public struct DepositRequestedEvent has copy, drop {
     request_id: address,
     utxo_id: UtxoId,
@@ -91,4 +105,8 @@ public struct DepositConfirmedEvent has copy, drop {
     amount: u64,
     derivation_path: Option<address>,
     // signature: CommitteeSignature,
+}
+
+public struct ExpiredDepositDeletedEvent has copy, drop {
+    request_id: address,
 }

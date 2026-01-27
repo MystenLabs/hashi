@@ -4,9 +4,11 @@ use futures::StreamExt;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::proto_to_timestamp_ms;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
+use crate::onchain::CheckpointInfo;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use crate::onchain::scrape_member_info;
@@ -16,6 +18,7 @@ use hashi_types::move_types::HashiEvent;
 pub async fn watcher(mut client: Client, state: OnchainState) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
+        Checkpoint::path_builder().summary().timestamp(),
         Checkpoint::path_builder()
             .transactions()
             .events()
@@ -59,6 +62,12 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
 
             let ckpt = checkpoint.cursor();
             tracing::debug!("recieved checkpoint {ckpt}");
+            let timestamp_ms = checkpoint
+                .checkpoint()
+                .summary()
+                .timestamp
+                .and_then(|t| proto_to_timestamp_ms(t).ok())
+                .unwrap_or(0);
 
             let mut events = Vec::new();
             {
@@ -85,8 +94,11 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
 
             handle_events(&client, &state, &events).await;
 
-            // Finally update the latest checkpoint
-            state.update_latest_checkpoint(ckpt);
+            // Finally update the latest checkpoint info
+            state.update_latest_checkpoint_info(CheckpointInfo {
+                height: ckpt,
+                timestamp_ms,
+            });
         }
     }
 }
@@ -158,7 +170,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .hashi
                     .deposit_queue
                     .requests
-                    .insert(deposit_request.utxo.id, deposit_request);
+                    .insert(deposit_request.id, deposit_request);
                 // TODO notify
             }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
@@ -173,9 +185,21 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     derivation_path: deposit_confirmed_event.derivation_path,
                 };
 
-                state.hashi.deposit_queue.requests.remove(&utxo.id);
+                state
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .remove(&deposit_confirmed_event.request_id);
                 state.hashi.utxo_pool.utxos.insert(utxo.id, utxo);
                 // TODO notify
+            }
+            HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .remove(&expired_deposit_deleted_event.request_id);
             }
             HashiEvent::StartReconfigEvent(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;
@@ -194,7 +218,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                         .insert(epoch, committee);
                     state.hashi.committees.set_pending_epoch_change(Some(epoch));
                 }
-                state.notify_start_reconfig(epoch);
+                state.notify(Notification::StartReconfig(epoch));
             }
             HashiEvent::EndReconfigEvent(end_reconfig_event) => {
                 let mut state = state.state_mut();

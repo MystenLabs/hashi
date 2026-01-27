@@ -319,7 +319,7 @@ pub struct Treasury {
 #[derive(Debug)]
 pub struct DepositRequestQueue {
     pub(super) id: Address,
-    pub(super) requests: BTreeMap<UtxoId, DepositRequest>,
+    pub(super) requests: BTreeMap<Address, DepositRequest>,
 }
 
 impl DepositRequestQueue {
@@ -327,7 +327,7 @@ impl DepositRequestQueue {
         &self.id
     }
 
-    pub fn requests(&self) -> &BTreeMap<UtxoId, DepositRequest> {
+    pub fn requests(&self) -> &BTreeMap<Address, DepositRequest> {
         &self.requests
     }
 }

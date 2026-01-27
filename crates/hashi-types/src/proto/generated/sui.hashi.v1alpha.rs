@@ -455,15 +455,58 @@ pub mod bridge_service_server {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetGuardianInfoRequest {}
-/// TODO: Add more info
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation
+    /// AWS Nitro attestation document.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub attestation: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Software version of the service. Similar to the `server` http header.
+    /// Guardian signing public key (Ed25519, 32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub signing_pub_key: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
+    #[prost(message, optional, tag = "3")]
+    pub signed_info: ::core::option::Option<SignedGuardianInfo>,
+}
+/// Guardian-signed wrapper around `GuardianInfoData`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignedGuardianInfo {
+    #[prost(message, optional, tag = "1")]
+    pub data: ::core::option::Option<GuardianInfoData>,
+    /// Milliseconds since Unix epoch.
+    #[prost(uint64, optional, tag = "2")]
+    pub timestamp_ms: ::core::option::Option<u64>,
+    /// Guardian signature over (intent || data || timestamp).
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Information about the guardian enclave.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GuardianInfoData {
+    /// Share commitments (if set). Used by key provisioners to check that right key will be used.
+    #[prost(message, optional, tag = "1")]
+    pub share_commitments: ::core::option::Option<GuardianShareCommitments>,
+    /// S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
+    #[prost(message, optional, tag = "2")]
+    pub bucket_info: ::core::option::Option<S3BucketInfo>,
+    /// Guardian encryption public key (32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub encryption_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Server version.
+    #[prost(string, optional, tag = "4")]
+    pub server_version: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Wrapper to allow presence for a repeated field.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GuardianShareCommitments {
+    #[prost(message, repeated, tag = "1")]
+    pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct S3BucketInfo {
+    #[prost(string, optional, tag = "1")]
+    pub bucket: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "2")]
-    pub server: ::core::option::Option<::prost::alloc::string::String>,
+    pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Untrusted wire DTO. Converted to a validated domain request in the server.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -544,6 +587,8 @@ pub struct S3Config {
     pub secret_key: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "3")]
     pub bucket_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitRequest {
