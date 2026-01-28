@@ -5,6 +5,8 @@ use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPublicDkgOutputRequest;
 use hashi_types::proto::GetPublicDkgOutputResponse;
+use hashi_types::proto::GetReconfigCompletionSignatureRequest;
+use hashi_types::proto::GetReconfigCompletionSignatureResponse;
 use hashi_types::proto::RetrieveMessagesRequest;
 use hashi_types::proto::RetrieveMessagesResponse;
 use hashi_types::proto::SendMessagesRequest;
@@ -92,6 +94,16 @@ impl MpcService for HttpService {
         Ok(tonic::Response::new(GetPublicDkgOutputResponse::from(
             &response,
         )))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn get_reconfig_completion_signature(
+        &self,
+        request: tonic::Request<GetReconfigCompletionSignatureRequest>,
+    ) -> Result<tonic::Response<GetReconfigCompletionSignatureResponse>, Status> {
+        authenticate_caller(&request)?;
+        let _external_request = request.into_inner();
+        todo!("Implement reconfig completion signature collection")
     }
 }
 

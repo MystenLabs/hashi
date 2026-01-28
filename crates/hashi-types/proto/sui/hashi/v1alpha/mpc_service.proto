@@ -16,6 +16,9 @@ service MpcService {
 
   // Get public DKG output.
   rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
+
+  // Get a validator's signature on the reconfig completion message.
+  rpc GetReconfigCompletionSignature(GetReconfigCompletionSignatureRequest) returns (GetReconfigCompletionSignatureResponse);
 }
 
 message RotationMessages {
@@ -98,4 +101,14 @@ message GetPublicDkgOutputResponse {
 
   // The commitments keyed by share index.
   map<uint32, sui.rpc.v2.Bcs> commitments = 2;
+}
+
+message GetReconfigCompletionSignatureRequest {
+  // The target epoch after key rotation completes.
+  optional uint64 epoch = 1;
+}
+
+message GetReconfigCompletionSignatureResponse {
+  // The validator's BLS signature on the reconfig completion message.
+  optional bytes signature = 1;
 }
