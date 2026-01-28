@@ -5,7 +5,7 @@ use hashi_guardian_shared::LogMessage;
 use std::sync::Arc;
 use std::time::Duration;
 
-async fn heartbeat_step(
+async fn send_heartbeat(
     enclave: &Enclave,
     max_failures: u32,
     consecutive_failures: &mut u32,
@@ -16,7 +16,7 @@ async fn heartbeat_step(
     }
 
     if let Err(e) = enclave.sign_and_log(LogMessage::Heartbeat).await {
-        debug_assert!(matches!(e, GuardianError::S3Error(_))); // checked in operator_init_complete
+        debug_assert!(matches!(e, GuardianError::S3Error(_))); // other errors shouldn't occur due to checks in operator_init_complete
         *consecutive_failures += 1;
         if *consecutive_failures >= max_failures {
             return Err(GuardianError::InternalError(format!(
@@ -31,7 +31,8 @@ async fn heartbeat_step(
     Ok(())
 }
 
-/// Send heartbeat messages to S3 once per interval, until max_failures failures happen
+/// Send heartbeat messages to S3 once per interval, until max_failures failures happen.
+/// This task is supposed to run as long as the enclave is alive.
 pub async fn run_heartbeat_writer_task(
     enclave: Arc<Enclave>,
     interval: Duration,
@@ -39,10 +40,9 @@ pub async fn run_heartbeat_writer_task(
 ) -> GuardianResult<()> {
     let mut ticker = tokio::time::interval(interval);
     let mut consecutive_failures = 0;
-
     loop {
         ticker.tick().await;
-        heartbeat_step(&enclave, max_failures, &mut consecutive_failures).await?;
+        send_heartbeat(&enclave, max_failures, &mut consecutive_failures).await?;
     }
 }
 
@@ -98,7 +98,7 @@ mod tests {
         // First (max_failures - 1) failures should be tolerated.
         for i in 0..(max_failures - 1) {
             assert!(
-                heartbeat_step(&enclave, max_failures, &mut consecutive_failures)
+                send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
                     .await
                     .is_ok()
             );
@@ -107,7 +107,7 @@ mod tests {
 
         // The next failure should exceed the threshold and return Err.
         assert!(
-            heartbeat_step(&enclave, max_failures, &mut consecutive_failures)
+            send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
                 .await
                 .is_err()
         );
@@ -139,7 +139,7 @@ mod tests {
         let mut consecutive_failures = 0u32;
         for i in 0..(max_failures - 1) {
             assert!(
-                heartbeat_step(&enclave, max_failures, &mut consecutive_failures)
+                send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
                     .await
                     .is_ok()
             );
@@ -147,7 +147,7 @@ mod tests {
         }
 
         assert!(
-            heartbeat_step(&enclave, max_failures, &mut consecutive_failures)
+            send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
                 .await
                 .is_ok()
         );

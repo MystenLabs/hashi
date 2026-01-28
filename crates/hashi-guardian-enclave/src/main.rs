@@ -181,7 +181,7 @@ impl EnclaveConfig {
     pub fn set_hashi_btc_pk(&self, pk: BitcoinPubkey) -> GuardianResult<()> {
         self.hashi_btc_master_pubkey
             .set(pk)
-            .map_err(|e| InvalidInputs(format!("Hashi BTC key is already set: {}", e)))
+            .map_err(|_| InvalidInputs("Hashi BTC key is already set".into()))
     }
 
     /// Sign a BTC tx. Returns an Err if enclave btc keypair or hashi btc pk is not set.

@@ -163,7 +163,7 @@ async fn log_withdrawal_success(
             // Logging failed => return Err (do not return signatures).
             // Note that LimiterGuard::Drop will revert the limiter
             error!("Logging withdrawal {} to S3 failed: {:?}", wid, e);
-            Err(InternalError("S3 logging failed".into()))
+            Err(e)
         }
     }
 }
@@ -177,8 +177,8 @@ async fn log_withdrawal_failure(
     if let Err(log_err) = enclave.sign_and_log(msg).await {
         error!("Logging withdrawal {} to S3 failed: {:?}", wid, log_err);
         return Err(InternalError(format!(
-            "Failed to log withdrawal error {} due to S3 logging error {}",
-            withdraw_err, log_err
+            "Failed to log withdrawal {} error {} due to S3 logging error {}",
+            wid, withdraw_err, log_err
         )));
     }
 
