@@ -1,10 +1,6 @@
 module hashi::cert_submission;
 
-use hashi::{hashi::Hashi, tob::ProtocolType};
-
-// TODO: Make threshold configurable.
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
+use hashi::{hashi::Hashi, threshold, tob::ProtocolType};
 
 entry fun submit_dkg_cert(
     hashi: &mut Hashi,
@@ -61,7 +57,7 @@ fun submit_cert_internal(
     hashi.config().assert_version_enabled();
     assert!(epoch == hashi.committee_set().epoch());
     let (epoch_certs, committee) = hashi.epoch_certs_and_committee(epoch, protocol_type, ctx);
-    let threshold = (committee.total_weight() as u64) * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
+    let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
     hashi::tob::submit_cert(
         epoch_certs,
         committee,
