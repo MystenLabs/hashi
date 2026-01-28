@@ -224,6 +224,15 @@ pub enum ProtocolType {
     KeyRotation,
 }
 
+/// Rust version of the Move struct `hashi::reconfig::ReconfigCompletionMessage`.
+#[derive(Clone, Debug, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct ReconfigCompletionMessage {
+    /// The epoch being transitioned to.
+    pub epoch: u64,
+    /// The MPC committee's threshold public key.
+    pub mpc_public_key: Vec<u8>,
+}
+
 /// Rust version of the Move hashi::tob::EpochCertsV1 type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCertsV1 {

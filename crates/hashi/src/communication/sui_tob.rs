@@ -18,13 +18,10 @@ use crate::dkg::types::DealerMessagesHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SuiTxExecutor;
 use hashi_types::committee::Committee;
+use hashi_types::committee::certificate_threshold;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-
-// TODO: Read threshold from on-chain config once it is made configurable.
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -93,8 +90,7 @@ pub async fn fetch_certificates(
     epoch: u64,
     committee: &Committee,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    // This matches the Move contract's threshold computation.
-    let threshold = committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
+    let threshold = certificate_threshold(committee.total_weight());
     let Some((protocol_type, raw_certs)) = onchain_state
         .fetch_certs(epoch)
         .await

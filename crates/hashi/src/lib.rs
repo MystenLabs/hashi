@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -37,6 +38,8 @@ pub struct Hashi {
     dkg_manager: OnceLock<Arc<RwLock<dkg::DkgManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
+    /// Reconfig completion signatures by epoch.
+    reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
 
 impl Hashi {
@@ -53,6 +56,7 @@ impl Hashi {
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            reconfig_signatures: RwLock::new(HashMap::new()),
         })
     }
 
@@ -72,6 +76,7 @@ impl Hashi {
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            reconfig_signatures: RwLock::new(HashMap::new()),
         })
     }
 
@@ -107,6 +112,21 @@ impl Hashi {
 
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
         self.btc_monitor.get().expect("BtcMonitor not initialized")
+    }
+
+    pub fn store_reconfig_signature(&self, epoch: u64, signature: Vec<u8>) {
+        self.reconfig_signatures
+            .write()
+            .unwrap()
+            .insert(epoch, signature);
+    }
+
+    pub fn get_reconfig_signature(&self, epoch: u64) -> Option<Vec<u8>> {
+        self.reconfig_signatures
+            .read()
+            .unwrap()
+            .get(&epoch)
+            .cloned()
     }
 
     async fn initialize_onchain_state(&self) {

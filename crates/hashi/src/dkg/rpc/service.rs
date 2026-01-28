@@ -102,8 +102,18 @@ impl MpcService for HttpService {
         request: tonic::Request<GetReconfigCompletionSignatureRequest>,
     ) -> Result<tonic::Response<GetReconfigCompletionSignatureResponse>, Status> {
         authenticate_caller(&request)?;
-        let _external_request = request.into_inner();
-        todo!("Implement reconfig completion signature collection")
+        let external_request = request.into_inner();
+        let epoch = external_request
+            .epoch
+            .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+        let signature = self
+            .get_reconfig_signature(epoch)
+            .ok_or_else(|| Status::not_found("signature not ready for this epoch"))?;
+        Ok(tonic::Response::new(
+            GetReconfigCompletionSignatureResponse {
+                signature: Some(signature.into()),
+            },
+        ))
     }
 }
 

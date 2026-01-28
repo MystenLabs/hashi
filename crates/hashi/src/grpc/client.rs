@@ -14,6 +14,7 @@ use crate::dkg::types::RetrieveMessagesResponse;
 use crate::dkg::types::SendMessagesRequest;
 use crate::dkg::types::SendMessagesResponse;
 use crate::tls::make_client_config_no_verification;
+use hashi_types::proto::GetReconfigCompletionSignatureRequest;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
@@ -130,5 +131,18 @@ impl Client {
             .await?;
         GetPublicDkgOutputResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    pub async fn get_reconfig_completion_signature(&self, epoch: u64) -> Result<Vec<u8>> {
+        let request = GetReconfigCompletionSignatureRequest { epoch: Some(epoch) };
+        let response = self
+            .mpc_service_client()
+            .get_reconfig_completion_signature(request)
+            .await?;
+        response
+            .into_inner()
+            .signature
+            .map(|b| b.to_vec())
+            .ok_or_else(|| tonic::Status::internal("response missing signature field"))
     }
 }

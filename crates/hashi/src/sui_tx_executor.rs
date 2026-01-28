@@ -356,6 +356,44 @@ impl SuiTxExecutor {
         anyhow::bail!("DepositRequestedEvent not found in transaction events")
     }
 
+    pub async fn execute_end_reconfig(
+        &mut self,
+        mpc_public_key: &[u8],
+        signature: &[u8],
+        signers_bitmap: &[u8],
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
+        let signature_arg = builder.pure(&signature.to_vec());
+        let signers_bitmap_arg = builder.pure(&signers_bitmap.to_vec());
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("end_reconfig"),
+            ),
+            vec![
+                hashi_arg,
+                mpc_public_key_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "end_reconfig transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
     /// Execute a certificate submission transaction.
     ///
     /// This submits a DKG or rotation certificate to the on-chain certificate store.

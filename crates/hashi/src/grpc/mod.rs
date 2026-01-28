@@ -97,6 +97,10 @@ impl HttpService {
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
         self.inner.btc_monitor()
     }
+
+    pub fn get_reconfig_signature(&self, epoch: u64) -> Option<Vec<u8>> {
+        self.inner.get_reconfig_signature(epoch)
+    }
 }
 
 async fn health() -> impl axum::response::IntoResponse {

@@ -3,8 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fastcrypto::traits::ToFromBytes;
+use futures::future::join_all;
 use tokio::sync::watch;
 use tracing::error;
+use tracing::info;
+use tracing::warn;
 
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
@@ -17,7 +21,11 @@ use crate::dkg::types::ProtocolType;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
+use hashi_types::committee::BLS12381Signature;
+use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
+use hashi_types::committee::certificate_threshold;
+use hashi_types::move_types::ReconfigCompletionMessage;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -125,19 +133,33 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
-        loop {
+        let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 return;
             }
             match self.run_key_rotation(target_epoch).await {
-                Ok(output) => {
-                    let _ = self.key_ready_tx.send(Some(output.public_key));
-                    self.submit_end_reconfig(target_epoch, &output).await;
+                Ok(output) => break output,
+                Err(e) => {
+                    error!(
+                        "Key rotation to epoch {} failed: {e}, retrying...",
+                        target_epoch
+                    );
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                }
+            }
+        };
+        let _ = self.key_ready_tx.send(Some(output.public_key));
+        loop {
+            if self.get_pending_epoch_change() != Some(target_epoch) {
+                return;
+            }
+            match self.submit_end_reconfig(target_epoch, &output).await {
+                Ok(()) => {
                     return;
                 }
                 Err(e) => {
                     error!(
-                        "Key rotation to epoch {} failed: {e}, retrying...",
+                        "submit_end_reconfig for epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
                     tokio::time::sleep(RETRY_INTERVAL).await;
@@ -198,8 +220,149 @@ impl MpcService {
         Ok(certs.into_iter().map(|(_, cert)| cert).collect())
     }
 
-    async fn submit_end_reconfig(&self, _epoch: u64, _output: &DkgOutput) {
-        todo!("Generate completion cert and submit on-chain")
+    async fn submit_end_reconfig(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {
+        let mpc_public_key =
+            bcs::to_bytes(&output.public_key).expect("public key serialization should succeed");
+        let target_committee = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no committee found for epoch {}", epoch))?;
+        let message = ReconfigCompletionMessage {
+            epoch,
+            mpc_public_key: mpc_public_key.clone(),
+        };
+        let signing_key = self
+            .inner
+            .config
+            .protocol_private_key()
+            .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
+        let my_address = self.inner.config.validator_address()?;
+        let my_sig = signing_key.sign(epoch, my_address, &message);
+        self.inner
+            .store_reconfig_signature(epoch, my_sig.signature().as_bytes().to_vec());
+        let cert = loop {
+            if self.get_pending_epoch_change() != Some(epoch) {
+                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            }
+            match self
+                .collect_reconfig_signatures(epoch, &mpc_public_key, &target_committee)
+                .await
+            {
+                Ok(cert) => break cert,
+                Err(e) => {
+                    warn!(
+                        "Signature collection for epoch {} failed: {e}, retrying...",
+                        epoch
+                    );
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                }
+            }
+        };
+        loop {
+            if self.get_pending_epoch_change() != Some(epoch) {
+                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            }
+            let result = async {
+                let mut executor =
+                    crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
+                executor
+                    .execute_end_reconfig(
+                        &mpc_public_key,
+                        cert.signature_bytes(),
+                        cert.signers_bitmap_bytes(),
+                    )
+                    .await
+            };
+            match result.await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!(
+                        "end_reconfig submission for epoch {} failed: {e}, retrying...",
+                        epoch
+                    );
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                }
+            }
+        }
+    }
+
+    async fn collect_reconfig_signatures(
+        &self,
+        epoch: u64,
+        mpc_public_key: &[u8],
+        committee: &Committee,
+    ) -> anyhow::Result<hashi_types::committee::SignedMessage<ReconfigCompletionMessage>> {
+        let message = ReconfigCompletionMessage {
+            epoch,
+            mpc_public_key: mpc_public_key.to_vec(),
+        };
+        let my_address = self.inner.config.validator_address()?;
+        let my_sig_bytes = self
+            .inner
+            .get_reconfig_signature(epoch)
+            .expect("own signature must be stored before collecting");
+        let my_sig =
+            BLS12381Signature::from_bytes(&my_sig_bytes).expect("stored signature must be valid");
+        let mut aggregator = BlsSignatureAggregator::new(committee, message.clone());
+        aggregator
+            .add_signature_from(my_address, my_sig)
+            .map_err(|e| anyhow::anyhow!("failed to add own signature: {e}"))?;
+        let required_weight = certificate_threshold(committee.total_weight());
+        while aggregator.weight() < required_weight {
+            let other_members: Vec<_> = committee
+                .members()
+                .iter()
+                .filter(|m| m.validator_address() != my_address)
+                .collect();
+            let futures = other_members.iter().map(|member| {
+                let address = member.validator_address();
+                async move {
+                    let result: anyhow::Result<Vec<u8>> = async {
+                        let client = self
+                            .inner
+                            .onchain_state()
+                            .state()
+                            .hashi()
+                            .committees
+                            .client(&address)
+                            .ok_or_else(|| anyhow::anyhow!("client not found for {}", address))?;
+                        client
+                            .get_reconfig_completion_signature(epoch)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("RPC failed: {e}"))
+                    }
+                    .await;
+                    (address, result)
+                }
+            });
+            let results = join_all(futures).await;
+            for (address, result) in results {
+                if let Ok(sig_bytes) = result {
+                    match BLS12381Signature::from_bytes(&sig_bytes) {
+                        Ok(sig) => {
+                            if let Err(e) = aggregator.add_signature_from(address, sig) {
+                                info!("Signature from {} rejected: {e}", address);
+                            }
+                        }
+                        Err(e) => {
+                            info!("Invalid signature bytes from {}: {e}", address);
+                        }
+                    }
+                }
+            }
+            if aggregator.weight() < required_weight {
+                tokio::time::sleep(RETRY_INTERVAL).await;
+            }
+        }
+        aggregator
+            .finish()
+            .map_err(|e| anyhow::anyhow!("failed to finalize certificate: {e}"))
     }
 }
 
