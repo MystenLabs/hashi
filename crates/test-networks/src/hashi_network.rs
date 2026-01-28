@@ -223,7 +223,8 @@ impl HashiNetworkBuilder {
 
         // Init the initial committee
         start_reconfig(sui, hashi_ids).await?;
-        // Use a placeholder MPC public key for test initialization
+        // TODO: Remove this test-only logic once the node service handles committing the
+        // MPC public key on-chain after DKG.
         let placeholder_mpc_public_key = vec![0u8; 33];
         end_reconfig(sui, hashi_ids, &bls_keys, placeholder_mpc_public_key).await?;
 

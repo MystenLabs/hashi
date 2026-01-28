@@ -681,11 +681,11 @@ fn withdrawal_state_to_pb(st: WithdrawalState) -> pb::WithdrawalState {
     pb::WithdrawalState {
         rate_limiter_state: Some(pb::RateLimiter {
             withdrawn_sats: limiter
-                .state
+                .state()
                 .iter()
                 .map(|(_, x)| Amount::to_sat(*x))
                 .collect(),
-            max_withdrawable_per_epoch_sats: Some(limiter.max_withdrawable_per_epoch.to_sat()),
+            max_withdrawable_per_epoch_sats: Some(limiter.max_withdrawable_per_epoch().to_sat()),
         }),
     }
 }
@@ -706,7 +706,6 @@ fn pb_to_hashi_committee_store(
 fn hashi_committee_store_to_pb(c: CommitteeStore) -> pb::CommitteeStore {
     pb::CommitteeStore {
         committees: c
-            .0
             .into_owned_iter()
             .map(|(_, x)| hashi_committee_to_pb(x))
             .collect(),

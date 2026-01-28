@@ -7,6 +7,8 @@ pub enum GuardianError {
     /// Internal errors related to S3
     S3Error(String),
     InvalidInputs(String),
+    EnclaveUninitialized,
+    RateLimitExceeded,
 }
 
 pub type GuardianResult<T> = Result<T, GuardianError>;
@@ -17,6 +19,8 @@ impl std::fmt::Display for GuardianError {
             GuardianError::InternalError(e) => write!(f, "InternalError: {}", e),
             GuardianError::InvalidInputs(e) => write!(f, "InvalidInputs: {}", e),
             GuardianError::S3Error(e) => write!(f, "S3Error: {}", e),
+            GuardianError::EnclaveUninitialized => write!(f, "Enclave is not fully initialized"),
+            GuardianError::RateLimitExceeded => write!(f, "Rate limit exceeded"),
         }
     }
 }
