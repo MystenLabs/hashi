@@ -28,6 +28,7 @@ use hashi_types::committee::certificate_threshold;
 use hashi_types::move_types::ReconfigCompletionMessage;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+const START_RECONFIG_MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -98,8 +99,14 @@ impl MpcService {
         }
         let mut notifications = self.inner.onchain_state().subscribe();
         while let Ok(notification) = notifications.recv().await {
-            if let Notification::StartReconfig(epoch) = notification {
-                self.handle_reconfig(epoch).await;
+            match notification {
+                Notification::StartReconfig(epoch) => {
+                    self.handle_reconfig(epoch).await;
+                }
+                Notification::SuiEpochChanged(sui_epoch) => {
+                    self.try_submit_start_reconfig(sui_epoch).await;
+                }
+                _ => {}
             }
         }
     }
@@ -130,6 +137,42 @@ impl MpcService {
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
         Ok(output)
+    }
+
+    async fn try_submit_start_reconfig(&self, sui_epoch: u64) {
+        if self.get_pending_epoch_change().is_some() {
+            return;
+        }
+        let hashi_epoch = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .epoch();
+        if hashi_epoch >= sui_epoch {
+            return;
+        }
+        for attempt in 1..=START_RECONFIG_MAX_ATTEMPTS {
+            let result = async {
+                let mut executor =
+                    crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
+                executor.execute_start_reconfig().await
+            };
+            match result.await {
+                Ok(()) => {
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        "start_reconfig attempt {attempt}/{START_RECONFIG_MAX_ATTEMPTS} failed: {e}"
+                    );
+                    if attempt < START_RECONFIG_MAX_ATTEMPTS {
+                        tokio::time::sleep(RETRY_INTERVAL).await;
+                    }
+                }
+            }
+        }
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {

@@ -50,6 +50,7 @@ pub enum Notification {
     ValidatorInfoUpdated(Address),
     /// Reconfig started, transitioning to the given epoch.
     StartReconfig(u64),
+    SuiEpochChanged(u64),
 }
 
 /// Information about the latest processed checkpoint
@@ -59,6 +60,8 @@ pub struct CheckpointInfo {
     pub height: u64,
     /// The checkpoint timestamp in milliseconds since Unix epoch
     pub timestamp_ms: u64,
+    /// The Sui epoch this checkpoint belongs to
+    pub epoch: u64,
 }
 
 struct Inner {
@@ -136,6 +139,10 @@ impl OnchainState {
 
     pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {
         self.0.checkpoint.borrow().timestamp_ms
+    }
+
+    pub fn latest_checkpoint_epoch(&self) -> u64 {
+        self.0.checkpoint.borrow().epoch
     }
 
     fn update_latest_checkpoint_info(&self, info: CheckpointInfo) {
@@ -333,6 +340,7 @@ async fn scrape_hashi(
         timestamp_ms: response
             .timestamp_ms()
             .ok_or_else(|| anyhow!("response missing X_SUI_TIMESTAMP_MS header"))?,
+        epoch: 0,
     };
 
     // Extract initial shared version from owner

@@ -19,6 +19,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
         Checkpoint::path_builder().summary().timestamp(),
+        Checkpoint::path_builder().summary().epoch(),
         Checkpoint::path_builder()
             .transactions()
             .events()
@@ -68,7 +69,12 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
                 .timestamp
                 .and_then(|t| proto_to_timestamp_ms(t).ok())
                 .unwrap_or(0);
-
+            let epoch = checkpoint.checkpoint().summary().epoch.unwrap_or(0);
+            let previous_epoch = state.latest_checkpoint_epoch();
+            if epoch != previous_epoch && previous_epoch != 0 {
+                tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
+                state.notify(Notification::SuiEpochChanged(epoch));
+            }
             let mut events = Vec::new();
             {
                 let state = state.state();
@@ -98,6 +104,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
             state.update_latest_checkpoint_info(CheckpointInfo {
                 height: ckpt,
                 timestamp_ms,
+                epoch,
             });
         }
     }
