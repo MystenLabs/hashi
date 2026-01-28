@@ -34,13 +34,8 @@ use bitcoin::taproot::TapLeafHash;
 use bitcoin::Amount;
 use bitcoin::Network;
 use ed25519_consensus::SigningKey;
-use fastcrypto::bls12381::min_pk::BLS12381KeyPair;
-use fastcrypto::traits::KeyPair;
-use fastcrypto::traits::ToFromBytes;
 use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
-use hashi_types::committee::Committee;
-use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 use hpke::Deserializable;
@@ -48,6 +43,16 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::Address as SuiAddress;
+
+// -------------------------------
+// Shared deterministic test values
+// -------------------------------
+
+/// Deterministic Sui address used across signing-related mocks.
+const TEST_SIGNER_ADDRESS: SuiAddress = SuiAddress::new([1u8; 32]);
+
+/// Deterministic committee signing key material used across tests.
+const TEST_HASHI_BLS_SK_BYTES: [u8; Bls12381PrivateKey::LENGTH] = [9u8; Bls12381PrivateKey::LENGTH];
 
 pub fn create_btc_keypair(sk: &[u8; 32]) -> Keypair {
     let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
@@ -84,28 +89,32 @@ impl SetupNewKeyRequest {
     }
 }
 
+pub fn dummy_commitments() -> Vec<ShareCommitment> {
+    (0..NUM_OF_SHARES)
+        .map(|i| ShareCommitment {
+            id: NonZeroU16::new((i + 1) as u16).unwrap(),
+            digest: vec![0u8; 32],
+        })
+        .collect()
+}
+
+fn dummy_encrypted_shares() -> Vec<EncryptedShare> {
+    (0..NUM_OF_SHARES)
+        .map(|i| EncryptedShare {
+            id: NonZeroU16::new((i + 1) as u16).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0u8; 32],
+                aes_ciphertext: vec![0u8; 32],
+            },
+        })
+        .collect()
+}
+
 impl GuardianSigned<SetupNewKeyResponse> {
     pub fn mock_for_testing() -> Self {
-        let mut share_commitments = vec![];
-        let mut encrypted_shares = vec![];
-        for i in 0..NUM_OF_SHARES {
-            share_commitments.push(ShareCommitment {
-                id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                digest: vec![0u8; 32],
-            });
-
-            encrypted_shares.push(EncryptedShare {
-                id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                ciphertext: Ciphertext {
-                    encapsulated_key: vec![0u8; 32],
-                    aes_ciphertext: vec![0u8; 32],
-                },
-            });
-        }
-
         let resp = SetupNewKeyResponse {
-            encrypted_shares,
-            share_commitments,
+            encrypted_shares: dummy_encrypted_shares(),
+            share_commitments: dummy_commitments(),
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);
@@ -156,23 +165,42 @@ impl ProvisionerInitRequest {
     }
 }
 
+fn mock_hashi_bls_sk() -> Bls12381PrivateKey {
+    Bls12381PrivateKey::from_bytes(TEST_HASHI_BLS_SK_BYTES).expect("valid bls sk bytes")
+}
+
 fn mock_committee_member() -> HashiCommitteeMember {
+    let pk = mock_hashi_bls_sk().public_key();
+
     HashiCommitteeMember::new(
-        SuiAddress::new([0u8; 32]),
-        BLS12381KeyPair::from_bytes(&[1u8; 32])
-            .unwrap()
-            .public()
-            .clone(),
+        // This address must match the one used in signing-related mocks.
+        TEST_SIGNER_ADDRESS,
+        pk,
         EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::from_bcs(&[1u8; 32]).unwrap()),
         10,
     )
 }
 
-fn mock_committee_with_one_member() -> HashiCommittee {
-    HashiCommittee::new(vec![mock_committee_member()], 0)
+fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
+    HashiCommittee::new(vec![mock_committee_member()], epoch)
 }
 
 impl ProvisionerInitState {
+    pub fn from_parts_for_testing(
+        withdrawal_config: WithdrawalConfig,
+        withdrawal_state: WithdrawalState,
+        hashi_committees: CommitteeStore,
+        hashi_btc_master_pubkey: crate::BitcoinPubkey,
+    ) -> Self {
+        ProvisionerInitState::new(
+            hashi_committees,
+            withdrawal_config,
+            withdrawal_state,
+            hashi_btc_master_pubkey,
+        )
+        .expect("valid ProvisionerInitState")
+    }
+
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let num_epochs_to_track = NonZeroU16::new(2).unwrap();
@@ -195,7 +223,7 @@ impl ProvisionerInitState {
             ),
             hashi_committees: CommitteeStore::new(
                 epoch_window,
-                vec![mock_committee_with_one_member()],
+                vec![mock_committee_with_one_member(epoch_window.first_epoch)],
             )
             .unwrap(),
             hashi_btc_master_pubkey: kp.x_only_public_key().0,
@@ -204,6 +232,27 @@ impl ProvisionerInitState {
 }
 
 impl StandardWithdrawalRequest {
+    /// Returns a signed request and the committee used to produce the signature
+    pub fn mock_signed_and_committee_for_testing(
+        network: Network,
+    ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
+        let epoch = 0u64;
+        let req = Self::mock_for_testing(network);
+        let committee = mock_committee_with_one_member(epoch);
+
+        let sk = mock_hashi_bls_sk();
+        let address = TEST_SIGNER_ADDRESS;
+        let mut agg = BlsSignatureAggregator::new(&committee, req.clone());
+        agg.add_signature(sk.sign(epoch, address, &req))
+            .expect("member signature should verify");
+
+        (agg.finish().expect("finish aggregator"), committee)
+    }
+
+    pub fn mock_signed_for_testing(network: Network) -> HashiSigned<StandardWithdrawalRequest> {
+        Self::mock_signed_and_committee_for_testing(network).0
+    }
+
     pub fn mock_for_testing(network: Network) -> Self {
         let kp = create_btc_keypair(&[2u8; 32]);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&kp);
@@ -233,29 +282,6 @@ impl StandardWithdrawalRequest {
             .expect("valid TxUTXOs");
 
         StandardWithdrawalRequest::new(123, utxos)
-    }
-
-    pub fn mock_signed_for_testing(network: Network) -> HashiSigned<StandardWithdrawalRequest> {
-        let epoch = 7;
-        let address = SuiAddress::new([1u8; 32]);
-        let req = Self::mock_for_testing(network);
-
-        // Deterministic 1-member committee.
-        let sk_bytes = [9u8; Bls12381PrivateKey::LENGTH];
-        let sk = Bls12381PrivateKey::from_bytes(sk_bytes).expect("valid bls sk bytes");
-        let pk = sk.public_key();
-
-        let enc_pk = EncryptionPublicKey::from_private_key(
-            &EncryptionPrivateKey::from_bcs(&[1u8; 32]).expect("valid encryption sk bytes"),
-        );
-
-        let committee = Committee::new(vec![CommitteeMember::new(address, pk, enc_pk, 1)], epoch);
-
-        let mut agg = BlsSignatureAggregator::new(&committee, req.clone());
-        agg.add_signature(sk.sign(epoch, address, &req))
-            .expect("member signature should verify");
-
-        agg.finish().expect("finish aggregator")
     }
 }
 
