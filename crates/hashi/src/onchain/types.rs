@@ -282,6 +282,31 @@ impl MemberInfo {
 pub struct Proposals {
     pub id: Address,
     pub size: u64,
+    pub(crate) proposals: BTreeMap<Address, Proposal>,
+}
+
+impl Proposals {
+    pub fn proposals(&self) -> &BTreeMap<Address, Proposal> {
+        &self.proposals
+    }
+}
+
+/// A proposal stored in the proposals bag
+#[derive(Clone, Debug)]
+pub struct Proposal {
+    pub id: Address,
+    pub timestamp_ms: u64,
+    pub proposal_type: ProposalType,
+}
+
+/// The type of proposal data stored in a `Proposal<T>`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalType {
+    UpdateDepositFee,
+    EnableVersion,
+    DisableVersion,
+    Upgrade,
+    Unknown(String),
 }
 
 #[derive(Debug)]

@@ -49,19 +49,21 @@ public(package) fun create<T: store>(
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
     let votes = vector[ctx.sender()];
+    let timestamp_ms = clock.timestamp_ms();
 
     let proposal = Proposal {
         id: object::new(ctx),
         creator: ctx.sender(),
         votes,
         quorum_threshold_bps,
-        timestamp_ms: clock.timestamp_ms(),
+        timestamp_ms,
         metadata,
         data,
     };
 
     let proposal_id = object::id(&proposal);
     hashi.proposals_mut().add(proposal_id, proposal);
+    proposal_events::emit_proposal_created_event<T>(proposal_id, timestamp_ms);
     proposal_id
 }
 

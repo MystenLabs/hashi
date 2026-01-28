@@ -349,12 +349,13 @@ async fn scrape_hashi(
         tob,
     } = response.get_ref().object().contents().deserialize()?;
 
-    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(
+    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool, proposals) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
         scrape_utxo_pool(client.clone(), utxo_pool.utxos.id),
+        scrape_proposals(client.clone(), proposals),
     )?;
 
     let mut committee_set =
@@ -375,7 +376,7 @@ async fn scrape_hashi(
             treasury,
             deposit_queue,
             utxo_pool,
-            proposals: convert_move_proposals(proposals),
+            proposals,
             tob_id: tob.id,
         },
     ))
@@ -409,13 +410,6 @@ fn convert_move_upgrade_cap(cap: move_types::UpgradeCap) -> types::UpgradeCap {
         package: cap.package,
         version: cap.version,
         policy: cap.policy,
-    }
-}
-
-fn convert_move_proposals(proposals: move_types::Bag) -> types::Proposals {
-    types::Proposals {
-        id: proposals.id,
-        size: proposals.size,
     }
 }
 
@@ -767,6 +761,107 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
     };
 
     Ok(pool)
+}
+
+async fn scrape_proposals(
+    client: Client,
+    proposals_bag: move_types::Bag,
+) -> Result<types::Proposals> {
+    let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
+
+    let mut stream = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(proposals_bag.id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder()
+                        .child_object()
+                        .contents()
+                        .finish(),
+                ])),
+        )
+        .pipe(Box::pin);
+
+    while let Some(field) = stream.try_next().await? {
+        // Parse the proposal type from the type tag
+        // The type will be something like: <package>::proposal::Proposal<<package>::update_deposit_fee::UpdateDepositFee>
+        let type_tag: TypeTag = field.child_object().contents().name().parse()?;
+        let proposal_type = parse_proposal_type(&type_tag);
+
+        // Deserialize proposal based on the proposal type
+        let contents = field.child_object().contents().value();
+        let result: Option<(Address, u64)> = match &proposal_type {
+            types::ProposalType::UpdateDepositFee => {
+                bcs::from_bytes::<move_types::Proposal<move_types::UpdateDepositFee>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::EnableVersion => {
+                bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::DisableVersion => {
+                bcs::from_bytes::<move_types::Proposal<move_types::DisableVersion>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::Upgrade => {
+                bcs::from_bytes::<move_types::Proposal<move_types::Upgrade>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::Unknown(_) => None,
+        };
+
+        if let Some((id, timestamp_ms)) = result {
+            proposals.insert(
+                id,
+                types::Proposal {
+                    id,
+                    timestamp_ms,
+                    proposal_type,
+                },
+            );
+        } else {
+            tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
+        }
+    }
+
+    Ok(types::Proposals {
+        id: proposals_bag.id,
+        size: proposals_bag.size,
+        proposals,
+    })
+}
+
+fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
+    let TypeTag::Struct(struct_tag) = type_tag else {
+        return types::ProposalType::Unknown(format!("{:?}", type_tag));
+    };
+
+    // The type is Proposal<T>, we need to extract T
+    if struct_tag.module() != "proposal" || struct_tag.name() != "Proposal" {
+        return types::ProposalType::Unknown(format!("{:?}", type_tag));
+    }
+
+    let Some(type_param) = struct_tag.type_params().first() else {
+        return types::ProposalType::Unknown(format!("{:?}", type_tag));
+    };
+
+    let TypeTag::Struct(inner_tag) = type_param else {
+        return types::ProposalType::Unknown(format!("{:?}", type_param));
+    };
+
+    match (inner_tag.module().as_str(), inner_tag.name().as_str()) {
+        ("update_deposit_fee", "UpdateDepositFee") => types::ProposalType::UpdateDepositFee,
+        ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
+        ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
+        ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
+        _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
+    }
 }
 
 pub trait MoveType {

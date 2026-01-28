@@ -8,11 +8,15 @@ use sui_rpc::proto::proto_to_timestamp_ms;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
+use sui_sdk_types::TypeTag;
+
 use crate::onchain::CheckpointInfo;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use crate::onchain::scrape_member_info;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::Proposal;
+use crate::onchain::types::ProposalType;
 use hashi_types::move_types::HashiEvent;
 
 pub async fn watcher(mut client: Client, state: OnchainState) {
@@ -120,8 +124,37 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
             }
             HashiEvent::VoteCastEvent(_) => {}
             HashiEvent::VoteRemovedEvent(_) => {}
-            HashiEvent::ProposalDeletedEvent(_) => {}
-            HashiEvent::ProposalExecutedEvent(_) => {}
+            HashiEvent::ProposalCreatedEvent(proposal_created_event) => {
+                let proposal = Proposal {
+                    id: proposal_created_event.proposal_id,
+                    timestamp_ms: proposal_created_event.timestamp_ms,
+                    proposal_type: parse_proposal_type_from_type_tag(
+                        &proposal_created_event.proposal_type,
+                    ),
+                };
+                state
+                    .state_mut()
+                    .hashi
+                    .proposals
+                    .proposals
+                    .insert(proposal.id, proposal);
+            }
+            HashiEvent::ProposalDeletedEvent(proposal_deleted_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .proposals
+                    .proposals
+                    .remove(&proposal_deleted_event.proposal_id);
+            }
+            HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .proposals
+                    .proposals
+                    .remove(&proposal_executed_event.proposal_id);
+            }
             HashiEvent::QuorumReachedEvent(_) => {}
             HashiEvent::PackageUpgradedEvent(package_upgraded_event) => {
                 state.add_package_version(
@@ -249,5 +282,20 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
             }
             Err(e) => tracing::error!("unable to query validator {validator}'s info: {e}"),
         }
+    }
+}
+
+/// Parse the proposal type from the TypeTag extracted from the event's phantom type parameter.
+fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
+    let TypeTag::Struct(struct_tag) = type_tag else {
+        return ProposalType::Unknown(format!("{:?}", type_tag));
+    };
+
+    match (struct_tag.module().as_str(), struct_tag.name().as_str()) {
+        ("update_deposit_fee", "UpdateDepositFee") => ProposalType::UpdateDepositFee,
+        ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
+        ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
+        ("upgrade", "Upgrade") => ProposalType::Upgrade,
+        _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }
