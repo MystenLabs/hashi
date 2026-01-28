@@ -8,6 +8,8 @@ use sui_rpc::proto::proto_to_timestamp_ms;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
+use sui_sdk_types::TypeTag;
+
 use crate::onchain::CheckpointInfo;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
@@ -126,7 +128,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 let proposal = Proposal {
                     id: proposal_created_event.proposal_id,
                     timestamp_ms: proposal_created_event.timestamp_ms,
-                    proposal_type: parse_proposal_type_from_string(
+                    proposal_type: parse_proposal_type_from_type_tag(
                         &proposal_created_event.proposal_type,
                     ),
                 };
@@ -283,24 +285,17 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
     }
 }
 
-/// Parse the proposal type from the type name string emitted by the Move event.
-/// The format is: `<package_addr>::<module>::<struct_name>`
-/// For example: `0x123::update_deposit_fee::UpdateDepositFee`
-fn parse_proposal_type_from_string(type_name: &str) -> ProposalType {
-    // Split by "::" and get the last two parts (module::struct_name)
-    let parts: Vec<&str> = type_name.split("::").collect();
-    if parts.len() < 2 {
-        return ProposalType::Unknown(type_name.to_string());
-    }
+/// Parse the proposal type from the TypeTag extracted from the event's phantom type parameter.
+fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
+    let TypeTag::Struct(struct_tag) = type_tag else {
+        return ProposalType::Unknown(format!("{:?}", type_tag));
+    };
 
-    let module = parts[parts.len() - 2];
-    let name = parts[parts.len() - 1];
-
-    match (module, name) {
+    match (struct_tag.module().as_str(), struct_tag.name().as_str()) {
         ("update_deposit_fee", "UpdateDepositFee") => ProposalType::UpdateDepositFee,
         ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
-        _ => ProposalType::Unknown(format!("{}::{}", module, name)),
+        _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

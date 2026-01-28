@@ -372,7 +372,7 @@ impl HashiEvent {
             VoteCastEvent::MODULE_NAME => VoteCastEvent::from_bcs(bcs.value())?.into(),
             VoteRemovedEvent::MODULE_NAME => VoteRemovedEvent::from_bcs(bcs.value())?.into(),
             ProposalCreatedEvent::MODULE_NAME => {
-                ProposalCreatedEvent::from_bcs(bcs.value())?.into()
+                ProposalCreatedEvent::new(&event_type, bcs.value())?.into()
             }
             ProposalDeletedEvent::MODULE_NAME => {
                 ProposalDeletedEvent::from_bcs(bcs.value())?.into()
@@ -433,11 +433,29 @@ impl From<ValidatorUpdated> for HashiEvent {
     }
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug)]
 pub struct ProposalCreatedEvent {
     pub proposal_id: Address,
-    pub proposal_type: String,
     pub timestamp_ms: u64,
+    pub proposal_type: TypeTag,
+}
+
+impl ProposalCreatedEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        if event_type.module() == Self::MODULE
+            && event_type.name() == Self::NAME
+            && let [proposal_type] = event_type.type_params()
+        {
+            let (proposal_id, timestamp_ms): (Address, u64) = bcs::from_bytes(bcs)?;
+            Ok(Self {
+                proposal_id,
+                timestamp_ms,
+                proposal_type: proposal_type.to_owned(),
+            })
+        } else {
+            Err(anyhow::anyhow!("invalid ProposalCreatedEvent"))
+        }
+    }
 }
 
 impl MoveType for ProposalCreatedEvent {
