@@ -2,6 +2,7 @@ use crate::S3BucketInfo;
 use crate::S3Config;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
+use aws_sdk_s3::error::DisplayErrorContext;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -87,7 +88,11 @@ impl S3Logger {
     /// Creates a new S3 Object with:
     ///     key: session-id/random.json
     ///     value: JSON representation of value
-    pub async fn write<T: Serialize>(&self, value: &T) -> GuardianResult<()> {
+    pub async fn write<T: Serialize>(
+        &self,
+        value: &T,
+        object_lock_duration: Duration,
+    ) -> GuardianResult<()> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -96,9 +101,8 @@ impl S3Logger {
         let key = format!("{}/{}.json", self.session_id, rand_suffix);
         info!("Logging to {}", key);
 
-        // TODO: change duration based on env or make it a config?
         let expiry_time = SystemTime::now()
-            .checked_add(Duration::from_mins(5))
+            .checked_add(object_lock_duration)
             .expect("Cant overflow");
 
         let body = serde_json::to_string(value)
@@ -116,7 +120,7 @@ impl S3Logger {
             .body(ByteStream::from(body.into_bytes()))
             .send()
             .await
-            .map_err(|e| S3Error(format!("Failed to write to s3: {}", e)))?;
+            .map_err(|e| S3Error(format!("Failed to write to s3: {}", DisplayErrorContext(&e))))?;
 
         info!("Logged entry {} to immutable storage", rand_suffix);
         info!("Object locked until: {:?}", expiry_time);
@@ -176,7 +180,7 @@ impl S3Logger {
             Err(e) => {
                 return Err(S3Error(format!(
                     "Failed to verify Object Lock configuration: {}",
-                    e
+                    DisplayErrorContext(&e)
                 )));
             }
         }
@@ -196,7 +200,7 @@ impl S3Logger {
             .max_keys(10)
             .send()
             .await
-            .map_err(|e| S3Error(format!("Failed to list objects: {}", e)))?;
+            .map_err(|e| S3Error(format!("Failed to list objects: {}", DisplayErrorContext(&e))))?;
 
         let objects = bucket_objects.contents();
 
@@ -272,7 +276,11 @@ mod tests {
 
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let logger = mk_logger_with_client(client);
-        logger.write(&TestPayload { a: 1 }).await.unwrap();
+        let object_lock_duration = Duration::from_mins(5);
+        logger
+            .write(&TestPayload { a: 1 }, object_lock_duration)
+            .await
+            .unwrap();
         assert_eq!(put_ok.num_calls(), 1);
     }
 
@@ -292,7 +300,11 @@ mod tests {
         let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky], |b| b
             .retry_config(RetryConfig::standard().with_max_attempts(3)));
         let logger = mk_logger_with_client(client);
-        logger.write(&TestPayload { a: 1 }).await.unwrap();
+        let object_lock_duration = Duration::from_mins(5);
+        logger
+            .write(&TestPayload { a: 1 }, object_lock_duration)
+            .await
+            .unwrap();
         assert_eq!(put_flaky.num_calls(), 3);
     }
 }

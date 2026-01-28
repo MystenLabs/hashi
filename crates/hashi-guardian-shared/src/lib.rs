@@ -192,6 +192,7 @@ pub struct StandardWithdrawalResponse {
 /// Uses enum discriminator for automatic domain separation between variants.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessage {
+    Heartbeat,
     /// Attestation and signing public key
     OperatorInitAttestationUnsigned {
         attestation: Attestation,

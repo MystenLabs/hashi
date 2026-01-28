@@ -21,6 +21,7 @@ use tonic::transport::Server;
 use tracing::info;
 
 mod getters;
+mod heartbeat;
 mod init;
 mod rpc;
 mod setup;
@@ -31,6 +32,7 @@ use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
 use hashi_guardian_shared::s3_logger::S3Logger;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
+use crate::heartbeat::run_heartbeat_writer_task;
 
 /// Enclave's config & state
 pub struct Enclave {
@@ -111,18 +113,31 @@ async fn main() -> Result<()> {
     let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
     let svc = GuardianGrpc {
-        enclave,
+        enclave: enclave.clone(),
         setup_mode,
     };
 
     let addr = "0.0.0.0:3000".parse()?;
     info!("gRPC server listening on {}.", addr);
 
-    Server::builder()
+    let server_future = Server::builder()
         .add_service(GuardianServiceServer::new(svc))
-        .serve(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+        .serve(addr);
+
+    // TODO: Add to operator init config?
+    let heartbeat_interval = Duration::from_mins(1);
+    let heartbeat_max_failures = 5;
+    let heartbeat_future =
+        run_heartbeat_writer_task(enclave, heartbeat_interval, heartbeat_max_failures);
+
+    tokio::select! {
+        res = server_future => {
+            res.map_err(|e| anyhow::anyhow!("Server error: {}", e))
+        }
+        res = heartbeat_future => {
+            panic!("Heartbeat failed: {:?}", res)
+        }
+    }
 }
 
 impl EnclaveConfig {
@@ -509,8 +524,12 @@ impl Enclave {
     /// Only LogMessage variants can be logged to enforce consistency.
     pub async fn sign_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let signed = self.sign(data);
-        // TODO: Add a session ID (e.g. eph pub key) to every log
-        self.config.s3_logger()?.write(&signed).await
+        // TODO: change duration based on env (prod/test) and LogMessage type
+        let object_lock_duration = Duration::from_mins(5);
+        self.config
+            .s3_logger()?
+            .write(&signed, object_lock_duration)
+            .await
     }
 
     /// Log unsigned data to S3 with timestamp.
@@ -518,7 +537,11 @@ impl Enclave {
     pub async fn timestamp_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let timestamp_ms = now_timestamp_ms();
         let timestamped = Timestamped { data, timestamp_ms };
-        self.config.s3_logger()?.write(&timestamped).await
+        let object_lock_duration = Duration::from_mins(5);
+        self.config
+            .s3_logger()?
+            .write(&timestamped, object_lock_duration)
+            .await
     }
 
     // ========================================================================
@@ -597,7 +620,7 @@ pub fn init_tracing_subscriber(with_file_line: bool) {
 
 // Mock S3 logger for use in APIs calls post operator_init, e.g., provisioner_init, withdrawals.
 #[cfg(test)]
-fn make_mock_s3_logger_for_testing() -> S3Logger {
+pub fn mock_logger() -> S3Logger {
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
@@ -611,16 +634,50 @@ fn make_mock_s3_logger_for_testing() -> S3Logger {
 
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
 
-    let config = S3Config {
-        bucket_info: S3BucketInfo {
-            bucket: "test-bucket".to_string(),
-            region: "us-east-1".to_string(),
-        },
-        access_key: "test-access-key".to_string(),
-        secret_key: "test-secret-key".to_string(),
-    };
+    let config = S3Config::mock_for_testing();
 
     S3Logger::from_client_for_tests("test-session-id".to_string(), config, client)
+}
+
+#[cfg(test)]
+pub struct OperatorInitTestArgs {
+    pub network: Network,
+    pub commitments: Vec<ShareCommitment>,
+    pub s3_logger: S3Logger,
+}
+
+#[cfg(test)]
+impl Default for OperatorInitTestArgs {
+    fn default() -> Self {
+        let dummy = ShareCommitment {
+            id: std::num::NonZeroU16::new(1).unwrap(),
+            digest: vec![],
+        };
+
+        Self {
+            network: Network::Regtest,
+            commitments: vec![dummy; NUM_OF_SHARES],
+            s3_logger: mock_logger(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl OperatorInitTestArgs {
+    pub fn with_network(mut self, network: Network) -> Self {
+        self.network = network;
+        self
+    }
+
+    pub fn with_commitments(mut self, commitments: Vec<ShareCommitment>) -> Self {
+        self.commitments = commitments;
+        self
+    }
+
+    pub fn with_s3_logger(mut self, s3_logger: S3Logger) -> Self {
+        self.s3_logger = s3_logger;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -631,36 +688,25 @@ impl Enclave {
         Arc::new(Enclave::new(signing_keys, encryption_keys))
     }
 
-    // Create an enclave post operator_init() but pre provisioner_init()
-    pub async fn create_operator_initialized(
-        network: Network,
-        commitments: &[ShareCommitment],
-    ) -> Arc<Self> {
+    // Create an enclave post operator_init() but pre provisioner_init().
+    pub async fn create_operator_initialized() -> Arc<Self> {
+        Self::create_operator_initialized_with(OperatorInitTestArgs::default()).await
+    }
+
+    pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
 
         // Initialize S3 logger
-        let mock_s3_logger = make_mock_s3_logger_for_testing();
-        enclave.config.set_s3_logger(mock_s3_logger).unwrap();
+        enclave.config.set_s3_logger(args.s3_logger).unwrap();
 
         // Set bitcoin network
-        enclave.config.set_bitcoin_network(network).unwrap();
+        enclave.config.set_bitcoin_network(args.network).unwrap();
 
         // Set share commitments
-        enclave.set_share_commitments(commitments.to_vec()).unwrap();
+        enclave.set_share_commitments(args.commitments).unwrap();
 
         assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
 
         enclave
-    }
-
-    // Create an enclave post operator_init() but pre provisioner_init() for SETUP_MODE
-    // Network and share commitments do not matter for setup mode: so we set those to dummy values.
-    pub async fn create_operator_initialized_for_setup_mode() -> Arc<Self> {
-        let network = Network::Regtest;
-        let dummy = ShareCommitment {
-            id: std::num::NonZeroU16::new(10).unwrap(),
-            digest: vec![],
-        };
-        Self::create_operator_initialized(network, &vec![dummy; NUM_OF_SHARES]).await
     }
 }

@@ -2608,6 +2608,7 @@ dependencies = [
  "sui-sdk-types",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

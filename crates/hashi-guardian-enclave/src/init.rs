@@ -218,10 +218,10 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::Network;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use hashi_guardian_shared::test_utils::create_btc_keypair;
     use k256::SecretKey;
+    use crate::OperatorInitTestArgs;
 
     /// Helper: Generate test shares and initialized enclave
     /// Returns (shares, enclave)
@@ -229,8 +229,10 @@ mod tests {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let shares = split_secret(&sk, &mut rand::thread_rng());
         let share_commitments: Vec<ShareCommitment> = shares.iter().map(commit_share).collect();
-        let enclave =
-            Enclave::create_operator_initialized(Network::Regtest, &share_commitments).await;
+        let enclave = Enclave::create_operator_initialized_with(
+            OperatorInitTestArgs::default().with_commitments(share_commitments.clone()),
+        )
+        .await;
         (shares, enclave)
     }
 

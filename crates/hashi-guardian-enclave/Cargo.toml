@@ -22,5 +22,6 @@ nsm_api = { git = "https://github.com/aws/aws-nitro-enclaves-nsm-api.git/", rev 
 hpke = "0.12.0"
 
 [dev-dependencies]
+tokio = { version = "1.43.0", features = ["full", "test-util"] }
 aws-sdk-s3 = { version = "1.12.0", features = ["test-util"] }
 aws-smithy-mocks = "0.1"
