@@ -7,7 +7,6 @@ use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
 use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
 use hashi_guardian_shared::bitcoin_utils::TxUTXOs;
 use hashi_guardian_shared::crypto::Share;
-use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::*;
 use hpke::Serializable;
@@ -27,12 +26,12 @@ mod rpc;
 mod setup;
 mod withdraw;
 
+use crate::heartbeat::run_heartbeat_writer_task;
 use crate::rpc::GuardianGrpc;
 use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
 use hashi_guardian_shared::s3_logger::S3Logger;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
-use crate::heartbeat::run_heartbeat_writer_task;
 
 /// Enclave's config & state
 pub struct Enclave {
@@ -89,6 +88,10 @@ pub struct EphemeralKeyPairs {
     pub encryption_keys: GuardianEncKeyPair,
 }
 
+// TODO: Leave as consts or make them configurable?
+const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
+const MAX_HEARTBEAT_FAILURES: u32 = 5;
+
 /// Enclave initialization.
 /// SETUP_MODE=true: only get_attestation, operator_init and setup_new_key are enabled.
 /// SETUP_MODE=false: all endpoints except setup_new_key are enabled.
@@ -124,11 +127,8 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
-    // TODO: Add to operator init config?
-    let heartbeat_interval = Duration::from_mins(1);
-    let heartbeat_max_failures = 5;
     let heartbeat_future =
-        run_heartbeat_writer_task(enclave, heartbeat_interval, heartbeat_max_failures);
+        run_heartbeat_writer_task(enclave, HEARTBEAT_INTERVAL, MAX_HEARTBEAT_FAILURES);
 
     tokio::select! {
         res = server_future => {
@@ -189,11 +189,11 @@ impl EnclaveConfig {
         let enclave_keypair = self
             .enclave_btc_keypair
             .get()
-            .ok_or(InternalError("Bitcoin key is not initialized".into()))?;
+            .ok_or(InvalidInputs("Bitcoin key is not initialized".into()))?;
         let hashi_btc_pk = self
             .hashi_btc_master_pubkey
             .get()
-            .ok_or(InternalError("Hashi BTC public key not set".into()))?;
+            .ok_or(InvalidInputs("Hashi BTC public key not set".into()))?;
 
         let messages = construct_signing_messages(
             tx_utxos,
@@ -210,13 +210,13 @@ impl EnclaveConfig {
     pub fn withdrawal_config(&self) -> GuardianResult<&WithdrawalConfig> {
         self.withdrawal_config
             .get()
-            .ok_or(InternalError("WithdrawalConfig is not initialized".into()))
+            .ok_or(InvalidInputs("WithdrawalConfig is not initialized".into()))
     }
 
     pub fn set_withdrawal_config(&self, config: WithdrawalConfig) -> GuardianResult<()> {
         self.withdrawal_config
             .set(config)
-            .map_err(|_| InternalError("WithdrawControlsConfig already set".into()))
+            .map_err(|_| InvalidInputs("WithdrawalConfig already set".into()))
     }
 
     pub fn delayed_withdrawals_min_delay(&self) -> GuardianResult<Duration> {
@@ -238,7 +238,7 @@ impl EnclaveConfig {
     pub fn s3_logger(&self) -> GuardianResult<&S3Logger> {
         self.s3_logger
             .get()
-            .ok_or(InternalError("S3 logger is not initialized".into()))
+            .ok_or(InvalidInputs("S3 logger is not initialized".into()))
     }
 
     pub fn set_s3_logger(&self, logger: S3Logger) -> GuardianResult<()> {
@@ -520,8 +520,9 @@ impl Enclave {
         self.signing_pubkey().as_bytes().to_lower_hex_string()
     }
 
-    /// Sign and log a LogMessage to S3.
-    /// Only LogMessage variants can be logged to enforce consistency.
+    /// Sign and log a LogMessage to S3. Only LogMessage variants can be logged to enforce consistency.
+    ///
+    /// Throws: InvalidInputs (if logger is not init) or S3Error.
     pub async fn sign_and_log(&self, data: LogMessage) -> GuardianResult<()> {
         let signed = self.sign(data);
         // TODO: change duration based on env (prod/test) and LogMessage type
@@ -568,7 +569,7 @@ impl Enclave {
         self.scratchpad
             .share_commitments
             .get()
-            .ok_or(InternalError("Share commitments not set".into()))
+            .ok_or(InvalidInputs("Share commitments not set".into()))
     }
 
     pub fn set_share_commitments(&self, commitments: Vec<ShareCommitment>) -> GuardianResult<()> {
@@ -589,7 +590,7 @@ impl Enclave {
         self.scratchpad
             .state_hash
             .set(hash)
-            .map_err(|_| InternalError("State hash already set".into()))
+            .map_err(|_| InvalidInputs("State hash already set".into()))
     }
 }
 

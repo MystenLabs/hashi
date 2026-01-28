@@ -3,7 +3,7 @@ use crate::bitcoin_utils::InputUTXO;
 use crate::bitcoin_utils::OutputUTXO;
 use crate::bitcoin_utils::TxUTXOs;
 use crate::bitcoin_utils::BTC_LIB;
-use crate::{Ciphertext, S3BucketInfo, S3Config};
+use crate::Ciphertext;
 use crate::CommitteeStore;
 use crate::EncPubKey;
 use crate::EncryptedShare;
@@ -17,6 +17,8 @@ use crate::OperatorInitRequest;
 use crate::ProvisionerInitRequest;
 use crate::ProvisionerInitState;
 use crate::RateLimiter;
+use crate::S3BucketInfo;
+use crate::S3Config;
 use crate::SetupNewKeyRequest;
 use crate::SetupNewKeyResponse;
 use crate::ShareCommitment;
@@ -89,7 +91,7 @@ impl SetupNewKeyRequest {
     }
 }
 
-pub fn dummy_commitments() -> Vec<ShareCommitment> {
+fn dummy_commitments() -> Vec<ShareCommitment> {
     (0..NUM_OF_SHARES)
         .map(|i| ShareCommitment {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),

@@ -188,11 +188,11 @@ async fn log_withdrawal_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OperatorInitTestArgs;
     use bitcoin::Amount;
     use bitcoin::Network;
     use hashi_guardian_shared::epoch_store::EpochWindow;
     use hashi_guardian_shared::test_utils::create_btc_keypair;
-    use hashi_guardian_shared::test_utils::dummy_commitments;
     use hashi_guardian_shared::CommitteeStore;
     use hashi_guardian_shared::ProvisionerInitState;
     use hashi_guardian_shared::RateLimiter;
@@ -209,8 +209,10 @@ mod tests {
         committee: HashiCommittee,
         max_withdrawable_per_epoch: Amount,
     ) -> Arc<Enclave> {
-        let commitments = dummy_commitments();
-        let enclave = Enclave::create_operator_initialized(network, &commitments).await;
+        let enclave = Enclave::create_operator_initialized_with(
+            OperatorInitTestArgs::default().with_network(network),
+        )
+        .await;
 
         let enclave_kp = create_btc_keypair(&[8u8; 32]);
         let hashi_kp = create_btc_keypair(&[6u8; 32]);

@@ -6,7 +6,6 @@ use aws_sdk_s3::error::DisplayErrorContext;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::GuardianError::InternalError;
 use crate::GuardianError::S3Error;
 use crate::GuardianResult;
 use aws_sdk_s3::config::retry::RetryConfig;
@@ -88,6 +87,7 @@ impl S3Logger {
     /// Creates a new S3 Object with:
     ///     key: session-id/random.json
     ///     value: JSON representation of value
+    /// Throws: S3Error if write fails
     pub async fn write<T: Serialize>(
         &self,
         value: &T,
@@ -97,6 +97,7 @@ impl S3Logger {
         let s3_config = &self.config;
 
         // session_id/<random>.json
+        // TODO: (IOP-155) Decide object key format
         let rand_suffix = format!("{:016x}", rand::random::<u64>());
         let key = format!("{}/{}.json", self.session_id, rand_suffix);
         info!("Logging to {}", key);
@@ -105,8 +106,7 @@ impl S3Logger {
             .checked_add(object_lock_duration)
             .expect("Cant overflow");
 
-        let body = serde_json::to_string(value)
-            .map_err(|e| InternalError(format!("Serialization error: {}", e)))?;
+        let body = serde_json::to_string(value).expect("Cant serialize to JSON");
         info!("Log message: {}", body);
 
         // TODO(integration-test): Verify on a real S3 bucket with Object Lock enabled that an object written with `Compliance` + `retain_until` cannot be deleted/overwritten before expiry.
@@ -120,7 +120,13 @@ impl S3Logger {
             .body(ByteStream::from(body.into_bytes()))
             .send()
             .await
-            .map_err(|e| S3Error(format!("Failed to write to s3: {}", DisplayErrorContext(&e))))?;
+            // DisplayErrorContext displays the full error returned by the SDK
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to write to s3: {}",
+                    DisplayErrorContext(&e)
+                ))
+            })?;
 
         info!("Logged entry {} to immutable storage", rand_suffix);
         info!("Object locked until: {:?}", expiry_time);
@@ -200,7 +206,12 @@ impl S3Logger {
             .max_keys(10)
             .send()
             .await
-            .map_err(|e| S3Error(format!("Failed to list objects: {}", DisplayErrorContext(&e))))?;
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to list objects: {}",
+                    DisplayErrorContext(&e)
+                ))
+            })?;
 
         let objects = bucket_objects.contents();
 

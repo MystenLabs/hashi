@@ -218,10 +218,10 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OperatorInitTestArgs;
     use hashi_guardian_shared::crypto::NUM_OF_SHARES;
     use hashi_guardian_shared::test_utils::create_btc_keypair;
     use k256::SecretKey;
-    use crate::OperatorInitTestArgs;
 
     /// Helper: Generate test shares and initialized enclave
     /// Returns (shares, enclave)
