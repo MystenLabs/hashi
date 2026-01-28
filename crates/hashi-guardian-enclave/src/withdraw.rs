@@ -1,6 +1,7 @@
 use crate::Enclave;
 use bitcoin::Amount;
 use hashi_guardian_shared::GuardianError;
+use hashi_guardian_shared::GuardianError::EnclaveUninitialized;
 use hashi_guardian_shared::GuardianError::InternalError;
 use hashi_guardian_shared::GuardianError::InvalidInputs;
 use hashi_guardian_shared::GuardianResult;
@@ -64,7 +65,7 @@ fn normal_withdrawal_inner(
 ) -> GuardianResult<(StandardWithdrawalResponse, LimiterGuard)> {
     // 0) Validation
     if !enclave.is_fully_initialized() {
-        return Err(InvalidInputs("Enclave is not fully initialized".into()));
+        return Err(EnclaveUninitialized);
     }
 
     let epoch = signed_request.epoch();
@@ -182,4 +183,116 @@ async fn log_withdrawal_failure(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Amount;
+    use bitcoin::Network;
+    use hashi_guardian_shared::epoch_store::EpochWindow;
+    use hashi_guardian_shared::test_utils::create_btc_keypair;
+    use hashi_guardian_shared::test_utils::dummy_commitments;
+    use hashi_guardian_shared::CommitteeStore;
+    use hashi_guardian_shared::ProvisionerInitState;
+    use hashi_guardian_shared::RateLimiter;
+    use hashi_guardian_shared::StandardWithdrawalRequest;
+    use hashi_guardian_shared::WithdrawalConfig;
+    use hashi_guardian_shared::WithdrawalState;
+    use std::num::NonZeroU16;
+    use std::time::Duration;
+
+    /// Sets up an enclave with a one-epoch window and provided committee, rate limits.
+    async fn setup_fully_initialized_enclave(
+        network: Network,
+        epoch: u64,
+        committee: HashiCommittee,
+        max_withdrawable_per_epoch: Amount,
+    ) -> Arc<Enclave> {
+        let commitments = dummy_commitments();
+        let enclave = Enclave::create_operator_initialized(network, &commitments).await;
+
+        let enclave_kp = create_btc_keypair(&[8u8; 32]);
+        let hashi_kp = create_btc_keypair(&[6u8; 32]);
+        let hashi_btc_master_pubkey = hashi_kp.x_only_public_key().0;
+
+        enclave.config.set_btc_keypair(enclave_kp).unwrap();
+        enclave
+            .config
+            .set_hashi_btc_pk(hashi_btc_master_pubkey)
+            .unwrap();
+
+        let withdrawal_config = WithdrawalConfig {
+            committee_threshold: 1,
+            delayed_withdrawals_min_delay: Duration::from_secs(1),
+            delayed_withdrawals_timeout: Duration::from_secs(60),
+        };
+        enclave
+            .config
+            .set_withdrawal_config(withdrawal_config.clone())
+            .unwrap();
+
+        let epoch_window = EpochWindow::new(epoch, NonZeroU16::new(1).unwrap());
+        let limiter = RateLimiter::new(
+            epoch_window,
+            vec![Amount::from_sat(0)],
+            max_withdrawable_per_epoch,
+        )
+        .unwrap();
+        let withdrawal_state = WithdrawalState::new(limiter);
+        let committee_store = CommitteeStore::new(epoch_window, vec![committee]).unwrap();
+        let init_state = ProvisionerInitState::new(
+            committee_store,
+            withdrawal_config,
+            withdrawal_state,
+            hashi_btc_master_pubkey,
+        )
+        .unwrap();
+        enclave.state.init(init_state).unwrap();
+
+        assert!(enclave.is_fully_initialized());
+        enclave
+    }
+
+    #[test]
+    fn test_normal_withdrawal_inner_requires_full_init() {
+        let enclave = Enclave::create_with_random_keys();
+        let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let result = normal_withdrawal_inner(enclave, signed_request);
+        assert!(matches!(result, Err(EnclaveUninitialized)));
+    }
+
+    #[tokio::test]
+    async fn test_normal_withdrawal() {
+        let (signed_request, committee) =
+            StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
+        let epoch = signed_request.epoch();
+        let amount = signed_request.message().utxos().external_out_amount();
+        // Set request amount as the max withdrawable
+        let enclave =
+            setup_fully_initialized_enclave(Network::Regtest, epoch, committee, amount).await;
+
+        let result = normal_withdrawal_inner(enclave, signed_request);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_standard_withdrawal_rate_limit_exceeded() {
+        let (signed_request, committee) =
+            StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
+        let epoch = signed_request.epoch();
+        let amount = signed_request.message().utxos().external_out_amount();
+        // Set request amount as the max withdrawable
+        let enclave =
+            setup_fully_initialized_enclave(Network::Regtest, epoch, committee, amount).await;
+
+        let first = standard_withdrawal(enclave.clone(), signed_request.clone()).await;
+        assert!(first.is_ok());
+
+        let second = standard_withdrawal(enclave, signed_request).await;
+        assert!(matches!(
+            second.unwrap_err(),
+            GuardianError::RateLimitExceeded
+        ));
+    }
 }

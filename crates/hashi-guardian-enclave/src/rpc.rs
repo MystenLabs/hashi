@@ -7,9 +7,7 @@ use hashi_guardian_shared::proto_conversions;
 use hashi_guardian_shared::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_guardian_shared::AddressValidation;
 use hashi_guardian_shared::GuardianError;
-use hashi_guardian_shared::GuardianError::InternalError;
-use hashi_guardian_shared::GuardianError::InvalidInputs;
-use hashi_guardian_shared::GuardianError::S3Error;
+use hashi_guardian_shared::GuardianError::*;
 use hashi_guardian_shared::HashiSigned;
 use hashi_guardian_shared::OperatorInitRequest;
 use hashi_guardian_shared::SetupNewKeyRequest;
@@ -31,6 +29,8 @@ fn to_status(e: GuardianError) -> Status {
         InvalidInputs(msg) => Status::invalid_argument(msg),
         InternalError(msg) => Status::internal(msg),
         S3Error(msg) => Status::internal(msg),
+        EnclaveUninitialized => Status::failed_precondition("Enclave is not fully initialized"),
+        RateLimitExceeded => Status::internal("Rate limit exceeded"),
     }
 }
 
