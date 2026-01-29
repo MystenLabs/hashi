@@ -8,9 +8,20 @@ check-fmt: ## Check code formatting
 	buf format --diff --exit-code
 
 .PHONY: fmt
-fmt: ## Format code
+fmt: fmt-rust fmt-buf fmt-move ## Format all code (Rust, protobuf, and Move)
+
+.PHONY: fmt-rust
+fmt-rust: ## Format Rust code
 	cargo fmt -- --config imports_granularity=Item --config format_code_in_doc_comments=true
+
+.PHONY: fmt-buf
+fmt-buf: ## Format protobuf files
 	$(MAKE) -C crates/hashi-types buf-fmt
+
+.PHONY: fmt-move
+fmt-move: ## Format Move code
+	prettier-move -w packages/*/sources/*.move
+	prettier-move -w packages/*/sources/**/*.move
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint
@@ -24,11 +35,6 @@ test: ## Run all tests
 .PHONY: test-move
 test-move: ## Run all move tests
 	ls -d packages/*/ | xargs -I {} bash -c "sui move test --path '{}'"
-
-.PHONY: fmt-move
-fmt-move: ## Format code
-	prettier-move -w packages/*/sources/*.move
-	prettier-move -w packages/*/sources/**/*.move
 
 .PHONY: proto
 proto: ## Build proto files
