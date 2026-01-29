@@ -168,6 +168,7 @@ impl Hashi {
             signing_key,
             store,
             WEIGHT_REDUCTION_ALLOWED_DELTA,
+            self.config.sui_chain_id(),
         )?)
     }
 

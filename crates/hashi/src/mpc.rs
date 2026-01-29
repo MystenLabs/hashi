@@ -28,6 +28,7 @@ use hashi_types::committee::certificate_threshold;
 use hashi_types::move_types::ReconfigCompletionMessage;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const START_RECONFIG_MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Clone)]
@@ -98,16 +99,28 @@ impl MpcService {
             }
         }
         let mut notifications = self.inner.onchain_state().subscribe();
-        while let Ok(notification) = notifications.recv().await {
-            match notification {
-                Notification::StartReconfig(epoch) => {
-                    self.handle_reconfig(epoch).await;
+        loop {
+            match notifications.recv().await {
+                Ok(notification) => match notification {
+                    Notification::StartReconfig(epoch) => {
+                        self.handle_reconfig(epoch).await;
+                    }
+                    Notification::SuiEpochChanged(sui_epoch) => {
+                        self.try_submit_start_reconfig(sui_epoch).await;
+                    }
+                    _ => {}
+                },
+                Err(e) => {
+                    error!("MPC notification recv error: {e:?}, resubscribing");
+                    notifications = self.inner.onchain_state().subscribe();
                 }
-                Notification::SuiEpochChanged(sui_epoch) => {
-                    self.try_submit_start_reconfig(sui_epoch).await;
-                }
-                _ => {}
             }
+        }
+    }
+
+    async fn sleep_if_still_pending(&self, epoch: u64) {
+        if self.get_pending_epoch_change() == Some(epoch) {
+            tokio::time::sleep(RETRY_INTERVAL).await;
         }
     }
 
@@ -187,7 +200,7 @@ impl MpcService {
                         "Key rotation to epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    self.sleep_if_still_pending(target_epoch).await;
                 }
             }
         };
@@ -197,15 +210,13 @@ impl MpcService {
                 return;
             }
             match self.submit_end_reconfig(target_epoch, &output).await {
-                Ok(()) => {
-                    return;
-                }
+                Ok(()) => return,
                 Err(e) => {
                     error!(
                         "submit_end_reconfig for epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    self.sleep_if_still_pending(target_epoch).await;
                 }
             }
         }
@@ -303,7 +314,7 @@ impl MpcService {
                         "Signature collection for epoch {} failed: {e}, retrying...",
                         epoch
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    self.sleep_if_still_pending(epoch).await;
                 }
             }
         };
@@ -329,7 +340,7 @@ impl MpcService {
                         "end_reconfig submission for epoch {} failed: {e}, retrying...",
                         epoch
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    self.sleep_if_still_pending(epoch).await;
                 }
             }
         }
@@ -366,7 +377,7 @@ impl MpcService {
             let futures = other_members.iter().map(|member| {
                 let address = member.validator_address();
                 async move {
-                    let result: anyhow::Result<Vec<u8>> = async {
+                    let result = tokio::time::timeout(RPC_TIMEOUT, async {
                         let client = self
                             .inner
                             .onchain_state()
@@ -379,8 +390,9 @@ impl MpcService {
                             .get_reconfig_completion_signature(epoch)
                             .await
                             .map_err(|e| anyhow::anyhow!("RPC failed: {e}"))
-                    }
-                    .await;
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("RPC timed out")));
                     (address, result)
                 }
             });

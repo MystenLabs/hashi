@@ -12,10 +12,10 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Old messages (for epochs < current_epoch - 1) are automatically cleaned up.
     fn store_dealer_message(&mut self, dealer: &Address, message: &avss::Message) -> Result<()>;
 
-    /// Retrieve a dealer's DKG message.
+    /// Retrieve a dealer's DKG message for the given epoch.
     ///
     /// Returns None if no message exists for this dealer.
-    fn get_dealer_message(&self, dealer: &Address) -> Result<Option<avss::Message>>;
+    fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<Option<avss::Message>>;
 
     /// List all stored dealer messages for the current epoch.
     fn list_all_dealer_messages(&self) -> Result<Vec<(Address, Messages)>>;
@@ -30,10 +30,14 @@ pub trait PublicMessagesStore: Send + Sync {
         messages: &RotationMessages,
     ) -> Result<()>;
 
-    /// Retrieve a dealer's rotation messages.
+    /// Retrieve a dealer's rotation messages for the given epoch.
     ///
     /// Returns None if no messages exist for this dealer.
-    fn get_rotation_messages(&self, dealer: &Address) -> Result<Option<RotationMessages>>;
+    fn get_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> Result<Option<RotationMessages>>;
 
     /// List all stored rotation messages for the current epoch.
     fn list_all_rotation_messages(&self) -> Result<Vec<(Address, Messages)>>;

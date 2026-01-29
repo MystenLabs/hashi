@@ -10,6 +10,7 @@ use crate::communication::with_timeout_and_retry;
 use crate::dkg::types::CertificateV1;
 use crate::dkg::types::DealerCertificate;
 use crate::dkg::types::DealerMessagesHash;
+use crate::dkg::types::ProtocolType;
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
@@ -88,6 +89,11 @@ pub struct DkgManager {
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
     pub previous_threshold: Option<u16>,
+    /// Used to reconstruct source session IDs during certificate reconstruction.
+    chain_id: String,
+    /// The epoch from which to read previous messages during reconstruction.
+    source_epoch: u64,
+    previous_output: Option<DkgOutput>,
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
@@ -96,10 +102,10 @@ pub struct DkgManager {
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, ComplaintResponses>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
-    previous_output: Option<DkgOutput>,
 }
 
 impl DkgManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
         committee_set: &CommitteeSet,
@@ -108,20 +114,30 @@ impl DkgManager {
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
         allowed_delta: u16,
+        chain_id: &str,
     ) -> DkgResult<Self> {
+        let epoch = committee_set
+            .pending_epoch_change()
+            .unwrap_or_else(|| committee_set.epoch());
         let committee = committee_set
-            .current_committee()
-            .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
+            .committees()
+            .get(&epoch)
+            .ok_or_else(|| DkgError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
         // TODO: Pass t and f as arguments instead of computing them
         let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
-        let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
+        let dkg_config = DkgConfig::new(epoch, nodes, threshold, max_faulty)?;
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
-        let previous_committee = committee_set.previous_committee().cloned();
+        let source_epoch = committee_set.epoch();
+        let previous_committee = if committee_set.pending_epoch_change().is_some() {
+            committee_set.committees().get(&source_epoch).cloned()
+        } else {
+            None
+        };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
                 let (nodes, threshold) = build_reduced_nodes(prev_committee, allowed_delta)?;
@@ -146,6 +162,8 @@ impl DkgManager {
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
+            chain_id: chain_id.to_string(),
+            source_epoch,
             previous_output: None,
         };
         manager.load_stored_messages()?;
@@ -1618,6 +1636,8 @@ impl DkgManager {
         &mut self,
         certificates: &[CertificateV1],
     ) -> DkgResult<DkgOutput> {
+        let source_session_id =
+            SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
         let mut certified_dealers = HashMap::new();
         for cert in certificates {
             let CertificateV1::Dkg(dkg_cert) = cert else {
@@ -1627,9 +1647,10 @@ impl DkgManager {
             };
             let msg = dkg_cert.message();
             let dealer_address = msg.dealer_address;
+            let source_epoch = self.source_epoch;
             let message = self
                 .public_messages_store
-                .get_dealer_message(&dealer_address)
+                .get_dealer_message(source_epoch, &dealer_address)
                 .map_err(|e| DkgError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     DkgError::StorageError(format!(
@@ -1637,7 +1658,7 @@ impl DkgManager {
                         dealer_address
                     ))
                 })?;
-            let messages = Messages::Dkg(message);
+            let messages = Messages::Dkg(message.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
                 return Err(DkgError::ProtocolFailed(format!(
@@ -1646,7 +1667,16 @@ impl DkgManager {
                 )));
             }
             self.dealer_messages.insert(dealer_address, messages);
-            self.process_certified_dkg_message(dealer_address)?;
+            let session_id = source_session_id
+                .dealer_session_id(&dealer_address)
+                .to_vec();
+            self.process_and_store_message(
+                session_id,
+                &message,
+                None,
+                DealerOutputsKey::Dkg(dealer_address),
+                ComplaintsToProcessKey::Dkg(dealer_address),
+            )?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
         // Unlike normal flow which accumulates until threshold in a loop, reconstruction
@@ -1680,6 +1710,11 @@ impl DkgManager {
         certificates: &[CertificateV1],
         previous_threshold: u16,
     ) -> DkgResult<DkgOutput> {
+        let source_session_id = SessionId::new(
+            &self.chain_id,
+            self.source_epoch,
+            &ProtocolType::KeyRotation,
+        );
         // Each dealer only rotates their own shares from the previous epoch, so share indices
         // are unique across dealers (no duplicates in `certified_share_indices`).
         let mut certified_share_indices = Vec::new();
@@ -1691,9 +1726,10 @@ impl DkgManager {
             };
             let msg = rotation_cert.message();
             let dealer_address = msg.dealer_address;
+            let source_epoch = self.source_epoch;
             let rotation_msgs = self
                 .public_messages_store
-                .get_rotation_messages(&dealer_address)
+                .get_rotation_messages(source_epoch, &dealer_address)
                 .map_err(|e| DkgError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     DkgError::StorageError(format!(
@@ -1711,8 +1747,7 @@ impl DkgManager {
             }
             self.dealer_messages.insert(dealer_address, messages);
             for (share_index, message) in rotation_msgs {
-                let session_id = self
-                    .session_id
+                let session_id = source_session_id
                     .rotation_session_id(&dealer_address, share_index)
                     .to_vec();
                 let output_key = DealerOutputsKey::Rotation(share_index);
@@ -1983,6 +2018,7 @@ mod tests {
 
     /// Use 0 for allowed_delta in tests to disable weight reduction.
     const TEST_ALLOWED_DELTA: u16 = 0;
+    const TEST_CHAIN_ID: &str = "testchain";
 
     struct MockPublicMessagesStore;
 
@@ -1995,7 +2031,11 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            _dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Ok(None)
         }
 
@@ -2013,6 +2053,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             _dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Ok(None)
@@ -2186,8 +2227,11 @@ mod tests {
             store: Box<dyn PublicMessagesStore>,
         ) -> DkgManager {
             let address = Address::new([validator_index as u8; 32]);
-            let session_id =
-                SessionId::new("testchain", self.committee_set.epoch(), &ProtocolType::Dkg);
+            let session_id = SessionId::new(
+                TEST_CHAIN_ID,
+                self.committee_set.epoch(),
+                &ProtocolType::Dkg,
+            );
             DkgManager::new(
                 address,
                 &self.committee_set,
@@ -2196,6 +2240,7 @@ mod tests {
                 self.signing_keys[validator_index].clone(),
                 store,
                 TEST_ALLOWED_DELTA,
+                TEST_CHAIN_ID,
             )
             .unwrap()
         }
@@ -2205,7 +2250,11 @@ mod tests {
         }
 
         fn session_id(&self) -> SessionId {
-            SessionId::new("testchain", self.committee_set.epoch(), &ProtocolType::Dkg)
+            SessionId::new(
+                TEST_CHAIN_ID,
+                self.committee_set.epoch(),
+                &ProtocolType::Dkg,
+            )
         }
 
         fn committee(&self) -> &Committee {
@@ -2768,6 +2817,7 @@ mod tests {
             signing_key,
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -2827,6 +2877,7 @@ mod tests {
             signing_keys[0].clone(),
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
+            "test",
         );
 
         let err = match result {
@@ -2834,7 +2885,7 @@ mod tests {
             Ok(_) => panic!("Should fail with no committee for epoch"),
         };
         assert!(
-            err.to_string().contains("no committee for current epoch"),
+            err.to_string().contains("no committee for epoch"),
             "Error should mention missing committee"
         );
     }
@@ -2899,7 +2950,11 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Ok(self.stored.get(dealer).cloned())
         }
 
@@ -2922,6 +2977,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Ok(self.rotation_stored.get(dealer).cloned())
@@ -2947,7 +3003,11 @@ mod tests {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
-        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            _dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
@@ -2965,6 +3025,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             _dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Err(anyhow::anyhow!("Storage failure"))
@@ -6105,7 +6166,11 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Ok(self.stored.get(dealer).cloned())
         }
 
@@ -6128,6 +6193,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Ok(self.rotation_stored.get(dealer).cloned())
@@ -6443,6 +6509,19 @@ mod tests {
             self.certificates.values().cloned().collect()
         }
 
+        /// Sets previous_committee, previous_nodes, and previous_threshold on a
+        /// DKG manager so it can be used for rotation tests. In production, these
+        /// are set by DkgManager::new when pending_epoch_change is set.
+        fn prepare_for_rotation(&self, manager: &mut DkgManager) {
+            let previous_committee = self.setup.committee_set.previous_committee().cloned();
+            if let Some(ref prev) = previous_committee {
+                let (nodes, threshold) = build_reduced_nodes(prev, TEST_ALLOWED_DELTA).unwrap();
+                manager.previous_nodes = Some(nodes);
+                manager.previous_threshold = Some(threshold);
+            }
+            manager.previous_committee = previous_committee;
+        }
+
         /// Creates a manager that has completed DKG and is ready for rotation.
         fn create_receiver_with_completed_dkg(
             &self,
@@ -6466,6 +6545,7 @@ mod tests {
             receiver_manager.dealer_outputs.clear();
             receiver_manager.complaints_to_process.clear();
             receiver_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut receiver_manager);
 
             (receiver_manager, dkg_output)
         }
@@ -6498,6 +6578,7 @@ mod tests {
             receiver_manager.dealer_outputs.clear();
             receiver_manager.complaints_to_process.clear();
             receiver_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut receiver_manager);
 
             (receiver_manager, dkg_output)
         }
@@ -6524,6 +6605,7 @@ mod tests {
             dealer_manager.dealer_outputs.clear();
             dealer_manager.complaints_to_process.clear();
             dealer_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut dealer_manager);
 
             // Create rotation messages and store for reuse
             let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -6564,6 +6646,7 @@ mod tests {
             dealer_manager.dealer_outputs.clear();
             dealer_manager.complaints_to_process.clear();
             dealer_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut dealer_manager);
 
             // Create rotation messages and store for reuse
             let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -6963,11 +7046,12 @@ mod tests {
 
         let mut new_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
         new_committee_set
-            .set_epoch(epoch)
+            .set_epoch(epoch - 1)
+            .set_pending_epoch_change(Some(epoch))
             .set_committees(committees);
 
         // Create new member's DkgManager
-        let session_id = SessionId::new("testchain", epoch, &ProtocolType::Dkg);
+        let session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg);
         let new_member_manager = DkgManager::new(
             new_member_addr,
             &new_committee_set,
@@ -6976,6 +7060,7 @@ mod tests {
             new_member_signing_key,
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
         )
         .unwrap();
 
@@ -7503,8 +7588,12 @@ mod tests {
                 .store_dealer_message(dealer, message)
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
-            self.inner.lock().unwrap().get_dealer_message(dealer)
+        fn get_dealer_message(
+            &self,
+            epoch: u64,
+            dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
+            self.inner.lock().unwrap().get_dealer_message(epoch, dealer)
         }
 
         fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
@@ -7524,9 +7613,13 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            epoch: u64,
             dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
-            self.inner.lock().unwrap().get_rotation_messages(dealer)
+            self.inner
+                .lock()
+                .unwrap()
+                .get_rotation_messages(epoch, dealer)
         }
 
         fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
@@ -7564,6 +7657,7 @@ mod tests {
             // Clear state to prepare for rotation
             dealer_manager.dealer_messages.clear();
             dealer_manager.dealer_outputs.clear();
+            rotation_setup.prepare_for_rotation(&mut dealer_manager);
 
             // Create and store rotation messages
             let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -7593,10 +7687,11 @@ mod tests {
             .unwrap();
         new_dealer_manager.dealer_messages.clear();
         new_dealer_manager.dealer_outputs.clear();
+        rotation_setup.prepare_for_rotation(&mut new_dealer_manager);
 
         // Load rotation messages from store (simulating restart recovery)
         let stored_messages = shared_store
-            .get_rotation_messages(&dealer_addr)
+            .get_rotation_messages(0, &dealer_addr)
             .unwrap()
             .expect("Rotation messages should be in store");
 
@@ -7705,6 +7800,7 @@ mod tests {
         let mut party_manager = rotation_setup
             .setup
             .create_manager_with_store(party_index, Box::new(shared_store.clone()));
+        rotation_setup.prepare_for_rotation(&mut party_manager);
 
         // Verify rotation messages were loaded from store
         for dealer_addr in rotation_messages_map.keys() {

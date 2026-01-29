@@ -93,6 +93,39 @@ impl HashiNodeHandle {
             .map_err(|_| anyhow::anyhow!("DKG completion timed out after {:?}", timeout))
     }
 
+    pub fn current_epoch(&self) -> Option<u64> {
+        self.0
+            .onchain_state_opt()
+            .map(|s| s.state().hashi().committees.epoch())
+    }
+
+    pub async fn wait_for_epoch(
+        &self,
+        target_epoch: u64,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_epoch_inner(target_epoch))
+            .await
+            .map_err(|_| anyhow::anyhow!("Timed out waiting for Hashi epoch {target_epoch}"))
+    }
+
+    async fn wait_for_epoch_inner(&self, target_epoch: u64) {
+        loop {
+            let onchain_state = match self.0.onchain_state_opt() {
+                Some(state) => state,
+                None => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let epoch = onchain_state.state().hashi().committees.epoch();
+            if epoch >= target_epoch {
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     async fn wait_for_dkg_completion_inner(&self) {
         loop {
             // Wait for hashi to finish initializing
@@ -257,6 +290,26 @@ impl Default for HashiNetworkBuilder {
 }
 
 async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+    // Retry registration because the proof-of-possession is bound to ctx.epoch().
+    // With short Sui epochs, the epoch can change between querying it and
+    // transaction execution, causing PoP verification to fail.
+    for attempt in 1..=3u32 {
+        match try_register_onchain(&mut client, config).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt < 3 {
+                    info!("register_onchain attempt {attempt}/3 failed: {e}, retrying...");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    unreachable!()
+}
+
+async fn try_register_onchain(client: &mut sui_rpc::Client, config: &HashiConfig) -> Result<()> {
     let ids = config.hashi_ids();
     let private_key = config.operator_private_key()?;
     let protocol_private_key = config.protocol_private_key().unwrap();
@@ -264,7 +317,13 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let sender = private_key.public_key().derive_address();
     let validator_address = config.validator_address()?;
     let price = client.get_reference_gas_price().await?;
-
+    let service_info = client
+        .clone()
+        .ledger_client()
+        .get_service_info(GetServiceInfoRequest::default())
+        .await?
+        .into_inner();
+    let current_epoch = service_info.epoch.unwrap_or(0);
     let gas_objects = client
         .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
         .await?;
@@ -287,7 +346,7 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let public_key_input = Input::Pure(protocol_public_key.as_ref().to_vec().to_bcs()?);
     let proof_of_possession = Input::Pure(
         protocol_private_key
-            .proof_of_possession(0, validator_address)
+            .proof_of_possession(current_epoch, validator_address)
             .signature()
             .as_ref()
             .to_bcs()?,
@@ -381,9 +440,10 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
         .await?
         .into_inner();
 
-    assert!(
+    anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "register failed"
+        "register failed: {:?}",
+        response.transaction().effects().status().error_opt()
     );
 
     Ok(())

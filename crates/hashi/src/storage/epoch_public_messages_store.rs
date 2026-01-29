@@ -30,9 +30,13 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to store dealer message: {e}"))
     }
 
-    fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+    fn get_dealer_message(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<avss::Message>> {
         self.db
-            .get_dealer_message(self.epoch, dealer)
+            .get_dealer_message(epoch, dealer)
             .map_err(|e| anyhow::anyhow!("failed to get dealer message: {e}"))
     }
 
@@ -57,9 +61,13 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to store rotation messages: {e}"))
     }
 
-    fn get_rotation_messages(&self, dealer: &Address) -> anyhow::Result<Option<RotationMessages>> {
+    fn get_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<RotationMessages>> {
         self.db
-            .get_rotation_messages(self.epoch, dealer)
+            .get_rotation_messages(epoch, dealer)
             .map_err(|e| anyhow::anyhow!("failed to get rotation messages: {e}"))
     }
 
