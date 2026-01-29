@@ -22,6 +22,8 @@ fmt-buf: ## Format protobuf files
 fmt-move: ## Format Move code
 	prettier-move -w packages/*/sources/*.move
 	prettier-move -w packages/*/sources/**/*.move
+	prettier-move -w packages/*/tests/*.move
+	prettier-move -w packages/*/tests/**/*.move
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint

@@ -9,12 +9,12 @@ module hashi::test_utils;
 use hashi::{
     committee::{Self, CommitteeMember},
     deposit_queue,
-    withdrawal_queue,
     disable_version,
     enable_version,
     hashi::Hashi,
     update_deposit_fee,
-    utxo_pool
+    utxo_pool,
+    withdrawal_queue
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
 
