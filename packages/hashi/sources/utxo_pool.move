@@ -1,8 +1,7 @@
 #[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo_pool;
 
-use hashi::committee_set::CommitteeSet;
-use hashi::utxo::{Utxo, UtxoId};
+use hashi::{committee_set::CommitteeSet, utxo::{Utxo, UtxoId}};
 use sui::bag::Bag;
 
 public struct UtxoPool has store {
