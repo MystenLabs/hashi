@@ -340,7 +340,9 @@ async fn scrape_hashi(
         timestamp_ms: response
             .timestamp_ms()
             .ok_or_else(|| anyhow!("response missing X_SUI_TIMESTAMP_MS header"))?,
-        epoch: 0,
+        epoch: response
+            .epoch()
+            .ok_or_else(|| anyhow!("response missing X_SUI_EPOCH header"))?,
     };
 
     // Extract initial shared version from owner

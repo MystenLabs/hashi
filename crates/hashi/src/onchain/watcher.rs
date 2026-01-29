@@ -69,9 +69,9 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
                 .timestamp
                 .and_then(|t| proto_to_timestamp_ms(t).ok())
                 .unwrap_or(0);
-            let epoch = checkpoint.checkpoint().summary().epoch.unwrap_or(0);
+            let epoch = checkpoint.checkpoint().summary().epoch();
             let previous_epoch = state.latest_checkpoint_epoch();
-            if epoch != previous_epoch && previous_epoch != 0 {
+            if epoch != previous_epoch {
                 tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
                 state.notify(Notification::SuiEpochChanged(epoch));
             }
