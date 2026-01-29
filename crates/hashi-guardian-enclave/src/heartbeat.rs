@@ -5,44 +5,60 @@ use hashi_guardian_shared::LogMessage;
 use std::sync::Arc;
 use std::time::Duration;
 
-async fn send_heartbeat(
-    enclave: &Enclave,
-    max_failures: u32,
-    consecutive_failures: &mut u32,
-) -> GuardianResult<()> {
-    // TODO: When should we start heartbeats? post operator_init or post provisioner_init?
-    if !enclave.is_operator_init_complete() {
-        return Ok(());
-    }
-
-    if let Err(e) = enclave.sign_and_log(LogMessage::Heartbeat).await {
-        debug_assert!(matches!(e, GuardianError::S3Error(_))); // other errors shouldn't occur due to checks in operator_init_complete
-        *consecutive_failures += 1;
-        if *consecutive_failures >= max_failures {
-            return Err(GuardianError::InternalError(format!(
-                "Heartbeat failed for {} times: {:?}",
-                max_failures, e
-            )));
-        }
-    } else {
-        *consecutive_failures = 0;
-    }
-
-    Ok(())
+/// Stateful heartbeat writer.
+pub struct HeartbeatWriter {
+    pub enclave: Arc<Enclave>,
+    pub max_failures: u32,
+    pub consecutive_failures: u32,
 }
 
-/// Send heartbeat messages to S3 once per interval, until max_failures failures happen.
-/// This task is supposed to run as long as the enclave is alive.
-pub async fn run_heartbeat_writer_task(
-    enclave: Arc<Enclave>,
-    interval: Duration,
-    max_failures: u32,
-) -> GuardianResult<()> {
-    let mut ticker = tokio::time::interval(interval);
-    let mut consecutive_failures = 0;
-    loop {
-        ticker.tick().await;
-        send_heartbeat(&enclave, max_failures, &mut consecutive_failures).await?;
+impl HeartbeatWriter {
+    pub fn new(enclave: Arc<Enclave>, max_failures: u32) -> Self {
+        Self {
+            enclave,
+            max_failures,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// Attempt to send one heartbeat.
+    ///
+    /// - If operator init is not complete, this is a no-op.
+    /// - On success, resets the failure counter.
+    /// - On S3 error, increments failures; errors once `max_failures` is reached.
+    pub async fn tick(&mut self) -> GuardianResult<()> {
+        if !self.enclave.is_operator_init_complete() {
+            return Ok(());
+        }
+
+        match self.enclave.sign_and_log(LogMessage::Heartbeat).await {
+            Ok(()) => {
+                self.consecutive_failures = 0;
+            }
+            Err(e) => {
+                // other errors shouldn't occur due to checks in operator_init_complete
+                debug_assert!(matches!(e, GuardianError::S3Error(_)));
+
+                self.consecutive_failures += 1;
+                if self.consecutive_failures >= self.max_failures {
+                    return Err(GuardianError::InternalError(format!(
+                        "Heartbeat failed for {} times: {:?}",
+                        self.max_failures, e
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run the periodic heartbeat loop.
+    pub async fn run(mut self, interval: Duration) -> GuardianResult<()> {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            self.tick().await?;
+        }
     }
 }
 
@@ -93,24 +109,16 @@ mod tests {
         let enclave = mk_operator_initialized_enclave(mk_s3_logger(client)).await;
 
         let max_failures = 3u32;
-        let mut consecutive_failures = 0u32;
+        let mut writer = HeartbeatWriter::new(enclave, max_failures);
 
         // First (max_failures - 1) failures should be tolerated.
         for i in 0..(max_failures - 1) {
-            assert!(
-                send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
-                    .await
-                    .is_ok()
-            );
-            assert_eq!(consecutive_failures, i + 1);
+            assert!(writer.tick().await.is_ok());
+            assert_eq!(writer.consecutive_failures, i + 1);
         }
 
         // The next failure should exceed the threshold and return Err.
-        assert!(
-            send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
-                .await
-                .is_err()
-        );
+        assert!(writer.tick().await.is_err());
         assert_eq!(put_fail.num_calls(), max_failures as usize);
     }
 
@@ -136,22 +144,14 @@ mod tests {
 
         let enclave = mk_operator_initialized_enclave(mk_s3_logger(client)).await;
 
-        let mut consecutive_failures = 0u32;
+        let mut writer = HeartbeatWriter::new(enclave, max_failures);
         for i in 0..(max_failures - 1) {
-            assert!(
-                send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
-                    .await
-                    .is_ok()
-            );
-            assert_eq!(consecutive_failures, i + 1);
+            assert!(writer.tick().await.is_ok());
+            assert_eq!(writer.consecutive_failures, i + 1);
         }
 
-        assert!(
-            send_heartbeat(&enclave, max_failures, &mut consecutive_failures)
-                .await
-                .is_ok()
-        );
-        assert_eq!(consecutive_failures, 0, "should reset");
+        assert!(writer.tick().await.is_ok());
+        assert_eq!(writer.consecutive_failures, 0, "should reset");
 
         assert_eq!(put_flaky.num_calls(), max_failures as usize);
     }

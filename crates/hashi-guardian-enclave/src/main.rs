@@ -26,7 +26,7 @@ mod rpc;
 mod setup;
 mod withdraw;
 
-use crate::heartbeat::run_heartbeat_writer_task;
+use crate::heartbeat::HeartbeatWriter;
 use crate::rpc::GuardianGrpc;
 use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
 use hashi_guardian_shared::s3_logger::S3Logger;
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
         .serve(addr);
 
     let heartbeat_future =
-        run_heartbeat_writer_task(enclave, HEARTBEAT_INTERVAL, MAX_HEARTBEAT_FAILURES);
+        HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES).run(HEARTBEAT_INTERVAL);
 
     tokio::select! {
         res = server_future => {
