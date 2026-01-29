@@ -15,6 +15,15 @@ use std::collections::HashMap;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
+// TODO: Read threshold from on-chain config once it is made configurable.
+const THRESHOLD_NUMERATOR: u64 = 2;
+const THRESHOLD_DENOMINATOR: u64 = 3;
+
+/// Matches Move's `threshold::certificate_threshold`.
+pub fn certificate_threshold(total_weight: u64) -> u64 {
+    total_weight * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
+}
+
 pub type EncryptionPrivateKey =
     fastcrypto_tbls::ecies_v1::PrivateKey<fastcrypto::groups::ristretto255::RistrettoPoint>;
 pub type EncryptionPublicKey =

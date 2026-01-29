@@ -5,6 +5,8 @@ use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPublicDkgOutputRequest;
 use hashi_types::proto::GetPublicDkgOutputResponse;
+use hashi_types::proto::GetReconfigCompletionSignatureRequest;
+use hashi_types::proto::GetReconfigCompletionSignatureResponse;
 use hashi_types::proto::RetrieveMessagesRequest;
 use hashi_types::proto::RetrieveMessagesResponse;
 use hashi_types::proto::SendMessagesRequest;
@@ -25,7 +27,8 @@ impl MpcService for HttpService {
         let internal_request = types::SendMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let mut mgr = self.dkg_manager().lock().unwrap();
+            let dkg_manager = self.dkg_manager();
+            let mut mgr = dkg_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
                 .map_err(dkg_error_to_status)?
@@ -43,7 +46,8 @@ impl MpcService for HttpService {
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let mgr = self.dkg_manager().lock().unwrap();
+            let dkg_manager = self.dkg_manager();
+            let mgr = dkg_manager.read().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_retrieve_messages_request(&internal_request)
                 .map_err(dkg_error_to_status)?
@@ -63,7 +67,8 @@ impl MpcService for HttpService {
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let mut mgr = self.dkg_manager().lock().unwrap();
+            let dkg_manager = self.dkg_manager();
+            let mut mgr = dkg_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_complain_request(&internal_request)
                 .map_err(dkg_error_to_status)?
@@ -81,13 +86,34 @@ impl MpcService for HttpService {
         let internal_request = types::GetPublicDkgOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let mgr = self.dkg_manager().lock().unwrap();
+            let dkg_manager = self.dkg_manager();
+            let mgr = dkg_manager.read().unwrap();
             mgr.handle_get_public_dkg_output_request(&internal_request)
                 .map_err(dkg_error_to_status)?
         };
         Ok(tonic::Response::new(GetPublicDkgOutputResponse::from(
             &response,
         )))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn get_reconfig_completion_signature(
+        &self,
+        request: tonic::Request<GetReconfigCompletionSignatureRequest>,
+    ) -> Result<tonic::Response<GetReconfigCompletionSignatureResponse>, Status> {
+        authenticate_caller(&request)?;
+        let external_request = request.into_inner();
+        let epoch = external_request
+            .epoch
+            .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+        let signature = self
+            .get_reconfig_signature(epoch)
+            .ok_or_else(|| Status::not_found("signature not ready for this epoch"))?;
+        Ok(tonic::Response::new(
+            GetReconfigCompletionSignatureResponse {
+                signature: Some(signature.into()),
+            },
+        ))
     }
 }
 

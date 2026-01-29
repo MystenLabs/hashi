@@ -5,6 +5,11 @@ module hashi::proposal_events;
 
 use sui::event;
 
+public struct ProposalCreatedEvent<phantom T> has copy, drop {
+    proposal_id: ID,
+    timestamp_ms: u64,
+}
+
 public struct VoteCastEvent has copy, drop {
     proposal_id: ID,
     voter: address,
@@ -30,6 +35,13 @@ public struct QuorumReachedEvent has copy, drop {
 public struct PackageUpgradedEvent has copy, drop {
     package: ID,
     version: u64,
+}
+
+public(package) fun emit_proposal_created_event<T>(proposal_id: ID, timestamp_ms: u64) {
+    event::emit(ProposalCreatedEvent<T> {
+        proposal_id,
+        timestamp_ms,
+    });
 }
 
 public(package) fun emit_vote_cast_event(proposal_id: ID, voter: address) {

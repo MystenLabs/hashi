@@ -331,6 +331,14 @@ public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
     self.pending_epoch_change.is_some()
 }
 
+public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
+    self.pending_epoch_change
+}
+
+public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
+    &self.committees[epoch]
+}
+
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
@@ -363,7 +371,6 @@ public(package) fun start_reconfig(
     epoch
 }
 
-//TODO include a cert from the next committee to confirm the handover.
 public(package) fun end_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();

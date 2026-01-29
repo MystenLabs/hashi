@@ -17,4 +17,5 @@ pub use interfaces::ChannelResult;
 pub use interfaces::OrderedBroadcastChannel;
 pub use interfaces::P2PChannel;
 pub use sui_tob::SuiTobChannel;
+pub use sui_tob::fetch_certificates;
 pub use timeout_and_retry::with_timeout_and_retry;

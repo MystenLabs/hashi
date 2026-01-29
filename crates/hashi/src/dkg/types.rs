@@ -12,7 +12,7 @@ use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::CertifiedMessage;
-use hashi_types::move_types::DkgDealerMessageHashV1;
+use hashi_types::move_types::DealerMessagesHashV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -74,7 +74,7 @@ pub struct SessionId([u8; 64]);
 // Unique MPC protocol instance identifier (per epoch & chain).
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ProtocolType {
-    DkgKeyGeneration,
+    Dkg,
     KeyRotation,
     NonceGeneration { batch_index: u32 },
     Signing { message_hash: MessageHash },
@@ -181,20 +181,20 @@ pub struct DealerMessagesHash {
 }
 
 impl DealerMessagesHash {
-    pub fn from_onchain_dkg_cert(
-        cert: &CertifiedMessage<DkgDealerMessageHashV1>,
+    pub fn from_onchain_cert(
+        cert: &CertifiedMessage<DealerMessagesHashV1>,
         epoch: u64,
         committee: &Committee,
         threshold: u64,
     ) -> Result<DealerCertificate, DkgError> {
         let hash_bytes: [u8; 32] =
             cert.message
-                .message_hash
+                .messages_hash
                 .as_slice()
                 .try_into()
                 .map_err(|_| DkgError::InvalidMessage {
                     sender: cert.message.dealer_address,
-                    reason: "invalid message_hash length".into(),
+                    reason: "invalid messages_hash length".into(),
                 })?;
 
         let message = Self {
@@ -223,6 +223,16 @@ pub enum CertificateV1 {
 }
 
 impl CertificateV1 {
+    pub fn new(
+        protocol_type: hashi_types::move_types::ProtocolType,
+        cert: DealerCertificate,
+    ) -> Self {
+        match protocol_type {
+            hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
+            hashi_types::move_types::ProtocolType::KeyRotation => CertificateV1::Rotation(cert),
+        }
+    }
+
     pub fn epoch(&self) -> u64 {
         match self {
             CertificateV1::Dkg(cert) => cert.epoch(),
@@ -283,6 +293,13 @@ impl CertificateV1 {
         match self {
             CertificateV1::Dkg(cert) => cert.message(),
             CertificateV1::Rotation(cert) => cert.message(),
+        }
+    }
+
+    pub fn protocol_type(&self) -> ProtocolType {
+        match self {
+            CertificateV1::Dkg(_) => ProtocolType::Dkg,
+            CertificateV1::Rotation(_) => ProtocolType::KeyRotation,
         }
     }
 }
@@ -482,7 +499,7 @@ mod tests {
     #[test]
     fn test_session_context_deterministic_serialization() {
         let epoch = 100;
-        let protocol_type = ProtocolType::DkgKeyGeneration;
+        let protocol_type = ProtocolType::Dkg;
         let chain_id = "testnet".to_string();
 
         let sid1 = SessionId::new(&chain_id, epoch, &protocol_type);
@@ -496,7 +513,7 @@ mod tests {
         let epoch = 100;
         let chain_id = "testnet".to_string();
 
-        let dkg_sid = SessionId::new(&chain_id, epoch, &ProtocolType::DkgKeyGeneration);
+        let dkg_sid = SessionId::new(&chain_id, epoch, &ProtocolType::Dkg);
         let rotation_sid = SessionId::new(&chain_id, epoch, &ProtocolType::KeyRotation);
         let nonce_sid = SessionId::new(
             &chain_id,
@@ -512,7 +529,7 @@ mod tests {
     #[test]
     fn test_session_id_different_chains() {
         let epoch = 100;
-        let protocol_type = ProtocolType::DkgKeyGeneration;
+        let protocol_type = ProtocolType::Dkg;
         let mainnet_id = SessionId::new("mainnet", epoch, &protocol_type);
         let testnet_id = SessionId::new("testnet", epoch, &protocol_type);
 
@@ -521,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_dealer_session_serialization() {
-        let sid = SessionId::new("testnet", 100, &ProtocolType::DkgKeyGeneration);
+        let sid = SessionId::new("testnet", 100, &ProtocolType::Dkg);
         let dealer1 = Address::new([1; 32]);
         let dealer2 = Address::new([2; 32]);
         let dealer1_session = sid.dealer_session_id(&dealer1);
@@ -592,9 +609,9 @@ mod tests {
 
         // Convert to on-chain format
         let onchain_cert = CertifiedMessage {
-            message: DkgDealerMessageHashV1 {
+            message: DealerMessagesHashV1 {
                 dealer_address,
-                message_hash: messages_hash.to_vec(),
+                messages_hash: messages_hash.to_vec(),
             },
             signature: MoveCommitteeSignature {
                 epoch,
@@ -604,9 +621,9 @@ mod tests {
             stake_support: 3,
         };
 
-        // Parse back using from_onchain_dkg_cert
+        // Parse back using from_onchain_cert
         let result =
-            DealerMessagesHash::from_onchain_dkg_cert(&onchain_cert, epoch, &committee, threshold);
+            DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch, &committee, threshold);
         assert!(
             result.is_ok(),
             "Should parse valid certificate: {:?}",
@@ -640,9 +657,9 @@ mod tests {
 
         // Create certificate with invalid hash length (not 32 bytes)
         let onchain_cert = CertifiedMessage {
-            message: DkgDealerMessageHashV1 {
+            message: DealerMessagesHashV1 {
                 dealer_address: Address::new([0u8; 32]),
-                message_hash: vec![1, 2, 3], // Invalid: only 3 bytes
+                messages_hash: vec![1, 2, 3], // Invalid: only 3 bytes
             },
             signature: MoveCommitteeSignature {
                 epoch,
@@ -653,11 +670,11 @@ mod tests {
         };
 
         let result =
-            DealerMessagesHash::from_onchain_dkg_cert(&onchain_cert, epoch, &committee, threshold);
+            DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch, &committee, threshold);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("invalid message_hash length"),
+            err.to_string().contains("invalid messages_hash length"),
             "Error should mention invalid hash length: {}",
             err
         );

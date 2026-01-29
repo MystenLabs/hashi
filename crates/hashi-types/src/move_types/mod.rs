@@ -26,6 +26,7 @@ pub struct Hashi {
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
     pub proposals: Bag,
+    /// TOB certificates by epoch (epoch -> EpochCertsV1)
     pub tob: Bag,
 }
 
@@ -213,15 +214,83 @@ pub struct UtxoId {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct UtxoPool {
-    pub utxos: Bag,
+    pub active_utxos: Bag,
+    pub spent_utxos: Bag,
+}
+
+/// Rust version of the Move hashi::tob::ProtocolType enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub enum ProtocolType {
+    Dkg,
+    KeyRotation,
+}
+
+/// Rust version of the Move struct `hashi::reconfig::ReconfigCompletionMessage`.
+#[derive(Clone, Debug, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct ReconfigCompletionMessage {
+    /// The epoch being transitioned to.
+    pub epoch: u64,
+    /// The MPC committee's threshold public key.
+    pub mpc_public_key: Vec<u8>,
+}
+
+/// Rust version of the Move hashi::proposal::Proposal type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct Proposal<T> {
+    pub id: Address,
+    pub creator: Address,
+    pub votes: Vec<Address>,
+    pub quorum_threshold_bps: u64,
+    pub timestamp_ms: u64,
+    pub metadata: VecMap<String, String>,
+    pub data: T,
+}
+
+/// Rust version of the Move hashi::update_deposit_fee::UpdateDepositFee type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct UpdateDepositFee {
+    pub fee: u64,
+}
+
+/// Rust version of the Move hashi::enable_version::EnableVersion type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct EnableVersion {
+    pub version: u64,
+}
+
+/// Rust version of the Move hashi::disable_version::DisableVersion type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct DisableVersion {
+    pub version: u64,
+}
+
+/// Rust version of the Move hashi::upgrade::Upgrade type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct Upgrade {
+    pub digest: Vec<u8>,
+}
+
+/// Rust version of the Move sui::vec_map::VecMap type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct VecMap<K, V> {
+    pub contents: Vec<Entry<K, V>>,
+}
+
+/// Rust version of the Move sui::vec_map::Entry type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct Entry<K, V> {
+    pub key: K,
+    pub value: V,
 }
 
 /// Rust version of the Move hashi::tob::EpochCertsV1 type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct EpochCertsV1 {
     pub epoch: u64,
-    // LinkedTable<address, CertifiedMessage<DkgDealerMessageHashV1>>
-    pub dkg_certs: LinkedTable<Address>,
+    pub protocol_type: ProtocolType,
+    /// Certificates indexed by dealer address (first-cert-wins).
+    // LinkedTable<address, CertifiedMessage<DealerMessagesHashV1>>
+    pub certs: LinkedTable<Address>,
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.
@@ -242,11 +311,11 @@ pub struct LinkedTableNode<K, V> {
     pub value: V,
 }
 
-/// Rust version of the Move hashi::tob::DkgDealerMessageHashV1 type.
+/// Rust version of the Move hashi::tob::DealerMessagesHashV1 type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct DkgDealerMessageHashV1 {
+pub struct DealerMessagesHashV1 {
     pub dealer_address: Address,
-    pub message_hash: Vec<u8>,
+    pub messages_hash: Vec<u8>,
 }
 
 /// Rust version of the Move hashi::committee::CommitteeSignature type.
@@ -271,6 +340,7 @@ pub enum HashiEvent {
     ValidatorUpdated(ValidatorUpdated),
     VoteCastEvent(VoteCastEvent),
     VoteRemovedEvent(VoteRemovedEvent),
+    ProposalCreatedEvent(ProposalCreatedEvent),
     ProposalDeletedEvent(ProposalDeletedEvent),
     ProposalExecutedEvent(ProposalExecutedEvent),
     QuorumReachedEvent(QuorumReachedEvent),
@@ -302,6 +372,9 @@ impl HashiEvent {
             ValidatorUpdated::MODULE_NAME => ValidatorUpdated::from_bcs(bcs.value())?.into(),
             VoteCastEvent::MODULE_NAME => VoteCastEvent::from_bcs(bcs.value())?.into(),
             VoteRemovedEvent::MODULE_NAME => VoteRemovedEvent::from_bcs(bcs.value())?.into(),
+            ProposalCreatedEvent::MODULE_NAME => {
+                ProposalCreatedEvent::new(&event_type, bcs.value())?.into()
+            }
             ProposalDeletedEvent::MODULE_NAME => {
                 ProposalDeletedEvent::from_bcs(bcs.value())?.into()
             }
@@ -358,6 +431,42 @@ impl MoveType for ValidatorUpdated {
 impl From<ValidatorUpdated> for HashiEvent {
     fn from(value: ValidatorUpdated) -> Self {
         Self::ValidatorUpdated(value)
+    }
+}
+
+#[derive(Debug)]
+pub struct ProposalCreatedEvent {
+    pub proposal_id: Address,
+    pub timestamp_ms: u64,
+    pub proposal_type: TypeTag,
+}
+
+impl ProposalCreatedEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        if event_type.module() == Self::MODULE
+            && event_type.name() == Self::NAME
+            && let [proposal_type] = event_type.type_params()
+        {
+            let (proposal_id, timestamp_ms): (Address, u64) = bcs::from_bytes(bcs)?;
+            Ok(Self {
+                proposal_id,
+                timestamp_ms,
+                proposal_type: proposal_type.to_owned(),
+            })
+        } else {
+            Err(anyhow::anyhow!("invalid ProposalCreatedEvent"))
+        }
+    }
+}
+
+impl MoveType for ProposalCreatedEvent {
+    const MODULE: &'static str = "proposal_events";
+    const NAME: &'static str = "ProposalCreatedEvent";
+}
+
+impl From<ProposalCreatedEvent> for HashiEvent {
+    fn from(value: ProposalCreatedEvent) -> Self {
+        Self::ProposalCreatedEvent(value)
     }
 }
 

@@ -93,6 +93,10 @@ impl CommitteeSet {
         self.epoch
     }
 
+    pub fn pending_epoch_change(&self) -> Option<u64> {
+        self.pending_epoch_change
+    }
+
     pub fn client(&self, validator: &Address) -> Option<Client> {
         self.clients.get(validator).cloned()
     }
@@ -278,6 +282,31 @@ impl MemberInfo {
 pub struct Proposals {
     pub id: Address,
     pub size: u64,
+    pub(crate) proposals: BTreeMap<Address, Proposal>,
+}
+
+impl Proposals {
+    pub fn proposals(&self) -> &BTreeMap<Address, Proposal> {
+        &self.proposals
+    }
+}
+
+/// A proposal stored in the proposals bag
+#[derive(Clone, Debug)]
+pub struct Proposal {
+    pub id: Address,
+    pub timestamp_ms: u64,
+    pub proposal_type: ProposalType,
+}
+
+/// The type of proposal data stored in a `Proposal<T>`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalType {
+    UpdateDepositFee,
+    EnableVersion,
+    DisableVersion,
+    Upgrade,
+    Unknown(String),
 }
 
 #[derive(Debug)]
@@ -354,17 +383,27 @@ pub struct UtxoId {
 
 #[derive(Debug)]
 pub struct UtxoPool {
-    pub(super) id: Address,
-    pub(super) utxos: BTreeMap<UtxoId, Utxo>,
+    pub(super) active_utxos_id: Address,
+    pub(super) active_utxos: BTreeMap<UtxoId, Utxo>,
+    pub(super) spent_utxos_id: Address,
+    pub(super) spent_utxos: BTreeMap<UtxoId, u64>,
 }
 
 impl UtxoPool {
-    pub fn id(&self) -> &Address {
-        &self.id
+    pub fn active_utxos_id(&self) -> &Address {
+        &self.active_utxos_id
     }
 
-    pub fn utxos(&self) -> &BTreeMap<UtxoId, Utxo> {
-        &self.utxos
+    pub fn active_utxos(&self) -> &BTreeMap<UtxoId, Utxo> {
+        &self.active_utxos
+    }
+
+    pub fn spent_utxos_id(&self) -> &Address {
+        &self.spent_utxos_id
+    }
+
+    pub fn spent_utxos(&self) -> &BTreeMap<UtxoId, u64> {
+        &self.spent_utxos
     }
 }
 

@@ -48,6 +48,8 @@ impl std::fmt::Debug for OnchainState {
 #[derive(Clone, Debug)]
 pub enum Notification {
     ValidatorInfoUpdated(Address),
+    /// Reconfig started, transitioning to the given epoch.
+    StartReconfig(u64),
 }
 
 /// Information about the latest processed checkpoint
@@ -196,29 +198,32 @@ impl OnchainState {
         Ok(None)
     }
 
-    /// Fetches all DKG certificates for the given epoch from on-chain.
-    /// Returns raw move types; caller is responsible for conversion.
-    pub async fn fetch_dkg_certs(
+    /// Fetches all certificates for the given epoch from on-chain.
+    /// Returns the protocol type and raw move types; caller is responsible for conversion.
+    pub async fn fetch_certs(
         &self,
         epoch: u64,
     ) -> Result<
-        Vec<(
-            Address,
-            move_types::CertifiedMessage<move_types::DkgDealerMessageHashV1>,
+        Option<(
+            move_types::ProtocolType,
+            Vec<(
+                Address,
+                move_types::CertifiedMessage<move_types::DealerMessagesHashV1>,
+            )>,
         )>,
     > {
         let epoch_certs = match self.fetch_epoch_certs(epoch).await? {
             Some(certs) => certs,
-            None => return Ok(vec![]),
+            None => return Ok(None),
         };
-        let Some(head) = epoch_certs.dkg_certs.head else {
-            return Ok(vec![]);
+        let Some(head) = epoch_certs.certs.head else {
+            return Ok(Some((epoch_certs.protocol_type, vec![])));
         };
         let mut nodes: std::collections::HashMap<
             Address,
             move_types::LinkedTableNode<
                 Address,
-                move_types::CertifiedMessage<move_types::DkgDealerMessageHashV1>,
+                move_types::CertifiedMessage<move_types::DealerMessagesHashV1>,
             >,
         > = std::collections::HashMap::new();
         let mut stream = self
@@ -227,7 +232,7 @@ impl OnchainState {
             .clone()
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.dkg_certs.id)
+                    .with_parent(epoch_certs.certs.id)
                     .with_page_size(u32::MAX)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -250,7 +255,7 @@ impl OnchainState {
             certificates.push((dealer, node.value));
             current = node.next;
         }
-        Ok(certificates)
+        Ok(Some((epoch_certs.protocol_type, certificates)))
     }
 }
 
@@ -344,12 +349,13 @@ async fn scrape_hashi(
         tob,
     } = response.get_ref().object().contents().deserialize()?;
 
-    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool) = tokio::try_join!(
+    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool, proposals) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
-        scrape_utxo_pool(client.clone(), utxo_pool.utxos.id),
+        scrape_utxo_pool(client.clone(), utxo_pool),
+        scrape_proposals(client.clone(), proposals),
     )?;
 
     let mut committee_set =
@@ -370,7 +376,7 @@ async fn scrape_hashi(
             treasury,
             deposit_queue,
             utxo_pool,
-            proposals: convert_move_proposals(proposals),
+            proposals,
             tob_id: tob.id,
         },
     ))
@@ -404,13 +410,6 @@ fn convert_move_upgrade_cap(cap: move_types::UpgradeCap) -> types::UpgradeCap {
         package: cap.package,
         version: cap.version,
         policy: cap.policy,
-    }
-}
-
-fn convert_move_proposals(proposals: move_types::Bag) -> types::Proposals {
-    types::Proposals {
-        id: proposals.id,
-        size: proposals.size,
     }
 }
 
@@ -731,11 +730,31 @@ fn convert_move_utxo(
     }
 }
 
-async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types::UtxoPool> {
-    let utxos: BTreeMap<types::UtxoId, types::Utxo> = client
+async fn scrape_utxo_pool(
+    client: Client,
+    utxo_pool: move_types::UtxoPool,
+) -> Result<types::UtxoPool> {
+    let (active_utxos, spent_utxos) = tokio::try_join!(
+        scrape_active_utxos(client.clone(), utxo_pool.active_utxos.id),
+        scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id),
+    )?;
+
+    Ok(types::UtxoPool {
+        active_utxos_id: utxo_pool.active_utxos.id,
+        active_utxos,
+        spent_utxos_id: utxo_pool.spent_utxos.id,
+        spent_utxos,
+    })
+}
+
+async fn scrape_active_utxos(
+    client: Client,
+    active_utxos_id: Address,
+) -> Result<BTreeMap<types::UtxoId, types::Utxo>> {
+    let active_utxos: BTreeMap<types::UtxoId, types::Utxo> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
-                .with_parent(utxo_pool_id)
+                .with_parent(active_utxos_id)
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
@@ -756,12 +775,146 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
         .try_collect()
         .await?;
 
-    let pool = types::UtxoPool {
-        id: utxo_pool_id,
-        utxos,
+    Ok(active_utxos)
+}
+
+async fn scrape_spent_utxos(
+    client: Client,
+    spent_utxos_id: Address,
+) -> Result<BTreeMap<types::UtxoId, u64>> {
+    let spent_utxos: BTreeMap<types::UtxoId, u64> = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(spent_utxos_id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ])),
+        )
+        .and_then(|field| async move {
+            let utxo_id: move_types::UtxoId = field
+                .name()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            let spent_epoch: u64 = field
+                .value()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok((utxo_id, spent_epoch))
+        })
+        .map_ok(|(utxo_id, spent_epoch)| {
+            let utxo_id = types::UtxoId {
+                txid: utxo_id.txid,
+                vout: utxo_id.vout,
+            };
+            (utxo_id, spent_epoch)
+        })
+        .try_collect()
+        .await?;
+
+    Ok(spent_utxos)
+}
+
+async fn scrape_proposals(
+    client: Client,
+    proposals_bag: move_types::Bag,
+) -> Result<types::Proposals> {
+    let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
+
+    let mut stream = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(proposals_bag.id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder()
+                        .child_object()
+                        .contents()
+                        .finish(),
+                ])),
+        )
+        .pipe(Box::pin);
+
+    while let Some(field) = stream.try_next().await? {
+        // Parse the proposal type from the type tag
+        // The type will be something like: <package>::proposal::Proposal<<package>::update_deposit_fee::UpdateDepositFee>
+        let type_tag: TypeTag = field.child_object().contents().name().parse()?;
+        let proposal_type = parse_proposal_type(&type_tag);
+
+        // Deserialize proposal based on the proposal type
+        let contents = field.child_object().contents().value();
+        let result: Option<(Address, u64)> = match &proposal_type {
+            types::ProposalType::UpdateDepositFee => {
+                bcs::from_bytes::<move_types::Proposal<move_types::UpdateDepositFee>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::EnableVersion => {
+                bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::DisableVersion => {
+                bcs::from_bytes::<move_types::Proposal<move_types::DisableVersion>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::Upgrade => {
+                bcs::from_bytes::<move_types::Proposal<move_types::Upgrade>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
+            types::ProposalType::Unknown(_) => None,
+        };
+
+        if let Some((id, timestamp_ms)) = result {
+            proposals.insert(
+                id,
+                types::Proposal {
+                    id,
+                    timestamp_ms,
+                    proposal_type,
+                },
+            );
+        } else {
+            tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
+        }
+    }
+
+    Ok(types::Proposals {
+        id: proposals_bag.id,
+        size: proposals_bag.size,
+        proposals,
+    })
+}
+
+fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
+    let TypeTag::Struct(struct_tag) = type_tag else {
+        return types::ProposalType::Unknown(format!("{:?}", type_tag));
     };
 
-    Ok(pool)
+    // The type is Proposal<T>, we need to extract T
+    if struct_tag.module() != "proposal" || struct_tag.name() != "Proposal" {
+        return types::ProposalType::Unknown(format!("{:?}", type_tag));
+    }
+
+    let Some(type_param) = struct_tag.type_params().first() else {
+        return types::ProposalType::Unknown(format!("{:?}", type_tag));
+    };
+
+    let TypeTag::Struct(inner_tag) = type_param else {
+        return types::ProposalType::Unknown(format!("{:?}", type_param));
+    };
+
+    match (inner_tag.module().as_str(), inner_tag.name().as_str()) {
+        ("update_deposit_fee", "UpdateDepositFee") => types::ProposalType::UpdateDepositFee,
+        ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
+        ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
+        ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
+        _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
+    }
 }
 
 pub trait MoveType {
