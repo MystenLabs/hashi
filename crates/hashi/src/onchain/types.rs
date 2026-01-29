@@ -23,7 +23,6 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
-    pub withdrawn_utxo_pool: UtxoPool,
     pub proposals: Proposals,
     pub tob_id: Address,
 }
@@ -384,17 +383,27 @@ pub struct UtxoId {
 
 #[derive(Debug)]
 pub struct UtxoPool {
-    pub(super) id: Address,
-    pub(super) utxos: BTreeMap<UtxoId, Utxo>,
+    pub(super) active_utxos_id: Address,
+    pub(super) active_utxos: BTreeMap<UtxoId, Utxo>,
+    pub(super) spent_utxos_id: Address,
+    pub(super) spent_utxos: BTreeMap<UtxoId, u64>,
 }
 
 impl UtxoPool {
-    pub fn id(&self) -> &Address {
-        &self.id
+    pub fn active_utxos_id(&self) -> &Address {
+        &self.active_utxos_id
     }
 
-    pub fn utxos(&self) -> &BTreeMap<UtxoId, Utxo> {
-        &self.utxos
+    pub fn active_utxos(&self) -> &BTreeMap<UtxoId, Utxo> {
+        &self.active_utxos
+    }
+
+    pub fn spent_utxos_id(&self) -> &Address {
+        &self.spent_utxos_id
+    }
+
+    pub fn spent_utxos(&self) -> &BTreeMap<UtxoId, u64> {
+        &self.spent_utxos
     }
 }
 

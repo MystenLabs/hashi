@@ -25,7 +25,6 @@ pub struct Hashi {
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
     pub utxo_pool: UtxoPool,
-    pub withdrawn_utxo_pool: UtxoPool,
     pub proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     pub tob: Bag,
@@ -215,7 +214,8 @@ pub struct UtxoId {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct UtxoPool {
-    pub utxos: Bag,
+    pub active_utxos: Bag,
+    pub spent_utxos: Bag,
 }
 
 /// Rust version of the Move hashi::tob::ProtocolType enum.

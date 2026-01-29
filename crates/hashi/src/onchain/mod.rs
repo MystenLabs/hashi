@@ -345,26 +345,16 @@ async fn scrape_hashi(
         treasury,
         deposit_queue,
         utxo_pool,
-        withdrawn_utxo_pool,
         proposals,
         tob,
     } = response.get_ref().object().contents().deserialize()?;
 
-    let (
-        member_info,
-        committees_per_epoch,
-        treasury,
-        deposit_queue,
-        utxo_pool,
-        withdrawn_utxo_pool,
-        proposals,
-    ) = tokio::try_join!(
+    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool, proposals) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
-        scrape_utxo_pool(client.clone(), utxo_pool.utxos.id),
-        scrape_utxo_pool(client.clone(), withdrawn_utxo_pool.utxos.id),
+        scrape_utxo_pool(client.clone(), utxo_pool),
         scrape_proposals(client.clone(), proposals),
     )?;
 
@@ -386,7 +376,6 @@ async fn scrape_hashi(
             treasury,
             deposit_queue,
             utxo_pool,
-            withdrawn_utxo_pool,
             proposals,
             tob_id: tob.id,
         },
@@ -741,11 +730,31 @@ fn convert_move_utxo(
     }
 }
 
-async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types::UtxoPool> {
-    let utxos: BTreeMap<types::UtxoId, types::Utxo> = client
+async fn scrape_utxo_pool(
+    client: Client,
+    utxo_pool: move_types::UtxoPool,
+) -> Result<types::UtxoPool> {
+    let (active_utxos, spent_utxos) = tokio::try_join!(
+        scrape_active_utxos(client.clone(), utxo_pool.active_utxos.id),
+        scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id),
+    )?;
+
+    Ok(types::UtxoPool {
+        active_utxos_id: utxo_pool.active_utxos.id,
+        active_utxos,
+        spent_utxos_id: utxo_pool.spent_utxos.id,
+        spent_utxos,
+    })
+}
+
+async fn scrape_active_utxos(
+    client: Client,
+    active_utxos_id: Address,
+) -> Result<BTreeMap<types::UtxoId, types::Utxo>> {
+    let active_utxos: BTreeMap<types::UtxoId, types::Utxo> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
-                .with_parent(utxo_pool_id)
+                .with_parent(active_utxos_id)
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
@@ -766,12 +775,45 @@ async fn scrape_utxo_pool(client: Client, utxo_pool_id: Address) -> Result<types
         .try_collect()
         .await?;
 
-    let pool = types::UtxoPool {
-        id: utxo_pool_id,
-        utxos,
-    };
+    Ok(active_utxos)
+}
 
-    Ok(pool)
+async fn scrape_spent_utxos(
+    client: Client,
+    spent_utxos_id: Address,
+) -> Result<BTreeMap<types::UtxoId, u64>> {
+    let spent_utxos: BTreeMap<types::UtxoId, u64> = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(spent_utxos_id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ])),
+        )
+        .and_then(|field| async move {
+            let utxo_id: move_types::UtxoId = field
+                .name()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            let spent_epoch: u64 = field
+                .value()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok((utxo_id, spent_epoch))
+        })
+        .map_ok(|(utxo_id, spent_epoch)| {
+            let utxo_id = types::UtxoId {
+                txid: utxo_id.txid,
+                vout: utxo_id.vout,
+            };
+            (utxo_id, spent_epoch)
+        })
+        .try_collect()
+        .await?;
+
+    Ok(spent_utxos)
 }
 
 async fn scrape_proposals(

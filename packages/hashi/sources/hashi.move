@@ -18,8 +18,6 @@ public struct Hashi has key {
     treasury: Treasury,
     deposit_queue: DepositRequestQueue,
     utxo_pool: UtxoPool,
-    /// Tracks UTXOs that have been withdrawn for replay protection
-    withdrawn_utxo_pool: UtxoPool,
     proposals: Bag,
     /// TOB certificates by epoch (epoch -> EpochCertsV1)
     tob: Bag,
@@ -34,7 +32,6 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
-        withdrawn_utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: bag::new(ctx),
         tob: bag::new(ctx),
     };
@@ -134,14 +131,6 @@ public(package) fun utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::Utxo
     &mut self.utxo_pool
 }
 
-public(package) fun withdrawn_utxo_pool(self: &Hashi): &hashi::utxo_pool::UtxoPool {
-    &self.withdrawn_utxo_pool
-}
-
-public(package) fun withdrawn_utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::UtxoPool {
-    &mut self.withdrawn_utxo_pool
-}
-
 public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
     &mut self.tob
 }
@@ -168,7 +157,6 @@ public fun create_for_testing(
     treasury: Treasury,
     deposit_queue: hashi::deposit_queue::DepositRequestQueue,
     utxo_pool: hashi::utxo_pool::UtxoPool,
-    withdrawn_utxo_pool: hashi::utxo_pool::UtxoPool,
     proposals: Bag,
     tob: Bag,
     ctx: &mut TxContext,
@@ -180,7 +168,6 @@ public fun create_for_testing(
         treasury,
         deposit_queue,
         utxo_pool,
-        withdrawn_utxo_pool,
         proposals,
         tob,
     }

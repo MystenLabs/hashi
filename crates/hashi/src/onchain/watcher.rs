@@ -223,7 +223,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .deposit_queue
                     .requests
                     .remove(&deposit_confirmed_event.request_id);
-                state.hashi.utxo_pool.utxos.insert(utxo.id, utxo);
+                state.hashi.utxo_pool.active_utxos.insert(utxo.id, utxo);
                 // TODO notify
             }
             HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {

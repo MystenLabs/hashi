@@ -18,10 +18,8 @@ public fun deposit(
     assert!(hashi.config().deposit_fee() == fee.value());
     hashi.treasury_mut().deposit_fee(fee);
 
-    // Check that the provided UTXO doesn't already exist in the system
-    assert!(!hashi.utxo_pool().contains(request.utxo().id()));
-    // Check that the UTXO hasn't been withdrawn before (replay protection)
-    assert!(!hashi.withdrawn_utxo_pool().contains(request.utxo().id()));
+    // Check that the UTXO isn't already active or previously spent (replay protection)
+    assert!(!hashi.utxo_pool().is_spent_or_active(request.utxo().id()));
 
     let deposit_requested_event = DepositRequestedEvent {
         request_id: request.id(),
@@ -75,7 +73,7 @@ public fun confirm_deposit(
         sui::transfer::public_transfer(btc, recipient);
     };
 
-    hashi.utxo_pool_mut().insert(utxo);
+    hashi.utxo_pool_mut().insert_active(utxo);
     sui::event::emit(deposit_confirmed_event);
 }
 
