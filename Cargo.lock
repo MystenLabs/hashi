@@ -2611,6 +2611,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashi-monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hashi-types"
 version = "0.0.0"
 dependencies = [
