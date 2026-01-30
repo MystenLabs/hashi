@@ -1,3 +1,4 @@
+use crate::dkg::spawn_blocking;
 use crate::dkg::types;
 use crate::dkg::types::DkgError;
 use crate::grpc::HttpService;
@@ -26,13 +27,14 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::SendMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = {
-            let dkg_manager = self.dkg_manager();
+        let dkg_manager = self.dkg_manager();
+        let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = dkg_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
-                .map_err(dkg_error_to_status)?
-        };
+                .map_err(dkg_error_to_status)
+        })
+        .await?;
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
     }
 
@@ -66,13 +68,14 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = {
-            let dkg_manager = self.dkg_manager();
+        let dkg_manager = self.dkg_manager();
+        let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = dkg_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_complain_request(&internal_request)
-                .map_err(dkg_error_to_status)?
-        };
+                .map_err(dkg_error_to_status)
+        })
+        .await?;
         Ok(tonic::Response::new(ComplainResponse::from(&response)))
     }
 

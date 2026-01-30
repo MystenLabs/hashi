@@ -99,9 +99,6 @@ pub struct DkgManager {
     previous_output: Option<DkgOutput>,
 }
 
-// TODO: Factor out common code between DKG and key rotation.
-// TODO: Consider wrapping crypto operations with `tokio::task::spawn_blocking`
-// since they are CPU-heavy and can block the async runtime.
 impl DkgManager {
     pub fn new(
         address: Address,
@@ -397,10 +394,14 @@ impl DkgManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> DkgResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
-        let mut rng = StdRng::from_entropy();
         let dealer_data = {
-            let mut mgr = dkg_manager.write().unwrap();
-            mgr.prepare_dealer_flow(&mut rng)?
+            let mgr = Arc::clone(dkg_manager);
+            spawn_blocking(move || {
+                let mut rng = StdRng::from_entropy();
+                let mut mgr = mgr.write().unwrap();
+                mgr.prepare_dealer_flow(&mut rng)
+            })
+            .await?
         };
         let mut aggregator =
             BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.messages_hash.clone());
@@ -465,8 +466,14 @@ impl DkgManager {
                 continue;
             }
             {
-                let mgr = dkg_manager.read().unwrap();
-                if let Err(e) = mgr.committee.verify_signature(&dkg_cert) {
+                let mgr = Arc::clone(dkg_manager);
+                let cert = dkg_cert.clone();
+                let verified = spawn_blocking(move || {
+                    let mgr = mgr.read().unwrap();
+                    mgr.committee.verify_signature(&cert)
+                })
+                .await;
+                if let Err(e) = verified {
                     tracing::info!("Invalid certificate signature from {:?}: {}", &dealer, e);
                     continue;
                 }
@@ -495,18 +502,24 @@ impl DkgManager {
                     })?;
             }
             let has_complaint = {
-                let mut mgr = dkg_manager.write().unwrap();
-                if !mgr
-                    .dealer_outputs
-                    .contains_key(&DealerOutputsKey::Dkg(dealer))
-                    && !mgr
-                        .complaints_to_process
-                        .contains_key(&ComplaintsToProcessKey::Dkg(dealer))
-                {
-                    mgr.process_certified_dkg_message(dealer)?;
-                }
-                mgr.complaints_to_process
-                    .contains_key(&ComplaintsToProcessKey::Dkg(dealer))
+                let mgr = Arc::clone(dkg_manager);
+                spawn_blocking(move || {
+                    let mut mgr = mgr.write().unwrap();
+                    if !mgr
+                        .dealer_outputs
+                        .contains_key(&DealerOutputsKey::Dkg(dealer))
+                        && !mgr
+                            .complaints_to_process
+                            .contains_key(&ComplaintsToProcessKey::Dkg(dealer))
+                    {
+                        mgr.process_certified_dkg_message(dealer)?;
+                    }
+                    Ok::<_, DkgError>(
+                        mgr.complaints_to_process
+                            .contains_key(&ComplaintsToProcessKey::Dkg(dealer)),
+                    )
+                })
+                .await?
             };
             if has_complaint {
                 let signers = {
@@ -541,8 +554,12 @@ impl DkgManager {
             certified_dealers.insert(dealer);
         }
         let output = {
-            let mgr = dkg_manager.read().unwrap();
-            mgr.complete_dkg(certified_dealers.iter().copied())?
+            let mgr = Arc::clone(dkg_manager);
+            spawn_blocking(move || {
+                let mgr = mgr.read().unwrap();
+                mgr.complete_dkg(certified_dealers.into_iter())
+            })
+            .await?
         };
         Ok(output)
     }
@@ -554,10 +571,15 @@ impl DkgManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> DkgResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
-        let mut rng = StdRng::from_entropy();
         let dealer_data = {
-            let mut mgr = dkg_manager.write().unwrap();
-            mgr.prepare_rotation_dealer_flow(previous, &mut rng)?
+            let mgr = Arc::clone(dkg_manager);
+            let previous = previous.clone();
+            spawn_blocking(move || {
+                let mut rng = StdRng::from_entropy();
+                let mut mgr = mgr.write().unwrap();
+                mgr.prepare_rotation_dealer_flow(&previous, &mut rng)
+            })
+            .await?
         };
         let mut aggregator =
             BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.messages_hash.clone());
@@ -631,8 +653,14 @@ impl DkgManager {
                 continue;
             }
             {
-                let mgr = dkg_manager.read().unwrap();
-                if let Err(e) = mgr.committee.verify_signature(&rotation_cert) {
+                let mgr = Arc::clone(dkg_manager);
+                let cert = rotation_cert.clone();
+                let verified = spawn_blocking(move || {
+                    let mgr = mgr.read().unwrap();
+                    mgr.committee.verify_signature(&cert)
+                })
+                .await;
+                if let Err(e) = verified {
                     tracing::info!(
                         "Invalid rotation certificate signature from {:?}: {}",
                         &dealer,
@@ -688,16 +716,23 @@ impl DkgManager {
                     })?;
             }
             {
-                let mut mgr = dkg_manager.write().unwrap();
-                if dealer_share_indices.iter().any(|idx| {
-                    !mgr.dealer_outputs
-                        .contains_key(&DealerOutputsKey::Rotation(*idx))
-                        && !mgr
-                            .complaints_to_process
-                            .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
-                }) {
-                    mgr.process_certified_rotation_message(&dealer, previous)?;
-                }
+                let mgr = Arc::clone(dkg_manager);
+                let previous = previous.clone();
+                let share_indices = dealer_share_indices.clone();
+                spawn_blocking(move || {
+                    let mut mgr = mgr.write().unwrap();
+                    if share_indices.iter().any(|idx| {
+                        !mgr.dealer_outputs
+                            .contains_key(&DealerOutputsKey::Rotation(*idx))
+                            && !mgr
+                                .complaints_to_process
+                                .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
+                    }) {
+                        mgr.process_certified_rotation_message(&dealer, &previous)?;
+                    }
+                    Ok::<_, DkgError>(())
+                })
+                .await?;
             }
             let signers = {
                 let mgr = dkg_manager.read().unwrap();
@@ -717,8 +752,13 @@ impl DkgManager {
             certified_dealers.insert(dealer);
         }
         let output = {
-            let mut mgr = dkg_manager.write().unwrap();
-            mgr.complete_key_rotation(previous, &certified_share_indices)?
+            let mgr = Arc::clone(dkg_manager);
+            let previous = previous.clone();
+            spawn_blocking(move || {
+                let mut mgr = mgr.write().unwrap();
+                mgr.complete_key_rotation(&previous, &certified_share_indices)
+            })
+            .await?
         };
         Ok(output)
     }
@@ -1153,6 +1193,7 @@ impl DkgManager {
             };
             (complaint_request, receiver, message)
         };
+        let receiver = Arc::new(receiver);
         let mut responses = Vec::new();
         for signer in signers {
             let response =
@@ -1173,7 +1214,13 @@ impl DkgManager {
                 }
             };
             responses.push(complaint_response);
-            match receiver.recover(&message, responses.clone()) {
+            let result = {
+                let receiver = Arc::clone(&receiver);
+                let message = message.clone();
+                let responses = responses.clone();
+                spawn_blocking(move || receiver.recover(&message, responses)).await
+            };
+            match result {
                 Ok(partial_output) => {
                     let mut mgr = dkg_manager.write().unwrap();
                     mgr.dealer_outputs
@@ -1216,6 +1263,12 @@ impl DkgManager {
             };
             (request, recovery_contexts)
         };
+        // Wrap receivers in Arc for use in `spawn_blocking` across loop iterations.
+        let recovery_contexts: HashMap<ShareIndex, (Arc<avss::Receiver>, avss::Message)> =
+            recovery_contexts
+                .into_iter()
+                .map(|(idx, (r, m))| (idx, (Arc::new(r), m)))
+                .collect();
         let mut all_responses: HashMap<
             ShareIndex,
             Vec<complaint::ComplaintResponse<avss::SharesForNode>>,
@@ -1248,7 +1301,13 @@ impl DkgManager {
                     for share_index in pending_shares.clone() {
                         let responses = all_responses.get(&share_index).unwrap();
                         let (receiver, message) = recovery_contexts.get(&share_index).unwrap();
-                        match receiver.recover(message, responses.clone()) {
+                        let result = {
+                            let receiver = Arc::clone(receiver);
+                            let message = message.clone();
+                            let responses = responses.clone();
+                            spawn_blocking(move || receiver.recover(&message, responses)).await
+                        };
+                        match result {
                             Ok(partial_output) => {
                                 let mut mgr = dkg_manager.write().unwrap();
                                 mgr.dealer_outputs.insert(
@@ -1795,8 +1854,13 @@ impl DkgManager {
             (is_member, mgr.previous_threshold)
         };
         let previous = if is_member_of_previous_committee {
-            let mut mgr = dkg_manager.write().unwrap();
-            mgr.reconstruct_previous_output(previous_certificates)?
+            let mgr = Arc::clone(dkg_manager);
+            let certs = previous_certificates.to_vec();
+            spawn_blocking(move || {
+                let mut mgr = mgr.write().unwrap();
+                mgr.reconstruct_previous_output(&certs)
+            })
+            .await?
         } else {
             let threshold = threshold_opt.ok_or_else(|| {
                 DkgError::InvalidConfig("Key rotation requires previous threshold".into())
@@ -1883,6 +1947,16 @@ where
         }
     }))
     .await
+}
+
+pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .expect("spawn_blocking task panicked")
 }
 
 #[cfg(test)]
