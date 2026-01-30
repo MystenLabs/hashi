@@ -183,6 +183,12 @@ mod tests {
         info!("  - Bitcoin RPC: {}", networks.bitcoin_node.rpc_url());
         info!("  - Hashi nodes: {}", networks.hashi_network.nodes().len());
 
+        info!("Waiting for MPC key to be ready...");
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+        info!("MPC key ready");
+
         let user_key = networks.sui_network.user_keys.first().unwrap();
         let hbtc_recipient = user_key.public_key().derive_address();
         let hashi = networks.hashi_network.nodes()[0].0.clone();

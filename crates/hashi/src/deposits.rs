@@ -5,6 +5,8 @@ use anyhow::bail;
 use bitcoin::ScriptBuf;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::XOnlyPublicKey;
+use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::proto::MemberSignature;
 
@@ -117,6 +119,7 @@ impl Hashi {
         };
         self.bitcoin_address_from_pubkey(&pubkey)
     }
+
     fn bitcoin_address_from_script_pubkey(
         &self,
         script_pubkey: &ScriptBuf,
@@ -131,10 +134,16 @@ impl Hashi {
         bitcoin::Address::p2tr(&secp, *pubkey, None, network)
     }
 
-    /// TODO: Use the real key
     pub fn get_hashi_pubkey(&self) -> XOnlyPublicKey {
-        let hardcoded_key_hex = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-        XOnlyPublicKey::from_slice(&hex::decode(hardcoded_key_hex).unwrap()).unwrap()
+        let g = self
+            .mpc_handle()
+            .expect("MpcHandle not initialized")
+            .public_key()
+            .expect("MPC public key not available yet");
+        // Convert G (ProjectivePoint, 33 bytes compressed) to SchnorrPublicKey (32 bytes x-only)
+        let schnorr_pk =
+            SchnorrPublicKey::try_from(&g).expect("valid non-zero group element for schnorr key");
+        XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array()).expect("valid 32-byte x-only key")
     }
 
     fn sign_deposit_confirmation(
