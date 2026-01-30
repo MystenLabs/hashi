@@ -36,7 +36,7 @@ pub mod display {
         format!("{:?}", datetime)
     }
 
-    /// Format proposal type for display
+    /// Format proposal type for display (from on-chain type)
     pub fn format_proposal_type(proposal_type: &ProposalType) -> String {
         match proposal_type {
             ProposalType::Upgrade => "Upgrade".to_string(),

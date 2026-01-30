@@ -12,7 +12,8 @@
 //! ```bash
 //! # Governance
 //! hashi-cli proposal list
-//! hashi-cli proposal vote 0x123... -t upgrade
+//! hashi-cli proposal vote 0x123...
+//! hashi-cli proposal create upgrade <digest>
 //!
 //! # Committee
 //! hashi-cli committee list
@@ -20,11 +21,15 @@
 //!
 //! # Configuration
 //! hashi-cli config template -o hashi-cli.toml
+//! hashi-cli config show
 //! ```
 
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use clap::builder::styling::AnsiColor;
+use clap::builder::styling::Effects;
+use clap::builder::styling::Styles;
 use colored::Colorize;
 
 mod client;
@@ -32,12 +37,19 @@ mod commands;
 mod config;
 mod types;
 
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default());
+
 #[derive(Parser)]
 #[clap(
     name = "hashi-cli",
     about = "CLI for Hashi committee members to manage proposals and vote",
     version = env!("CARGO_PKG_VERSION"),
-    author = "Mysten Labs"
+    author = "Mysten Labs",
+    styles = STYLES
 )]
 struct Cli {
     /// Path to the configuration file
@@ -71,6 +83,10 @@ struct Cli {
     /// Gas budget for transactions (in MIST). If not set, estimates via dry-run.
     #[clap(long, global = true, env = "HASHI_GAS_BUDGET")]
     gas_budget: Option<u64>,
+
+    /// Simulate the transaction without executing (dry-run)
+    #[clap(long, global = true)]
+    dry_run: bool,
 
     #[clap(subcommand)]
     command: Commands,
@@ -120,20 +136,12 @@ enum ProposalCommands {
     Vote {
         /// The proposal object ID to vote on
         proposal_id: String,
-
-        /// The proposal type (required for type-safety)
-        #[clap(long, short = 't', value_enum)]
-        r#type: ProposalType,
     },
 
     /// Remove your vote from a proposal
     RemoveVote {
         /// The proposal object ID
         proposal_id: String,
-
-        /// The proposal type
-        #[clap(long, short = 't', value_enum)]
-        r#type: ProposalType,
     },
 
     /// Create a new proposal
@@ -183,9 +191,16 @@ enum CreateProposalCommands {
 }
 
 /// Shared metadata arguments for proposal creation
+///
+/// Metadata provides additional context about the proposal (e.g., description, rationale).
+/// This information is stored on-chain and displayed when viewing proposals.
 #[derive(Args)]
 struct MetadataArgs {
-    /// Optional metadata key-value pairs (format: key=value)
+    /// Metadata key-value pairs (format: key=value). Can be specified multiple times.
+    ///
+    /// Common keys: description, rationale, link
+    ///
+    /// Example: -m description="Upgrade to v2" -m link="https://..."
     #[clap(long, short, value_name = "KEY=VALUE")]
     metadata: Vec<String>,
 }
@@ -225,30 +240,13 @@ enum ConfigCommands {
     OnChain,
 }
 
-#[derive(Clone, Debug, clap::ValueEnum)]
-pub enum ProposalType {
-    Upgrade,
-    UpdateDepositFee,
-    EnableVersion,
-    DisableVersion,
-}
-
-impl std::fmt::Display for ProposalType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProposalType::Upgrade => write!(f, "Upgrade"),
-            ProposalType::UpdateDepositFee => write!(f, "UpdateDepositFee"),
-            ProposalType::EnableVersion => write!(f, "EnableVersion"),
-            ProposalType::DisableVersion => write!(f, "DisableVersion"),
-        }
-    }
-}
-
 /// Transaction options passed to commands
 pub struct TxOptions {
     /// Gas budget - None means estimate via dry-run
     pub gas_budget: Option<u64>,
     pub skip_confirm: bool,
+    /// If true, simulate the transaction without executing
+    pub dry_run: bool,
 }
 
 impl TxOptions {
@@ -284,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
     let tx_opts = TxOptions {
         gas_budget: cli.gas_budget,
         skip_confirm: cli.yes,
+        dry_run: cli.dry_run,
     };
 
     match cli.command {
@@ -294,24 +293,18 @@ async fn main() -> anyhow::Result<()> {
             ProposalCommands::View { proposal_id } => {
                 commands::proposal::view_proposal(&config, &proposal_id).await?;
             }
-            ProposalCommands::Vote {
-                proposal_id,
-                r#type,
-            } => {
-                commands::proposal::vote(&config, &proposal_id, r#type, &tx_opts).await?;
+            ProposalCommands::Vote { proposal_id } => {
+                commands::proposal::vote(&config, &proposal_id, &tx_opts).await?;
             }
-            ProposalCommands::RemoveVote {
-                proposal_id,
-                r#type,
-            } => {
-                commands::proposal::remove_vote(&config, &proposal_id, r#type, &tx_opts).await?;
+            ProposalCommands::RemoveVote { proposal_id } => {
+                commands::proposal::remove_vote(&config, &proposal_id, &tx_opts).await?;
             }
             ProposalCommands::Create { proposal } => match proposal {
                 CreateProposalCommands::Upgrade { digest, metadata } => {
                     commands::proposal::create_upgrade_proposal(
                         &config,
                         &digest,
-                        metadata.metadata,
+                        parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
                     .await?;
@@ -320,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
                     commands::proposal::create_update_deposit_fee_proposal(
                         &config,
                         fee,
-                        metadata.metadata,
+                        parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
                     .await?;
@@ -329,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
                     commands::proposal::create_enable_version_proposal(
                         &config,
                         version,
-                        metadata.metadata,
+                        parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
                     .await?;
@@ -338,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
                     commands::proposal::create_disable_version_proposal(
                         &config,
                         version,
-                        metadata.metadata,
+                        parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
                     .await?;
@@ -372,6 +365,25 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse metadata arguments from "key=value" format into a Vec of tuples
+fn parse_metadata(args: Vec<String>) -> Vec<(String, String)> {
+    args.into_iter()
+        .filter_map(|s| {
+            let mut parts = s.splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some(key), Some(value)) => Some((key.to_string(), value.to_string())),
+                _ => {
+                    print_warning(&format!(
+                        "Ignoring invalid metadata format: '{}' (expected key=value)",
+                        s
+                    ));
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 fn init_tracing(verbose: bool) {
     let filter = if verbose {
         tracing_subscriber::EnvFilter::builder()
@@ -390,15 +402,8 @@ fn init_tracing(verbose: bool) {
 }
 
 /// Print a success message
-#[allow(dead_code)]
 pub fn print_success(msg: &str) {
     println!("{} {}", "✓".green().bold(), msg);
-}
-
-/// Print an error message
-#[allow(dead_code)]
-pub fn print_error(msg: &str) {
-    eprintln!("{} {}", "✗".red().bold(), msg);
 }
 
 /// Print an info message

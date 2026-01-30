@@ -107,7 +107,7 @@ pub async fn show_onchain_config(config: &Config) -> Result<()> {
 
     print_info("Fetching on-chain configuration...");
 
-    let epoch = client.fetch_epoch().await?;
+    let epoch = client.fetch_epoch();
 
     println!("\n{}", "On-chain Hashi Configuration:".bold());
     println!("{}", "━".repeat(60).dimmed());

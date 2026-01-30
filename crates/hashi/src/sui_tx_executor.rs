@@ -52,7 +52,9 @@ use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
-const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
+
+/// Well-known Sui Clock object address (0x6)
+pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 
 /// A reusable executor for submitting Sui transactions.
 ///
@@ -107,6 +109,11 @@ impl SuiTxExecutor {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Get the sender address (derived from the signer's public key).
+    pub fn sender(&self) -> Address {
+        self.signer.public_key().derive_address()
     }
 
     // ========================================================================

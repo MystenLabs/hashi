@@ -17,16 +17,24 @@ use crate::types::display;
 pub async fn list_members(config: &Config, epoch: Option<u64>) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
-    let epoch_display = epoch
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| "current".to_string());
+    let current_epoch = client.fetch_epoch();
+
+    // Note: Currently only the current epoch's members are available
+    if let Some(requested_epoch) = epoch
+        && requested_epoch != current_epoch
+    {
+        print_warning(&format!(
+            "Only current epoch ({}) data is available. Showing current epoch.",
+            current_epoch
+        ));
+    }
 
     print_info(&format!(
         "Fetching committee for epoch {}...",
-        epoch_display
+        current_epoch
     ));
 
-    let members = client.fetch_committee(epoch).await?;
+    let members = client.fetch_committee_members();
 
     if members.is_empty() {
         println!("\n{}", "No committee members found.".dimmed());
@@ -34,7 +42,7 @@ pub async fn list_members(config: &Config, epoch: Option<u64>) -> Result<()> {
         return Ok(());
     }
 
-    println!("\n👥 Committee Members (Epoch {}):\n", epoch_display);
+    println!("\n👥 Committee Members (Epoch {}):\n", current_epoch);
 
     #[derive(Tabled)]
     struct MemberRow {
@@ -73,7 +81,7 @@ pub async fn view_member(config: &Config, address: &str) -> Result<()> {
 
     print_info(&format!("Fetching member info for {}...", address));
 
-    let members = client.fetch_committee(None).await?;
+    let members = client.fetch_committee_members();
 
     let member = members.iter().find(|m| m.validator_address == member_addr);
 
@@ -113,7 +121,7 @@ pub async fn show_epoch(config: &Config) -> Result<()> {
 
     print_info("Fetching epoch information...");
 
-    let epoch = client.fetch_epoch().await?;
+    let epoch = client.fetch_epoch();
 
     println!("\n{}", "Epoch Information:".bold());
     println!("{}", "━".repeat(50).dimmed());

@@ -213,7 +213,7 @@ impl CommitteeSet {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MemberInfo {
     /// Sui Validator Address of this node
     pub validator_address: Address,

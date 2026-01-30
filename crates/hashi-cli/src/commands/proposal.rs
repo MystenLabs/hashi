@@ -10,11 +10,80 @@ use tabled::Tabled;
 use crate::TxOptions;
 use crate::client::CreateProposalParams;
 use crate::client::HashiClient;
+use crate::client::SimulationResult;
+use crate::client::get_proposal_type_arg;
 use crate::config::Config;
 use crate::print_info;
 use crate::print_warning;
 use crate::types::Proposal;
 use crate::types::display;
+
+/// Print metadata if present
+fn print_metadata(metadata: &[(String, String)]) {
+    if !metadata.is_empty() {
+        println!("  {}", "Metadata:".bold());
+        for (key, value) in metadata {
+            println!("    {}: {}", key.dimmed(), value);
+        }
+    }
+}
+
+/// Print simulation (dry-run) results
+fn print_simulation_result(result: &SimulationResult) {
+    println!("\n{}", "🔍 Dry-run Results:".bold());
+    println!("  {} {}", "Sender:".dimmed(), result.sender.to_hex().cyan());
+    println!(
+        "  {} {} MIST",
+        "Gas Budget:".dimmed(),
+        result.gas_budget.to_string().cyan()
+    );
+    println!(
+        "  {} {} MIST/unit",
+        "Gas Price:".dimmed(),
+        result.gas_price.to_string().cyan()
+    );
+    let max_cost_sui = (result.gas_budget as f64) / 1_000_000_000.0;
+    println!(
+        "  {} {:.6} SUI",
+        "Max Cost:".dimmed(),
+        format!("{:.6}", max_cost_sui).yellow()
+    );
+    println!(
+        "\n  {} Transaction was simulated successfully. Use without --dry-run to execute.",
+        "✓".green()
+    );
+}
+
+/// Execute or simulate a transaction based on tx_opts
+///
+/// Returns Ok(true) if execution/simulation succeeded, Ok(false) if no keypair configured.
+async fn execute_or_simulate(
+    client: &mut HashiClient,
+    tx: sui_transaction_builder::TransactionBuilder,
+    tx_opts: &TxOptions,
+) -> Result<bool> {
+    if !client.can_execute() {
+        print_warning("Transaction execution requires keypair configuration (--keypair).");
+        return Ok(false);
+    }
+
+    if tx_opts.dry_run {
+        print_info("Simulating transaction (dry-run)...");
+        let result = client.simulate(tx).await?;
+        print_simulation_result(&result);
+    } else {
+        print_info("Executing transaction...");
+        let response = client.execute(tx).await?;
+        let digest = response.transaction().digest();
+        println!(
+            "\n{} Transaction submitted: {}",
+            "✓".green(),
+            digest.to_string().cyan()
+        );
+    }
+
+    Ok(true)
+}
 
 /// List all active proposals
 pub async fn list_proposals(
@@ -26,7 +95,7 @@ pub async fn list_proposals(
 
     print_info("Fetching proposals...");
 
-    let proposals = client.fetch_proposals().await?;
+    let proposals = client.fetch_proposals();
 
     if proposals.is_empty() {
         println!("\n{}", "No active proposals found.".dimmed());
@@ -111,7 +180,6 @@ pub async fn view_proposal(config: &Config, proposal_id: &str) -> Result<()> {
 
     let proposal = client
         .fetch_proposal(&proposal_addr)
-        .await?
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
     println!();
@@ -121,13 +189,8 @@ pub async fn view_proposal(config: &Config, proposal_id: &str) -> Result<()> {
 }
 
 /// Vote on a proposal
-pub async fn vote(
-    config: &Config,
-    proposal_id: &str,
-    proposal_type: crate::ProposalType,
-    tx_opts: &TxOptions,
-) -> Result<()> {
-    let client = HashiClient::new(config).await?;
+pub async fn vote(config: &Config, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+    let mut client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
         .with_context(|| format!("Invalid proposal ID: {}", proposal_id))?;
@@ -136,41 +199,35 @@ pub async fn vote(
 
     let proposal = client
         .fetch_proposal(&proposal_addr)
-        .await?
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
-    println!("\n{}", "Proposal Details:".bold());
-    println!(
-        "  Type: {}",
-        display::format_proposal_type(&proposal.proposal_type).cyan()
-    );
+    let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
-    if !tx_opts.skip_confirm && !confirm_action("vote on this proposal")? {
+    println!("\n{}", "Proposal Details:".bold());
+    println!("  Type: {}", proposal_type_str.cyan());
+
+    if !tx_opts.skip_confirm && !confirm_action("vote on this proposal").await? {
         return Ok(());
     }
 
     print_info("Building vote transaction...");
 
-    let gas_budget = client.resolve_gas_budget(tx_opts).await?;
-    let _tx = client.build_vote_transaction(proposal_addr, &proposal_type)?;
+    // Infer the type tag from the on-chain proposal type
+    let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
+    let tx = client.build_vote_transaction(proposal_addr, type_arg);
 
-    print_info(&format!("Gas budget: {} MIST", gas_budget));
+    print_info(&format!(
+        "Transaction: proposal::vote<{}> on {}",
+        proposal_type_str, proposal_id
+    ));
 
-    // TODO: Execute transaction using SuiTxExecutor pattern
-    // Would need to load keypair and call executor.execute(tx)
-    print_warning("Transaction built. Execution requires keypair - see SuiTxExecutor.");
-
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
 
 /// Remove vote from a proposal
-pub async fn remove_vote(
-    config: &Config,
-    proposal_id: &str,
-    proposal_type: crate::ProposalType,
-    tx_opts: &TxOptions,
-) -> Result<()> {
-    let client = HashiClient::new(config).await?;
+pub async fn remove_vote(config: &Config, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+    let mut client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
         .with_context(|| format!("Invalid proposal ID: {}", proposal_id))?;
@@ -179,27 +236,29 @@ pub async fn remove_vote(
 
     let proposal = client
         .fetch_proposal(&proposal_addr)
-        .await?
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
-    println!("\n{}", "Proposal Details:".bold());
-    println!(
-        "  Type: {}",
-        display::format_proposal_type(&proposal.proposal_type).cyan()
-    );
+    let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
-    if !tx_opts.skip_confirm && !confirm_action("remove your vote from this proposal")? {
+    println!("\n{}", "Proposal Details:".bold());
+    println!("  Type: {}", proposal_type_str.cyan());
+
+    if !tx_opts.skip_confirm && !confirm_action("remove your vote from this proposal").await? {
         return Ok(());
     }
 
     print_info("Building remove_vote transaction...");
 
-    let gas_budget = client.resolve_gas_budget(tx_opts).await?;
-    let _tx = client.build_remove_vote_transaction(proposal_addr, &proposal_type)?;
+    // Infer the type tag from the on-chain proposal type
+    let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
+    let tx = client.build_remove_vote_transaction(proposal_addr, type_arg);
 
-    print_info(&format!("Gas budget: {} MIST", gas_budget));
-    print_warning("Transaction built. Execution requires keypair - see SuiTxExecutor.");
+    print_info(&format!(
+        "Transaction: proposal::remove_vote<{}> on {}",
+        proposal_type_str, proposal_id
+    ));
 
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
 
@@ -207,7 +266,7 @@ pub async fn remove_vote(
 pub async fn create_upgrade_proposal(
     config: &Config,
     digest: &str,
-    _metadata: Vec<String>,
+    metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
     let digest_bytes =
@@ -215,21 +274,20 @@ pub async fn create_upgrade_proposal(
 
     println!("\n{}", "Creating Upgrade Proposal:".bold());
     println!("  Digest: 0x{}", hex::encode(&digest_bytes));
+    print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this upgrade proposal")? {
+    if !tx_opts.skip_confirm && !confirm_action("create this upgrade proposal").await? {
         return Ok(());
     }
 
-    let client = HashiClient::new(config).await?;
-    let gas_budget = client.resolve_gas_budget(tx_opts).await?;
-
-    let _tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
-    })?;
+        metadata,
+    });
 
-    print_info(&format!("Gas budget: {} MIST", gas_budget));
-    print_warning("Transaction built. Execution requires keypair - see SuiTxExecutor.");
-
+    print_info("Transaction: upgrade::propose");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
 
@@ -237,25 +295,25 @@ pub async fn create_upgrade_proposal(
 pub async fn create_update_deposit_fee_proposal(
     config: &Config,
     fee: u64,
-    _metadata: Vec<String>,
+    metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
     println!("\n{}", "Creating Update Deposit Fee Proposal:".bold());
     println!("  New fee: {} satoshis", fee);
+    print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this deposit fee update proposal")? {
+    if !tx_opts.skip_confirm && !confirm_action("create this deposit fee update proposal").await? {
         return Ok(());
     }
 
-    let client = HashiClient::new(config).await?;
-    let gas_budget = client.resolve_gas_budget(tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateDepositFee {
+        fee,
+        metadata,
+    });
 
-    let _tx =
-        client.build_create_proposal_transaction(CreateProposalParams::UpdateDepositFee { fee })?;
-
-    print_info(&format!("Gas budget: {} MIST", gas_budget));
-    print_warning("Transaction built. Execution requires keypair - see SuiTxExecutor.");
-
+    print_info("Transaction: update_deposit_fee::propose");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
 
@@ -263,25 +321,25 @@ pub async fn create_update_deposit_fee_proposal(
 pub async fn create_enable_version_proposal(
     config: &Config,
     version: u64,
-    _metadata: Vec<String>,
+    metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
     println!("\n{}", "Creating Enable Version Proposal:".bold());
     println!("  Version: {}", version);
+    print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this enable version proposal")? {
+    if !tx_opts.skip_confirm && !confirm_action("create this enable version proposal").await? {
         return Ok(());
     }
 
-    let client = HashiClient::new(config).await?;
-    let gas_budget = client.resolve_gas_budget(tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::EnableVersion {
+        version,
+        metadata,
+    });
 
-    let _tx = client
-        .build_create_proposal_transaction(CreateProposalParams::EnableVersion { version })?;
-
-    print_info(&format!("Gas budget: {} MIST", gas_budget));
-    print_warning("Transaction built. Execution requires keypair - see SuiTxExecutor.");
-
+    print_info("Transaction: enable_version::propose");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
 
@@ -289,25 +347,25 @@ pub async fn create_enable_version_proposal(
 pub async fn create_disable_version_proposal(
     config: &Config,
     version: u64,
-    _metadata: Vec<String>,
+    metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
     println!("\n{}", "Creating Disable Version Proposal:".bold());
     println!("  Version: {}", version);
+    print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this disable version proposal")? {
+    if !tx_opts.skip_confirm && !confirm_action("create this disable version proposal").await? {
         return Ok(());
     }
 
-    let client = HashiClient::new(config).await?;
-    let gas_budget = client.resolve_gas_budget(tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::DisableVersion {
+        version,
+        metadata,
+    });
 
-    let _tx = client
-        .build_create_proposal_transaction(CreateProposalParams::DisableVersion { version })?;
-
-    print_info(&format!("Gas budget: {} MIST", gas_budget));
-    print_warning("Transaction built. Execution requires keypair - see SuiTxExecutor.");
-
+    print_info("Transaction: disable_version::propose");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
 
@@ -333,13 +391,19 @@ fn print_proposal_detailed(proposal: &Proposal) {
     println!("{}", "━".repeat(60).dimmed());
 }
 
-fn confirm_action(action: &str) -> Result<bool> {
+async fn confirm_action(action: &str) -> Result<bool> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::io::BufReader;
+
     println!(
         "\n{}",
         format!("Are you sure you want to {}? (y/N)", action).yellow()
     );
+
+    let mut reader = BufReader::new(tokio::io::stdin());
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
+    reader.read_line(&mut input).await?;
+
     if input.trim().eq_ignore_ascii_case("y") {
         Ok(true)
     } else {

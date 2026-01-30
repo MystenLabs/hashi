@@ -1,140 +1,220 @@
 //! Sui RPC client for interacting with the Hashi on-chain state
 //!
-//! This module provides a client for reading Hashi state and building transactions.
-//! It leverages the `hashi` crate's `OnchainState` for reading and `SuiTxExecutor`
-//! patterns for transaction execution.
+//! This module provides a client for reading Hashi state and building/executing
+//! proposal-related transactions.
+//!
+//! Uses `OnchainState` from the hashi crate for reading on-chain data,
+//! and `SuiTxExecutor` for transaction execution when a keypair is configured.
 
 use anyhow::Context;
 use anyhow::Result;
 use hashi::config::HashiIds;
+use hashi::onchain::OnchainState;
+use hashi::onchain::types::MemberInfo;
 use hashi::onchain::types::Proposal;
-use hashi::onchain::types::ProposalType;
-use sui_rpc::Client;
+use hashi::sui_tx_executor::SUI_CLOCK_OBJECT_ID;
+use hashi::sui_tx_executor::SuiTxExecutor;
+use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
+use sui_sdk_types::StructTag;
+use sui_sdk_types::TypeTag;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 
-use crate::TxOptions;
 use crate::config::Config;
 
-/// Default gas budget when estimation fails or is not available
-pub const DEFAULT_GAS_BUDGET: u64 = 10_000_000; // 0.01 SUI
+/// Parameters for creating different types of proposals
+#[derive(Debug, Clone)]
+pub enum CreateProposalParams {
+    Upgrade {
+        digest: Vec<u8>,
+        metadata: Vec<(String, String)>,
+    },
+    UpdateDepositFee {
+        fee: u64,
+        metadata: Vec<(String, String)>,
+    },
+    EnableVersion {
+        version: u64,
+        metadata: Vec<(String, String)>,
+    },
+    DisableVersion {
+        version: u64,
+        metadata: Vec<(String, String)>,
+    },
+}
 
-/// Well-known Sui Clock object
-const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
+/// Result of a transaction simulation (dry-run)
+#[derive(Debug)]
+pub struct SimulationResult {
+    /// The sender address that would execute the transaction
+    pub sender: Address,
+    /// Estimated gas budget (in MIST)
+    pub gas_budget: u64,
+    /// Gas price (in MIST per unit)
+    pub gas_price: u64,
+}
 
-/// Client for interacting with Hashi on-chain state and executing transactions
+/// Client for reading Hashi on-chain state and building/executing transactions.
+///
+/// Uses `OnchainState` for reading on-chain data (committees, proposals, etc.)
+/// and `SuiTxExecutor` for transaction execution when a keypair is configured.
 pub struct HashiClient {
-    #[allow(dead_code)] // Will be used for actual RPC calls
-    client: Client,
+    /// On-chain state reader from hashi crate
+    onchain_state: OnchainState,
+    /// Hashi package and object IDs
     hashi_ids: HashiIds,
+    /// Optional executor for signing and submitting transactions
+    executor: Option<SuiTxExecutor>,
 }
 
 impl HashiClient {
     /// Create a new client
+    ///
+    /// This scrapes the current on-chain state and optionally sets up
+    /// transaction execution if a keypair is configured.
     pub async fn new(config: &Config) -> Result<Self> {
         config.validate()?;
-
-        let client = Client::new(&config.sui_rpc_url).context("Failed to create Sui RPC client")?;
 
         let hashi_ids = HashiIds {
             package_id: config.package_id(),
             hashi_object_id: config.hashi_object_id(),
         };
 
-        Ok(Self { client, hashi_ids })
-    }
+        // Create OnchainState which scrapes the current state
+        // The background watcher will be dropped when HashiClient is dropped
+        let onchain_state = OnchainState::new(&config.sui_rpc_url, hashi_ids, None)
+            .await
+            .context("Failed to initialize on-chain state")?;
 
-    /// Get the underlying RPC client
-    #[allow(dead_code)]
-    pub fn client(&self) -> &Client {
-        &self.client
+        // Try to create executor if keypair is available
+        let executor = match config.load_keypair()? {
+            Some(signer) => {
+                tracing::debug!("Keypair loaded, transaction execution enabled");
+                Some(SuiTxExecutor::new(
+                    onchain_state.client(),
+                    signer,
+                    hashi_ids,
+                ))
+            }
+            None => {
+                tracing::debug!("No keypair configured, transaction execution disabled");
+                None
+            }
+        };
+
+        Ok(Self {
+            onchain_state,
+            hashi_ids,
+            executor,
+        })
     }
 
     /// Get the Hashi IDs
-    #[allow(dead_code)]
     pub fn hashi_ids(&self) -> &HashiIds {
         &self.hashi_ids
     }
 
+    /// Check if transaction execution is available (keypair is configured)
+    pub fn can_execute(&self) -> bool {
+        self.executor.is_some()
+    }
+
+    /// Execute a transaction built with `TransactionBuilder`.
+    ///
+    /// Returns an error if no keypair is configured.
+    pub async fn execute(
+        &mut self,
+        builder: TransactionBuilder,
+    ) -> Result<ExecuteTransactionResponse> {
+        let executor = self
+            .executor
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Cannot execute transactions: no keypair configured"))?;
+
+        executor.execute(builder).await
+    }
+
+    /// Simulate a transaction (dry-run) without executing it.
+    ///
+    /// Returns the estimated gas budget on success.
+    /// This performs the same steps as execute but stops before signing/submitting.
+    pub async fn simulate(&mut self, mut builder: TransactionBuilder) -> Result<SimulationResult> {
+        let executor = self.executor.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Cannot simulate transactions: no keypair configured")
+        })?;
+
+        let sender = executor.sender();
+        builder.set_sender(sender);
+
+        // Build the transaction - this internally does a dry-run for gas estimation
+        let transaction = builder.build(&mut self.onchain_state.client()).await?;
+
+        Ok(SimulationResult {
+            sender,
+            gas_budget: transaction.gas_payment.budget,
+            gas_price: transaction.gas_payment.price,
+        })
+    }
+
     // ========================================================================
-    // Read operations
+    // Read operations (using OnchainState)
     // ========================================================================
 
     /// Fetch current epoch from on-chain state
-    pub async fn fetch_epoch(&self) -> Result<u64> {
-        // TODO: Implement using OnchainState patterns from hashi crate
-        // For now, return placeholder
-        tracing::debug!("Fetching current epoch");
-        Ok(0)
+    pub fn fetch_epoch(&self) -> u64 {
+        self.onchain_state.state().hashi().committees.epoch()
     }
 
     /// Fetch all active proposals
-    pub async fn fetch_proposals(&self) -> Result<Vec<Proposal>> {
-        // TODO: Implement using OnchainState::scrape patterns
-        // Would iterate over the proposals Bag and parse each one
-        tracing::debug!("Fetching proposals from Hashi object");
-        Ok(vec![])
+    pub fn fetch_proposals(&self) -> Vec<Proposal> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .proposals
+            .proposals()
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Fetch a specific proposal by ID
-    pub async fn fetch_proposal(&self, proposal_id: &Address) -> Result<Option<Proposal>> {
-        // TODO: Implement by fetching the dynamic field from proposals Bag
-        tracing::debug!("Fetching proposal {}", proposal_id.to_hex());
-        Ok(Some(Proposal {
-            id: *proposal_id,
-            timestamp_ms: 0,
-            proposal_type: ProposalType::Unknown("Fetching...".to_string()),
-        }))
+    pub fn fetch_proposal(&self, proposal_id: &Address) -> Option<Proposal> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .proposals
+            .proposals()
+            .get(proposal_id)
+            .cloned()
     }
 
-    /// Fetch committee members for the specified epoch
-    pub async fn fetch_committee(
-        &self,
-        epoch: Option<u64>,
-    ) -> Result<Vec<hashi::onchain::types::MemberInfo>> {
-        // TODO: Implement using OnchainState patterns
-        tracing::debug!("Fetching committee for epoch {:?}", epoch);
-        Ok(vec![])
-    }
-
-    // ========================================================================
-    // Gas budget resolution
-    // ========================================================================
-
-    /// Resolve gas budget - either use provided value or estimate via dry-run
-    pub async fn resolve_gas_budget(&self, tx_opts: &TxOptions) -> Result<u64> {
-        match tx_opts.gas_budget {
-            Some(budget) => {
-                tracing::debug!("Using explicit gas budget: {} MIST", budget);
-                Ok(budget)
-            }
-            None => {
-                // The SuiTxExecutor/TransactionBuilder.build() handles gas estimation
-                // automatically via dry-run. For display purposes, we show default.
-                tracing::debug!(
-                    "Gas budget will be estimated via dry-run (default: {} MIST)",
-                    DEFAULT_GAS_BUDGET
-                );
-                Ok(DEFAULT_GAS_BUDGET)
-            }
-        }
+    /// Fetch committee members for the current epoch
+    pub fn fetch_committee_members(&self) -> Vec<MemberInfo> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .committees
+            .members()
+            .values()
+            .cloned()
+            .collect()
     }
 
     // ========================================================================
-    // Transaction builders (following SuiTxExecutor patterns)
+    // Transaction builders (proposal/governance)
     // ========================================================================
 
-    /// Build a vote transaction
+    /// Build a vote transaction for a proposal.
     ///
     /// Calls: `proposal::vote<T>(hashi, proposal_id, clock, ctx)`
     pub fn build_vote_transaction(
         &self,
         proposal_id: Address,
-        proposal_type: &crate::ProposalType,
-    ) -> Result<TransactionBuilder> {
+        type_arg: TypeTag,
+    ) -> TransactionBuilder {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -148,8 +228,6 @@ impl HashiClient {
                 .as_shared()
                 .with_mutable(false),
         );
-
-        let type_tag = self.get_proposal_type_tag(proposal_type)?;
 
         builder.move_call(
             Function::new(
@@ -157,21 +235,21 @@ impl HashiClient {
                 Identifier::from_static("proposal"),
                 Identifier::from_static("vote"),
             )
-            .with_type_args(vec![type_tag]),
+            .with_type_args(vec![type_arg]),
             vec![hashi_arg, proposal_id_arg, clock_arg],
         );
 
-        Ok(builder)
+        builder
     }
 
-    /// Build a remove_vote transaction
+    /// Build a remove_vote transaction for a proposal.
     ///
     /// Calls: `proposal::remove_vote<T>(hashi, proposal_id, ctx)`
     pub fn build_remove_vote_transaction(
         &self,
         proposal_id: Address,
-        proposal_type: &crate::ProposalType,
-    ) -> Result<TransactionBuilder> {
+        type_arg: TypeTag,
+    ) -> TransactionBuilder {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -181,26 +259,24 @@ impl HashiClient {
         );
         let proposal_id_arg = builder.pure(&proposal_id);
 
-        let type_tag = self.get_proposal_type_tag(proposal_type)?;
-
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("proposal"),
                 Identifier::from_static("remove_vote"),
             )
-            .with_type_args(vec![type_tag]),
+            .with_type_args(vec![type_arg]),
             vec![hashi_arg, proposal_id_arg],
         );
 
-        Ok(builder)
+        builder
     }
 
-    /// Build a proposal creation transaction
+    /// Build a proposal creation transaction.
     pub fn build_create_proposal_transaction(
         &self,
-        proposal_type: CreateProposalParams,
-    ) -> Result<TransactionBuilder> {
+        params: CreateProposalParams,
+    ) -> TransactionBuilder {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -214,13 +290,10 @@ impl HashiClient {
                 .with_mutable(false),
         );
 
-        // Empty metadata for now - could be extended
-        let metadata_arg = builder.pure(&Vec::<(String, String)>::new());
-
-        match proposal_type {
-            CreateProposalParams::Upgrade { digest } => {
+        match params {
+            CreateProposalParams::Upgrade { digest, metadata } => {
                 let digest_arg = builder.pure(&digest);
-
+                let metadata_arg = builder.pure(&metadata);
                 builder.move_call(
                     Function::new(
                         self.hashi_ids.package_id,
@@ -230,9 +303,9 @@ impl HashiClient {
                     vec![hashi_arg, digest_arg, metadata_arg, clock_arg],
                 );
             }
-            CreateProposalParams::UpdateDepositFee { fee } => {
+            CreateProposalParams::UpdateDepositFee { fee, metadata } => {
                 let fee_arg = builder.pure(&fee);
-
+                let metadata_arg = builder.pure(&metadata);
                 builder.move_call(
                     Function::new(
                         self.hashi_ids.package_id,
@@ -242,9 +315,9 @@ impl HashiClient {
                     vec![hashi_arg, fee_arg, metadata_arg, clock_arg],
                 );
             }
-            CreateProposalParams::EnableVersion { version } => {
+            CreateProposalParams::EnableVersion { version, metadata } => {
                 let version_arg = builder.pure(&version);
-
+                let metadata_arg = builder.pure(&metadata);
                 builder.move_call(
                     Function::new(
                         self.hashi_ids.package_id,
@@ -254,9 +327,9 @@ impl HashiClient {
                     vec![hashi_arg, version_arg, metadata_arg, clock_arg],
                 );
             }
-            CreateProposalParams::DisableVersion { version } => {
+            CreateProposalParams::DisableVersion { version, metadata } => {
                 let version_arg = builder.pure(&version);
-
+                let metadata_arg = builder.pure(&metadata);
                 builder.move_call(
                     Function::new(
                         self.hashi_ids.package_id,
@@ -268,38 +341,37 @@ impl HashiClient {
             }
         }
 
-        Ok(builder)
-    }
-
-    /// Get the TypeTag for a proposal type
-    fn get_proposal_type_tag(
-        &self,
-        proposal_type: &crate::ProposalType,
-    ) -> Result<sui_sdk_types::TypeTag> {
-        use sui_sdk_types::StructTag;
-        use sui_sdk_types::TypeTag;
-
-        let (module, name) = match proposal_type {
-            crate::ProposalType::Upgrade => ("upgrade", "Upgrade"),
-            crate::ProposalType::UpdateDepositFee => ("update_deposit_fee", "UpdateDepositFee"),
-            crate::ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
-            crate::ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
-        };
-
-        Ok(TypeTag::Struct(Box::new(StructTag::new(
-            self.hashi_ids.package_id,
-            Identifier::new(module).context("Invalid module name")?,
-            Identifier::new(name).context("Invalid type name")?,
-            vec![],
-        ))))
+        builder
     }
 }
 
-/// Parameters for creating different types of proposals
-#[derive(Debug)]
-pub enum CreateProposalParams {
-    Upgrade { digest: Vec<u8> },
-    UpdateDepositFee { fee: u64 },
-    EnableVersion { version: u64 },
-    DisableVersion { version: u64 },
+/// Get the TypeTag for a proposal type (from on-chain type)
+///
+/// Returns an error if the proposal type is `Unknown`.
+pub fn get_proposal_type_arg(
+    package_id: Address,
+    proposal_type: &hashi::onchain::types::ProposalType,
+) -> Result<TypeTag> {
+    use hashi::onchain::types::ProposalType;
+
+    let (module, name) = match proposal_type {
+        ProposalType::Upgrade => ("upgrade", "Upgrade"),
+        ProposalType::UpdateDepositFee => ("update_deposit_fee", "UpdateDepositFee"),
+        ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
+        ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
+        ProposalType::Unknown(s) => {
+            anyhow::bail!(
+                "Cannot vote on unknown proposal type '{}'. \
+                 This may be a new proposal type not yet supported by this CLI version.",
+                s
+            );
+        }
+    };
+
+    Ok(TypeTag::Struct(Box::new(StructTag::new(
+        package_id,
+        Identifier::new(module).context("Invalid module name")?,
+        Identifier::new(name).context("Invalid type name")?,
+        vec![],
+    ))))
 }

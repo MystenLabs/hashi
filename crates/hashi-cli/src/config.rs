@@ -5,9 +5,11 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use hashi::config::load_ed25519_private_key_from_path;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
+use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
 /// CLI Configuration
@@ -147,5 +149,23 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
     pub fn hashi_object_id(&self) -> Address {
         self.hashi_object_id
             .expect("hashi_object_id not configured")
+    }
+
+    /// Load the keypair from the configured path
+    ///
+    /// Returns `None` if no keypair path is configured.
+    /// Returns an error if the path is configured but the keypair cannot be loaded.
+    ///
+    /// Uses the shared `load_ed25519_private_key_from_path` from the hashi crate,
+    /// which supports DER and PEM formats.
+    pub fn load_keypair(&self) -> Result<Option<Ed25519PrivateKey>> {
+        let Some(ref path) = self.keypair_path else {
+            return Ok(None);
+        };
+
+        let pk = load_ed25519_private_key_from_path(path)
+            .with_context(|| format!("Failed to load keypair from {}", path.display()))?;
+
+        Ok(Some(pk))
     }
 }
