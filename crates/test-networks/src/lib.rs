@@ -183,7 +183,7 @@ mod tests {
 
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
-    const SUI_EPOCH_DURATION_MS: u64 = 60_000;
+    const SUI_EPOCH_DURATION_MS: u64 = 10_000;
 
     /// Wait for all nodes to reach at least `target_epoch`.
     /// Returns the actual epoch of `nodes[0]` after the wait (may exceed `target_epoch`).

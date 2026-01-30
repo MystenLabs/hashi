@@ -100,6 +100,11 @@ impl MpcService {
         }
         let mut notifications = self.inner.onchain_state().subscribe();
         loop {
+            // Check for pending reconfig before blocking on `recv()`.
+            if let Some(epoch) = self.get_pending_epoch_change() {
+                self.handle_reconfig(epoch).await;
+                continue;
+            }
             match notifications.recv().await {
                 Ok(notification) => match notification {
                     Notification::StartReconfig(epoch) => {
