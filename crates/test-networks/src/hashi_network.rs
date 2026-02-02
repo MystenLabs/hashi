@@ -87,6 +87,23 @@ impl HashiNodeHandle {
         self.0.config.metrics_http_address()
     }
 
+    pub async fn wait_for_mpc_key(&self, timeout: std::time::Duration) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_mpc_key_inner())
+            .await
+            .map_err(|_| anyhow::anyhow!("MPC key timed out after {:?}", timeout))?
+    }
+
+    async fn wait_for_mpc_key_inner(&self) -> Result<()> {
+        loop {
+            if let Some(mpc_handle) = self.0.mpc_handle()
+                && mpc_handle.public_key().is_some()
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub async fn wait_for_dkg_completion(&self, timeout: std::time::Duration) -> Result<()> {
         tokio::time::timeout(timeout, self.wait_for_dkg_completion_inner())
             .await
