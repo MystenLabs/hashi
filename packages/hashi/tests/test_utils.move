@@ -13,7 +13,8 @@ use hashi::{
     enable_version,
     hashi::Hashi,
     update_deposit_fee,
-    utxo_pool
+    utxo_pool,
+    withdrawal_queue
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
 
@@ -132,6 +133,9 @@ public fun create_hashi_with_weighted_committee(
     // Create deposit queue
     let deposit_queue = deposit_queue::create(ctx);
 
+    // Create withdrawal queue
+    let withdrawal_queue = withdrawal_queue::create(ctx);
+
     // Create utxo pool
     let utxo_pool = utxo_pool::create(ctx);
 
@@ -146,6 +150,7 @@ public fun create_hashi_with_weighted_committee(
         config,
         treasury,
         deposit_queue,
+        withdrawal_queue,
         utxo_pool,
         proposals,
         tob,

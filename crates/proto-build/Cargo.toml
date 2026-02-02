@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-prost-types = "0.14"
-prost = "0.14"
-protox = "0.9"
-tonic-prost-build = "0.14"
-walkdir = "2.5.0"
+prost-types.workspace = true
+prost.workspace = true
+protox.workspace = true
+tonic-prost-build.workspace = true
+walkdir.workspace = true

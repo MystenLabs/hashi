@@ -7,21 +7,22 @@ edition = "2024"
 hashi = { path = "../hashi" }
 hashi-btc = { path = "../hashi-btc" }
 hashi-types = { path = "../hashi-types" }
-anyhow = "1.0"
-tokio = { version = "1.0", features = ["full"] }
-tracing = "0.1"
-prometheus = "0.13"
-bitcoin = "0.32"
-bitcoincore-rpc = "0.19"
-tempfile = "3.0"
-sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
-sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["ed25519"] }
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
-base64ct = { version = "1.8.0", features = ["std"] }
-serde_yaml = "0.9.34"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-futures = "0.3"
+
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+prometheus.workspace = true
+bitcoin.workspace = true
+bitcoincore-rpc.workspace = true
+tempfile.workspace = true
+sui-rpc.workspace = true
+sui-crypto.workspace = true
+sui-sdk-types.workspace = true
+base64ct.workspace = true
+serde_yaml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true
