@@ -206,7 +206,7 @@ impl MpcService {
 
     async fn fetch_previous_certificates(&self) -> anyhow::Result<Vec<CertificateV1>> {
         let onchain_state = self.inner.onchain_state().clone();
-        let source_epoch = onchain_state.state().hashi().committees.epoch();
+        let source_epoch = onchain_state.epoch();
         let source_committee = onchain_state
             .state()
             .hashi()

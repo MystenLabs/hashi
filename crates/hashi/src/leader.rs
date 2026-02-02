@@ -331,16 +331,7 @@ impl LeaderService {
     /// Check for and delete expired proposals.
     /// Proposals are sorted by timestamp and deleted if they are older than MAX_PROPOSAL_AGE_MS.
     async fn check_delete_proposals(&self, checkpoint_timestamp_ms: u64) {
-        let mut proposals: Vec<_> = {
-            let state = self.inner.onchain_state().state();
-            state
-                .hashi()
-                .proposals
-                .proposals()
-                .values()
-                .cloned()
-                .collect()
-        };
+        let mut proposals = self.inner.onchain_state().proposals();
         // Sort proposals by timestamp, from earliest to latest
         proposals.sort_by_key(|p| p.timestamp_ms);
 

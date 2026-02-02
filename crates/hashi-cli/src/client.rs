@@ -160,47 +160,27 @@ impl HashiClient {
     }
 
     // ========================================================================
-    // Read operations (using OnchainState)
+    // Read operations (delegating to OnchainState)
     // ========================================================================
 
     /// Fetch current epoch from on-chain state
     pub fn fetch_epoch(&self) -> u64 {
-        self.onchain_state.state().hashi().committees.epoch()
+        self.onchain_state.epoch()
     }
 
     /// Fetch all active proposals
     pub fn fetch_proposals(&self) -> Vec<Proposal> {
-        self.onchain_state
-            .state()
-            .hashi()
-            .proposals
-            .proposals()
-            .values()
-            .cloned()
-            .collect()
+        self.onchain_state.proposals()
     }
 
     /// Fetch a specific proposal by ID
     pub fn fetch_proposal(&self, proposal_id: &Address) -> Option<Proposal> {
-        self.onchain_state
-            .state()
-            .hashi()
-            .proposals
-            .proposals()
-            .get(proposal_id)
-            .cloned()
+        self.onchain_state.proposal(proposal_id)
     }
 
     /// Fetch committee members for the current epoch
     pub fn fetch_committee_members(&self) -> Vec<MemberInfo> {
-        self.onchain_state
-            .state()
-            .hashi()
-            .committees
-            .members()
-            .values()
-            .cloned()
-            .collect()
+        self.onchain_state.committee_members()
     }
 
     // ========================================================================

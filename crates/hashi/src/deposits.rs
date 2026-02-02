@@ -141,7 +141,7 @@ impl Hashi {
         &self,
         deposit_request: &DepositRequest,
     ) -> anyhow::Result<MemberSignature> {
-        let epoch = self.onchain_state().state().hashi().committees.epoch();
+        let epoch = self.onchain_state().epoch();
         let validator_address = self
             .config
             .validator_address()

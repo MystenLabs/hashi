@@ -169,6 +169,48 @@ impl OnchainState {
         self.state().hashi.tob_id
     }
 
+    /// Returns the current epoch.
+    pub fn epoch(&self) -> u64 {
+        self.state().hashi.committees.epoch()
+    }
+
+    /// Returns all active proposals.
+    pub fn proposals(&self) -> Vec<types::Proposal> {
+        self.state()
+            .hashi
+            .proposals
+            .proposals()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Returns a specific proposal by ID, if it exists.
+    pub fn proposal(&self, id: &Address) -> Option<types::Proposal> {
+        self.state().hashi.proposals.proposals().get(id).cloned()
+    }
+
+    /// Returns all committee members for the current epoch.
+    pub fn committee_members(&self) -> Vec<types::MemberInfo> {
+        self.state()
+            .hashi
+            .committees
+            .members()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Returns a specific committee member by validator address, if it exists.
+    pub fn committee_member(&self, validator: &Address) -> Option<types::MemberInfo> {
+        self.state()
+            .hashi
+            .committees
+            .members()
+            .get(validator)
+            .cloned()
+    }
+
     /// Fetches the EpochCertsV1 for the given epoch from on-chain.
     /// Returns None if no certs exist for this epoch.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.

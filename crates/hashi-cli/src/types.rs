@@ -5,8 +5,8 @@
 
 // Re-export onchain types used by the CLI
 pub use hashi::onchain::types::Proposal;
-pub use hashi::onchain::types::ProposalType;
 
+use hashi::onchain::types::ProposalType;
 use sui_sdk_types::Address;
 
 /// Display formatting helpers

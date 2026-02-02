@@ -203,7 +203,7 @@ impl Hashi {
             // Initialize
             self.initialize_onchain_state().await;
 
-            let epoch = self.onchain_state().state().hashi().committees.epoch();
+            let epoch = self.onchain_state().epoch();
             let dkg_manager = match self.create_dkg_manager(epoch, dkg::types::ProtocolType::Dkg) {
                 Ok(m) => m,
                 Err(e) => {
