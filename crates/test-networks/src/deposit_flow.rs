@@ -176,13 +176,7 @@ mod tests {
         info!("=== Starting Bitcoin Deposit E2E Test ===");
 
         info!("Setting up test networks...");
-        let mut networks = TestNetworksBuilder::new()
-            .with_nodes(4)
-            // Use a long Sui epoch so that no epoch change triggers start_reconfig
-            // during the deposit flow, which would block deposit confirmations.
-            .with_sui_epoch_duration_ms(600_000)
-            .build()
-            .await?;
+        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
 
         info!("Test networks initialized");
         info!("  - Sui RPC: {}", networks.sui_network.rpc_url);

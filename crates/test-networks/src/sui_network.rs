@@ -32,7 +32,7 @@ use tokio::time::Duration;
 use tokio::time::sleep;
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
-const DEFAULT_EPOCH_DURATION_MS: u64 = 60_000;
+const DEFAULT_EPOCH_DURATION_MS: u64 = 86_400_000; // 24 hours; tests that need epoch changes should set a shorter duration
 const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 60;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 

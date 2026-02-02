@@ -293,10 +293,12 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     // Retry registration because the proof-of-possession is bound to ctx.epoch().
     // With short Sui epochs, the epoch can change between querying it and
     // transaction execution, causing PoP verification to fail.
-    for attempt in 1..=3u32 {
+    let mut attempt = 0;
+    loop {
         match try_register_onchain(&mut client, config).await {
             Ok(()) => return Ok(()),
             Err(e) => {
+                attempt += 1;
                 if attempt < 3 {
                     info!("register_onchain attempt {attempt}/3 failed: {e}, retrying...");
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -306,7 +308,6 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
             }
         }
     }
-    unreachable!()
 }
 
 async fn try_register_onchain(client: &mut sui_rpc::Client, config: &HashiConfig) -> Result<()> {
