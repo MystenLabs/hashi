@@ -383,6 +383,15 @@ pub struct UtxoId {
     pub vout: u32,
 }
 
+impl From<hashi_types::move_types::UtxoId> for UtxoId {
+    fn from(id: hashi_types::move_types::UtxoId) -> Self {
+        Self {
+            txid: id.txid,
+            vout: id.vout,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UtxoPool {
     pub(super) active_utxos_id: Address,

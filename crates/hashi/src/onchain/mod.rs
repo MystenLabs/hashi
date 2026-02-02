@@ -211,6 +211,50 @@ impl OnchainState {
             .cloned()
     }
 
+    pub fn current_committee(&self) -> Option<Committee> {
+        self.state().hashi.committees.current_committee().cloned()
+    }
+
+    pub fn current_committee_members(&self) -> Option<Vec<CommitteeMember>> {
+        self.state()
+            .hashi()
+            .committees
+            .current_committee()
+            .map(|c| c.members().to_vec())
+    }
+
+    pub fn deposit_requests(&self) -> Vec<types::DepositRequest> {
+        self.state()
+            .hashi()
+            .deposit_queue
+            .requests()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
+        self.state()
+            .hashi()
+            .utxo_pool
+            .spent_utxos()
+            .iter()
+            .map(|(utxo_id, epoch)| (*utxo_id, *epoch))
+            .collect()
+    }
+
+    pub fn bridge_service_client(
+        &self,
+        validator: &Address,
+    ) -> Option<hashi_types::proto::bridge_service_client::BridgeServiceClient<tonic_rustls::Channel>>
+    {
+        self.state()
+            .hashi()
+            .committees
+            .client(validator)
+            .map(|c| c.bridge_service_client())
+    }
+
     /// Fetches the EpochCertsV1 for the given epoch from on-chain.
     /// Returns None if no certs exist for this epoch.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
@@ -846,13 +890,7 @@ async fn scrape_spent_utxos(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok((utxo_id, spent_epoch))
         })
-        .map_ok(|(utxo_id, spent_epoch)| {
-            let utxo_id = types::UtxoId {
-                txid: utxo_id.txid,
-                vout: utxo_id.vout,
-            };
-            (utxo_id, spent_epoch)
-        })
+        .map_ok(|(utxo_id, spent_epoch): (move_types::UtxoId, u64)| (utxo_id.into(), spent_epoch))
         .try_collect()
         .await?;
 

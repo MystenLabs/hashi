@@ -1,8 +1,8 @@
+mod garbage_collection;
+
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
 use crate::onchain::types::DepositRequest;
-use crate::onchain::types::Proposal;
-use crate::onchain::types::ProposalType;
 use crate::sui_tx_executor::SuiTxExecutor;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
@@ -20,11 +20,6 @@ use tracing::trace;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
-const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
-const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
-const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
-const MAX_PROPOSAL_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
-const PROPOSAL_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 
 #[derive(Clone)]
 pub struct LeaderService {
@@ -62,6 +57,7 @@ impl LeaderService {
 
             self.process_deposit_requests(checkpoint_timestamp_ms).await;
             self.check_delete_proposals(checkpoint_timestamp_ms).await;
+            self.check_delete_spent_utxos().await;
         }
     }
 
@@ -72,9 +68,7 @@ impl LeaderService {
             ForceRunAsLeader::Default => (),
         }
 
-        let onchain_state = self.inner.onchain_state();
-        let state = onchain_state.state();
-        let Some(committee) = state.hashi().committees.current_committee() else {
+        let Some(committee) = self.inner.onchain_state().current_committee() else {
             // TODO: do we need to do anything when bootstrapping? At genesis there is no committee.
             return false;
         };
@@ -100,16 +94,7 @@ impl LeaderService {
     }
 
     async fn process_deposit_requests(&self, checkpoint_timestamp_ms: u64) {
-        let mut deposit_requests: Vec<_> = {
-            let state = self.inner.onchain_state().state();
-            state
-                .hashi()
-                .deposit_queue
-                .requests()
-                .values()
-                .cloned()
-                .collect()
-        };
+        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
 
@@ -144,16 +129,11 @@ impl LeaderService {
         );
 
         let proto_request = deposit_request.to_proto();
-        let members = {
-            let state = self.inner.onchain_state().state();
-            state
-                .hashi()
-                .committees
-                .current_committee()
-                .expect("No current committee")
-                .members()
-                .to_vec()
-        };
+        let members = self
+            .inner
+            .onchain_state()
+            .current_committee_members()
+            .expect("No current committee members");
 
         let mut signatures: Vec<MemberSignature> = Vec::new();
         for member in members {
@@ -186,21 +166,17 @@ impl LeaderService {
             validator_address
         );
 
-        let mut rpc_client = {
-            let state = self.inner.onchain_state().state();
-            state
-                .hashi()
-                .committees
-                .client(&validator_address)
-                .or_else(|| {
-                    error!(
-                        "Cannot find client for validator address: {:?}",
-                        validator_address
-                    );
-                    None
-                })?
-                .bridge_service_client()
-        };
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
 
         let response = rpc_client
             .sign_deposit_confirmation(proto_request.clone())
@@ -238,15 +214,11 @@ impl LeaderService {
             deposit_request.id
         );
 
-        let committee = {
-            let state = self.inner.onchain_state().state();
-            state
-                .hashi()
-                .committees
-                .current_committee()
-                .expect("No current committee")
-                .clone()
-        };
+        let committee = self
+            .inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
 
         // Aggregate signatures
         let mut signature_aggregator =
@@ -275,187 +247,6 @@ impl LeaderService {
             "Successfully submitted deposit confirmation for request: {:?}",
             deposit_request.id
         );
-        Ok(())
-    }
-
-    // Deposit requests comes sorted in ascending order, from oldest to newest
-    async fn check_delete_expired_deposit_requests(
-        &self,
-        deposit_requests: &[DepositRequest],
-        checkpoint_timestamp_ms: u64,
-    ) {
-        // Check if it's time to delete
-        let Some(oldest_request) = deposit_requests.first() else {
-            return;
-        };
-        // If there aren't any deposit requests at least 4 days old, don't do anything
-        if checkpoint_timestamp_ms
-            < oldest_request.timestamp_ms
-                + MAX_DEPOSIT_REQUEST_AGE_MS
-                + DEPOSIT_REQUEST_DELETE_DELAY_MS
-        {
-            return;
-        }
-
-        // Find all expired requests (older than 3 days)
-        let expired_requests = deposit_requests
-            .iter()
-            .filter(|r| checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
-            .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        info!(
-            "Deleting {} expired deposit requests",
-            expired_requests.len()
-        );
-
-        let result = async {
-            let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-            executor
-                .execute_delete_expired_deposit_requests(&expired_requests)
-                .await
-        }
-        .await;
-
-        if let Err(e) = result {
-            error!("Failed to delete expired deposit requests: {e}");
-        } else {
-            info!(
-                "Successfully deleted {} expired deposit requests",
-                expired_requests.len()
-            );
-        }
-    }
-
-    /// Check for and delete expired proposals.
-    /// Proposals are sorted by timestamp and deleted if they are older than MAX_PROPOSAL_AGE_MS.
-    async fn check_delete_proposals(&self, checkpoint_timestamp_ms: u64) {
-        let mut proposals = self.inner.onchain_state().proposals();
-        // Sort proposals by timestamp, from earliest to latest
-        proposals.sort_by_key(|p| p.timestamp_ms);
-
-        // Check if it's time to delete
-        let Some(oldest_proposal) = proposals.first() else {
-            return;
-        };
-
-        // If there aren't any proposals at least 8 days old (7 days expiry + 1 day delay), don't do anything
-        if checkpoint_timestamp_ms
-            < oldest_proposal.timestamp_ms + MAX_PROPOSAL_AGE_MS + PROPOSAL_DELETE_DELAY_MS
-        {
-            return;
-        }
-
-        // Find all expired proposals (older than 7 days)
-        let expired_proposals: Vec<_> = proposals
-            .iter()
-            .filter(|p| checkpoint_timestamp_ms > p.timestamp_ms + MAX_PROPOSAL_AGE_MS)
-            .cloned()
-            .collect();
-
-        if expired_proposals.is_empty() {
-            return;
-        }
-
-        info!("Deleting {} expired proposals", expired_proposals.len());
-
-        let result = self
-            .delete_expired_proposals_batch(&expired_proposals)
-            .await;
-        if let Err(e) = result {
-            error!("Failed to delete expired proposals: {e}");
-        } else {
-            info!(
-                "Successfully deleted {} expired proposals",
-                expired_proposals.len()
-            );
-        }
-    }
-
-    async fn delete_expired_proposals_batch(
-        &self,
-        expired_proposals: &[Proposal],
-    ) -> anyhow::Result<()> {
-        use sui_sdk_types::Identifier;
-        use sui_sdk_types::StructTag;
-        use sui_sdk_types::TypeTag;
-        use sui_transaction_builder::Function;
-        use sui_transaction_builder::ObjectInput;
-        use sui_transaction_builder::TransactionBuilder;
-
-        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-        let hashi_ids = self.inner.config.hashi_ids();
-
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-
-        // Clock object (0x6) - immutable shared object
-        let clock_arg = builder.object(
-            ObjectInput::new(Address::from_static("0x6"))
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        // Add a move call for each expired proposal
-        for proposal in expired_proposals {
-            let proposal_id_arg = builder.pure(&proposal.id);
-
-            // Get the type argument for the proposal
-            let type_arg = match &proposal.proposal_type {
-                ProposalType::UpdateDepositFee => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("update_deposit_fee"),
-                    Identifier::from_static("UpdateDepositFee"),
-                    vec![],
-                ))),
-                ProposalType::EnableVersion => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("enable_version"),
-                    Identifier::from_static("EnableVersion"),
-                    vec![],
-                ))),
-                ProposalType::DisableVersion => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("disable_version"),
-                    Identifier::from_static("DisableVersion"),
-                    vec![],
-                ))),
-                ProposalType::Upgrade => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("upgrade"),
-                    Identifier::from_static("Upgrade"),
-                    vec![],
-                ))),
-                ProposalType::Unknown(type_name) => {
-                    error!(
-                        "Cannot delete proposal {:?} with unknown type: {}",
-                        proposal.id, type_name
-                    );
-                    continue;
-                }
-            };
-
-            builder.move_call(
-                Function::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("proposal"),
-                    Identifier::from_static("delete_expired"),
-                )
-                .with_type_args(vec![type_arg]),
-                vec![hashi_arg, proposal_id_arg, clock_arg],
-            );
-        }
-
-        let response = executor.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!("Transaction failed to delete expired proposals");
-        }
         Ok(())
     }
 }
