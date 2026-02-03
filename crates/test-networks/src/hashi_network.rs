@@ -1,4 +1,5 @@
 use anyhow::Result;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
@@ -315,7 +316,7 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
         config
             .encryption_public_key()?
             .as_element()
-            .compress()
+            .to_byte_array()
             .as_slice()
             .to_bcs()?,
     );

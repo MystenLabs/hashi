@@ -1,6 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -34,6 +35,11 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
 pub mod types;
 mod watcher;
+
+fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::dkg::EncryptionGroupElement> {
+    let array: [u8; 32] = bytes.try_into().ok()?;
+    crate::dkg::EncryptionGroupElement::from_byte_array(&array).ok()
+}
 
 #[derive(Clone)]
 pub struct OnchainState(Arc<Inner>);
@@ -588,11 +594,10 @@ async fn scrape_all_member_info(
                     ),
                     https_address: https_address.try_into().ok(),
                     tls_public_key: tls_public_key.as_slice().try_into().ok(),
-                    next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+                    next_epoch_encryption_public_key: parse_encryption_public_key(
                         next_epoch_encryption_public_key.as_slice(),
                     )
-                    .map(Into::into)
-                    .ok(),
+                    .map(Into::into),
                 };
 
                 (info.validator_address, info)
@@ -645,11 +650,10 @@ async fn scrape_member_info(
         next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
         https_address: https_address.try_into().ok(),
         tls_public_key: tls_public_key.as_slice().try_into().ok(),
-        next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+        next_epoch_encryption_public_key: parse_encryption_public_key(
             next_epoch_encryption_public_key.as_slice(),
         )
-        .map(Into::into)
-        .ok(),
+        .map(Into::into),
     };
     Ok(info)
 }
@@ -740,9 +744,9 @@ fn convert_move_committee_member(
         convert_move_uncompressed_g1_pubkey(&public_key),
         // Use fallback key for nodes without valid encryption key.
         // These nodes cannot decrypt shares but still count toward thresholds.
-        crate::dkg::EncryptionGroupElement::try_from(encryption_public_key.as_slice())
+        parse_encryption_public_key(encryption_public_key.as_slice())
             .map(Into::into)
-            .unwrap_or_else(|_| fallback_encryption_public_key()),
+            .unwrap_or_else(fallback_encryption_public_key),
         weight,
     )
 }

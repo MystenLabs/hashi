@@ -63,8 +63,8 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 
 # fastcrypto
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2", features = ["experimental"] }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "8101176" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "8101176", features = ["experimental"] }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git" }

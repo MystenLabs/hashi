@@ -776,7 +776,7 @@ impl DkgManager {
             dealer_session_id.to_vec(),
         )
         .expect("checked threshold above");
-        dealer.create_message(rng).expect("checked threshold above")
+        dealer.create_message(rng)
     }
 
     fn store_dkg_message(&mut self, dealer: Address, message: &avss::Message) -> DkgResult<()> {
@@ -1456,9 +1456,7 @@ impl DkgManager {
                     sid.to_vec(),
                 )
                 .expect(EXPECT_THRESHOLD_VALIDATED);
-                let message = dealer
-                    .create_message(rng)
-                    .expect(EXPECT_THRESHOLD_VALIDATED);
+                let message = dealer.create_message(rng);
                 (share.index, message)
             })
             .collect()
@@ -1968,9 +1966,9 @@ mod tests {
     use fastcrypto::encoding::Encoding;
     use fastcrypto::encoding::Hex;
     use fastcrypto::groups::Scalar;
+    use fastcrypto::random_oracle::RandomOracle;
     use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
     use fastcrypto_tbls::polynomial::Poly;
-    use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
@@ -5690,7 +5688,7 @@ mod tests {
             dealer_session_id.to_vec(),
         )
         .unwrap();
-        let template_message = dealer.create_message(rng).unwrap();
+        let template_message = dealer.create_message(rng);
 
         // Serialize our corrupted components to construct the Message
         let ciphertext_bytes = bcs::to_bytes(&corrupted_ciphertext).unwrap();
@@ -5763,7 +5761,7 @@ mod tests {
             rotation_session_id.to_vec(),
         )
         .unwrap();
-        let template_message = dealer.create_message(rng).unwrap();
+        let template_message = dealer.create_message(rng);
 
         // Serialize our corrupted components to construct the Message
         let ciphertext_bytes = bcs::to_bytes(&corrupted_ciphertext).unwrap();
