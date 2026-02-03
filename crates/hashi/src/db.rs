@@ -300,7 +300,7 @@ mod tests {
             b"test-session".to_vec(),
         )
         .unwrap();
-        dealer.create_message(&mut rand::thread_rng()).unwrap()
+        dealer.create_message(&mut rand::thread_rng())
     }
 
     #[test]

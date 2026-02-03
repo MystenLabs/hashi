@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::path::PathBuf;
 
 use sui_crypto::ed25519::Ed25519PrivateKey;
@@ -7,6 +8,46 @@ use sui_sdk_types::Address;
 use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
+
+/// Load an Ed25519 private key from a file path or inline PEM string.
+///
+/// Supported formats:
+/// - DER-encoded binary file
+/// - PEM-encoded text file
+/// - Inline PEM string (if not a valid file path)
+pub fn load_ed25519_private_key(path_or_pem: &str) -> anyhow::Result<Ed25519PrivateKey> {
+    load_ed25519_private_key_from_path(Path::new(path_or_pem))
+        .or_else(|_| {
+            Ed25519PrivateKey::from_pem(path_or_pem)
+                .map_err(|e| anyhow::anyhow!("PEM parse error: {}", e))
+        })
+        .map_err(|_: anyhow::Error| {
+            anyhow::anyhow!("unable to load Ed25519 private key from '{}'", path_or_pem)
+        })
+}
+
+/// Load an Ed25519 private key from a file path.
+///
+/// Supported formats:
+/// - DER-encoded binary file
+/// - PEM-encoded text file
+pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519PrivateKey> {
+    let contents = std::fs::read(path)?;
+
+    // Try DER format first
+    if let Ok(pk) = Ed25519PrivateKey::from_der(&contents) {
+        return Ok(pk);
+    }
+
+    // Try PEM format
+    if let Ok(contents_str) = std::str::from_utf8(&contents)
+        && let Ok(pk) = Ed25519PrivateKey::from_pem(contents_str)
+    {
+        return Ok(pk);
+    }
+
+    anyhow::bail!("unsupported key format in '{}'", path.display())
+}
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -154,25 +195,7 @@ impl Config {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no operator_private_key configured"))?;
 
-        if let Ok(private_key) = std::fs::read(raw) {
-            if let Ok(pk) = Ed25519PrivateKey::from_der(&private_key) {
-                return Ok(pk);
-            }
-
-            if let Some(pk) = std::str::from_utf8(&private_key)
-                .ok()
-                .and_then(|pk| Ed25519PrivateKey::from_pem(pk).ok())
-            {
-                return Ok(pk);
-            }
-        }
-
-        if let Ok(private_key) = Ed25519PrivateKey::from_pem(raw) {
-            return Ok(private_key);
-        }
-
-        // maybe some other format?
-        Err(anyhow::anyhow!("unable to load operator_private_key"))
+        load_ed25519_private_key(raw)
     }
 
     pub fn validator_address(&self) -> Result<Address, anyhow::Error> {

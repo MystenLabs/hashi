@@ -23,6 +23,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
         Checkpoint::path_builder().summary().timestamp(),
+        Checkpoint::path_builder().summary().epoch(),
         Checkpoint::path_builder()
             .transactions()
             .events()
@@ -72,7 +73,12 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
                 .timestamp
                 .and_then(|t| proto_to_timestamp_ms(t).ok())
                 .unwrap_or(0);
-
+            let epoch = checkpoint.checkpoint().summary().epoch();
+            let previous_epoch = state.latest_checkpoint_epoch();
+            if epoch != previous_epoch {
+                tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
+                state.notify(Notification::SuiEpochChanged(epoch));
+            }
             let mut events = Vec::new();
             {
                 let state = state.state();
@@ -102,6 +108,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
             state.update_latest_checkpoint_info(CheckpointInfo {
                 height: ckpt,
                 timestamp_ms,
+                epoch,
             });
         }
     }
@@ -189,10 +196,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 let deposit_request = DepositRequest {
                     id: deposit_requested_event.request_id,
                     utxo: super::types::Utxo {
-                        id: super::types::UtxoId {
-                            txid: deposit_requested_event.utxo_id.txid,
-                            vout: deposit_requested_event.utxo_id.vout,
-                        },
+                        id: deposit_requested_event.utxo_id.into(),
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
@@ -210,10 +214,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 let mut state = state.state_mut();
 
                 let utxo = super::types::Utxo {
-                    id: super::types::UtxoId {
-                        txid: deposit_confirmed_event.utxo_id.txid,
-                        vout: deposit_confirmed_event.utxo_id.vout,
-                    },
+                    id: deposit_confirmed_event.utxo_id.into(),
                     amount: deposit_confirmed_event.amount,
                     derivation_path: deposit_confirmed_event.derivation_path,
                 };
@@ -233,6 +234,20 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .deposit_queue
                     .requests
                     .remove(&expired_deposit_deleted_event.request_id);
+            }
+            HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
+                state.state_mut().hashi.utxo_pool.spent_utxos.insert(
+                    utxo_spent_event.utxo_id.into(),
+                    utxo_spent_event.spent_epoch,
+                );
+            }
+            HashiEvent::SpentUtxoDeletedEvent(spent_utxo_deleted_event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .utxo_pool
+                    .spent_utxos
+                    .remove(&spent_utxo_deleted_event.utxo_id.into());
             }
             HashiEvent::StartReconfigEvent(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;

@@ -1,0 +1,38 @@
+[package]
+name = "hashi-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for Hashi committee members to manage proposals and vote"
+
+[[bin]]
+name = "hashi-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Internal dependencies - use hashi for types and tx execution
+hashi = { path = "../hashi" }
+hashi-types = { path = "../hashi-types" }
+
+# Sui dependencies
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["serde", "hash"] }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
+sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Async runtime
+tokio = { version = "1.46.1", features = ["full"] }
+
+# Serialization
+serde = "1.0.219"
+toml = "0.9.2"
+hex = "0.4"
+
+# Utilities
+anyhow = "1.0.98"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+colored = "2.1"
+tabled = "0.16"

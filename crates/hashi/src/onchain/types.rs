@@ -215,7 +215,7 @@ impl CommitteeSet {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MemberInfo {
     /// Sui Validator Address of this node
     pub validator_address: Address,
@@ -381,6 +381,15 @@ pub struct UtxoId {
     pub txid: Address,
     // Out position of the UTXO
     pub vout: u32,
+}
+
+impl From<hashi_types::move_types::UtxoId> for UtxoId {
+    fn from(id: hashi_types::move_types::UtxoId) -> Self {
+        Self {
+            txid: id.txid,
+            vout: id.vout,
+        }
+    }
 }
 
 #[derive(Debug)]

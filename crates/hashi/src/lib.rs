@@ -129,6 +129,10 @@ impl Hashi {
             .cloned()
     }
 
+    pub fn mpc_handle(&self) -> Option<&mpc::MpcHandle> {
+        self.mpc_handle.get()
+    }
+
     async fn initialize_onchain_state(&self) {
         let onchain_state = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
@@ -203,7 +207,7 @@ impl Hashi {
             // Initialize
             self.initialize_onchain_state().await;
 
-            let epoch = self.onchain_state().state().hashi().committees.epoch();
+            let epoch = self.onchain_state().epoch();
             let dkg_manager = match self.create_dkg_manager(epoch, dkg::types::ProtocolType::Dkg) {
                 Ok(m) => m,
                 Err(e) => {

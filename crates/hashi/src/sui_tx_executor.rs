@@ -52,7 +52,10 @@ use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
-const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
+
+/// Well-known Sui Clock object address (0x6)
+pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
+const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
 
 /// A reusable executor for submitting Sui transactions.
 ///
@@ -107,6 +110,11 @@ impl SuiTxExecutor {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Get the sender address (derived from the signer's public key).
+    pub fn sender(&self) -> Address {
+        self.signer.public_key().derive_address()
     }
 
     // ========================================================================
@@ -354,6 +362,36 @@ impl SuiTxExecutor {
         }
 
         anyhow::bail!("DepositRequestedEvent not found in transaction events")
+    }
+
+    pub async fn execute_start_reconfig(&mut self) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let sui_system_arg = builder.object(
+            ObjectInput::new(SUI_SYSTEM_STATE_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("start_reconfig"),
+            ),
+            vec![hashi_arg, sui_system_arg],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "start_reconfig transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
     }
 
     pub async fn execute_end_reconfig(
