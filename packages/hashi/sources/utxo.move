@@ -4,7 +4,7 @@ module hashi::utxo;
 use std::string::String;
 use sui::{bag::Bag, balance::Balance, object_bag::ObjectBag};
 
-public struct Utxo has store {
+public struct Utxo has copy, drop, store {
     id: UtxoId,
     // In satoshis
     amount: u64,
