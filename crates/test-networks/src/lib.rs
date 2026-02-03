@@ -183,7 +183,6 @@ mod tests {
 
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
-    const SUI_EPOCH_DURATION_MS: u64 = 180_000;
 
     /// Wait for all nodes to reach at least `target_epoch`.
     /// Returns the actual epoch of `nodes[0]` after the wait (may exceed `target_epoch`).
@@ -382,31 +381,36 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
-            .with_sui_epoch_duration_ms(SUI_EPOCH_DURATION_MS)
             .build()
             .await?;
 
-        let nodes = test_networks.hashi_network().nodes();
-
         // Wait for initial DKG completion on all nodes (epoch 1)
-        let dkg_futures: Vec<_> = nodes
-            .iter()
-            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
-            .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let dkg_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
         }
 
-        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
 
-        // Wait for first key rotation
-        let epoch = wait_for_rotation(nodes, initial_epoch + 1).await;
+        // Trigger first key rotation via Sui epoch change
+        test_networks.sui_network.force_close_epoch().await?;
+        let epoch =
+            wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
 
-        // Wait for second key rotation
-        wait_for_rotation(nodes, epoch + 1).await;
+        // Trigger second key rotation via Sui epoch change
+        test_networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(test_networks.hashi_network().nodes(), epoch + 1).await;
 
         Ok(())
     }
@@ -424,41 +428,49 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
-            .with_sui_epoch_duration_ms(SUI_EPOCH_DURATION_MS)
             .build()
             .await?;
 
-        let nodes = test_networks.hashi_network().nodes();
-
         // Wait for initial DKG completion on all nodes
-        let dkg_futures: Vec<_> = nodes
-            .iter()
-            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
-            .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let dkg_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
         }
 
-        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
 
         // Round 1: restart after DKG, then rotate
-        let restarted_after_dkg = copy_db_and_restart_node(&nodes[0], "after-dkg")?;
+        let restarted_after_dkg =
+            copy_db_and_restart_node(&test_networks.hashi_network().nodes()[0], "after-dkg")?;
 
+        // Trigger first rotation via Sui epoch change
+        test_networks.sui_network.force_close_epoch().await?;
         let first_target = initial_epoch + 1;
-        let epoch = wait_for_rotation(nodes, first_target).await;
+        let epoch = wait_for_rotation(test_networks.hashi_network().nodes(), first_target).await;
         restarted_after_dkg
             .wait_for_epoch(first_target, ROTATION_TIMEOUT)
             .await
             .expect("Restarted-after-DKG node failed first rotation");
 
         // Round 2: restart after rotation, then rotate again
-        let restarted_after_rotation = copy_db_and_restart_node(&nodes[0], "after-rotation")?;
+        let restarted_after_rotation =
+            copy_db_and_restart_node(&test_networks.hashi_network().nodes()[0], "after-rotation")?;
 
+        // Trigger second rotation via Sui epoch change
+        test_networks.sui_network.force_close_epoch().await?;
         let second_target = epoch + 1;
-        wait_for_rotation(nodes, second_target).await;
+        wait_for_rotation(test_networks.hashi_network().nodes(), second_target).await;
         restarted_after_rotation
             .wait_for_epoch(second_target, ROTATION_TIMEOUT)
             .await
