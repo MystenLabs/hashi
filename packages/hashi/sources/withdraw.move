@@ -108,3 +108,10 @@ entry fun confirm_withdrawal(
 
     withdrawal.destroy_pending_withdrawal();
 }
+
+public fun delete_expired_spent_utxo(hashi: &mut Hashi, txid: address, vout: u32) {
+    hashi.config().assert_version_enabled();
+    let utxo_id = hashi::utxo::utxo_id(txid, vout);
+    let current_epoch = hashi.committee_set().epoch();
+    hashi.utxo_pool_mut().delete_expired_spent_utxo(utxo_id, current_epoch);
+}

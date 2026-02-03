@@ -358,6 +358,8 @@ pub enum HashiEvent {
     DepositRequestedEvent(DepositRequestedEvent),
     DepositConfirmedEvent(DepositConfirmedEvent),
     ExpiredDepositDeletedEvent(ExpiredDepositDeletedEvent),
+    UtxoSpentEvent(UtxoSpentEvent),
+    SpentUtxoDeletedEvent(SpentUtxoDeletedEvent),
     StartReconfigEvent(StartReconfigEvent),
     EndReconfigEvent(EndReconfigEvent),
     AbortReconfigEvent(AbortReconfigEvent),
@@ -397,6 +399,10 @@ impl HashiEvent {
             }
             DepositConfirmedEvent::MODULE_NAME => {
                 DepositConfirmedEvent::from_bcs(bcs.value())?.into()
+            }
+            UtxoSpentEvent::MODULE_NAME => UtxoSpentEvent::from_bcs(bcs.value())?.into(),
+            SpentUtxoDeletedEvent::MODULE_NAME => {
+                SpentUtxoDeletedEvent::from_bcs(bcs.value())?.into()
             }
             StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
             EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
@@ -696,6 +702,39 @@ impl MoveType for ExpiredDepositDeletedEvent {
 impl From<ExpiredDepositDeletedEvent> for HashiEvent {
     fn from(value: ExpiredDepositDeletedEvent) -> Self {
         Self::ExpiredDepositDeletedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct UtxoSpentEvent {
+    pub utxo_id: UtxoId,
+    pub spent_epoch: u64,
+}
+
+impl MoveType for UtxoSpentEvent {
+    const MODULE: &'static str = "utxo_pool";
+    const NAME: &'static str = "UtxoSpentEvent";
+}
+
+impl From<UtxoSpentEvent> for HashiEvent {
+    fn from(value: UtxoSpentEvent) -> Self {
+        Self::UtxoSpentEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct SpentUtxoDeletedEvent {
+    pub utxo_id: UtxoId,
+}
+
+impl MoveType for SpentUtxoDeletedEvent {
+    const MODULE: &'static str = "utxo_pool";
+    const NAME: &'static str = "SpentUtxoDeletedEvent";
+}
+
+impl From<SpentUtxoDeletedEvent> for HashiEvent {
+    fn from(value: SpentUtxoDeletedEvent) -> Self {
+        Self::SpentUtxoDeletedEvent(value)
     }
 }
 

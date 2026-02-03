@@ -1,4 +1,3 @@
-/// Module: deposit
 module hashi::deposit;
 
 use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, utxo::UtxoId};

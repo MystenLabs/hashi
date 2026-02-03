@@ -1,6 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -34,6 +35,11 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
 pub mod types;
 mod watcher;
+
+fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::dkg::EncryptionGroupElement> {
+    let array: [u8; 32] = bytes.try_into().ok()?;
+    crate::dkg::EncryptionGroupElement::from_byte_array(&array).ok()
+}
 
 #[derive(Clone)]
 pub struct OnchainState(Arc<Inner>);
@@ -216,6 +222,50 @@ impl OnchainState {
             .members()
             .get(validator)
             .cloned()
+    }
+
+    pub fn current_committee(&self) -> Option<Committee> {
+        self.state().hashi.committees.current_committee().cloned()
+    }
+
+    pub fn current_committee_members(&self) -> Option<Vec<CommitteeMember>> {
+        self.state()
+            .hashi()
+            .committees
+            .current_committee()
+            .map(|c| c.members().to_vec())
+    }
+
+    pub fn deposit_requests(&self) -> Vec<types::DepositRequest> {
+        self.state()
+            .hashi()
+            .deposit_queue
+            .requests()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
+        self.state()
+            .hashi()
+            .utxo_pool
+            .spent_utxos()
+            .iter()
+            .map(|(utxo_id, epoch)| (*utxo_id, *epoch))
+            .collect()
+    }
+
+    pub fn bridge_service_client(
+        &self,
+        validator: &Address,
+    ) -> Option<hashi_types::proto::bridge_service_client::BridgeServiceClient<tonic_rustls::Channel>>
+    {
+        self.state()
+            .hashi()
+            .committees
+            .client(validator)
+            .map(|c| c.bridge_service_client())
     }
 
     /// Fetches the EpochCertsV1 for the given epoch from on-chain.
@@ -554,11 +604,10 @@ async fn scrape_all_member_info(
                     ),
                     https_address: https_address.try_into().ok(),
                     tls_public_key: tls_public_key.as_slice().try_into().ok(),
-                    next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+                    next_epoch_encryption_public_key: parse_encryption_public_key(
                         next_epoch_encryption_public_key.as_slice(),
                     )
-                    .map(Into::into)
-                    .ok(),
+                    .map(Into::into),
                 };
 
                 (info.validator_address, info)
@@ -611,11 +660,10 @@ async fn scrape_member_info(
         next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
         https_address: https_address.try_into().ok(),
         tls_public_key: tls_public_key.as_slice().try_into().ok(),
-        next_epoch_encryption_public_key: crate::dkg::EncryptionGroupElement::try_from(
+        next_epoch_encryption_public_key: parse_encryption_public_key(
             next_epoch_encryption_public_key.as_slice(),
         )
-        .map(Into::into)
-        .ok(),
+        .map(Into::into),
     };
     Ok(info)
 }
@@ -706,9 +754,9 @@ fn convert_move_committee_member(
         convert_move_uncompressed_g1_pubkey(&public_key),
         // Use fallback key for nodes without valid encryption key.
         // These nodes cannot decrypt shares but still count toward thresholds.
-        crate::dkg::EncryptionGroupElement::try_from(encryption_public_key.as_slice())
+        parse_encryption_public_key(encryption_public_key.as_slice())
             .map(Into::into)
-            .unwrap_or_else(|_| fallback_encryption_public_key()),
+            .unwrap_or_else(fallback_encryption_public_key),
         weight,
     )
 }
@@ -856,13 +904,7 @@ async fn scrape_spent_utxos(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok((utxo_id, spent_epoch))
         })
-        .map_ok(|(utxo_id, spent_epoch)| {
-            let utxo_id = types::UtxoId {
-                txid: utxo_id.txid,
-                vout: utxo_id.vout,
-            };
-            (utxo_id, spent_epoch)
-        })
+        .map_ok(|(utxo_id, spent_epoch): (move_types::UtxoId, u64)| (utxo_id.into(), spent_epoch))
         .try_collect()
         .await?;
 

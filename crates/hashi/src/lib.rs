@@ -129,6 +129,10 @@ impl Hashi {
             .cloned()
     }
 
+    pub fn mpc_handle(&self) -> Option<&mpc::MpcHandle> {
+        self.mpc_handle.get()
+    }
+
     async fn initialize_onchain_state(&self) {
         let onchain_state = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),

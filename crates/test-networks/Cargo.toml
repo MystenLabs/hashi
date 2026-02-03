@@ -9,6 +9,7 @@ hashi-btc = { path = "../hashi-btc" }
 hashi-types = { path = "../hashi-types" }
 
 anyhow.workspace = true
+fastcrypto.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 prometheus.workspace = true
