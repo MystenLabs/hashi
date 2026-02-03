@@ -150,7 +150,11 @@ impl SuiNetworkBuilder {
             .clone()
             .ok_or_else(|| anyhow!("no directory configured"))?;
         self.generate_genesis(&dir)?;
-        let (validator_keys, user_keys, admin_ports) = load_keys(&dir)?;
+        let NetworkKeys {
+            validator_keys,
+            user_keys,
+            admin_ports,
+        } = load_keys(&dir)?;
 
         let rpc_port = get_available_port();
         let process = self.start_network(&dir, rpc_port)?;
@@ -250,13 +254,13 @@ fn ed25519_private_key_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
     Ok(Ed25519PrivateKey::new((&bytes[..]).try_into()?))
 }
 
-fn load_keys(
-    dir: &Path,
-) -> Result<(
-    BTreeMap<Address, Ed25519PrivateKey>,
-    Vec<Ed25519PrivateKey>,
-    Vec<u16>,
-)> {
+struct NetworkKeys {
+    validator_keys: BTreeMap<Address, Ed25519PrivateKey>,
+    user_keys: Vec<Ed25519PrivateKey>,
+    admin_ports: Vec<u16>,
+}
+
+fn load_keys(dir: &Path) -> Result<NetworkKeys> {
     #[derive(serde::Deserialize)]
     struct Config {
         validator_configs: Vec<NodeConfig>,
@@ -294,7 +298,11 @@ fn load_keys(
         user_keys.push(ed25519_private_key_from_base64(&raw_key)?);
     }
 
-    Ok((validator_keys, user_keys, admin_ports))
+    Ok(NetworkKeys {
+        validator_keys,
+        user_keys,
+        admin_ports,
+    })
 }
 
 impl SuiNetworkHandle {
