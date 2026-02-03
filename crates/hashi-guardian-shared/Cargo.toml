@@ -4,26 +4,26 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-tracing = "0.1.41"
-bcs = "0.1.6"
+serde_json.workspace = true
+serde.workspace = true
+tracing.workspace = true
+bcs.workspace = true
 hashi-types = { path = "../hashi-types" }
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
+sui-sdk-types.workspace = true
 
 # Crypto dependencies
 # Note: bitcoin v0.32.7 and k256 v0.13 both require rand_core 0.6.4
 # hpke 0.13.0 uses rand 0.9 which conflicts - must use hpke 0.12.0
 hpke = "0.12.0"
-rand = "0.8.5"
-rand_core = "0.6.4"
+rand.workspace = true
+rand_core.workspace = true
 k256 = "0.13"
-bitcoin = { version =  "0.32.7", features = ["serde"] }
+bitcoin.workspace = true
 blake2 = "0.10"
 ed25519-consensus = "2.1"
 miniscript = "13.0.0"
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
+fastcrypto-tbls.workspace = true
+fastcrypto.workspace = true
 
 # AWS dependencies
 aws-config = "1.1.7"
@@ -31,6 +31,6 @@ aws-sdk-s3 = "1.12.0"
 aws-credential-types = "1"
 
 [dev-dependencies]
-tokio = { version = "1.43.0", features = ["full"] }
+tokio.workspace = true
 aws-sdk-s3 = { version = "1.12.0", features = ["test-util"] }
 aws-smithy-mocks = "0.1"

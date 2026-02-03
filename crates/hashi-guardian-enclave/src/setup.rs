@@ -92,7 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_new_key() {
-        let enclave = Enclave::create_operator_initialized_for_setup_mode().await;
+        let enclave = Enclave::create_operator_initialized().await;
         let verification_key = &enclave.signing_pubkey();
         let (request, kp_private_keys) = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();

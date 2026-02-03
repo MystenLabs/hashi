@@ -3,7 +3,12 @@
 
 module hashi::treasury;
 
-use sui::{coin::{TreasuryCap, Coin}, coin_registry::MetadataCap, object_bag::{Self, ObjectBag}};
+use sui::{
+    balance::Balance,
+    coin::{TreasuryCap, Coin},
+    coin_registry::MetadataCap,
+    object_bag::{Self, ObjectBag}
+};
 
 //////////////////////////////////////////////////////
 // Types
@@ -32,9 +37,9 @@ fun balance<T>(self: &mut Treasury): &mut Coin<T> {
     &mut self.objects[Key<Coin<T>> {}]
 }
 
-public(package) fun burn<T>(self: &mut Treasury, token: Coin<T>) {
-    sui::event::emit(BurnEvent<T> { amount: token.value() });
-    self.treasury_cap<T>().burn(token);
+public(package) fun burn<T>(self: &mut Treasury, balance: Balance<T>) {
+    sui::event::emit(BurnEvent<T> { amount: balance.value() });
+    self.treasury_cap<T>().supply_mut().decrease_supply(balance);
 }
 
 public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContext): Coin<T> {

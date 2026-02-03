@@ -4,29 +4,29 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["serde", "hash"] }
-sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
-sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
+sui-sdk-types.workspace = true
+sui-crypto.workspace = true
+sui-rpc.workspace = true
 
-serde = "1.0.219"
-serde_derive = "1.0.219"
-bcs = "0.1.6"
+serde.workspace = true
+serde_derive.workspace = true
+bcs.workspace = true
 
 # Dependencies for the protobuf definitions
-tonic = { version = "0.14", features = ["zstd", "transport", "tls-webpki-roots"] }
-tonic-prost = "0.14"
-prost = "0.14"
-prost-types = "0.14"
-bytes = { version = "1.5.0", features = ["serde"] }
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+bytes.workspace = true
 
 # crypto deps
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "cc67fd2", features = ["experimental"] }
+fastcrypto.workspace = true
+fastcrypto-tbls.workspace = true
 
-anyhow = "1.0.98"
+anyhow.workspace = true
 
 [dev-dependencies]
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
-test-strategy = "0.4"
-proptest = { version = "1.6.0", default-features = false, features = ["std"] }
-rand = "0.8"
+ed25519-dalek.workspace = true
+test-strategy.workspace = true
+proptest.workspace = true
+rand.workspace = true

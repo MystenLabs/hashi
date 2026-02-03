@@ -18,13 +18,10 @@ use crate::dkg::types::DealerMessagesHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SuiTxExecutor;
 use hashi_types::committee::Committee;
+use hashi_types::committee::certificate_threshold;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-
-// TODO: Read threshold from on-chain config once it is made configurable.
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -78,11 +75,6 @@ impl SuiTobChannel {
         }
     }
 
-    // This matches the Move contract's threshold computation.
-    fn threshold(&self) -> u64 {
-        self.committee.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
-    }
-
     fn create_executor(&self) -> SuiTxExecutor {
         SuiTxExecutor::new(
             self.onchain_state.client(),
@@ -91,35 +83,36 @@ impl SuiTobChannel {
         )
         .with_timeout(TX_CONFIRMATION_TIMEOUT)
     }
+}
 
-    /// Fetches all certificates in insertion order by following the LinkedTable's linked list.
-    async fn fetch_all_certificates(&self) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-        let raw_certs = self
-            .onchain_state
-            .fetch_dkg_certs(self.epoch)
-            .await
-            .map_err(|e| TobError::RpcError(e.to_string()))?;
-        let mut certificates = Vec::with_capacity(raw_certs.len());
-        for (dealer, dkg_cert) in raw_certs {
-            let inner_cert = DealerMessagesHash::from_onchain_dkg_cert(
-                &dkg_cert,
-                self.epoch,
-                &self.committee,
-                self.threshold(),
-            )
+pub async fn fetch_certificates(
+    onchain_state: &OnchainState,
+    epoch: u64,
+    committee: &Committee,
+) -> Result<Vec<(Address, CertificateV1)>, TobError> {
+    let threshold = certificate_threshold(committee.total_weight());
+    let Some((protocol_type, raw_certs)) = onchain_state
+        .fetch_certs(epoch)
+        .await
+        .map_err(|e| TobError::RpcError(e.to_string()))?
+    else {
+        return Ok(vec![]);
+    };
+    let mut certificates = Vec::with_capacity(raw_certs.len());
+    for (dealer, cert) in raw_certs {
+        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch, committee, threshold)
             .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
-            certificates.push((dealer, CertificateV1::Dkg(inner_cert)));
-        }
-        Ok(certificates)
+        let cert = CertificateV1::new(protocol_type, inner_cert);
+        certificates.push((dealer, cert));
     }
+    Ok(certificates)
 }
 
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = self
-            .fetch_all_certificates()
+        let existing = fetch_certificates(&self.onchain_state, self.epoch, &self.committee)
             .await
             .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
@@ -128,7 +121,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
 
         let mut executor = self.create_executor();
         executor
-            .execute_submit_dkg_certificate(&cert)
+            .execute_submit_certificate(&cert)
             .await
             .map_err(|e| ChannelError::Other(e.to_string()))
     }
@@ -139,8 +132,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = self
-                .fetch_all_certificates()
+            let all_certs = fetch_certificates(&self.onchain_state, self.epoch, &self.committee)
                 .await
                 .map_err(ChannelError::from)?;
             for (dealer, cert) in all_certs {

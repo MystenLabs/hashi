@@ -23,6 +23,14 @@ public fun utxo_id(txid: address, vout: u32): UtxoId {
     UtxoId { txid, vout }
 }
 
+public(package) fun utxo_id_from_bcs(raw: vector<u8>): UtxoId {
+    let mut bcs = sui::bcs::new(raw);
+    let txid = bcs.peel_address();
+    let vout = bcs.peel_u32();
+    bcs.into_remainder_bytes().destroy_empty();
+    UtxoId { txid, vout }
+}
+
 public fun utxo(utxo_id: UtxoId, amount: u64, derivation_path: Option<address>): Utxo {
     Utxo { id: utxo_id, amount, derivation_path }
 }
