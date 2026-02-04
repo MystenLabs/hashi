@@ -1,0 +1,12 @@
+[package]
+name = "hashi-monitor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+bitcoin.workspace = true
+serde.workspace = true
+hashi-guardian-shared = { path = "../hashi-guardian-shared" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
