@@ -115,6 +115,7 @@ impl DkgManager {
         public_message_store: Box<dyn PublicMessagesStore>,
         allowed_delta: u16,
         chain_id: &str,
+        test_weight_divisor: u16,
     ) -> DkgResult<Self> {
         let epoch = committee_set
             .pending_epoch_change()
@@ -125,7 +126,8 @@ impl DkgManager {
             .ok_or_else(|| DkgError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
         // TODO: Pass t and f as arguments instead of computing them
-        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta)?;
+        let (nodes, threshold) =
+            build_reduced_nodes(&committee, allowed_delta, test_weight_divisor)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
         let dkg_config = DkgConfig::new(epoch, nodes, threshold, max_faulty)?;
@@ -140,7 +142,8 @@ impl DkgManager {
         };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold) = build_reduced_nodes(prev_committee, allowed_delta)?;
+                let (nodes, threshold) =
+                    build_reduced_nodes(prev_committee, allowed_delta, test_weight_divisor)?;
                 (Some(nodes), Some(threshold))
             }
             None => (None, None),
@@ -1938,6 +1941,7 @@ fn compute_bft_threshold(total_weight: u16) -> DkgResult<u16> {
 fn build_reduced_nodes(
     committee: &Committee,
     allowed_delta: u16,
+    test_weight_divisor: u16,
 ) -> DkgResult<(Nodes<EncryptionGroupElement>, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
@@ -1946,7 +1950,7 @@ fn build_reduced_nodes(
         .map(|(index, member)| Node {
             id: index as u16,
             pk: member.encryption_public_key().to_owned(),
-            weight: member.weight() as u16,
+            weight: (member.weight() as u16 / test_weight_divisor).max(1),
         })
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
@@ -2016,6 +2020,8 @@ mod tests {
 
     /// Use 0 for allowed_delta in tests to disable weight reduction.
     const TEST_ALLOWED_DELTA: u16 = 0;
+    /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
+    const TEST_WEIGHT_DIVISOR: u16 = 1;
     const TEST_CHAIN_ID: &str = "testchain";
 
     struct MockPublicMessagesStore;
@@ -2239,6 +2245,7 @@ mod tests {
                 store,
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
+                TEST_WEIGHT_DIVISOR,
             )
             .unwrap()
         }
@@ -2816,6 +2823,7 @@ mod tests {
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
+            TEST_WEIGHT_DIVISOR,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -2876,6 +2884,7 @@ mod tests {
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
             "test",
+            TEST_WEIGHT_DIVISOR,
         );
 
         let err = match result {
@@ -6513,7 +6522,8 @@ mod tests {
         fn prepare_for_rotation(&self, manager: &mut DkgManager) {
             let previous_committee = self.setup.committee_set.previous_committee().cloned();
             if let Some(ref prev) = previous_committee {
-                let (nodes, threshold) = build_reduced_nodes(prev, TEST_ALLOWED_DELTA).unwrap();
+                let (nodes, threshold) =
+                    build_reduced_nodes(prev, TEST_ALLOWED_DELTA, TEST_WEIGHT_DIVISOR).unwrap();
                 manager.previous_nodes = Some(nodes);
                 manager.previous_threshold = Some(threshold);
             }
@@ -7059,6 +7069,7 @@ mod tests {
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
+            TEST_WEIGHT_DIVISOR,
         )
         .unwrap();
 

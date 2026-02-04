@@ -49,6 +49,7 @@ const HTTP_SCHEME: &str = "http://";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const THRESHOLD_NUMERATOR: u64 = 2;
 const THRESHOLD_DENOMINATOR: u64 = 3;
+const TEST_WEIGHT_DIVISOR: u16 = 100;
 
 pub struct HashiNodeHandle(pub Arc<Hashi>);
 
@@ -237,6 +238,7 @@ impl HashiNetworkBuilder {
         let mut configs = Vec::with_capacity(self.num_nodes);
         for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
             let mut config = HashiConfig::new_for_testing();
+            config.test_weight_divisor = Some(TEST_WEIGHT_DIVISOR);
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

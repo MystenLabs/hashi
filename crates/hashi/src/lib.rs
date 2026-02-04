@@ -173,6 +173,7 @@ impl Hashi {
             store,
             WEIGHT_REDUCTION_ALLOWED_DELTA,
             self.config.sui_chain_id(),
+            self.config.test_weight_divisor(),
         )?)
     }
 
