@@ -15,13 +15,8 @@ use tracing::info;
 
 /// A minimal storage abstraction.
 ///
-/// This is intentionally small so we can implement a persistent backend later (fjall / sqlite / etc.)
-/// with minimal churn.
-///
 /// Ingestor flow (TODO: unimplemented):
-///     - Read BTC/Sui/S3 cursor
-///     - Fetch and insert events
-///     - New events are marked unprocessed
+///     - Use Sui/S3 cursor to listen to new events which are marked unprocessed
 ///
 /// Correlator flow (correlate.rs):
 ///     - For each unprocessed event, perform all checks and mark it processed.
