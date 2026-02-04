@@ -69,20 +69,11 @@ pub struct E4BtcSpendFromHashi {
 }
 
 /// A unified view of withdrawal-related events.
-///
-/// Security-complete: only stable identifiers + timestamps.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WithdrawalEvent {
-    /// (E1) Sui withdrawal initiation.
     SuiInit(E1SuiInit),
-
-    /// (E2) Guardian approval.
     GuardianApproved(E2GuardianApproved),
-
-    /// (E3) Hashi approval (recorded on Sui).
     SuiApproved(E3SuiApproved),
-
-    /// (E4) Confirmed Bitcoin spend.
     BtcSpend(E4BtcSpendFromHashi),
 }
 
@@ -96,42 +87,6 @@ impl WithdrawalEvent {
             Self::BtcSpend(e) => e.timestamp,
         }
     }
-
-    /// Withdrawal ID associated with this event, if any.
-    pub fn wid(&self) -> Option<WithdrawalID> {
-        match self {
-            Self::SuiInit(e) => Some(e.wid),
-            Self::GuardianApproved(e) => Some(e.wid),
-            Self::SuiApproved(e) => Some(e.wid),
-            Self::BtcSpend(_) => None,
-        }
-    }
-
-    /// Bitcoin txid associated with this event, if any.
-    pub fn txid(&self) -> Option<Txid> {
-        match self {
-            Self::SuiInit(_) => None,
-            Self::GuardianApproved(e) => Some(e.btc_txid),
-            Self::SuiApproved(e) => Some(e.btc_txid),
-            Self::BtcSpend(e) => Some(e.txid),
-        }
-    }
-}
-
-/// Describes an inconsistency between two events that are expected to be linked.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InconsistentLink {
-    /// Two events with the same `wid` disagree on the Bitcoin transaction id.
-    WidTxidMismatch {
-        /// Withdrawal identifier.
-        wid: WithdrawalID,
-
-        /// Bitcoin txid recorded/approved by the Guardian (E2).
-        guardian_txid: Txid,
-
-        /// Bitcoin txid recorded on Sui by Hashi approval (E3).
-        sui_txid: Txid,
-    },
 }
 
 /// Findings emitted by the monitor.

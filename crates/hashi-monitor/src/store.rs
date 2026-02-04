@@ -19,22 +19,19 @@ use tracing::info;
 /// This is intentionally small so we can implement a persistent backend later (fjall / sqlite / etc.)
 /// with minimal churn.
 ///
-/// Ingestor flow:
-///     - Read BTC / Sui / Guardian cursor
+/// Ingestor flow (TODO: unimplemented):
+///     - Read BTC/Sui/S3 cursor
 ///     - Fetch and insert events
 ///     - New events are marked unprocessed
 ///
-/// Correlator flow:
-///     - Read unprocessed events
-///     - Perform all checks
+/// Correlator flow (correlate.rs):
+///     - For each unprocessed event, perform all checks and mark it processed.
 pub trait Store: Send + Sync {
     // ========================================================================
     // Ingestor Functions
     // ========================================================================
 
-    /// Get a named cursor value (raw).
-    ///
-    /// A cursor represents where we left off reading from some upstream source (BTC/Sui/S3/etc.).
+    /// Get a named cursor value (raw). A cursor represents where we left off reading from some upstream source (BTC/Sui/S3/etc.).
     fn get_cursor_raw(&self, name: &str) -> Option<String>;
 
     /// Set a named cursor value (raw).
