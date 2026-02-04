@@ -7,9 +7,10 @@
 //!
 //! Safety checks: for every event in E_{i+1}, there exists a corresponding event in E_i.
 //! Liveness checks: for every event in E_i, there exists a corresponding event in E_{i+1} within time `t`.
+//!     In addition, we also need to check that for every E3, there exists a corresponding BTC spend (E4).
 //!
-//! For now, only information critical for security and liveness checks is added.
-//! TODO: More info to be added later, e.g., external_address, amount, etc.
+//! For now, only information critical for security or liveness checks is added to the events.
+//! TODO: More info can be added later to the event fields, e.g., external_address, amount, etc.
 
 use std::error::Error as StdError;
 use std::fmt;
