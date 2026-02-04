@@ -7,7 +7,6 @@ use std::sync::MutexGuard;
 use crate::domain::E1SuiInit;
 use crate::domain::E2GuardianApproved;
 use crate::domain::E3SuiApproved;
-use crate::domain::E4BtcSpendFromHashi;
 use crate::domain::WithdrawalEvent;
 use anyhow::anyhow;
 use bitcoin::Txid;
@@ -48,12 +47,6 @@ pub trait Store: Send + Sync {
     // ========================================================================
     // Correlator Functions
     // ========================================================================
-
-    /// List unprocessed (E4) events.
-    fn list_unprocessed_e4(&self, limit: usize) -> Vec<E4BtcSpendFromHashi>;
-
-    /// Mark an (E4) event as processed.
-    fn mark_e4_processed(&self, event: &E4BtcSpendFromHashi);
 
     /// List unprocessed (E3) events.
     fn list_unprocessed_e3(&self, limit: usize) -> Vec<E3SuiApproved>;
@@ -99,10 +92,6 @@ struct Inner {
     e3_by_wid: HashMap<WithdrawalID, E3SuiApproved>,
     e3_by_txid: HashMap<Txid, E3SuiApproved>,
     e3_unprocessed: HashSet<WithdrawalID>,
-
-    // (E4)
-    e4_by_txid: HashMap<Txid, E4BtcSpendFromHashi>,
-    e4_unprocessed: HashSet<Txid>,
 }
 
 /// In-memory store implementation.
@@ -222,38 +211,7 @@ impl Store for InMemoryStore {
                 inner.e3_unprocessed.insert(approved.wid);
                 Ok(())
             }
-
-            WithdrawalEvent::BtcSpend(spend) => match inner.e4_by_txid.entry(spend.txid) {
-                Entry::Vacant(v) => {
-                    v.insert(spend.clone());
-                    inner.e4_unprocessed.insert(spend.txid);
-                    Ok(())
-                }
-                Entry::Occupied(o) if o.get() == &spend => Ok(()),
-                Entry::Occupied(o) => Err(conflicting_reinsert(
-                    "E4",
-                    format!("txid={:?}", spend.txid),
-                    o.get(),
-                    &spend,
-                )),
-            },
         }
-    }
-
-    fn list_unprocessed_e4(&self, limit: usize) -> Vec<E4BtcSpendFromHashi> {
-        let inner = self.lock();
-        info!("found {} unprocessed e4 events", inner.e4_unprocessed.len());
-        let mut out = Vec::new();
-        for txid in inner.e4_unprocessed.iter().copied().take(limit) {
-            if let Some(spend) = inner.e4_by_txid.get(&txid) {
-                out.push(spend.clone());
-            }
-        }
-        out
-    }
-
-    fn mark_e4_processed(&self, e4: &E4BtcSpendFromHashi) {
-        self.lock().e4_unprocessed.remove(&e4.txid);
     }
 
     fn list_unprocessed_e3(&self, limit: usize) -> Vec<E3SuiApproved> {

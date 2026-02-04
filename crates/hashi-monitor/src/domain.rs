@@ -4,7 +4,6 @@
 //! - E1: Sui withdrawal initiation (user intent)
 //! - E2: Guardian approval
 //! - E3: Hashi approval (on Sui)
-//! - E4: Bitcoin spend observed
 //!
 //! Safety checks: for every event in E_{i+1}, there exists a corresponding event in E_i.
 //! Liveness checks: for every event in E_i, there exists a corresponding event in E_{i+1} within time `t`.
@@ -58,23 +57,12 @@ pub struct E3SuiApproved {
     pub timestamp: UnixSeconds,
 }
 
-/// (E4) A confirmed Bitcoin tx observed spending from a Hashi-controlled address set.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct E4BtcSpendFromHashi {
-    /// The spending transaction id.
-    pub txid: Txid,
-
-    /// Unix timestamp of the block containing this tx.
-    pub timestamp: UnixSeconds,
-}
-
 /// A unified view of withdrawal-related events.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WithdrawalEvent {
     SuiInit(E1SuiInit),
     GuardianApproved(E2GuardianApproved),
     SuiApproved(E3SuiApproved),
-    BtcSpend(E4BtcSpendFromHashi),
 }
 
 impl WithdrawalEvent {
@@ -84,7 +72,6 @@ impl WithdrawalEvent {
             Self::SuiInit(e) => e.timestamp,
             Self::GuardianApproved(e) => e.timestamp,
             Self::SuiApproved(e) => e.timestamp,
-            Self::BtcSpend(e) => e.timestamp,
         }
     }
 }

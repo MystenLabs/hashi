@@ -1,6 +1,5 @@
 use crate::domain::E2GuardianApproved;
 use crate::domain::E3SuiApproved;
-use crate::domain::E4BtcSpendFromHashi;
 use crate::domain::Finding;
 use crate::domain::WithdrawalEvent;
 use crate::store::Store;
@@ -12,14 +11,6 @@ use crate::store::Store;
 ///
 /// If a finding is detected, we return it as an error.
 pub fn correlate_pending_safety_events(store: &dyn Store, limit: usize) -> anyhow::Result<()> {
-    // (E4) => (E3)
-    for e4 in store.list_unprocessed_e4(limit) {
-        if let Some(finding) = check_safety_for_e4(store, &e4) {
-            return Err(anyhow::anyhow!(finding));
-        }
-        store.mark_e4_processed(&e4);
-    }
-
     // (E3) => (E2)
     for e3 in store.list_unprocessed_e3(limit) {
         if let Some(finding) = check_safety_for_e3(store, &e3) {
@@ -37,17 +28,6 @@ pub fn correlate_pending_safety_events(store: &dyn Store, limit: usize) -> anyho
     }
 
     Ok(())
-}
-
-fn check_safety_for_e4(store: &dyn Store, e4: &E4BtcSpendFromHashi) -> Option<Finding> {
-    // Safety: if we observe a BTC spend (E4), we should have seen Sui approval (E3).
-    if store.get_e3_by_txid(&e4.txid).is_none() {
-        return Some(Finding::SafetyMissingPredecessor(
-            WithdrawalEvent::BtcSpend(e4.clone()),
-        ));
-    }
-
-    None
 }
 
 fn check_safety_for_e3(store: &dyn Store, e3: &E3SuiApproved) -> Option<Finding> {
