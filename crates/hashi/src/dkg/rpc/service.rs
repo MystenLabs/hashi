@@ -4,6 +4,8 @@ use crate::dkg::types::DkgError;
 use crate::grpc::HttpService;
 use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
+use hashi_types::proto::GetPartialSignaturesRequest;
+use hashi_types::proto::GetPartialSignaturesResponse;
 use hashi_types::proto::GetPublicDkgOutputRequest;
 use hashi_types::proto::GetPublicDkgOutputResponse;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
@@ -12,6 +14,8 @@ use hashi_types::proto::RetrieveMessagesRequest;
 use hashi_types::proto::RetrieveMessagesResponse;
 use hashi_types::proto::SendMessagesRequest;
 use hashi_types::proto::SendMessagesResponse;
+use hashi_types::proto::SendPartialSignaturesRequest;
+use hashi_types::proto::SendPartialSignaturesResponse;
 use hashi_types::proto::mpc_service_server::MpcService;
 use sui_sdk_types::Address;
 use tonic::Status;
@@ -117,6 +121,20 @@ impl MpcService for HttpService {
                 signature: Some(signature.into()),
             },
         ))
+    }
+
+    async fn send_partial_signatures(
+        &self,
+        _request: tonic::Request<SendPartialSignaturesRequest>,
+    ) -> Result<tonic::Response<SendPartialSignaturesResponse>, Status> {
+        todo!()
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        _request: tonic::Request<GetPartialSignaturesRequest>,
+    ) -> Result<tonic::Response<GetPartialSignaturesResponse>, Status> {
+        todo!()
     }
 }
 
