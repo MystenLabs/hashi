@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use sui_crypto::SuiSigner;
+use sui_futures::service::Service;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::BatchGetObjectsRequest;
@@ -33,6 +34,7 @@ use sui_sdk_types::Transaction;
 use sui_sdk_types::TransactionExpiration;
 use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
+use tokio::sync::Mutex;
 use tracing::info;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -50,42 +52,71 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500)
 const THRESHOLD_NUMERATOR: u64 = 2;
 const THRESHOLD_DENOMINATOR: u64 = 3;
 
-pub struct HashiNodeHandle(pub Arc<Hashi>);
+pub struct HashiNodeHandle {
+    hashi: Arc<Hashi>,
+    service: Mutex<Option<Service>>,
+}
 
 impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();
         let hashi_instance = Hashi::new_with_registry(server_version, config, &registry);
-        Ok(Self(hashi_instance))
+        Ok(Self {
+            hashi: hashi_instance,
+            service: Mutex::new(None),
+        })
     }
 
-    pub fn start(&self) {
-        self.0.clone().start();
+    pub async fn start(&self) -> Result<()> {
+        let mut guard = self.service.lock().await;
+        if guard.is_some() {
+            anyhow::bail!("Hashi node already started");
+        }
+        let service = self.hashi.clone().start().await?;
+        *guard = Some(service);
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) {
+        let service = self.service.lock().await.take();
+        if let Some(service) = service
+            && let Err(e) = service.shutdown().await
+        {
+            tracing::warn!("Hashi shutdown error: {e}");
+        }
+    }
+
+    pub fn hashi(&self) -> &Arc<Hashi> {
+        &self.hashi
     }
 
     pub fn https_url(&self) -> String {
-        format!("{}{}", HTTPS_SCHEME, self.0.config.https_address())
+        format!("{}{}", HTTPS_SCHEME, self.hashi.config.https_address())
     }
 
     pub fn http_url(&self) -> String {
-        format!("{}{}", HTTP_SCHEME, self.0.config.http_address())
+        format!("{}{}", HTTP_SCHEME, self.hashi.config.http_address())
     }
 
     pub fn metrics_url(&self) -> String {
-        format!("{}{}", HTTP_SCHEME, self.0.config.metrics_http_address())
+        format!(
+            "{}{}",
+            HTTP_SCHEME,
+            self.hashi.config.metrics_http_address()
+        )
     }
 
     pub fn https_address(&self) -> SocketAddr {
-        self.0.config.https_address()
+        self.hashi.config.https_address()
     }
 
     pub fn http_address(&self) -> SocketAddr {
-        self.0.config.http_address()
+        self.hashi.config.http_address()
     }
 
     pub fn metrics_address(&self) -> SocketAddr {
-        self.0.config.metrics_http_address()
+        self.hashi.config.metrics_http_address()
     }
 
     pub async fn wait_for_mpc_key(&self, timeout: std::time::Duration) -> Result<()> {
@@ -96,7 +127,7 @@ impl HashiNodeHandle {
 
     async fn wait_for_mpc_key_inner(&self) -> Result<()> {
         loop {
-            if let Some(mpc_handle) = self.0.mpc_handle()
+            if let Some(mpc_handle) = self.hashi.mpc_handle()
                 && mpc_handle.public_key().is_some()
             {
                 return Ok(());
@@ -114,7 +145,7 @@ impl HashiNodeHandle {
     async fn wait_for_dkg_completion_inner(&self) {
         loop {
             // Wait for hashi to finish initializing
-            let onchain_state = match self.0.onchain_state_opt() {
+            let onchain_state = match self.hashi.onchain_state_opt() {
                 Some(state) => state,
                 None => {
                     tokio::time::sleep(POLL_INTERVAL).await;
@@ -163,6 +194,10 @@ pub struct HashiNetwork {
 impl HashiNetwork {
     pub fn nodes(&self) -> &[HashiNodeHandle] {
         &self.nodes
+    }
+
+    pub async fn shutdown(&self) {
+        futures::future::join_all(self.nodes.iter().map(|node| node.shutdown())).await;
     }
 
     pub fn ids(&self) -> HashiIds {
@@ -250,7 +285,7 @@ impl HashiNetworkBuilder {
         for config in configs {
             let validator_address = config.validator_address()?;
             let node_handle = HashiNodeHandle::new(config)?;
-            node_handle.start();
+            node_handle.start().await?;
             info!(
                 "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
                 validator_address,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use sui_futures::service::Service;
 use tower::ServiceBuilder;
 
 use crate::Hashi;
@@ -19,7 +20,7 @@ impl HttpService {
         Self { inner: hashi }
     }
 
-    pub async fn start(self) -> sui_http::ServerHandle {
+    pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
             let bridge_service =
                 hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
@@ -84,10 +85,26 @@ impl HttpService {
             crate::tls::make_server_config(self.inner.config.tls_private_key().unwrap());
         // let tls_config =
         //     crate::tls_rpk::make_server_config(self.inner.config.tls_private_key().unwrap());
-        sui_http::Builder::new()
-            .tls_config(tls_config)
-            .serve(self.inner.config.https_address(), router)
-            .unwrap()
+
+        let server_handle = Arc::new(
+            sui_http::Builder::new()
+                .tls_config(tls_config)
+                .serve(self.inner.config.https_address(), router)
+                .unwrap(),
+        );
+        let local_addr = *server_handle.local_addr();
+        let shutdown_handle = server_handle.clone();
+
+        let service = Service::new()
+            .with_shutdown_signal(async move {
+                shutdown_handle.trigger_shutdown();
+            })
+            .spawn(async move {
+                server_handle.wait_for_shutdown().await;
+                Ok(())
+            });
+
+        (local_addr, service)
     }
 
     pub fn dkg_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::DkgManager>> {

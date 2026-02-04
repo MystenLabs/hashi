@@ -62,6 +62,10 @@ impl TestNetworks {
         &self.bitcoin_node
     }
 
+    pub async fn shutdown(&self) {
+        self.hashi_network.shutdown().await;
+    }
+
     fn _sui_client_command(&self) -> Command {
         let client_config = self.dir.path().join("sui/client.yaml");
         let mut cmd = Command::new(sui_binary());
@@ -216,6 +220,7 @@ mod tests {
         //     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         // }
 
+        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -230,7 +235,7 @@ mod tests {
         let sui_rpc_url = &test_networks.sui_network().rpc_url;
         let ids = test_networks.hashi_network().ids();
 
-        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
+        let (state, _service) = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
@@ -253,7 +258,7 @@ mod tests {
         let mut reciever = state.subscribe();
 
         let client = test_networks.sui_network().client.clone();
-        let v1_config = &test_networks.hashi_network().nodes()[0].0.config;
+        let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
         super::hashi_network::update_tls_public_key(client, v1_config)
             .await
             .unwrap();
@@ -267,6 +272,7 @@ mod tests {
             panic!("unexpected notification");
         }
 
+        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -287,6 +293,7 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
+        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -314,7 +321,7 @@ mod tests {
         }
 
         // Save the config of the first node and copy its DB for recovery test
-        let mut saved_config = nodes[0].0.config.clone();
+        let mut saved_config = nodes[0].hashi().config.clone();
         let original_db_path = saved_config.db.as_ref().unwrap().clone();
 
         // TODO: Use graceful shutdown/restart instead of copying the database and spinning up a duplicate node.
@@ -342,13 +349,16 @@ mod tests {
 
         // Create a new node with the copied DB (simulating restart with same data)
         let restarted_node = HashiNodeHandle::new(saved_config)?;
-        restarted_node.start();
+        restarted_node.start().await?;
 
         // Wait for the restarted node to see DKG completion via on-chain certificates
         restarted_node
             .wait_for_dkg_completion(DKG_TIMEOUT)
             .await
             .expect("DKG recovery should complete within timeout");
+
+        restarted_node.shutdown().await;
+        test_networks.shutdown().await;
         Ok(())
     }
 }

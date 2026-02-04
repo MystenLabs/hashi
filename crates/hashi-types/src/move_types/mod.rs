@@ -192,7 +192,7 @@ pub struct DepositRequestQueue {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalRequestQueue {
     pub requests: Bag,
-    pub peending_withdrawals: Bag,
+    pub pending_withdrawals: Bag,
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.

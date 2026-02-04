@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
+use sui_futures::service::Service;
 use tokio::sync::watch;
 use tracing::error;
 use tracing::info;
@@ -78,7 +79,15 @@ impl MpcService {
         (service, handle)
     }
 
-    pub async fn start(self) {
+    /// Start the MPC service and return a `Service` for lifecycle management.
+    pub fn start(self) -> Service {
+        Service::new().spawn_aborting(async move {
+            self.run().await;
+            Ok(())
+        })
+    }
+
+    async fn run(self) {
         if let Some(epoch) = self.get_pending_epoch_change() {
             self.handle_reconfig(epoch).await;
         } else {

@@ -69,3 +69,4 @@ fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git" }
 prometheus-closure-metric = { git = "https://github.com/MystenLabs/sui.git" }
+sui-futures = { git = "https://github.com/MystenLabs/sui.git" }

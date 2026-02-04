@@ -83,9 +83,11 @@ impl HashiClient {
             hashi_object_id: config.hashi_object_id(),
         };
 
-        // Create OnchainState which scrapes the current state
-        // The background watcher will be dropped when HashiClient is dropped
-        let onchain_state = OnchainState::new(&config.sui_rpc_url, hashi_ids, None)
+        // Create OnchainState which scrapes the current state.
+        // Dropping the service immediately aborts the background watcher task, so the
+        // OnchainState will have the initial scraped state but won't receive live updates.
+        // This is fine for CLI commands for now.
+        let (onchain_state, _service) = OnchainState::new(&config.sui_rpc_url, hashi_ids, None)
             .await
             .context("Failed to initialize on-chain state")?;
 

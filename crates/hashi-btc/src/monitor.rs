@@ -4,6 +4,7 @@ use anyhow::Result;
 use bitcoincore_rpc::RpcApi;
 use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
+use sui_futures::service::Service;
 use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
@@ -27,7 +28,8 @@ pub struct Monitor {
 
 impl Monitor {
     /// Run a BTC monitor with the given configuration.
-    pub fn run(config: MonitorConfig) -> Result<MonitorClient> {
+    /// Returns the client for interacting with the monitor and a Service for lifecycle management.
+    pub fn run(config: MonitorConfig) -> Result<(MonitorClient, Service)> {
         let mut node_builder = kyoto::NodeBuilder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
             // TODO: should we set this higher than default?
@@ -61,41 +63,45 @@ impl Monitor {
             pending_deposits: vec![],
         };
 
-        // Spawn tasks.
-        tokio::spawn(async move {
-            info!("Starting Kyoto node");
-            if let Err(e) = kyoto_node.run().await {
-                error!("Kyoto node error: {}", e);
-            }
-        });
-        tokio::spawn(async move {
-            info!(
-                "Starting Bitcoin monitor for network: {:?}",
-                monitor.config.network
-            );
-            loop {
-                tokio::select! {
-                    Some(event) = kyoto_client.event_rx.recv() => {
-                        monitor.process_kyoto_event(event);
-                    }
-                    Some(msg) = client_rx.recv() => {
-                        monitor.process_client_message(msg);
-                    }
-                    Some(msg) = kyoto_client.info_rx.recv() => {
-                        info!("Kyoto: {msg}");
-                    }
-                    Some(msg) = kyoto_client.warn_rx.recv() => {
-                        warn!("Kyoto: {msg}");
-                    }
-                    else => {
-                        break;
+        // Spawn tasks with graceful shutdown support.
+        let service = Service::new()
+            .spawn_aborting(async move {
+                info!("Starting Kyoto node");
+                if let Err(e) = kyoto_node.run().await {
+                    error!("Kyoto node error: {}", e);
+                    anyhow::bail!(e);
+                }
+                Ok(())
+            })
+            .spawn_aborting(async move {
+                info!(
+                    "Starting Bitcoin monitor for network: {:?}",
+                    monitor.config.network
+                );
+                loop {
+                    tokio::select! {
+                        Some(event) = kyoto_client.event_rx.recv() => {
+                            monitor.process_kyoto_event(event);
+                        }
+                        Some(msg) = client_rx.recv() => {
+                            monitor.process_client_message(msg);
+                        }
+                        Some(msg) = kyoto_client.info_rx.recv() => {
+                            info!("Kyoto: {msg}");
+                        }
+                        Some(msg) = kyoto_client.warn_rx.recv() => {
+                            warn!("Kyoto: {msg}");
+                        }
+                        else => {
+                            break;
+                        }
                     }
                 }
-            }
-            info!("Bitcoin monitor stopped");
-        });
+                info!("Bitcoin monitor stopped");
+                Ok(())
+            });
 
-        Ok(MonitorClient { tx: client_tx })
+        Ok((MonitorClient { tx: client_tx }, service))
     }
 
     fn process_kyoto_event(&mut self, event: kyoto::Event) {

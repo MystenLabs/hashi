@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use sui_futures::service::Service;
 
 pub mod communication;
 pub mod config;
@@ -132,15 +133,17 @@ impl Hashi {
         self.mpc_handle.get()
     }
 
-    async fn initialize_onchain_state(&self) {
-        let onchain_state = onchain::OnchainState::new(
+    async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
+        let (onchain_state, service) = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
             self.config.hashi_ids(),
             self.config.tls_private_key().ok(),
         )
-        .await
-        .unwrap();
-        self.onchain_state.set(onchain_state).unwrap();
+        .await?;
+        self.onchain_state
+            .set(onchain_state)
+            .map_err(|_| anyhow!("OnchainState already initialized"))?;
+        Ok(service)
     }
 
     pub fn create_dkg_manager(
@@ -174,7 +177,7 @@ impl Hashi {
         )?)
     }
 
-    fn initialize_btc_monitor(&self) -> anyhow::Result<()> {
+    fn initialize_btc_monitor(&self) -> anyhow::Result<Service> {
         let monitor_config = hashi_btc::config::MonitorConfig::builder()
             .network(self.config.bitcoin_network())
             .confirmation_threshold(self.config.bitcoin_confirmation_threshold())
@@ -192,51 +195,52 @@ impl Hashi {
                     .join("btc-monitor"),
             )
             .build();
+        let (client, service) =
+            hashi_btc::monitor::Monitor::run(monitor_config).expect("Failed to start BtcMonitor");
         self.btc_monitor
-            .set(
-                hashi_btc::monitor::Monitor::run(monitor_config)
-                    .expect("Failed to start BtcMonitor"),
-            )
+            .set(client)
             .map_err(|_| anyhow!("BtcMonitor already initialized"))?;
-        Ok(())
+        Ok(service)
     }
 
-    pub fn start(self: Arc<Self>) {
-        tokio::spawn(async move {
-            // Initialize
-            self.initialize_onchain_state().await;
+    pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
+        // Initialize
+        let onchain_service = self.initialize_onchain_state().await?;
 
-            let epoch = self.onchain_state().epoch();
-            let dkg_manager = match self.create_dkg_manager(epoch, mpc::types::ProtocolType::Dkg) {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("Failed to create DkgManager: {e}");
-                    return;
-                }
-            };
-            if self
-                .dkg_manager
-                .set(Arc::new(RwLock::new(dkg_manager)))
-                .is_err()
-            {
-                panic!("DkgManager already set");
-            }
-            let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone());
-            self.mpc_handle
-                .set(mpc_handle)
-                .expect("MpcHandle already set");
+        let epoch = self.onchain_state().epoch();
+        let dkg_manager = self
+            .create_dkg_manager(epoch, mpc::types::ProtocolType::Dkg)
+            .map_err(|e| {
+                tracing::error!("Failed to create DkgManager: {e}");
+                e
+            })?;
+        self.dkg_manager
+            .set(Arc::new(RwLock::new(dkg_manager)))
+            .map_err(|_| anyhow!("DkgManager already set"))?;
 
-            if let Err(e) = self.initialize_btc_monitor() {
-                tracing::error!("Failed to initialize BtcMonitor: {e}");
-                return;
-            }
+        let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone());
+        self.mpc_handle
+            .set(mpc_handle)
+            .expect("MpcHandle already set");
 
-            // Start services
-            let http_service = grpc::HttpService::new(self.clone()).start();
-            let leader_service = leader::LeaderService::new(self.clone()).start();
-            let mpc_service = mpc_service.start();
-            tokio::join!(http_service, leader_service, mpc_service);
-        });
+        let btc_monitor_service = self.initialize_btc_monitor().map_err(|e| {
+            tracing::error!("Failed to initialize BtcMonitor: {e}");
+            e
+        })?;
+
+        // Start services
+        let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
+        let leader_service = leader::LeaderService::new(self.clone()).start();
+        let mpc_service = mpc_service.start();
+
+        let service = Service::new()
+            .merge(onchain_service)
+            .merge(btc_monitor_service)
+            .merge(http_service)
+            .merge(leader_service)
+            .merge(mpc_service);
+
+        Ok(service)
     }
 }
 
@@ -278,9 +282,9 @@ mod test {
 
         let hashi = Hashi::new(server_version, config);
 
-        let http_server = crate::grpc::HttpService::new(hashi).start().await;
+        let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
 
-        let address = format!("https://{}", http_server.local_addr());
+        let address = format!("https://{}", local_addr);
         dbg!(&address);
 
         let client_tls_config = crate::tls::make_client_config(&tls_public_key);

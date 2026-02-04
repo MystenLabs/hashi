@@ -1013,8 +1013,8 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 
 [[package]]
 name = "bin-version"
-version = "1.64.0"
-source = "git+https://github.com/MystenLabs/sui.git#cd8b36a9f1bf85b73eb7e174f5306d56b643dcc4"
+version = "1.66.0"
+source = "git+https://github.com/MystenLabs/sui.git#10436c976a91e9a493c1c6ba8be8b63102535aa4"
 dependencies = [
  "const-str",
  "git-version",
@@ -2573,6 +2573,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "sui-crypto",
+ "sui-futures",
  "sui-http",
  "sui-rpc",
  "sui-sdk-types",
@@ -2608,6 +2609,7 @@ dependencies = [
  "kyoto-cbf",
  "serde",
  "serde_derive",
+ "sui-futures",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3967,7 +3969,7 @@ dependencies = [
 [[package]]
 name = "prometheus-closure-metric"
 version = "0.1.0"
-source = "git+https://github.com/MystenLabs/sui.git#cd8b36a9f1bf85b73eb7e174f5306d56b643dcc4"
+source = "git+https://github.com/MystenLabs/sui.git#10436c976a91e9a493c1c6ba8be8b63102535aa4"
 dependencies = [
  "anyhow",
  "prometheus",
@@ -5047,6 +5049,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sui-futures"
+version = "1.66.0"
+source = "git+https://github.com/MystenLabs/sui.git#10436c976a91e9a493c1c6ba8be8b63102535aa4"
+dependencies = [
+ "anyhow",
+ "futures",
+ "tap",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sui-http"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5222,6 +5237,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sui-crypto",
+ "sui-futures",
  "sui-rpc",
  "sui-sdk-types",
  "tempfile",

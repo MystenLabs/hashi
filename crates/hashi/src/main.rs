@@ -45,24 +45,24 @@ async fn main() {
 
     let server_version = ServerVersion::new(env!("CARGO_BIN_NAME"), VERSION);
 
-    Hashi::new(server_version, config).start();
+    let service = match Hashi::new(server_version, config).start().await {
+        Ok(service) => service,
+        Err(e) => {
+            tracing::error!("hashi failed to initialize: {e}");
+            return;
+        }
+    };
 
-    wait_termination().await;
-    tracing::info!("hashi shutting down; goodbye");
-}
-
-async fn wait_termination() {
-    use futures::FutureExt;
-    use tokio::signal::unix::*;
-
-    let sigint = tokio::signal::ctrl_c().boxed();
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
-    let sigterm_recv = sigterm.recv().boxed();
-
-    tokio::select! {
-        _ = sigint => {},
-        _ = sigterm_recv => {},
+    match service.main().await {
+        Ok(()) => {}
+        Err(sui_futures::service::Error::Terminated) => {
+            tracing::info!("hashi received termination signal");
+        }
+        Err(e) => {
+            tracing::error!("hashi exited with error: {e}");
+        }
     }
+    tracing::info!("hashi shutting down; goodbye");
 }
 
 fn init_tracing_subscriber() {
