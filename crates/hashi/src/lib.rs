@@ -9,7 +9,6 @@ pub mod communication;
 pub mod config;
 pub mod db;
 pub mod deposits;
-pub mod dkg;
 pub mod grpc;
 pub mod leader;
 pub mod metrics;
@@ -35,7 +34,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    dkg_manager: OnceLock<Arc<RwLock<dkg::DkgManager>>>,
+    dkg_manager: OnceLock<Arc<RwLock<mpc::DkgManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
     /// Reconfig completion signatures by epoch.
@@ -92,14 +91,14 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn dkg_manager(&self) -> Arc<RwLock<dkg::DkgManager>> {
+    pub fn dkg_manager(&self) -> Arc<RwLock<mpc::DkgManager>> {
         self.dkg_manager
             .get()
             .expect("DkgManager not initialized")
             .clone()
     }
 
-    pub fn set_dkg_manager(&self, manager: dkg::DkgManager) {
+    pub fn set_dkg_manager(&self, manager: mpc::DkgManager) {
         *self
             .dkg_manager
             .get()
@@ -147,11 +146,11 @@ impl Hashi {
     pub fn create_dkg_manager(
         &self,
         epoch: u64,
-        protocol_type: dkg::types::ProtocolType,
-    ) -> anyhow::Result<dkg::DkgManager> {
+        protocol_type: mpc::types::ProtocolType,
+    ) -> anyhow::Result<mpc::DkgManager> {
         let state = self.onchain_state().state();
         let committee_set = &state.hashi().committees;
-        let session_id = dkg::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
+        let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let encryption_key = self.config.encryption_private_key()?;
         self.db
             .store_encryption_key(epoch, &encryption_key)
@@ -164,7 +163,7 @@ impl Hashi {
             self.db.clone(),
             epoch,
         ));
-        Ok(dkg::DkgManager::new(
+        Ok(mpc::DkgManager::new(
             self.config.validator_address()?,
             committee_set,
             session_id,
@@ -208,7 +207,7 @@ impl Hashi {
             self.initialize_onchain_state().await;
 
             let epoch = self.onchain_state().epoch();
-            let dkg_manager = match self.create_dkg_manager(epoch, dkg::types::ProtocolType::Dkg) {
+            let dkg_manager = match self.create_dkg_manager(epoch, mpc::types::ProtocolType::Dkg) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to create DkgManager: {e}");

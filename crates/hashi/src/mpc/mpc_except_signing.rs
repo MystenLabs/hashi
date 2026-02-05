@@ -1,15 +1,32 @@
-//! Distributed Key Generation (DKG) module
-
-pub mod rpc;
-pub mod types;
-
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
 use crate::communication::with_timeout_and_retry;
-use crate::dkg::types::CertificateV1;
-use crate::dkg::types::DealerCertificate;
-use crate::dkg::types::DealerMessagesHash;
+use crate::mpc::types::CertificateV1;
+pub use crate::mpc::types::ComplainRequest;
+pub use crate::mpc::types::ComplaintResponses;
+pub use crate::mpc::types::ComplaintsToProcessKey;
+use crate::mpc::types::DealerCertificate;
+pub use crate::mpc::types::DealerFlowData;
+use crate::mpc::types::DealerMessagesHash;
+pub use crate::mpc::types::DealerOutputsKey;
+use crate::mpc::types::DkgConfig;
+pub use crate::mpc::types::DkgError;
+pub use crate::mpc::types::DkgOutput;
+pub use crate::mpc::types::DkgResult;
+pub use crate::mpc::types::EncryptionGroupElement;
+pub use crate::mpc::types::GetPublicDkgOutputRequest;
+pub use crate::mpc::types::GetPublicDkgOutputResponse;
+pub use crate::mpc::types::MessageHash;
+pub use crate::mpc::types::Messages;
+pub use crate::mpc::types::PublicDkgOutput;
+pub use crate::mpc::types::RetrieveMessagesRequest;
+pub use crate::mpc::types::RetrieveMessagesResponse;
+use crate::mpc::types::RotationComplainContext;
+use crate::mpc::types::RotationMessages;
+pub use crate::mpc::types::SendMessagesRequest;
+pub use crate::mpc::types::SendMessagesResponse;
+pub use crate::mpc::types::SessionId;
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
@@ -44,28 +61,6 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use sui_sdk_types::Address;
-pub use types::ComplainRequest;
-pub use types::ComplaintResponses;
-pub use types::ComplaintsToProcessKey;
-pub use types::DealerFlowData;
-pub use types::DealerOutputsKey;
-use types::DkgConfig;
-pub use types::DkgError;
-pub use types::DkgOutput;
-pub use types::DkgResult;
-pub use types::EncryptionGroupElement;
-pub use types::GetPublicDkgOutputRequest;
-pub use types::GetPublicDkgOutputResponse;
-pub use types::MessageHash;
-pub use types::Messages;
-pub use types::PublicDkgOutput;
-pub use types::RetrieveMessagesRequest;
-pub use types::RetrieveMessagesResponse;
-use types::RotationComplainContext;
-use types::RotationMessages;
-pub use types::SendMessagesRequest;
-pub use types::SendMessagesResponse;
-pub use types::SessionId;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
@@ -1798,7 +1793,7 @@ impl DkgManager {
                 .expect("key rotation requires epoch > 0");
             (previous_committee, epoch)
         };
-        let request = types::GetPublicDkgOutputRequest { epoch };
+        let request = GetPublicDkgOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
             .iter()
@@ -1960,8 +1955,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::types::ProtocolType;
-    use crate::dkg::types::RotationMessages;
+    use crate::mpc::types::ProtocolType;
+    use crate::mpc::types::RotationMessages;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
     use fastcrypto::encoding::Hex;

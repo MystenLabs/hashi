@@ -26,7 +26,7 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
-use crate::dkg::fallback_encryption_public_key;
+use crate::mpc::fallback_encryption_public_key;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::move_types;
@@ -36,9 +36,9 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 pub mod types;
 mod watcher;
 
-fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::dkg::EncryptionGroupElement> {
+fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::mpc::EncryptionGroupElement> {
     let array: [u8; 32] = bytes.try_into().ok()?;
-    crate::dkg::EncryptionGroupElement::from_byte_array(&array).ok()
+    crate::mpc::EncryptionGroupElement::from_byte_array(&array).ok()
 }
 
 #[derive(Clone)]
@@ -1025,7 +1025,7 @@ mod tests {
     use fastcrypto::traits::KeyPair;
     use fastcrypto::traits::ToFromBytes;
 
-    use crate::dkg::EncryptionGroupElement;
+    use crate::mpc::EncryptionGroupElement;
 
     use super::*;
 

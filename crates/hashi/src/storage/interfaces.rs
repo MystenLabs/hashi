@@ -2,8 +2,8 @@ use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
 
-pub use crate::dkg::types::Messages;
-pub use crate::dkg::types::RotationMessages;
+pub use crate::mpc::types::Messages;
+pub use crate::mpc::types::RotationMessages;
 
 pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's DKG message.

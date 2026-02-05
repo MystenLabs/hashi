@@ -1,13 +1,13 @@
 //! Communication channel interfaces
 
-use crate::dkg::ComplainRequest;
-use crate::dkg::ComplaintResponses;
-use crate::dkg::GetPublicDkgOutputRequest;
-use crate::dkg::GetPublicDkgOutputResponse;
-use crate::dkg::RetrieveMessagesRequest;
-use crate::dkg::RetrieveMessagesResponse;
-use crate::dkg::SendMessagesRequest;
-use crate::dkg::SendMessagesResponse;
+use crate::mpc::ComplainRequest;
+use crate::mpc::ComplaintResponses;
+use crate::mpc::GetPublicDkgOutputRequest;
+use crate::mpc::GetPublicDkgOutputResponse;
+use crate::mpc::RetrieveMessagesRequest;
+use crate::mpc::RetrieveMessagesResponse;
+use crate::mpc::SendMessagesRequest;
+use crate::mpc::SendMessagesResponse;
 use async_trait::async_trait;
 use sui_sdk_types::Address;
 use thiserror::Error;
