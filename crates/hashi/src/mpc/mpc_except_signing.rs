@@ -110,6 +110,32 @@ impl DkgManager {
         public_message_store: Box<dyn PublicMessagesStore>,
         allowed_delta: u16,
         chain_id: &str,
+    ) -> DkgResult<Self> {
+        Self::new_for_testing(
+            address,
+            committee_set,
+            session_id,
+            encryption_key,
+            signing_key,
+            public_message_store,
+            allowed_delta,
+            chain_id,
+            1, // default: no weight reduction
+        )
+    }
+
+    /// Constructor with test weight divisor for integration tests.
+    /// Use `new()` for production code.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_testing(
+        address: Address,
+        committee_set: &CommitteeSet,
+        session_id: SessionId,
+        encryption_key: PrivateKey<EncryptionGroupElement>,
+        signing_key: Bls12381PrivateKey,
+        public_message_store: Box<dyn PublicMessagesStore>,
+        allowed_delta: u16,
+        chain_id: &str,
         test_weight_divisor: u16,
     ) -> DkgResult<Self> {
         let epoch = committee_set
@@ -2240,7 +2266,6 @@ mod tests {
                 store,
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
-                TEST_WEIGHT_DIVISOR,
             )
             .unwrap()
         }
@@ -2818,7 +2843,6 @@ mod tests {
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
-            TEST_WEIGHT_DIVISOR,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -2879,7 +2903,6 @@ mod tests {
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
             "test",
-            TEST_WEIGHT_DIVISOR,
         );
 
         let err = match result {
@@ -7064,7 +7087,6 @@ mod tests {
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
-            TEST_WEIGHT_DIVISOR,
         )
         .unwrap();
 

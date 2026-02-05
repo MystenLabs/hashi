@@ -163,17 +163,32 @@ impl Hashi {
             self.db.clone(),
             epoch,
         ));
-        Ok(mpc::DkgManager::new(
-            self.config.validator_address()?,
-            committee_set,
-            session_id,
-            encryption_key,
-            signing_key,
-            store,
-            WEIGHT_REDUCTION_ALLOWED_DELTA,
-            self.config.sui_chain_id(),
-            self.config.test_weight_divisor(),
-        )?)
+        let address = self.config.validator_address()?;
+        let chain_id = self.config.sui_chain_id();
+        if let Some(divisor) = self.config.test_weight_divisor {
+            Ok(mpc::DkgManager::new_for_testing(
+                address,
+                committee_set,
+                session_id,
+                encryption_key,
+                signing_key,
+                store,
+                WEIGHT_REDUCTION_ALLOWED_DELTA,
+                chain_id,
+                divisor,
+            )?)
+        } else {
+            Ok(mpc::DkgManager::new(
+                address,
+                committee_set,
+                session_id,
+                encryption_key,
+                signing_key,
+                store,
+                WEIGHT_REDUCTION_ALLOWED_DELTA,
+                chain_id,
+            )?)
+        }
     }
 
     fn initialize_btc_monitor(&self) -> anyhow::Result<()> {
