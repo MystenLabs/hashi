@@ -1,4 +1,4 @@
-use crate::dkg::types;
+use crate::mpc::types;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;

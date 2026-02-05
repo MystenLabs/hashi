@@ -90,7 +90,7 @@ impl HttpService {
             .unwrap()
     }
 
-    pub fn dkg_manager(&self) -> Arc<std::sync::RwLock<crate::dkg::DkgManager>> {
+    pub fn dkg_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::DkgManager>> {
         self.inner.dkg_manager()
     }
 

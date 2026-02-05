@@ -1,7 +1,7 @@
-use crate::dkg::spawn_blocking;
-use crate::dkg::types;
-use crate::dkg::types::DkgError;
 use crate::grpc::HttpService;
+use crate::mpc::spawn_blocking;
+use crate::mpc::types;
+use crate::mpc::types::DkgError;
 use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPartialSignaturesRequest;

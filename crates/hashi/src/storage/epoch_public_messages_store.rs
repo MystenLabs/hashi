@@ -4,8 +4,8 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use sui_sdk_types::Address;
 
 use crate::db::Database;
-use crate::dkg::types::Messages;
-use crate::dkg::types::RotationMessages;
+use crate::mpc::types::Messages;
+use crate::mpc::types::RotationMessages;
 use crate::storage::PublicMessagesStore;
 
 pub struct EpochPublicMessagesStore {

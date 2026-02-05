@@ -10,7 +10,7 @@ use sui_sdk_types::Address;
 
 use hashi_types::committee::EncryptionPrivateKey;
 
-use crate::dkg::types::RotationMessages;
+use crate::mpc::types::RotationMessages;
 
 pub struct Database {
     #[allow(unused)]
@@ -264,7 +264,7 @@ fn clean_up_old_epochs(keyspace: &Keyspace, current_epoch: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::dkg::EncryptionGroupElement;
+    use crate::mpc::EncryptionGroupElement;
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
     use fastcrypto_tbls::threshold_schnorr::avss;
