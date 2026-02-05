@@ -126,8 +126,8 @@ message SendPartialSignaturesRequest {
   // Hex-encoded Sui address identifying the withdrawal/deposit request.
   optional string sui_request_id = 2;
 
-  // The public presignature nonce.
-  optional sui.rpc.v2.Bcs public_presig = 3;
+  // The presignature nonce.
+  optional sui.rpc.v2.Bcs presig = 3;
 
   // Partial signatures.
   optional sui.rpc.v2.Bcs partial_sigs = 4;
@@ -146,8 +146,8 @@ message GetPartialSignaturesRequest {
 }
 
 message GetPartialSignaturesResponse {
-  // The public presignature nonce.
-  optional sui.rpc.v2.Bcs public_presig = 1;
+  // The presignature nonce.
+  optional sui.rpc.v2.Bcs presig = 1;
 
   // Partial signatures.
   optional sui.rpc.v2.Bcs partial_sigs = 2;

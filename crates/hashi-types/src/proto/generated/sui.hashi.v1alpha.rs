@@ -1499,9 +1499,9 @@ pub struct SendPartialSignaturesRequest {
     /// Hex-encoded Sui address identifying the withdrawal/deposit request.
     #[prost(string, optional, tag = "2")]
     pub sui_request_id: ::core::option::Option<::prost::alloc::string::String>,
-    /// The public presignature nonce.
+    /// The presignature nonce.
     #[prost(message, optional, tag = "3")]
-    pub public_presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    pub presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
     /// Partial signatures.
     #[prost(message, optional, tag = "4")]
     pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
@@ -1520,9 +1520,9 @@ pub struct GetPartialSignaturesRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPartialSignaturesResponse {
-    /// The public presignature nonce.
+    /// The presignature nonce.
     #[prost(message, optional, tag = "1")]
-    pub public_presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    pub presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
     /// Partial signatures.
     #[prost(message, optional, tag = "2")]
     pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
