@@ -66,10 +66,6 @@ impl TestNetworks {
         &self.bitcoin_node
     }
 
-    pub async fn shutdown(&mut self) {
-        self.hashi_network.shutdown().await;
-    }
-
     pub async fn restart(&mut self) -> Result<()> {
         self.hashi_network.restart().await
     }
@@ -195,7 +191,7 @@ mod tests {
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
-        let mut test_networks = TestNetworksBuilder::new()
+        let test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -208,7 +204,6 @@ mod tests {
         //     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         // }
 
-        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -216,7 +211,7 @@ mod tests {
     async fn test_onchain_state_scraping() -> Result<()> {
         const TEST_NUM_NODES: usize = 1;
 
-        let mut test_networks = TestNetworksBuilder::new()
+        let test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -260,7 +255,6 @@ mod tests {
             panic!("unexpected notification");
         }
 
-        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -268,7 +262,7 @@ mod tests {
     async fn test_dkg_completes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
-        let mut test_networks = TestNetworksBuilder::new()
+        let test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -281,7 +275,6 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
-        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -317,7 +310,6 @@ mod tests {
             .await
             .expect("DKG recovery should complete within timeout");
 
-        test_networks.shutdown().await;
         Ok(())
     }
 
@@ -396,7 +388,6 @@ mod tests {
             );
         }
 
-        test_networks.shutdown().await;
         Ok(())
     }
 }

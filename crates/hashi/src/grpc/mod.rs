@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use sui_futures::service::Service;
+use sui_http::ServerHandle;
 use tower::ServiceBuilder;
 
 use crate::Hashi;
@@ -9,6 +10,20 @@ mod client;
 pub use client::Client;
 
 pub mod bridge_service;
+
+/// Wrapper that triggers graceful HTTP server shutdown on drop.
+///
+/// The HTTP server is spawned on a detached tokio task by `sui_http::Builder::serve`.
+/// This guard ensures that `trigger_shutdown` is called when the owning `Service` is
+/// dropped (whether via explicit `Service::shutdown()` or implicit drop), so the server's
+/// accept loop breaks and in-flight connections are drained.
+struct ServerHandleGuard(Arc<ServerHandle>);
+
+impl Drop for ServerHandleGuard {
+    fn drop(&mut self) {
+        self.0.trigger_shutdown();
+    }
+}
 
 #[derive(Clone)]
 pub struct HttpService {
@@ -94,9 +109,15 @@ impl HttpService {
         );
         let local_addr = *server_handle.local_addr();
 
-        let service = Service::new().with_shutdown_signal(async move {
-            server_handle.trigger_shutdown();
-        });
+        let guard = ServerHandleGuard(server_handle.clone());
+        let service = Service::new()
+            .spawn_aborting(async move {
+                guard.0.wait_for_shutdown().await;
+                Ok(())
+            })
+            .with_shutdown_signal(async move {
+                server_handle.trigger_shutdown();
+            });
 
         (local_addr, service)
     }

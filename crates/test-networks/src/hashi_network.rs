@@ -103,7 +103,7 @@ impl HashiNodeHandle {
         unreachable!()
     }
 
-    pub async fn shutdown(&mut self) {
+    async fn shutdown(&mut self) {
         let Some((service, _hashi)) = self.service.take() else {
             tracing::warn!("Hashi node not running, cannot shutdown");
             return;
@@ -226,10 +226,6 @@ impl HashiNetwork {
 
     pub fn nodes_mut(&mut self) -> &mut [HashiNodeHandle] {
         &mut self.nodes
-    }
-
-    pub async fn shutdown(&mut self) {
-        futures::future::join_all(self.nodes.iter_mut().map(|node| node.shutdown())).await;
     }
 
     pub async fn restart(&mut self) -> Result<()> {

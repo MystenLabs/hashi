@@ -244,7 +244,6 @@ mod tests {
         );
 
         info!("Test completed successfully");
-        networks.shutdown().await;
         Ok(())
     }
 }
