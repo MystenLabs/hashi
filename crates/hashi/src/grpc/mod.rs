@@ -93,16 +93,10 @@ impl HttpService {
                 .unwrap(),
         );
         let local_addr = *server_handle.local_addr();
-        let shutdown_handle = server_handle.clone();
 
-        let service = Service::new()
-            .with_shutdown_signal(async move {
-                shutdown_handle.trigger_shutdown();
-            })
-            .spawn(async move {
-                server_handle.wait_for_shutdown().await;
-                Ok(())
-            });
+        let service = Service::new().with_shutdown_signal(async move {
+            server_handle.trigger_shutdown();
+        });
 
         (local_addr, service)
     }

@@ -189,27 +189,7 @@ impl Default for TestNetworksBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
-    use std::net::Ipv4Addr;
-    use std::net::SocketAddr;
-
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-    /// Recursively copy a directory and its contents.
-    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let ty = entry.file_type()?;
-            let dest_path = dst.join(entry.file_name());
-            if ty.is_dir() {
-                copy_dir_all(&entry.path(), &dest_path)?;
-            } else {
-                std::fs::copy(entry.path(), dest_path)?;
-            }
-        }
-        Ok(())
-    }
 
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
@@ -308,8 +288,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dkg_recovery_after_restart() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
-        const LOCALHOST_ANY_PORT: SocketAddr =
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
@@ -328,44 +306,17 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
 
-        // Save the config of the first node and copy its DB for recovery test
-        let mut saved_config = nodes[0].hashi().config.clone();
-        let original_db_path = saved_config.db.as_ref().unwrap().clone();
-
-        // TODO: Use graceful shutdown/restart instead of copying the database and spinning up a duplicate node.
-        let recovery_db_path = original_db_path.with_file_name(format!(
-            "{}-recovery",
-            original_db_path.file_name().unwrap().to_str().unwrap()
-        ));
-        std::fs::create_dir_all(&recovery_db_path)?;
-        for entry in std::fs::read_dir(&original_db_path)? {
-            let entry = entry?;
-            let dest = recovery_db_path.join(entry.file_name());
-            if entry.file_type()?.is_dir() {
-                copy_dir_all(&entry.path(), &dest)?;
-            } else {
-                std::fs::copy(entry.path(), dest)?;
-            }
-        }
-        saved_config.db = Some(recovery_db_path);
-
-        // Use different ports for the restarted node to avoid conflicts with
-        // the original node (which may still be holding the ports)
-        saved_config.https_address = Some(LOCALHOST_ANY_PORT);
-        saved_config.http_address = Some(LOCALHOST_ANY_PORT);
-        saved_config.metrics_http_address = Some(LOCALHOST_ANY_PORT);
-
-        // Create a new node with the copied DB (simulating restart with same data)
-        let mut restarted_node = HashiNodeHandle::new(saved_config)?;
-        restarted_node.start().await?;
+        // Restart the first node
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
 
         // Wait for the restarted node to see DKG completion via on-chain certificates
-        restarted_node
+        test_networks.hashi_network().nodes()[0]
             .wait_for_dkg_completion(DKG_TIMEOUT)
             .await
             .expect("DKG recovery should complete within timeout");
 
-        restarted_node.shutdown().await;
         test_networks.shutdown().await;
         Ok(())
     }
