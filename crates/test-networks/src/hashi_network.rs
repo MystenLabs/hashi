@@ -70,23 +70,48 @@ impl HashiNodeHandle {
         if self.service.is_some() {
             anyhow::bail!("Hashi node already started");
         }
-        let server_version = ServerVersion::new("test-hashi", "0.1.0");
-        let registry = prometheus::Registry::new();
-        let hashi = Hashi::new_with_registry(server_version, self.config.clone(), &registry);
+        let hashi = Self::create_hashi_retry(&self.config).await?;
         let service = hashi.clone().start().await?;
         self.service = Some((service, hashi));
         Ok(())
     }
 
+    fn create_hashi(config: &HashiConfig) -> Result<Arc<Hashi>> {
+        let server_version = ServerVersion::new("test-hashi", "0.1.0");
+        let registry = prometheus::Registry::new();
+        Hashi::new_with_registry(server_version, config.clone(), &registry)
+    }
+
+    /// Create a Hashi instance with retry logic for database lock contention.
+    ///
+    /// After shutdown, there may be a brief delay before the database lock is released.
+    async fn create_hashi_retry(config: &HashiConfig) -> Result<Arc<Hashi>> {
+        const MAX_ATTEMPTS: u32 = 3;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match Self::create_hashi(config) {
+                Ok(hashi) => return Ok(hashi),
+                Err(e) if attempt == MAX_ATTEMPTS => return Err(e),
+                Err(e) => {
+                    tracing::debug!(
+                        "Failed to create Hashi (attempt {attempt}/{MAX_ATTEMPTS}): {e}"
+                    );
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+            }
+        }
+        unreachable!()
+    }
+
     pub async fn shutdown(&mut self) {
-        if let Some((service, _hashi)) = self.service.take()
-            && let Err(e) = service.shutdown().await
-        {
+        let Some((service, _hashi)) = self.service.take() else {
+            tracing::warn!("Hashi node not running, cannot shutdown");
+            return;
+        };
+        let result = service.shutdown().await;
+        if let Err(e) = result {
             tracing::warn!("Hashi shutdown error: {e}");
         }
-        // Yield to allow aborted tasks to be cleaned up and drop their Arc<Hashi> references.
-        // This ensures the database lock is released before a new Hashi instance can be created.
-        tokio::task::yield_now().await;
     }
 
     pub async fn restart(&mut self) -> Result<()> {
@@ -107,11 +132,7 @@ impl HashiNodeHandle {
     }
 
     pub fn metrics_url(&self) -> String {
-        format!(
-            "{}{}",
-            HTTP_SCHEME,
-            self.hashi().config.metrics_http_address()
-        )
+        format!("{}{}", HTTP_SCHEME, self.metrics_address())
     }
 
     pub fn https_address(&self) -> SocketAddr {

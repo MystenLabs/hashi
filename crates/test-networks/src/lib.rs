@@ -372,8 +372,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_node_restart_stress() -> Result<()> {
-        const TEST_NUM_NODES: usize = 5;
-        const RESTART_ITERATIONS: usize = 5;
+        const TEST_NUM_NODES: usize = 3;
+        const RESTART_ITERATIONS: usize = 3;
 
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)

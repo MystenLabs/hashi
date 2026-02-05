@@ -43,11 +43,12 @@ pub struct Hashi {
 }
 
 impl Hashi {
-    pub fn new(server_version: ServerVersion, config: config::Config) -> Arc<Self> {
+    pub fn new(server_version: ServerVersion, config: config::Config) -> anyhow::Result<Arc<Self>> {
         init_crypto_provider();
+        let db_path = config.db.as_deref().unwrap();
+        let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new_default());
-        let db = db::Database::open(config.db.as_deref().unwrap());
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             server_version,
             config,
             metrics,
@@ -57,27 +58,29 @@ impl Hashi {
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
-        })
+        }))
     }
 
     pub fn new_with_registry(
         server_version: ServerVersion,
         config: config::Config,
         registry: &prometheus::Registry,
-    ) -> Arc<Self> {
+    ) -> anyhow::Result<Arc<Self>> {
         init_crypto_provider();
-        let db = db::Database::open(config.db.as_deref().unwrap());
-        Arc::new(Self {
+        let db_path = config.db.as_deref().unwrap();
+        let db = db::Database::open(db_path)?;
+        let metrics = Arc::new(metrics::Metrics::new(registry));
+        Ok(Arc::new(Self {
             server_version,
             config,
-            metrics: Arc::new(metrics::Metrics::new(registry)),
+            metrics,
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
-        })
+        }))
     }
 
     pub fn onchain_state(&self) -> &onchain::OnchainState {
@@ -280,7 +283,7 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config);
+        let hashi = Hashi::new(server_version, config).unwrap();
 
         let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
 
