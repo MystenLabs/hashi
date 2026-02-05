@@ -19,6 +19,12 @@ service MpcService {
 
   // Get a validator's signature on the reconfig completion message.
   rpc GetReconfigCompletionSignature(GetReconfigCompletionSignatureRequest) returns (GetReconfigCompletionSignatureResponse);
+
+  // Push partial signatures to another party.
+  rpc SendPartialSignatures(SendPartialSignaturesRequest) returns (SendPartialSignaturesResponse);
+
+  // Pull partial signatures from another party.
+  rpc GetPartialSignatures(GetPartialSignaturesRequest) returns (GetPartialSignaturesResponse);
 }
 
 message RotationMessages {
@@ -111,4 +117,38 @@ message GetReconfigCompletionSignatureRequest {
 message GetReconfigCompletionSignatureResponse {
   // The validator's BLS signature on the reconfig completion message.
   optional bytes signature = 1;
+}
+
+message SendPartialSignaturesRequest {
+  // The epoch for this MPC instance.
+  optional uint64 epoch = 1;
+
+  // Hex-encoded Sui address identifying the withdrawal/deposit request.
+  optional string sui_request_id = 2;
+
+  // The public presignature nonce.
+  optional sui.rpc.v2.Bcs public_presig = 3;
+
+  // Partial signatures.
+  optional sui.rpc.v2.Bcs partial_sigs = 4;
+}
+
+message SendPartialSignaturesResponse {
+  // Empty response; success indicated by lack of error.
+}
+
+message GetPartialSignaturesRequest {
+  // The epoch for this MPC instance.
+  optional uint64 epoch = 1;
+
+  // Hex-encoded Sui address identifying the withdrawal/deposit request.
+  optional string sui_request_id = 2;
+}
+
+message GetPartialSignaturesResponse {
+  // The public presignature nonce.
+  optional sui.rpc.v2.Bcs public_presig = 1;
+
+  // Partial signatures.
+  optional sui.rpc.v2.Bcs partial_sigs = 2;
 }
