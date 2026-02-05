@@ -58,12 +58,20 @@ impl TestNetworks {
         &self.hashi_network
     }
 
+    pub fn hashi_network_mut(&mut self) -> &mut HashiNetwork {
+        &mut self.hashi_network
+    }
+
     pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
         &self.bitcoin_node
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&mut self) {
         self.hashi_network.shutdown().await;
+    }
+
+    pub async fn restart(&mut self) -> Result<()> {
+        self.hashi_network.restart().await
     }
 
     fn _sui_client_command(&self) -> Command {
@@ -207,7 +215,7 @@ mod tests {
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -228,7 +236,7 @@ mod tests {
     async fn test_onchain_state_scraping() -> Result<()> {
         const TEST_NUM_NODES: usize = 1;
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -280,7 +288,7 @@ mod tests {
     async fn test_dkg_completes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -303,7 +311,7 @@ mod tests {
         const LOCALHOST_ANY_PORT: SocketAddr =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -348,7 +356,7 @@ mod tests {
         saved_config.metrics_http_address = Some(LOCALHOST_ANY_PORT);
 
         // Create a new node with the copied DB (simulating restart with same data)
-        let restarted_node = HashiNodeHandle::new(saved_config)?;
+        let mut restarted_node = HashiNodeHandle::new(saved_config)?;
         restarted_node.start().await?;
 
         // Wait for the restarted node to see DKG completion via on-chain certificates
@@ -358,6 +366,85 @@ mod tests {
             .expect("DKG recovery should complete within timeout");
 
         restarted_node.shutdown().await;
+        test_networks.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_node_restart_stress() -> Result<()> {
+        const TEST_NUM_NODES: usize = 5;
+        const RESTART_ITERATIONS: usize = 5;
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for initial DKG completion on all nodes
+        let nodes = test_networks.hashi_network().nodes();
+        let dkg_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} initial DKG failed: {e}"));
+        }
+
+        // Verify all nodes are reachable via RPC before restart cycles
+        for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+            let client = hashi::grpc::Client::new_no_auth(node.https_url())?;
+            client
+                .get_service_info()
+                .await
+                .unwrap_or_else(|e| panic!("Node {i} initial RPC failed: {e}"));
+        }
+
+        // Restart all nodes multiple times
+        for iteration in 0..RESTART_ITERATIONS {
+            tracing::info!(
+                "Starting restart iteration {}/{}",
+                iteration + 1,
+                RESTART_ITERATIONS
+            );
+
+            // Restart all nodes
+            test_networks.hashi_network_mut().restart().await?;
+
+            // Wait for DKG completion on all nodes after restart
+            let nodes = test_networks.hashi_network().nodes();
+            let dkg_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| {
+                    panic!(
+                        "Node {i} DKG failed after restart iteration {}: {e}",
+                        iteration + 1
+                    )
+                });
+            }
+
+            // Verify all nodes are reachable via RPC after restart
+            for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+                let client = hashi::grpc::Client::new_no_auth(node.https_url())?;
+                client.get_service_info().await.unwrap_or_else(|e| {
+                    panic!(
+                        "Node {i} RPC failed after restart iteration {}: {e}",
+                        iteration + 1
+                    )
+                });
+            }
+
+            tracing::info!(
+                "Restart iteration {}/{} completed successfully",
+                iteration + 1,
+                RESTART_ITERATIONS
+            );
+        }
+
         test_networks.shutdown().await;
         Ok(())
     }
