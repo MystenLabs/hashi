@@ -58,8 +58,16 @@ impl TestNetworks {
         &self.hashi_network
     }
 
+    pub fn hashi_network_mut(&mut self) -> &mut HashiNetwork {
+        &mut self.hashi_network
+    }
+
     pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
         &self.bitcoin_node
+    }
+
+    pub async fn restart(&mut self) -> Result<()> {
+        self.hashi_network.restart().await
     }
 
     fn _sui_client_command(&self) -> Command {
@@ -177,10 +185,6 @@ impl Default for TestNetworksBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
-    use std::net::Ipv4Addr;
-    use std::net::SocketAddr;
-
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
 
@@ -196,54 +200,6 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
         }
         nodes[0].current_epoch().unwrap()
-    }
-
-    /// Copy a node's database and create a duplicate node on new ports.
-    // TODO: Replace with graceful shutdown/restart once supported.
-    fn copy_db_and_restart_node(node: &HashiNodeHandle, suffix: &str) -> Result<HashiNodeHandle> {
-        const LOCALHOST_ANY_PORT: SocketAddr =
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-
-        let mut config = node.0.config.clone();
-        let original_db_path = config.db.as_ref().unwrap().clone();
-        let recovery_db_path = original_db_path.with_file_name(format!(
-            "{}-recovery-{suffix}",
-            original_db_path.file_name().unwrap().to_str().unwrap()
-        ));
-        std::fs::create_dir_all(&recovery_db_path)?;
-        for entry in std::fs::read_dir(&original_db_path)? {
-            let entry = entry?;
-            let dest = recovery_db_path.join(entry.file_name());
-            if entry.file_type()?.is_dir() {
-                copy_dir_all(&entry.path(), &dest)?;
-            } else {
-                std::fs::copy(entry.path(), dest)?;
-            }
-        }
-        config.db = Some(recovery_db_path);
-        config.https_address = Some(LOCALHOST_ANY_PORT);
-        config.http_address = Some(LOCALHOST_ANY_PORT);
-        config.metrics_http_address = Some(LOCALHOST_ANY_PORT);
-
-        let restarted = HashiNodeHandle::new(config)?;
-        restarted.start();
-        Ok(restarted)
-    }
-
-    /// Recursively copy a directory and its contents.
-    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let ty = entry.file_type()?;
-            let dest_path = dst.join(entry.file_name());
-            if ty.is_dir() {
-                copy_dir_all(&entry.path(), &dest_path)?;
-            } else {
-                std::fs::copy(entry.path(), dest_path)?;
-            }
-        }
-        Ok(())
     }
 
     #[tokio::test]
@@ -277,7 +233,7 @@ mod tests {
         let sui_rpc_url = &test_networks.sui_network().rpc_url;
         let ids = test_networks.hashi_network().ids();
 
-        let state = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
+        let (state, _service) = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
@@ -300,7 +256,7 @@ mod tests {
         let mut reciever = state.subscribe();
 
         let client = test_networks.sui_network().client.clone();
-        let v1_config = &test_networks.hashi_network().nodes()[0].0.config;
+        let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
         super::hashi_network::update_tls_public_key(client, v1_config)
             .await
             .unwrap();
@@ -341,7 +297,7 @@ mod tests {
     async fn test_dkg_recovery_after_restart() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
             .await?;
@@ -358,13 +314,95 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
 
-        let restarted_node = copy_db_and_restart_node(&nodes[0], "dkg")?;
+        // Restart the first node
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
 
         // Wait for the restarted node to see DKG completion via on-chain certificates
-        restarted_node
+        test_networks.hashi_network().nodes()[0]
             .wait_for_dkg_completion(DKG_TIMEOUT)
             .await
             .expect("DKG recovery should complete within timeout");
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_node_restart_stress() -> Result<()> {
+        const TEST_NUM_NODES: usize = 3;
+        const RESTART_ITERATIONS: usize = 3;
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for initial DKG completion on all nodes
+        let nodes = test_networks.hashi_network().nodes();
+        let dkg_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} initial DKG failed: {e}"));
+        }
+
+        // Verify all nodes are reachable via RPC before restart cycles
+        for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+            let client = hashi::grpc::Client::new_no_auth(node.https_url())?;
+            client
+                .get_service_info()
+                .await
+                .unwrap_or_else(|e| panic!("Node {i} initial RPC failed: {e}"));
+        }
+
+        // Restart all nodes multiple times
+        for iteration in 0..RESTART_ITERATIONS {
+            tracing::info!(
+                "Starting restart iteration {}/{}",
+                iteration + 1,
+                RESTART_ITERATIONS
+            );
+
+            // Restart all nodes
+            test_networks.hashi_network_mut().restart().await?;
+
+            // Wait for DKG completion on all nodes after restart
+            let nodes = test_networks.hashi_network().nodes();
+            let dkg_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| {
+                    panic!(
+                        "Node {i} DKG failed after restart iteration {}: {e}",
+                        iteration + 1
+                    )
+                });
+            }
+
+            // Verify all nodes are reachable via RPC after restart
+            for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+                let client = hashi::grpc::Client::new_no_auth(node.https_url())?;
+                client.get_service_info().await.unwrap_or_else(|e| {
+                    panic!(
+                        "Node {i} RPC failed after restart iteration {}: {e}",
+                        iteration + 1
+                    )
+                });
+            }
+
+            tracing::info!(
+                "Restart iteration {}/{} completed successfully",
+                iteration + 1,
+                RESTART_ITERATIONS
+            );
+        }
+
         Ok(())
     }
 
@@ -451,30 +489,24 @@ mod tests {
             .unwrap();
 
         // Round 1: restart after DKG, then rotate
-        let restarted_after_dkg =
-            copy_db_and_restart_node(&test_networks.hashi_network().nodes()[0], "after-dkg")?;
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
 
         // Trigger first rotation via Sui epoch change
         test_networks.sui_network.force_close_epoch().await?;
         let first_target = initial_epoch + 1;
         let epoch = wait_for_rotation(test_networks.hashi_network().nodes(), first_target).await;
-        restarted_after_dkg
-            .wait_for_epoch(first_target, ROTATION_TIMEOUT)
-            .await
-            .expect("Restarted-after-DKG node failed first rotation");
 
         // Round 2: restart after rotation, then rotate again
-        let restarted_after_rotation =
-            copy_db_and_restart_node(&test_networks.hashi_network().nodes()[0], "after-rotation")?;
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
 
         // Trigger second rotation via Sui epoch change
         test_networks.sui_network.force_close_epoch().await?;
         let second_target = epoch + 1;
         wait_for_rotation(test_networks.hashi_network().nodes(), second_target).await;
-        restarted_after_rotation
-            .wait_for_epoch(second_target, ROTATION_TIMEOUT)
-            .await
-            .expect("Restarted-after-rotation node failed second rotation");
 
         Ok(())
     }

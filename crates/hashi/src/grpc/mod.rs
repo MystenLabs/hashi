@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use sui_futures::service::Service;
+use sui_http::ServerHandle;
 use tower::ServiceBuilder;
 
 use crate::Hashi;
@@ -8,6 +10,20 @@ mod client;
 pub use client::Client;
 
 pub mod bridge_service;
+
+/// Wrapper that triggers graceful HTTP server shutdown on drop.
+///
+/// The HTTP server is spawned on a detached tokio task by `sui_http::Builder::serve`.
+/// This guard ensures that `trigger_shutdown` is called when the owning `Service` is
+/// dropped (whether via explicit `Service::shutdown()` or implicit drop), so the server's
+/// accept loop breaks and in-flight connections are drained.
+struct ServerHandleGuard(Arc<ServerHandle>);
+
+impl Drop for ServerHandleGuard {
+    fn drop(&mut self) {
+        self.0.trigger_shutdown();
+    }
+}
 
 #[derive(Clone)]
 pub struct HttpService {
@@ -19,7 +35,7 @@ impl HttpService {
         Self { inner: hashi }
     }
 
-    pub async fn start(self) -> sui_http::ServerHandle {
+    pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
             let bridge_service =
                 hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
@@ -84,10 +100,26 @@ impl HttpService {
             crate::tls::make_server_config(self.inner.config.tls_private_key().unwrap());
         // let tls_config =
         //     crate::tls_rpk::make_server_config(self.inner.config.tls_private_key().unwrap());
-        sui_http::Builder::new()
-            .tls_config(tls_config)
-            .serve(self.inner.config.https_address(), router)
-            .unwrap()
+
+        let server_handle = Arc::new(
+            sui_http::Builder::new()
+                .tls_config(tls_config)
+                .serve(self.inner.config.https_address(), router)
+                .unwrap(),
+        );
+        let local_addr = *server_handle.local_addr();
+
+        let guard = ServerHandleGuard(server_handle.clone());
+        let service = Service::new()
+            .spawn_aborting(async move {
+                guard.0.wait_for_shutdown().await;
+                Ok(())
+            })
+            .with_shutdown_signal(async move {
+                server_handle.trigger_shutdown();
+            });
+
+        (local_addr, service)
     }
 
     pub fn dkg_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::DkgManager>> {

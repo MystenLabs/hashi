@@ -158,7 +158,6 @@ pub fn lookup_vout(
 mod tests {
     use super::*;
     use crate::TestNetworksBuilder;
-    use hashi::onchain::OnchainState;
     use hashi::sui_tx_executor::SuiTxExecutor;
 
     #[tokio::test]
@@ -191,7 +190,7 @@ mod tests {
 
         let user_key = networks.sui_network.user_keys.first().unwrap();
         let hbtc_recipient = user_key.public_key().derive_address();
-        let hashi = networks.hashi_network.nodes()[0].0.clone();
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let deposit_address =
             hashi.get_deposit_address(&hashi.get_hashi_pubkey(), Some(&hbtc_recipient));
 
@@ -209,14 +208,7 @@ mod tests {
 
         info!("Creating deposit request on Sui...");
         let vout = lookup_vout(&networks, txid, deposit_address, amount_sats)?;
-        // Create OnchainState directly since hashi may not be fully initialized yet
-        let onchain_state = OnchainState::new(
-            &networks.sui_network.rpc_url,
-            networks.hashi_network.ids(),
-            None,
-        )
-        .await?;
-        let mut executor = SuiTxExecutor::from_config(&hashi.config, &onchain_state)?
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
             .with_signer(user_key.clone());
         let request_id = executor
             .execute_create_deposit_request(

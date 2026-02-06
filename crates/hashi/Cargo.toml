@@ -9,6 +9,7 @@ sui-crypto.workspace = true
 sui-rpc.workspace = true
 sui-http.workspace = true
 sui-transaction-builder.workspace = true
+sui-futures = { workspace = true }
 
 hashi-types = { path = "../hashi-types" }
 hashi-guardian-shared = { path = "../hashi-guardian-shared" }

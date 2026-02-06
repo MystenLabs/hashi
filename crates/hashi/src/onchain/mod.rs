@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
+use sui_futures::service::Service;
 use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
@@ -92,7 +93,7 @@ impl OnchainState {
         sui_rpc_url: &str,
         ids: HashiIds,
         tls_private_key: Option<ed25519_dalek::SigningKey>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Service)> {
         let client = Client::new(sui_rpc_url)?;
 
         let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
@@ -112,9 +113,13 @@ impl OnchainState {
         .pipe(Arc::new)
         .pipe(Self);
 
-        tokio::spawn(watcher::watcher(client, state.clone()));
+        let watcher_state = state.clone();
+        let service = Service::new().spawn_aborting(async move {
+            watcher::watcher(client, watcher_state).await;
+            Ok(())
+        });
 
-        Ok(state)
+        Ok((state, service))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {

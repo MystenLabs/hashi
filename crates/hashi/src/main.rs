@@ -16,7 +16,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     init_tracing_subscriber();
 
     tracing::info!("welcome to hashi");
@@ -45,24 +45,12 @@ async fn main() {
 
     let server_version = ServerVersion::new(env!("CARGO_BIN_NAME"), VERSION);
 
-    Hashi::new(server_version, config).start();
+    let hashi = Hashi::new(server_version, config)?;
+    let hashi_service = hashi.start().await?;
+    hashi_service.main().await?;
 
-    wait_termination().await;
     tracing::info!("hashi shutting down; goodbye");
-}
-
-async fn wait_termination() {
-    use futures::FutureExt;
-    use tokio::signal::unix::*;
-
-    let sigint = tokio::signal::ctrl_c().boxed();
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
-    let sigterm_recv = sigterm.recv().boxed();
-
-    tokio::select! {
-        _ = sigint => {},
-        _ = sigterm_recv => {},
-    }
+    Ok(())
 }
 
 fn init_tracing_subscriber() {
