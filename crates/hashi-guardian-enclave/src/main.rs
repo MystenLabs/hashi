@@ -11,6 +11,8 @@ use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -30,6 +32,7 @@ mod withdraw;
 use crate::heartbeat::HeartbeatWriter;
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
+use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::epoch_store::ConsecutiveEpochStore;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -69,6 +72,12 @@ pub struct EnclaveState {
     hashi_committees: RwLock<Option<ArcCommitteeStore>>,
     /// Withdrawal-related state.
     withdraw_state: Mutex<Option<WithdrawalState>>,
+    /// Sequence number for ordered init log writes.
+    /// We use a separate sequence number for init & withdraw because listeners have different expectations:
+    /// init log stream can't have holes (as we panic upon error) whereas withdraw log stream can.
+    init_log_seq: AtomicU64,
+    /// Sequence number for ordered withdrawal log writes.
+    withdraw_log_seq: AtomicU64,
 }
 
 /// Scratchpad used only during initialization.
@@ -82,6 +91,12 @@ pub struct Scratchpad {
     pub share_commitments: OnceLock<Vec<ShareCommitment>>,
     /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
+    /// Set once operator_init has successfully written all logs to S3.
+    /// This prevents heartbeats from being emitted before operator_init logs.
+    pub operator_init_logging_complete: OnceLock<()>,
+    /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
+    /// This prevents withdrawals from starting before provisioner_init logs.
+    pub provisioner_init_logging_complete: OnceLock<()>,
 }
 
 pub struct EphemeralKeyPairs {
@@ -441,13 +456,21 @@ impl Enclave {
             state: EnclaveState {
                 hashi_committees: RwLock::new(None),
                 withdraw_state: Mutex::new(None),
+                init_log_seq: AtomicU64::new(0),
+                withdraw_log_seq: AtomicU64::new(0),
             },
             scratchpad: Scratchpad::default(),
         }
     }
 
     pub fn is_provisioner_init_complete(&self) -> bool {
-        self.config.is_provisioner_init_complete() && self.state.is_provisioner_init_complete()
+        self.config.is_provisioner_init_complete()
+            && self.state.is_provisioner_init_complete()
+            && self
+                .scratchpad
+                .provisioner_init_logging_complete
+                .get()
+                .is_some()
     }
 
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
@@ -456,7 +479,13 @@ impl Enclave {
     }
 
     pub fn is_operator_init_complete(&self) -> bool {
-        self.config.is_operator_init_complete() && self.scratchpad.share_commitments.get().is_some()
+        self.config.is_operator_init_complete()
+            && self.scratchpad.share_commitments.get().is_some()
+            && self
+                .scratchpad
+                .operator_init_logging_complete
+                .get()
+                .is_some()
     }
 
     pub fn is_operator_init_partially_complete(&self) -> bool {
@@ -521,28 +550,55 @@ impl Enclave {
         self.signing_pubkey().as_bytes().to_lower_hex_string()
     }
 
-    /// Sign and log a LogMessage to S3. Only LogMessage variants can be logged to enforce consistency.
+    /// Log an init message at an ordered key.
     ///
-    /// Throws: InvalidInputs (if logger is not init) or S3Error.
-    pub async fn sign_and_log(&self, data: LogMessage) -> GuardianResult<()> {
-        let signed = self.sign(data);
-        // TODO: change duration based on env (prod/test) and LogMessage type
-        let object_lock_duration = Duration::from_mins(5);
+    /// Init messages are expected to be logged in the following order.
+    /// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
+    /// This is enforced in the monitor.
+    pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
+        let env = match msg {
+            OIAttestationUnsigned { .. } => LogMessageEnvelope::Timestamped(Timestamped {
+                data: LogMessage::Init(Box::new(msg)),
+                timestamp_ms: now_timestamp_ms(),
+            }),
+            _ => LogMessageEnvelope::Signed(self.sign(LogMessage::Init(Box::new(msg)))),
+        };
+
+        let seq = self.state.init_log_seq.fetch_add(1, Ordering::Relaxed);
+
         self.config
             .s3_logger()?
-            .write(&signed, object_lock_duration)
+            .write_at_seq(S3_PREFIX_INIT, seq, &env, S3_OBJECT_LOCK_DURATION_INIT)
             .await
     }
 
-    /// Log unsigned data to S3 with timestamp.
-    /// Only LogMessage variants can be logged to enforce consistency.
-    pub async fn timestamp_and_log(&self, data: LogMessage) -> GuardianResult<()> {
-        let timestamp_ms = now_timestamp_ms();
-        let timestamped = Timestamped { data, timestamp_ms };
-        let object_lock_duration = Duration::from_mins(5);
+    pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
+        let env = LogMessageEnvelope::Signed(self.sign(LogMessage::Withdrawal(Box::new(msg))));
+        let seq = self.state.withdraw_log_seq.fetch_add(1, Ordering::Relaxed);
+
         self.config
             .s3_logger()?
-            .write(&timestamped, object_lock_duration)
+            .write_at_seq(
+                S3_PREFIX_WITHDRAW,
+                seq,
+                &env,
+                S3_OBJECT_LOCK_DURATION_WITHDRAW,
+            )
+            .await
+    }
+
+    /// Throws: InvalidInputs (if logger is not init) or S3Error.
+    pub async fn log_heartbeat_at_seq(&self, seq: u64) -> GuardianResult<()> {
+        let env = LogMessageEnvelope::Signed(self.sign(LogMessage::Heartbeat));
+
+        self.config
+            .s3_logger()?
+            .write_at_seq(
+                S3_PREFIX_HEARTBEAT,
+                seq,
+                &env,
+                S3_OBJECT_LOCK_DURATION_HEARTBEAT,
+            )
             .await
     }
 
@@ -628,7 +684,7 @@ pub fn mock_logger() -> S3Logger {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::S3Config;
+    use hashi_guardian_shared::S3Config;
 
     // For unit tests we only need PutObject to succeed, because `sign_and_log()` calls `S3Logger::write()`.
     // The `then_output` helper creates a "simple" rule that repeats indefinitely.
@@ -706,6 +762,13 @@ impl Enclave {
 
         // Set share commitments
         enclave.set_share_commitments(args.commitments).unwrap();
+
+        // In tests, treat "operator initialized" as including the operator-init identity logs.
+        enclave
+            .scratchpad
+            .operator_init_logging_complete
+            .set(())
+            .expect("operator_init_logging_complete should only be set once");
 
         assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
 

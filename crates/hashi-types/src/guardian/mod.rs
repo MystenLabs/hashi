@@ -42,6 +42,23 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+
+// ---------------------------------
+//          Constants
+// ---------------------------------
+
+/// Object lock durations used for S3 log objects.
+///
+/// These are public so that external verifiers/monitors can apply the same expectations.
+pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(5 * 60);
+pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(5 * 60);
+pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
+
+/// S3 sub-prefixes (directories) used for log streams within a session.
+pub const S3_PREFIX_INIT: &str = "init";
+pub const S3_PREFIX_WITHDRAW: &str = "withdraw";
+pub const S3_PREFIX_HEARTBEAT: &str = "heartbeat";
+
 // ---------------------------------
 //          Intents
 // ---------------------------------
@@ -99,6 +116,15 @@ pub struct GuardianSigned<T> {
     /// Milliseconds since Unix epoch.
     pub timestamp_ms: u64,
     pub signature: GuardianSignature,
+}
+
+/// Envelope for all log messages written to S3.
+///
+/// Some log messages are only timestamped (e.g., attestation), while most are signed.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LogMessageEnvelope {
+    Timestamped(Timestamped<LogMessage>),
+    Signed(GuardianSigned<LogMessage>),
 }
 
 // ---------------------------------
@@ -196,34 +222,46 @@ pub struct StandardWithdrawalResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessage {
     Heartbeat,
-    /// Attestation and signing public key
-    OperatorInitAttestationUnsigned {
+    Init(Box<InitLogMessage>),
+    Withdrawal(Box<WithdrawalLogMessage>),
+}
+
+/// OI: operator_init
+/// PI: provisioner_init
+#[derive(Debug, Serialize, Deserialize)]
+pub enum InitLogMessage {
+    /// Attestation and signing public key posted in /operator_init
+    OIAttestationUnsigned {
         attestation: Attestation,
         signing_public_key: GuardianPubKey,
     },
     /// Share commitments given in /operator_init
-    GuardianInfo(GuardianInfo),
+    OIGuardianInfo(GuardianInfo),
     /// A successful /setup_new_key call
     SetupNewKeySuccess {
         encrypted_shares: Vec<EncryptedShare>,
         share_commitments: Vec<ShareCommitment>,
     },
     /// A single successful /provisioner_init call (happens N times)
-    ProvisionerInitSuccess {
+    PISuccess {
         share_id: ShareID,
         state_hash: [u8; 32],
     },
     /// Threshold reached - enclave fully initialized (happens once)
-    EnclaveFullyInitialized,
+    PIEnclaveFullyInitialized,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum WithdrawalLogMessage {
     /// Immediate withdraw success
-    NormalWithdrawalSuccess {
+    Success {
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         response: StandardWithdrawalResponse,
     },
     /// Immediate withdraw failure
     /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
-    NormalWithdrawalFailure {
+    Failure {
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         error: GuardianError,

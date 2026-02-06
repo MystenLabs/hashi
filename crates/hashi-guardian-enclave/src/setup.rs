@@ -5,6 +5,7 @@ use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::crypto::NUM_OF_SHARES;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
+use hashi_types::guardian::InitLogMessage::SetupNewKeySuccess;
 use k256::SecretKey;
 use std::sync::Arc;
 use tracing::info;
@@ -54,7 +55,7 @@ pub async fn setup_new_key(
     // Log to S3. KPs check that S3 has exactly one SetupNewKeySuccess message,
     // which ensures that KPs receive consistent shares w.r.t each other.
     enclave
-        .sign_and_log(LogMessage::SetupNewKeySuccess {
+        .log_init(SetupNewKeySuccess {
             encrypted_shares: encrypted_shares.clone(),
             share_commitments: share_commitments.clone(),
         })

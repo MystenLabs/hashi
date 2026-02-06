@@ -10,6 +10,7 @@ pub struct HeartbeatWriter {
     pub enclave: Arc<Enclave>,
     pub max_failures: u32,
     pub consecutive_failures: u32,
+    pub next_seq: u64,
 }
 
 impl HeartbeatWriter {
@@ -18,6 +19,7 @@ impl HeartbeatWriter {
             enclave,
             max_failures,
             consecutive_failures: 0,
+            next_seq: 0,
         }
     }
 
@@ -31,9 +33,10 @@ impl HeartbeatWriter {
             return Ok(());
         }
 
-        match self.enclave.sign_and_log(LogMessage::Heartbeat).await {
+        match self.enclave.log_heartbeat_at_seq(self.next_seq).await {
             Ok(()) => {
                 self.consecutive_failures = 0;
+                self.next_seq += 1;
             }
             Err(e) => {
                 // other errors shouldn't occur due to checks in operator_init_complete

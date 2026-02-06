@@ -6,6 +6,10 @@ use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::*;
+use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
+use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
+use hashi_types::guardian::InitLogMessage::PIEnclaveFullyInitialized;
+use hashi_types::guardian::InitLogMessage::PISuccess;
 use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
@@ -61,7 +65,7 @@ pub async fn operator_init(
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
     let signing_pk = enclave.signing_pubkey();
     enclave
-        .timestamp_and_log(LogMessage::OperatorInitAttestationUnsigned {
+        .log_init(OIAttestationUnsigned {
             attestation: get_attestation(&signing_pk).expect("Unable to get attestation"),
             signing_public_key: signing_pk,
         })
@@ -70,9 +74,15 @@ pub async fn operator_init(
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
-        .sign_and_log(LogMessage::GuardianInfo(enclave.info()))
+        .log_init(OIGuardianInfo(enclave.info()))
         .await
         .expect("Unable to log GuardianInfo");
+
+    enclave
+        .scratchpad
+        .operator_init_logging_complete
+        .set(())
+        .expect("operator_init_logging_complete should only be set once");
 
     info!("Operator initialization complete.");
     Ok(())
@@ -87,6 +97,10 @@ pub async fn provisioner_init(
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
+    // Ensure only one provisioner_init request runs at a time to keep things simple.
+    // We reuse the decrypted_shares mutex lock for this purpose.
+    let mut received_shares = enclave.decrypted_shares().lock().await;
+
     // Validation
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("Do operator init first".into()));
@@ -95,8 +109,11 @@ pub async fn provisioner_init(
         return Err(InvalidInputs("Provisioner init already complete".into()));
     }
     if enclave.is_provisioner_init_partially_complete() {
-        // shouldn't reach inside as we must've panicked elsewhere
-        unreachable!("Provisioner init partially complete.");
+        debug_assert!(
+            false,
+            "provisioner_init partially complete; this should not happen"
+        );
+        return Err(InvalidInputs("Provisioner init partially complete".into()));
     }
     info!("Enclave state validated.");
 
@@ -135,7 +152,6 @@ pub async fn provisioner_init(
 
     // 4) Persist share
     info!("Persisting share.");
-    let mut received_shares = enclave.decrypted_shares().lock().await;
     let share_id = share.id;
     // Check for duplicate share ID (linear search is fine for small share count)
     if received_shares.iter().any(|s| s.id == share_id) {
@@ -150,7 +166,7 @@ pub async fn provisioner_init(
 
     // Note: This S3 log does not serve any security purpose.
     enclave
-        .sign_and_log(LogMessage::ProvisionerInitSuccess {
+        .log_init(PISuccess {
             share_id,
             state_hash,
         })
@@ -163,9 +179,15 @@ pub async fn provisioner_init(
         finalize_init(&shares_vec, &enclave, request.into_state()).await;
         // Log to S3 indicating that withdrawals can be expected henceforth
         enclave
-            .sign_and_log(LogMessage::EnclaveFullyInitialized)
+            .log_init(PIEnclaveFullyInitialized)
             .await
             .expect("Unable to log EnclaveFullyInitialized");
+
+        enclave
+            .scratchpad
+            .provisioner_init_logging_complete
+            .set(())
+            .expect("provisioner_init_logging_complete should only be set once");
     }
 
     Ok(())

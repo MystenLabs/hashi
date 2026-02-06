@@ -84,22 +84,32 @@ impl S3Logger {
     // S3 Write
     // ========================================================================
 
-    /// Creates a new S3 Object with:
-    ///     key: session-id/random.json
-    ///     value: JSON representation of value
+    /// Write a value to S3 under `{dir}/{session_id}/{seq:020}.json`.
+    ///
     /// Throws: S3Error if write fails
-    pub async fn write<T: Serialize>(
+    pub async fn write_at_seq<T: Serialize>(
         &self,
+        dir: &str,
+        seq: u64,
+        value: &T,
+        object_lock_duration: Duration,
+    ) -> GuardianResult<()> {
+        let key = format!("{}/{}/{:020}.json", dir, self.session_id, seq);
+        self.write_at_key(&key, value, object_lock_duration).await
+    }
+
+    /// Write a value to S3 at an explicit key.
+    ///
+    /// This is intended for ordered log streams where the caller determines the key.
+    async fn write_at_key<T: Serialize>(
+        &self,
+        key: &str,
         value: &T,
         object_lock_duration: Duration,
     ) -> GuardianResult<()> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
-        // session_id/<random>.json
-        // TODO: (IOP-155) Decide object key format
-        let rand_suffix = format!("{:016x}", rand::random::<u64>());
-        let key = format!("{}/{}.json", self.session_id, rand_suffix);
         info!("Logging to {}", key);
 
         let expiry_time = SystemTime::now()
@@ -113,7 +123,7 @@ impl S3Logger {
         let _result = s3_client
             .put_object()
             .bucket(s3_config.bucket_name())
-            .key(&key)
+            .key(key)
             .content_type("application/json")
             .object_lock_mode(ObjectLockMode::Compliance)
             .object_lock_retain_until_date(DateTime::from(expiry_time))
@@ -128,7 +138,7 @@ impl S3Logger {
                 ))
             })?;
 
-        info!("Logged entry {} to immutable storage", rand_suffix);
+        info!("Logged entry to immutable storage");
         info!("Object locked until: {:?}", expiry_time);
         info!(
             "Public URL: https://{}.s3.amazonaws.com/{}",
@@ -278,7 +288,7 @@ mod tests {
                 req.bucket() == Some("bucket")
                     && req
                         .key()
-                        .is_some_and(|k| k.starts_with("session/") && k.ends_with(".json"))
+                        .is_some_and(|k| k.starts_with("init/session/") && k.ends_with(".json"))
                     && req.content_type() == Some("application/json")
                     && req.object_lock_mode() == Some(&ObjectLockMode::Compliance)
                     && req.object_lock_retain_until_date().is_some()
@@ -289,7 +299,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write(&TestPayload { a: 1 }, object_lock_duration)
+            .write_at_seq("init", 0, &TestPayload { a: 1 }, object_lock_duration)
             .await
             .unwrap();
         assert_eq!(put_ok.num_calls(), 1);
@@ -313,7 +323,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write(&TestPayload { a: 1 }, object_lock_duration)
+            .write_at_seq("init", 0, &TestPayload { a: 1 }, object_lock_duration)
             .await
             .unwrap();
         assert_eq!(put_flaky.num_calls(), 3);

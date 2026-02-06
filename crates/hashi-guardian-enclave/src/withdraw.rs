@@ -30,7 +30,7 @@ pub async fn standard_withdrawal(
     match normal_withdrawal_inner(enclave.clone(), signed_request) {
         Ok((response, limiter_guard)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
-            let msg = LogMessage::NormalWithdrawalSuccess {
+            let msg = WithdrawalLogMessage::Success {
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 response: response.clone(),
@@ -40,7 +40,7 @@ pub async fn standard_withdrawal(
         }
         Err(withdraw_err) => {
             error!("Withdrawal {} failed: {:?}", wid, withdraw_err);
-            let msg = LogMessage::NormalWithdrawalFailure {
+            let msg = WithdrawalLogMessage::Failure {
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 error: withdraw_err.clone(),
@@ -149,10 +149,10 @@ pub fn verify_hashi_cert<T: Serialize>(
 async fn log_withdrawal_success(
     enclave: &Enclave,
     wid: u64,
-    msg: LogMessage,
+    msg: WithdrawalLogMessage,
     limiter_guard: LimiterGuard,
 ) -> GuardianResult<()> {
-    match enclave.sign_and_log(msg).await {
+    match enclave.log_withdraw(msg).await {
         Ok(_) => {
             info!("Withdrawal {} logged.", wid);
             // Commit limiter consumption only after we've successfully logged.
@@ -171,10 +171,10 @@ async fn log_withdrawal_success(
 async fn log_withdrawal_failure(
     enclave: &Enclave,
     wid: u64,
-    msg: LogMessage,
+    msg: WithdrawalLogMessage,
     withdraw_err: &GuardianError,
 ) -> GuardianResult<()> {
-    if let Err(log_err) = enclave.sign_and_log(msg).await {
+    if let Err(log_err) = enclave.log_withdraw(msg).await {
         error!("Logging withdrawal {} to S3 failed: {:?}", wid, log_err);
         return Err(InternalError(format!(
             "Failed to log withdrawal {} error {} due to S3 logging error {}",
@@ -251,6 +251,12 @@ mod tests {
         )
         .unwrap();
         enclave.state.init(init_state).unwrap();
+
+        enclave
+            .scratchpad
+            .provisioner_init_logging_complete
+            .set(())
+            .expect("provisioner_init_logging_complete should only be set once");
 
         assert!(enclave.is_fully_initialized());
         enclave
