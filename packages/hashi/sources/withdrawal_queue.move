@@ -1,6 +1,6 @@
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, utxo::Utxo};
+use hashi::{btc::BTC, utxo::{Utxo, UtxoInfo}};
 use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
 
 const NUMBER_OF_RANDOM_BYTES: u16 = 32;
@@ -181,7 +181,7 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdraw
         pending_id: self.id,
         txid: self.txid,
         request_ids: self.requests.map_ref!(|info| info.id),
-        inputs: self.inputs,
+        inputs: self.inputs.map_ref!(|u| u.to_info()),
         outputs: self.outputs,
         timestamp_ms: self.timestamp_ms,
         randomness: self.randomness,
@@ -207,7 +207,7 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
     pending_id: address,
     txid: address,
     request_ids: vector<address>,
-    inputs: vector<Utxo>,
+    inputs: vector<UtxoInfo>,
     outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
