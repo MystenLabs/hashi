@@ -4,6 +4,8 @@ use crate::communication::P2PChannel;
 use crate::grpc::Client;
 use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
+use crate::mpc::types::GetPartialSignaturesRequest;
+use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::GetPublicDkgOutputRequest;
 use crate::mpc::types::GetPublicDkgOutputResponse;
 use crate::mpc::types::RetrieveMessagesRequest;
@@ -81,5 +83,13 @@ impl P2PChannel for RpcP2PChannel {
             .get_public_dkg_output(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        _party: &Address,
+        _request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        todo!("get_partial_signatures RPC not yet implemented")
     }
 }

@@ -1,6 +1,6 @@
-use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
+use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
@@ -44,7 +44,6 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
-use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Bls12381PrivateKey;
@@ -56,7 +55,6 @@ use rand::rngs::StdRng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
@@ -404,7 +402,7 @@ impl DkgManager {
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
         let results = send_to_many(
-            &dealer_data.recipients,
+            dealer_data.recipients.iter().copied(),
             dealer_data.request,
             |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
         )
@@ -582,7 +580,7 @@ impl DkgManager {
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
         let results = send_to_many(
-            &dealer_data.recipients,
+            dealer_data.recipients.iter().copied(),
             dealer_data.request,
             |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
         )
@@ -1920,28 +1918,6 @@ fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
     Blake2b256::digest(&bytes).digest
 }
 
-async fn send_to_many<Req, Resp, F, Fut>(
-    recipients: &[Address],
-    request: Req,
-    send: F,
-) -> Vec<(Address, ChannelResult<Resp>)>
-where
-    Req: Clone + Send + Sync,
-    Resp: Send,
-    F: Fn(Address, Req) -> Fut + Clone + Send + Sync,
-    Fut: Future<Output = ChannelResult<Resp>> + Send,
-{
-    join_all(recipients.iter().map(|&addr| {
-        let req = request.clone();
-        let send = send.clone();
-        async move {
-            let result = with_timeout_and_retry(|| send(addr, req.clone())).await;
-            (addr, result)
-        }
-    }))
-    .await
-}
-
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -1955,6 +1931,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::communication::ChannelResult;
+    use crate::mpc::types::GetPartialSignaturesRequest;
+    use crate::mpc::types::GetPartialSignaturesResponse;
     use crate::mpc::types::ProtocolType;
     use crate::mpc::types::RotationMessages;
     use crate::onchain::types::MemberInfo;
@@ -2377,6 +2356,14 @@ mod tests {
                 })?;
             Ok(response)
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("MockP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct MockOrderedBroadcastChannel {
@@ -2505,6 +2492,14 @@ mod tests {
                 self.error_message.clone(),
             ))
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("FailingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct SucceedingP2PChannel {
@@ -2568,6 +2563,14 @@ mod tests {
             _request: &GetPublicDkgOutputRequest,
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("SucceedingP2PChannel does not implement get_public_dkg_output")
+        }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("SucceedingP2PChannel does not implement get_partial_signatures")
         }
     }
 
@@ -2657,6 +2660,14 @@ mod tests {
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement get_public_dkg_output")
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("PartiallyFailingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     /// P2P channel that returns pre-collected complaint responses.
@@ -2712,6 +2723,14 @@ mod tests {
             _request: &GetPublicDkgOutputRequest,
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement get_public_dkg_output")
+        }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("PreCollectedP2PChannel does not implement get_partial_signatures")
         }
     }
 
@@ -6183,6 +6202,14 @@ mod tests {
             request: &GetPublicDkgOutputRequest,
         ) -> crate::communication::ChannelResult<GetPublicDkgOutputResponse> {
             self.inner.get_public_dkg_output(party, request).await
+        }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> crate::communication::ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("TrackingP2PChannel does not implement get_partial_signatures")
         }
     }
 

@@ -1,49 +1,136 @@
+use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
+use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::S;
+use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
+use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
+use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
+use hashi_types::committee::Committee;
 use std::collections::HashMap;
-
+use std::collections::HashSet;
+use std::time::Duration;
 use sui_sdk_types::Address;
+use tokio::time::Instant;
 
+use crate::communication::P2PChannel;
+use crate::communication::send_to_many;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::PartialSigningOutput;
-use crate::mpc::types::SendPartialSignaturesRequest;
-use crate::mpc::types::SendPartialSignaturesResponse;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
 
 pub struct SigningManager {
+    address: Address,
+    committee: Committee,
+    threshold: u16,
+    key_shares: avss::SharesForNode,
+    verifying_key: G,
+    presignatures: Presignatures,
     /// Key: sui_request_id (hex-encoded Sui address identifying the request)
-    pub partial_signing_outputs: HashMap<String, PartialSigningOutput>,
+    partial_signing_outputs: HashMap<String, PartialSigningOutput>,
 }
 
 impl SigningManager {
-    pub fn new() -> Self {
+    pub fn new(
+        address: Address,
+        committee: Committee,
+        threshold: u16,
+        key_shares: avss::SharesForNode,
+        verifying_key: G,
+        presignatures: Presignatures,
+    ) -> Self {
         Self {
+            address,
+            committee,
+            threshold,
+            key_shares,
+            verifying_key,
+            presignatures,
             partial_signing_outputs: HashMap::new(),
         }
     }
 
-    pub fn handle_send_partial_signatures_request(
+    pub async fn sign(
         &mut self,
-        sender: Address,
-        request: &SendPartialSignaturesRequest,
-    ) -> SigningResult<SendPartialSignaturesResponse> {
-        if let Some(existing) = self.partial_signing_outputs.get(&request.sui_request_id) {
-            if existing.presig != request.presig || existing.partial_sigs != request.partial_sigs {
-                return Err(SigningError::InvalidMessage {
-                    sender,
-                    reason: "Sender sent different presig or partial signatures".to_string(),
-                });
-            }
-            return Ok(SendPartialSignaturesResponse {});
-        }
+        p2p_channel: &impl P2PChannel,
+        sui_request_id: &str,
+        message: &[u8],
+        beacon_value: &S,
+        derivation_address: Option<&DerivationAddress>,
+        timeout: Duration,
+    ) -> SigningResult<SchnorrSignature> {
+        let (presig, partial_sigs) = generate_partial_signatures(
+            message,
+            &mut self.presignatures,
+            beacon_value,
+            &self.key_shares,
+            &self.verifying_key,
+            derivation_address,
+        )
+        .map_err(|e| SigningError::CryptoError(e.to_string()))?;
         self.partial_signing_outputs.insert(
-            request.sui_request_id.clone(),
+            sui_request_id.to_string(),
             PartialSigningOutput {
-                presig: request.presig,
-                partial_sigs: request.partial_sigs.clone(),
+                presig,
+                partial_sigs: partial_sigs.clone(),
             },
         );
-        Ok(SendPartialSignaturesResponse {})
+        let mut all_partial_sigs = partial_sigs;
+        let mut remaining_peers: HashSet<Address> = self
+            .committee
+            .members()
+            .iter()
+            .map(|m| m.validator_address())
+            .filter(|addr| *addr != self.address)
+            .collect();
+        let request = GetPartialSignaturesRequest {
+            sui_request_id: sui_request_id.to_string(),
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            if all_partial_sigs.len() >= self.threshold as usize {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(SigningError::Timeout {
+                    collected: all_partial_sigs.len(),
+                    threshold: self.threshold,
+                });
+            }
+            let results = send_to_many(
+                remaining_peers.iter().copied(),
+                request.clone(),
+                |addr, req| async move { p2p_channel.get_partial_signatures(&addr, &req).await },
+            )
+            .await;
+            for (addr, result) in results {
+                match result {
+                    Ok(response) => {
+                        if response.presig != presig {
+                            tracing::info!("Peer {} returned different presig, skipping", addr);
+                            continue;
+                        }
+                        remaining_peers.remove(&addr);
+                        all_partial_sigs.extend(response.partial_sigs);
+                    }
+                    Err(e) => {
+                        tracing::info!("Failed to get partial signatures from {}: {}", addr, e);
+                    }
+                }
+            }
+        }
+        aggregate_signatures(
+            message,
+            &presig,
+            beacon_value,
+            &all_partial_sigs,
+            self.threshold,
+            &self.verifying_key,
+            derivation_address,
+        )
+        .map_err(|e| SigningError::CryptoError(e.to_string()))
     }
 
     pub fn handle_get_partial_signatures_request(
@@ -63,11 +150,5 @@ impl SigningManager {
             presig: output.presig,
             partial_sigs: output.partial_sigs.clone(),
         })
-    }
-}
-
-impl Default for SigningManager {
-    fn default() -> Self {
-        Self::new()
     }
 }

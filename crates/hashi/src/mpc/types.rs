@@ -395,16 +395,6 @@ pub struct PartialSigningOutput {
 }
 
 #[derive(Clone, Debug)]
-pub struct SendPartialSignaturesRequest {
-    pub sui_request_id: String,
-    pub presig: G,
-    pub partial_sigs: Vec<Eval<S>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SendPartialSignaturesResponse {}
-
-#[derive(Clone, Debug)]
 pub struct GetPartialSignaturesRequest {
     pub sui_request_id: String,
 }
@@ -422,6 +412,12 @@ pub enum SigningError {
 
     #[error("Not found: {0}")]
     NotFound(String),
+
+    #[error("Cryptographic error: {0}")]
+    CryptoError(String),
+
+    #[error("Signing timed out: collected {collected} partial sigs, need {threshold}")]
+    Timeout { collected: usize, threshold: u16 },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;
