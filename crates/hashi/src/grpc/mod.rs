@@ -94,6 +94,10 @@ impl HttpService {
         self.inner.dkg_manager()
     }
 
+    pub fn signing_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::SigningManager>> {
+        self.inner.signing_manager()
+    }
+
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
         self.inner.btc_monitor()
     }

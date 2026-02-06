@@ -35,6 +35,7 @@ pub struct Hashi {
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
     dkg_manager: OnceLock<Arc<RwLock<mpc::DkgManager>>>,
+    signing_manager: OnceLock<Arc<RwLock<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
     /// Reconfig completion signatures by epoch.
@@ -53,6 +54,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            signing_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
@@ -73,6 +75,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            signing_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
@@ -106,6 +109,22 @@ impl Hashi {
             .write()
             // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
             // Poisoning indicates a bug, so we propagate the panic rather than recover.
+            .unwrap() = manager;
+    }
+
+    pub fn signing_manager(&self) -> Arc<RwLock<mpc::SigningManager>> {
+        self.signing_manager
+            .get()
+            .expect("SigningManager not initialized")
+            .clone()
+    }
+
+    pub fn set_signing_manager(&self, manager: mpc::SigningManager) {
+        *self
+            .signing_manager
+            .get()
+            .expect("SigningManager not initialized")
+            .write()
             .unwrap() = manager;
     }
 

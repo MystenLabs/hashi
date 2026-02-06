@@ -52,6 +52,10 @@ impl SigningManager {
         }
     }
 
+    pub fn epoch(&self) -> u64 {
+        self.committee.epoch()
+    }
+
     pub async fn sign(
         &mut self,
         p2p_channel: &impl P2PChannel,

@@ -87,9 +87,12 @@ impl P2PChannel for RpcP2PChannel {
 
     async fn get_partial_signatures(
         &self,
-        _party: &Address,
-        _request: &GetPartialSignaturesRequest,
+        party: &Address,
+        request: &GetPartialSignaturesRequest,
     ) -> ChannelResult<GetPartialSignaturesResponse> {
-        todo!("get_partial_signatures RPC not yet implemented")
+        self.get_client(party)?
+            .get_partial_signatures(self.epoch, request)
+            .await
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 }
