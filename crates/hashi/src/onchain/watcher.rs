@@ -300,10 +300,14 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .remove(&event.pending_id);
             }
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
-                state.state_mut().hashi.utxo_pool.spent_utxos.insert(
-                    utxo_spent_event.utxo_id.into(),
-                    utxo_spent_event.spent_epoch,
-                );
+                let mut state = state.state_mut();
+                let utxo_id = utxo_spent_event.utxo_id.into();
+                state.hashi.utxo_pool.active_utxos.remove(&utxo_id);
+                state
+                    .hashi
+                    .utxo_pool
+                    .spent_utxos
+                    .insert(utxo_id, utxo_spent_event.spent_epoch);
             }
             HashiEvent::SpentUtxoDeletedEvent(spent_utxo_deleted_event) => {
                 state

@@ -1,8 +1,26 @@
 /// Module: withdraw
 module hashi::withdraw;
 
-use hashi::{btc::BTC, hashi::Hashi, withdrawal_queue::withdrawal_request};
+use hashi::{
+    btc::BTC,
+    committee::CommitteeSignature,
+    hashi::Hashi,
+    threshold,
+    utxo::UtxoId,
+    withdrawal_queue::{OutputUtxo, withdrawal_request}
+};
 use sui::{balance::Balance, clock::Clock, coin::Coin, random::Random, sui::SUI};
+
+public struct WithdrawalApproval has copy, drop, store {
+    request_ids: vector<address>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
+    txid: address,
+}
+
+public struct WithdrawalConfirmation has copy, drop, store {
+    withdrawal_id: address,
+}
 
 // User entry-point for requesting a withdrawal
 //
@@ -40,14 +58,13 @@ public fun request_withdrawal(
 // - Broadcast txn to committee for agreement (maybe get preauth from guardian?)
 // - Send txn onchain to commit to the txn
 // - commit to utxos to use in input
-entry fun pick_withdrawal_for_processing(
+public fun pick_withdrawal_for_processing(
     hashi: &mut Hashi,
-    requests: vector<address>,
+    request_ids: vector<address>,
     selected_utxos: vector<vector<u8>>,
     outputs: vector<vector<u8>>,
     txid: address,
-    // BTC txn itself?
-    // cert: Cert,
+    cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -57,7 +74,7 @@ entry fun pick_withdrawal_for_processing(
     // Do not allow scheduling of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
-    let requests = requests.map!(|request_id| {
+    let requests = request_ids.map!(|request_id| {
         let request = hashi.withdrawal_queue_mut().remove_request(request_id);
         let (request, btc) = hashi::withdrawal_queue::request_into_parts(request);
 
@@ -75,7 +92,25 @@ entry fun pick_withdrawal_for_processing(
     // outputs
     let outputs = outputs.map!(|raw| hashi::withdrawal_queue::output_utxo_from_bcs(raw));
 
-    // TODO Verify cert
+    let approval = WithdrawalApproval {
+        request_ids,
+        selected_utxos,
+        outputs,
+        txid,
+    };
+
+    let threshold =
+        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
+    let approval = hashi
+        .current_committee()
+        .verify_certificate(approval, cert, threshold)
+        .into_message();
+
+    let WithdrawalApproval {
+        outputs,
+        txid,
+        ..,
+    } = approval;
 
     let pending = hashi::withdrawal_queue::new_pending_withdrawal(
         requests,
@@ -90,18 +125,23 @@ entry fun pick_withdrawal_for_processing(
     hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending);
 }
 
-entry fun confirm_withdrawal(
+public fun confirm_withdrawal(
     hashi: &mut Hashi,
     withdrawal_id: address,
-    // BTC signatures?
-    // cert: Cert
+    cert: CommitteeSignature,
     _ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
 
-    let withdrawal = hashi.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
+    let threshold =
+        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
+    let confirmation = WithdrawalConfirmation { withdrawal_id };
+    let _ = hashi
+        .current_committee()
+        .verify_certificate(confirmation, cert, threshold)
+        .into_message();
 
-    // TODO Verify cert
+    let withdrawal = hashi.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
 
     // TODO create and insert new UTXO for change if it hasn't already been
     // inserted
