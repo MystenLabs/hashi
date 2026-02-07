@@ -87,7 +87,7 @@ pub struct DkgManager {
     /// Used to reconstruct source session IDs during certificate reconstruction.
     chain_id: String,
     /// The epoch from which to read previous messages during reconstruction.
-    source_epoch: u64,
+    pub source_epoch: u64,
     previous_output: Option<DkgOutput>,
 
     // Mutable during the epoch
@@ -155,11 +155,23 @@ impl DkgManager {
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
-        let source_epoch = committee_set.epoch();
-        let previous_committee = if committee_set.pending_epoch_change().is_some() {
-            committee_set.committees().get(&source_epoch).cloned()
+        let (source_epoch, previous_committee) = if committee_set.pending_epoch_change().is_some() {
+            // Live reconfig
+            let source = committee_set.epoch();
+            (source, committee_set.committees().get(&source).cloned())
         } else {
-            None
+            match epoch.checked_sub(1).and_then(|prev| {
+                committee_set
+                    .committees()
+                    .get(&prev)
+                    .cloned()
+                    .map(|c| (prev, c))
+            }) {
+                // Rotation recovery
+                Some((prev, committee)) => (prev, Some(committee)),
+                // Initial DKG
+                None => (committee_set.epoch(), None),
+            }
         };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
@@ -398,12 +410,25 @@ impl DkgManager {
         {
             let mut mgr = dkg_manager.write().unwrap();
             mgr.previous_output = Some(previous.clone());
-            // Clear state from previous round
+            // Clear DKG entries inserted by reconstruct_from_dkg_certificates.
+            // Without this, handle_send_messages_request rejects incoming
+            // rotation messages due to hash mismatch with stale DKG entries.
             mgr.dealer_messages.clear();
             mgr.dealer_outputs.clear();
             mgr.complaints_to_process.clear();
             mgr.message_responses.clear();
             mgr.complaint_responses.clear();
+            // Reload rotation messages from DB for restart recovery.
+            // For live rotation this is a no-op (no messages stored yet).
+            // For restart, this restores rotation messages that were
+            // loaded in the constructor but wiped by the clear above.
+            for (dealer, message) in mgr
+                .public_messages_store
+                .list_all_rotation_messages()
+                .map_err(|e| DkgError::StorageError(e.to_string()))?
+            {
+                mgr.dealer_messages.insert(dealer, message);
+            }
         }
         if is_member_of_previous_committee {
             // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
@@ -790,7 +815,13 @@ impl DkgManager {
                 p2p_channel,
             )
             .await?;
-            certified_share_indices.extend(dealer_share_indices);
+            // Only add indices not already tracked (avoids duplicates when
+            // the dealer phase already stored outputs for this node's own shares).
+            for idx in dealer_share_indices {
+                if !certified_share_indices.contains(&idx) {
+                    certified_share_indices.push(idx);
+                }
+            }
             certified_dealers.insert(dealer);
         }
         let output = {
@@ -6888,6 +6919,10 @@ mod tests {
         let (mut test_manager, test_dkg_output, _) =
             rotation_setup.create_rotation_dealer_with_memory_store(0);
         let test_addr = rotation_setup.setup.address(0);
+        // In this test, DKG was done at epoch 100 (current epoch). The constructor
+        // sets source_epoch = 99 (rotation recovery heuristic), but reconstruction
+        // needs the epoch at which DKG messages were actually created.
+        test_manager.source_epoch = rotation_setup.setup.epoch();
         test_manager.previous_output = Some(test_dkg_output.clone());
         let test_manager = Arc::new(RwLock::new(test_manager));
 

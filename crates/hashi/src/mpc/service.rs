@@ -31,6 +31,7 @@ use hashi_types::move_types::ReconfigCompletionMessage;
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const START_RECONFIG_MAX_ATTEMPTS: u32 = 3;
+const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -95,13 +96,13 @@ impl MpcService {
             loop {
                 // TODO: Store DKG public key on-chain, and read it from there if it already exists.
                 // Note that restart is already supported in `DkgManager`, so the latter is not strictly necessary despite more direct.
-                match self.run_dkg().await {
+                match self.recover_mpc_state().await {
                     Ok(output) => {
                         let _ = self.key_ready_tx.send(Some(output.public_key));
                         break;
                     }
                     Err(e) => {
-                        error!("DKG failed: {e:?}");
+                        error!("MPC state recovery failed: {e:?}");
                     }
                 }
                 tokio::time::sleep(RETRY_INTERVAL).await;
@@ -145,6 +146,18 @@ impl MpcService {
             .hashi()
             .committees
             .pending_epoch_change()
+    }
+
+    async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let epoch = onchain_state.epoch();
+        let protocol_type = onchain_state.fetch_certs(epoch).await?.map(|(pt, _)| pt);
+        match protocol_type {
+            Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
+                self.run_key_rotation(epoch).await
+            }
+            _ => self.run_dkg().await,
+        }
     }
 
     async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
@@ -195,7 +208,17 @@ impl MpcService {
                         "start_reconfig attempt {attempt}/{START_RECONFIG_MAX_ATTEMPTS} failed: {e}"
                     );
                     if attempt < START_RECONFIG_MAX_ATTEMPTS {
-                        tokio::time::sleep(RETRY_INTERVAL).await;
+                        // Poll for pending epoch change while waiting, so we can
+                        // return early if another node submitted start_reconfig.
+                        let polls = (RETRY_INTERVAL.as_millis()
+                            / START_RECONFIG_POLL_INTERVAL.as_millis())
+                            as u32;
+                        for _ in 0..polls {
+                            if self.get_pending_epoch_change().is_some() {
+                                return;
+                            }
+                            tokio::time::sleep(START_RECONFIG_POLL_INTERVAL).await;
+                        }
                     }
                 }
             }
@@ -238,7 +261,6 @@ impl MpcService {
 
     async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
-        let previous_certs = self.fetch_previous_certificates().await?;
         let target_committee = onchain_state
             .state()
             .hashi()
@@ -250,8 +272,22 @@ impl MpcService {
         let rotation_manager = self
             .inner
             .create_dkg_manager(target_epoch, ProtocolType::KeyRotation)?;
+        let source_epoch = rotation_manager.source_epoch;
         self.inner.set_dkg_manager(rotation_manager);
         let dkg_manager = self.inner.dkg_manager();
+        let source_committee = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&source_epoch)
+            .ok_or_else(|| anyhow::anyhow!("No committee for source epoch {source_epoch}"))?
+            .clone();
+        let previous_certs = fetch_certificates(&onchain_state, source_epoch, &source_committee)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
+        let previous_certs: Vec<CertificateV1> =
+            previous_certs.into_iter().map(|(_, cert)| cert).collect();
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
         let mut tob_channel = SuiTobChannel::new(
@@ -270,22 +306,6 @@ impl MpcService {
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;
         Ok(output)
-    }
-
-    async fn fetch_previous_certificates(&self) -> anyhow::Result<Vec<CertificateV1>> {
-        let onchain_state = self.inner.onchain_state().clone();
-        let source_epoch = onchain_state.epoch();
-        let source_committee = onchain_state
-            .state()
-            .hashi()
-            .committees
-            .current_committee()
-            .ok_or_else(|| anyhow::anyhow!("No source committee"))?
-            .clone();
-        let certs = fetch_certificates(&onchain_state, source_epoch, &source_committee)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch certificates: {e}"))?;
-        Ok(certs.into_iter().map(|(_, cert)| cert).collect())
     }
 
     async fn submit_end_reconfig(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {

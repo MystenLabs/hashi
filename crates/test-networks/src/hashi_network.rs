@@ -48,8 +48,6 @@ use crate::SuiNetworkHandle;
 const HTTPS_SCHEME: &str = "https://";
 const HTTP_SCHEME: &str = "http://";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
 const TEST_WEIGHT_DIVISOR: u16 = 100;
 
 pub struct HashiNodeHandle {
@@ -165,12 +163,6 @@ impl HashiNodeHandle {
         }
     }
 
-    pub async fn wait_for_dkg_completion(&self, timeout: std::time::Duration) -> Result<()> {
-        tokio::time::timeout(timeout, self.wait_for_dkg_completion_inner())
-            .await
-            .map_err(|_| anyhow::anyhow!("DKG completion timed out after {:?}", timeout))
-    }
-
     pub fn current_epoch(&self) -> Option<u64> {
         self.hashi()
             .onchain_state_opt()
@@ -198,49 +190,6 @@ impl HashiNodeHandle {
             };
             let epoch = onchain_state.state().hashi().committees.epoch();
             if epoch >= target_epoch {
-                return;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-    }
-
-    async fn wait_for_dkg_completion_inner(&self) {
-        loop {
-            // Wait for hashi to finish initializing
-            let onchain_state = match self.hashi().onchain_state_opt() {
-                Some(state) => state,
-                None => {
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let epoch_threshold_and_committee = {
-                let state = onchain_state.state();
-                let epoch = state.hashi().committees.epoch();
-                state.hashi().committees.current_committee().map(|c| {
-                    let threshold = c.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
-                    (epoch, threshold, c.clone())
-                })
-            };
-            let (epoch, threshold, committee) = match epoch_threshold_and_committee {
-                Some(et) => et,
-                None => {
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let raw_certs = match onchain_state.fetch_certs(epoch).await {
-                Ok(Some((_, certs))) => certs,
-                Ok(None) | Err(_) => {
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let certified_weight: u64 = raw_certs
-                .iter()
-                .filter_map(|(dealer, _)| committee.weight_of(dealer).ok())
-                .sum();
-            if certified_weight >= threshold {
                 return;
             }
             tokio::time::sleep(POLL_INTERVAL).await;
