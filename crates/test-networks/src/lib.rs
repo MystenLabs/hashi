@@ -109,6 +109,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_initially_active_nodes(mut self, initially_active: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_initially_active(initially_active);
+        self
+    }
+
     pub fn with_sui_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
         self.sui_builder = self.sui_builder.with_epoch_duration_ms(epoch_duration_ms);
         self
@@ -548,6 +553,129 @@ mod tests {
             .await
             .expect("Node 0 should recover MPC key after restart");
         force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_member_joins_key_rotation_after_dkg() -> Result<()> {
+        const TOTAL_VALIDATORS: usize = 20;
+        const INITIAL_NODES: usize = 19; // 19/20 = 95%, meets the registration threshold
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_sui_validators(TOTAL_VALIDATORS)
+            .with_hashi_nodes(TOTAL_VALIDATORS)
+            .with_initially_active_nodes(INITIAL_NODES)
+            .build()
+            .await?;
+
+        // Wait for DKG to complete with 19 nodes
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            assert_eq!(nodes.len(), INITIAL_NODES);
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            assert_nodes_agree_on_mpc_key(nodes);
+        }
+
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        // Register and start the 20th node (new member)
+        let client = test_networks.sui_network.client.clone();
+        test_networks
+            .hashi_network_mut()
+            .register_and_start_pending_node(client)
+            .await?;
+        assert_eq!(
+            test_networks.hashi_network().nodes().len(),
+            TOTAL_VALIDATORS
+        );
+
+        // Force epoch change → key rotation 19→20.
+        test_networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_member_joins_key_rotation_after_rotation() -> Result<()> {
+        const TOTAL_VALIDATORS: usize = 20;
+        const INITIAL_NODES: usize = 19; // 19/20 = 95%, meets the registration threshold
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_sui_validators(TOTAL_VALIDATORS)
+            .with_hashi_nodes(TOTAL_VALIDATORS)
+            .with_initially_active_nodes(INITIAL_NODES)
+            .build()
+            .await?;
+
+        // Wait for DKG to complete with 19 nodes
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            assert_eq!(nodes.len(), INITIAL_NODES);
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            assert_nodes_agree_on_mpc_key(nodes);
+        }
+
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        // 2. Force epoch change → key rotation with same 19 nodes.
+        test_networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        // 3. Register and start the 20th node (new member)
+        let client = test_networks.sui_network.client.clone();
+        test_networks
+            .hashi_network_mut()
+            .register_and_start_pending_node(client)
+            .await?;
+        assert_eq!(
+            test_networks.hashi_network().nodes().len(),
+            TOTAL_VALIDATORS
+        );
+
+        // 4. Force epoch change → key rotation 19→20.
+        test_networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 2).await;
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
 
         Ok(())
     }

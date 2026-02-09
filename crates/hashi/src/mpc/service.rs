@@ -92,7 +92,7 @@ impl MpcService {
     async fn run(self) {
         if let Some(epoch) = self.get_pending_epoch_change() {
             self.handle_reconfig(epoch).await;
-        } else {
+        } else if self.inner.is_in_current_committee() {
             loop {
                 // TODO: Store DKG public key on-chain, and read it from there if it already exists.
                 // Note that restart is already supported in `DkgManager`, so the latter is not strictly necessary despite more direct.
@@ -107,6 +107,8 @@ impl MpcService {
                 }
                 tokio::time::sleep(RETRY_INTERVAL).await;
             }
+        } else {
+            info!("Node is not in the current committee, waiting for reconfig notification...");
         }
         let mut notifications = self.inner.onchain_state().subscribe();
         loop {
@@ -154,6 +156,7 @@ impl MpcService {
         let protocol_type = onchain_state.fetch_certs(epoch).await?.map(|(pt, _)| pt);
         match protocol_type {
             Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
+                self.setup_key_rotation(epoch)?;
                 self.run_key_rotation(epoch).await
             }
             _ => self.run_dkg().await,
@@ -163,7 +166,10 @@ impl MpcService {
     async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let (epoch, committee) = get_epoch_and_committee(&onchain_state)?;
-        let dkg_manager = self.inner.dkg_manager();
+        let dkg_manager = self
+            .inner
+            .dkg_manager()
+            .expect("DkgManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(
@@ -226,6 +232,16 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
+        // Create the DkgManager once before the retry loop so retries reuse
+        // the same manager (and its accumulated messages) instead of generating
+        // fresh random dealer messages that conflict with previously sent ones.
+        if let Err(e) = self.setup_key_rotation(target_epoch) {
+            error!(
+                "Failed to set up key rotation for epoch {}: {e}",
+                target_epoch
+            );
+            return;
+        }
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 return;
@@ -259,6 +275,14 @@ impl MpcService {
         }
     }
 
+    fn setup_key_rotation(&self, target_epoch: u64) -> anyhow::Result<()> {
+        let rotation_manager = self
+            .inner
+            .create_dkg_manager(target_epoch, ProtocolType::KeyRotation)?;
+        self.inner.set_dkg_manager(rotation_manager);
+        Ok(())
+    }
+
     async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let target_committee = onchain_state
@@ -269,12 +293,14 @@ impl MpcService {
             .get(&target_epoch)
             .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {}", target_epoch))?
             .clone();
-        let rotation_manager = self
+        let dkg_manager = self
             .inner
-            .create_dkg_manager(target_epoch, ProtocolType::KeyRotation)?;
-        let source_epoch = rotation_manager.source_epoch;
-        self.inner.set_dkg_manager(rotation_manager);
-        let dkg_manager = self.inner.dkg_manager();
+            .dkg_manager()
+            .ok_or_else(|| anyhow::anyhow!("DkgManager not initialized for key rotation"))?;
+        let source_epoch = dkg_manager
+            .read()
+            .map_err(|_| anyhow::anyhow!("DkgManager lock poisoned"))?
+            .source_epoch;
         let source_committee = onchain_state
             .state()
             .hashi()

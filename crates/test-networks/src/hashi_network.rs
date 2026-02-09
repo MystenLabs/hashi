@@ -200,6 +200,10 @@ impl HashiNodeHandle {
 pub struct HashiNetwork {
     ids: HashiIds,
     nodes: Vec<HashiNodeHandle>,
+    /// Configs for nodes that were built but not yet registered or started.
+    pending_configs: Vec<HashiConfig>,
+    /// BLS registration keys corresponding to each pending config.
+    pending_bls_keys: Vec<(Address, Bls12381PrivateKey, EncryptionPublicKey)>,
 }
 
 impl HashiNetwork {
@@ -219,19 +223,45 @@ impl HashiNetwork {
     pub fn ids(&self) -> HashiIds {
         self.ids
     }
+
+    pub async fn register_and_start_pending_node(&mut self, client: sui_rpc::Client) -> Result<()> {
+        let config = self
+            .pending_configs
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("no pending nodes to start"))?;
+        let _bls_key = self
+            .pending_bls_keys
+            .pop()
+            .expect("pending_bls_keys should match pending_configs");
+        register_onchain(client, &config).await?;
+        let mut node_handle = HashiNodeHandle::new(config)?;
+        node_handle.start().await?;
+        self.nodes.push(node_handle);
+        Ok(())
+    }
 }
 
 pub struct HashiNetworkBuilder {
     pub num_nodes: usize,
+    /// `None` means all `num_nodes` are active (default).
+    pub num_initially_active_nodes: Option<usize>,
 }
 
 impl HashiNetworkBuilder {
     pub fn new() -> Self {
-        Self { num_nodes: 1 }
+        Self {
+            num_nodes: 1,
+            num_initially_active_nodes: None,
+        }
     }
 
     pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
         self.num_nodes = num_nodes;
+        self
+    }
+
+    pub fn with_initially_active(mut self, initially_active: usize) -> Self {
+        self.num_initially_active_nodes = Some(initially_active);
         self
     }
 
@@ -275,28 +305,39 @@ impl HashiNetworkBuilder {
             configs.push(config);
         }
 
-        let bls_keys: Vec<(Address, Bls12381PrivateKey, EncryptionPublicKey)> = configs
-            .iter()
-            .map(|c| {
-                (
-                    c.validator_address().unwrap(),
-                    c.protocol_private_key().unwrap(),
-                    c.encryption_public_key().unwrap(),
-                )
-            })
-            .collect();
+        let initially_active = self.num_initially_active_nodes.unwrap_or(configs.len());
+        assert!(
+            initially_active <= configs.len(),
+            "initially_active ({initially_active}) must be <= num_nodes ({})",
+            configs.len()
+        );
+        let pending_configs: Vec<HashiConfig> = configs.split_off(initially_active);
+        let extract_bls_keys = |configs: &[HashiConfig]| {
+            configs
+                .iter()
+                .map(|c| {
+                    (
+                        c.validator_address().unwrap(),
+                        c.protocol_private_key().unwrap(),
+                        c.encryption_public_key().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let active_bls_keys = extract_bls_keys(&configs);
+        let pending_bls_keys = extract_bls_keys(&pending_configs);
 
         for config in &configs {
             let client = sui.client.clone();
             register_onchain(client, config).await?;
         }
 
-        // Init the initial committee
+        // Initialize the initial committee with only active nodes
         start_reconfig(sui, hashi_ids).await?;
         // TODO: Remove this test-only logic once the node service handles committing the
         // MPC public key on-chain after DKG.
         let placeholder_mpc_public_key = vec![0u8; 33];
-        end_reconfig(sui, hashi_ids, &bls_keys, placeholder_mpc_public_key).await?;
+        end_reconfig(sui, hashi_ids, &active_bls_keys, placeholder_mpc_public_key).await?;
 
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
@@ -316,6 +357,8 @@ impl HashiNetworkBuilder {
         Ok(HashiNetwork {
             ids: hashi_ids,
             nodes,
+            pending_configs,
+            pending_bls_keys,
         })
     }
 }

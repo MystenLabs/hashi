@@ -929,7 +929,16 @@ impl DkgManager {
             }
         };
         let session_id = self.session_id.dealer_session_id(&dealer).to_vec();
-        self.process_and_store_message(session_id, &message, None, output_key, complaint_key)
+        self.process_and_store_message(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            session_id,
+            &message,
+            None,
+            output_key,
+            complaint_key,
+        )
     }
 
     fn process_certified_rotation_message(
@@ -961,6 +970,9 @@ impl DkgManager {
                 .to_vec();
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             self.process_and_store_message(
+                self.dkg_config.nodes.clone(),
+                self.party_id,
+                self.dkg_config.threshold,
                 session_id,
                 &message,
                 commitment,
@@ -971,8 +983,12 @@ impl DkgManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_and_store_message(
         &mut self,
+        nodes: Nodes<EncryptionGroupElement>,
+        party_id: u16,
+        threshold: u16,
         session_id: Vec<u8>,
         message: &avss::Message,
         commitment: Option<G>,
@@ -980,9 +996,9 @@ impl DkgManager {
         complaint_key: ComplaintsToProcessKey,
     ) -> DkgResult<()> {
         let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            self.dkg_config.threshold,
+            nodes,
+            party_id,
+            threshold,
             session_id,
             commitment,
             self.encryption_key.clone(),
@@ -1689,6 +1705,18 @@ impl DkgManager {
         &mut self,
         certificates: &[CertificateV1],
     ) -> DkgResult<DkgOutput> {
+        let previous_committee = self.previous_committee.clone().ok_or_else(|| {
+            DkgError::InvalidConfig("DKG reconstruction requires previous committee".into())
+        })?;
+        let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
+            DkgError::InvalidConfig("DKG reconstruction requires previous nodes".into())
+        })?;
+        let previous_threshold = self.previous_threshold.ok_or_else(|| {
+            DkgError::InvalidConfig("DKG reconstruction requires previous threshold".into())
+        })?;
+        let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
+            DkgError::InvalidConfig("This node is not in the previous committee".into())
+        })? as u16;
         let source_session_id =
             SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
         let mut certified_dealers = HashMap::new();
@@ -1724,6 +1752,9 @@ impl DkgManager {
                 .dealer_session_id(&dealer_address)
                 .to_vec();
             self.process_and_store_message(
+                previous_nodes.clone(),
+                previous_party_id,
+                previous_threshold,
                 session_id,
                 &message,
                 None,
@@ -1737,25 +1768,54 @@ impl DkgManager {
         let total_weight: u16 = certified_dealers
             .keys()
             .map(|dealer| {
-                let party_id = self
-                    .committee
+                let party_id = previous_committee
                     .index_of(dealer)
-                    .expect("certified dealer must be committee member")
+                    .expect("certified dealer must be in previous committee")
                     as u16;
-                self.dkg_config
-                    .nodes
+                previous_nodes
                     .weight_of(party_id)
                     .expect("party_id must be valid")
             })
             .sum();
-        let threshold = self.dkg_config.threshold;
-        if total_weight < threshold {
+        if total_weight < previous_threshold {
             return Err(DkgError::NotEnoughApprovals {
-                needed: threshold as usize,
+                needed: previous_threshold as usize,
                 got: total_weight as usize,
             });
         }
-        self.complete_dkg(certified_dealers.into_keys())
+        let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
+            .into_keys()
+            .map(|dealer| {
+                let dealer_party_id = previous_committee
+                    .index_of(&dealer)
+                    .expect("certified dealer must be in previous committee")
+                    as u16;
+                let output = self
+                    .dealer_outputs
+                    .get(&DealerOutputsKey::Dkg(dealer))
+                    .ok_or_else(|| {
+                        DkgError::ProtocolFailed(format!(
+                            "No dealer output found for dealer: {:?}.",
+                            dealer
+                        ))
+                    })?
+                    .clone();
+                Ok((dealer_party_id, output))
+            })
+            .collect::<Result<_, DkgError>>()?;
+        let combined_output =
+            avss::ReceiverOutput::complete_dkg(previous_threshold, &previous_nodes, outputs)
+                .expect(EXPECT_THRESHOLD_MET);
+        Ok(DkgOutput {
+            public_key: combined_output.vk,
+            key_shares: combined_output.my_shares,
+            commitments: combined_output
+                .commitments
+                .into_iter()
+                .map(|c| (c.index, c.value))
+                .collect(),
+            threshold: previous_threshold,
+        })
     }
 
     fn reconstruct_from_rotation_certificates(
@@ -1763,6 +1823,15 @@ impl DkgManager {
         certificates: &[CertificateV1],
         previous_threshold: u16,
     ) -> DkgResult<DkgOutput> {
+        let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
+            DkgError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
+        })?;
+        let previous_committee = self.previous_committee.clone().ok_or_else(|| {
+            DkgError::InvalidConfig("Rotation reconstruction requires previous committee".into())
+        })?;
+        let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
+            DkgError::InvalidConfig("This node is not in the previous committee".into())
+        })? as u16;
         let source_session_id = SessionId::new(
             &self.chain_id,
             self.source_epoch,
@@ -1807,6 +1876,9 @@ impl DkgManager {
                 let complaint_key = ComplaintsToProcessKey::Rotation(dealer_address, share_index);
                 // Pass None for commitment. Re-verification would be redundant since we trust the certificates.
                 self.process_and_store_message(
+                    previous_nodes.clone(),
+                    previous_party_id,
+                    previous_threshold,
                     session_id,
                     &message,
                     None,
@@ -1824,17 +1896,9 @@ impl DkgManager {
                 got: certified_share_indices.len(),
             });
         }
-        self.complete_key_rotation_for_reconstruction(previous_threshold, &certified_share_indices)
-    }
-
-    fn complete_key_rotation_for_reconstruction(
-        &mut self,
-        threshold: u16,
-        certified_share_indices: &[ShareIndex],
-    ) -> DkgResult<DkgOutput> {
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
-            .take(threshold as usize)
+            .take(previous_threshold as usize)
             .map(|&share_index| {
                 let output = self
                     .dealer_outputs
@@ -1852,9 +1916,9 @@ impl DkgManager {
             })
             .collect::<Result<_, DkgError>>()?;
         let combined = avss::ReceiverOutput::complete_key_rotation(
-            threshold,
-            self.party_id,
-            &self.dkg_config.nodes,
+            previous_threshold,
+            previous_party_id,
+            &previous_nodes,
             &indexed_outputs,
         )
         .expect(EXPECT_THRESHOLD_MET);
@@ -1866,7 +1930,7 @@ impl DkgManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold,
+            threshold: previous_threshold,
         })
     }
 
@@ -7905,7 +7969,16 @@ mod tests {
                     .rotation_session_id(dealer_addr, *share_index)
                     .to_vec();
                 party_manager
-                    .process_and_store_message(session_id, message, None, output_key, complaint_key)
+                    .process_and_store_message(
+                        party_manager.dkg_config.nodes.clone(),
+                        party_manager.party_id,
+                        party_manager.dkg_config.threshold,
+                        session_id,
+                        message,
+                        None,
+                        output_key,
+                        complaint_key,
+                    )
                     .unwrap();
             }
         }
@@ -7933,6 +8006,354 @@ mod tests {
         assert_eq!(
             rotation_output.threshold, dkg_output.threshold,
             "Rotation output threshold should match DKG threshold"
+        );
+    }
+
+    /// Tests that `reconstruct_from_dkg_certificates` uses the previous committee's
+    /// parameters (nodes, party_id, threshold) to decrypt DKG messages, not the target
+    /// committee's.
+    #[test]
+    fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
+        let mut rng = rand::thread_rng();
+
+        // Previous committee: 5 members with weights [3, 2, 4, 1, 2]
+        // (total=12, threshold=4). Dealers: 0, 1, 4 (total weight=7 >= threshold).
+        let rotation_setup = RotationTestSetup::new();
+        let epoch = rotation_setup.setup.epoch(); // = 100
+
+        // Complete DKG for all 5 members, storing messages in InMemoryPublicMessagesStore.
+        // We need the DKG certificates and the stored messages for reconstruction.
+        let mut dkg_outputs = Vec::new();
+        let mut stores = Vec::new();
+        for i in 0..5 {
+            let (manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            dkg_outputs.push(output);
+            stores.push(manager.public_messages_store);
+        }
+
+        let expected_public_key = dkg_outputs[0].public_key;
+        let certificates = rotation_setup.certificates();
+
+        // Create a new member that, when inserted before existing members, shifts party_ids.
+        // Previous committee order: addr_0=[0;32], addr_1=[1;32], addr_2=[2;32], addr_3=[3;32], addr_4=[4;32]
+        // party_ids:                     0            1            2            3            4
+        //
+        // Insert new member between addr_1 and addr_2:
+        // Target committee order:  addr_0, addr_1, new_addr, addr_2, addr_3, addr_4
+        // party_ids:                  0       1        2        3        4        5
+        //
+        // addr_4's party_id shifts from 4 (previous) to 5 (target).
+        let new_member_addr = Address::new([99u8; 32]);
+        let new_member_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let new_member_signing_key = Bls12381PrivateKey::generate(&mut rng);
+
+        let previous_members: Vec<_> = rotation_setup.setup.committee().members().to_vec();
+        let mut target_members: Vec<_> = previous_members.clone();
+        // Insert new member at position 2 to shift members 2, 3, 4
+        target_members.insert(
+            2,
+            CommitteeMember::new(
+                new_member_addr,
+                new_member_signing_key.public_key(),
+                EncryptionPublicKey::from_private_key(&new_member_encryption_key),
+                2,
+            ),
+        );
+
+        let target_epoch = epoch + 1;
+        let previous_committee = Committee::new(previous_members, epoch);
+        let target_committee = Committee::new(target_members, target_epoch);
+
+        // Build CommitteeSet simulating a live reconfig:
+        // epoch = 100 (current), pending_epoch_change = 101 (target)
+        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        let mut committees = BTreeMap::new();
+        committees.insert(epoch, previous_committee);
+        committees.insert(target_epoch, target_committee);
+        committee_set
+            .set_epoch(epoch)
+            .set_pending_epoch_change(Some(target_epoch))
+            .set_committees(committees);
+
+        // Test with a shifted member (addr_4, previous party_id=4, target party_id=5).
+        let shifted_member_index = 4usize;
+        let shifted_addr = rotation_setup.setup.address(shifted_member_index);
+        assert_eq!(
+            committee_set
+                .committees()
+                .get(&target_epoch)
+                .unwrap()
+                .index_of(&shifted_addr),
+            Some(5), // shifted from 4 to 5
+            "Party ID should be shifted in target committee"
+        );
+
+        // Create an InMemoryPublicMessagesStore with the DKG messages from the original DKG.
+        let mut store = InMemoryPublicMessagesStore::new();
+        for (i, &dealer_idx) in rotation_setup.dealer_indices.iter().enumerate() {
+            let dealer_addr = rotation_setup.setup.address(dealer_idx);
+            let msg = match &rotation_setup.dealer_messages[i] {
+                Messages::Dkg(m) => m,
+                _ => panic!("Expected DKG message"),
+            };
+            store.store_dealer_message(&dealer_addr, msg).unwrap();
+        }
+
+        // Create DkgManager for the shifted member with the target committee.
+        let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
+        let mut manager = DkgManager::new(
+            shifted_addr,
+            &committee_set,
+            session_id,
+            rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
+            rotation_setup.setup.signing_keys[shifted_member_index].clone(),
+            Box::new(store),
+            TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
+        )
+        .unwrap();
+
+        // Verify the party_id shift
+        assert_eq!(manager.party_id, 5, "Target party_id should be 5");
+        assert_eq!(
+            manager
+                .previous_committee
+                .as_ref()
+                .unwrap()
+                .index_of(&shifted_addr),
+            Some(4),
+            "Previous party_id should be 4"
+        );
+
+        // This would panic with "index out of bounds: the len is 5 but the index is 5"
+        // if previous committee parameters were not used for decryption.
+        let reconstructed = manager
+            .reconstruct_from_dkg_certificates(&certificates)
+            .unwrap();
+
+        // Verify the reconstructed output matches the original DKG
+        assert_eq!(
+            reconstructed.public_key, expected_public_key,
+            "Reconstructed public key should match original DKG"
+        );
+        assert_eq!(
+            reconstructed.threshold, dkg_outputs[shifted_member_index].threshold,
+            "Reconstructed threshold should match"
+        );
+        assert_eq!(
+            reconstructed.key_shares.shares.len(),
+            dkg_outputs[shifted_member_index].key_shares.shares.len(),
+            "Should have same number of key shares"
+        );
+    }
+
+    /// Tests that `reconstruct_from_rotation_certificates` uses the previous committee's
+    /// parameters to decrypt rotation messages.
+    #[test]
+    fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
+        let mut rng = rand::thread_rng();
+
+        // Step 1: Complete DKG at epoch 100 with 5 members, weights [3, 2, 4, 1, 2]
+        let rotation_setup = RotationTestSetup::new();
+        let dkg_epoch = rotation_setup.setup.epoch(); // = 100
+        // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total=12, threshold=4)
+
+        // Get DKG outputs for all 5 members
+        let mut dkg_outputs = Vec::new();
+        for i in 0..5 {
+            let (_, output) = rotation_setup.create_receiver_with_completed_dkg(i);
+            dkg_outputs.push(output);
+        }
+        let expected_public_key = dkg_outputs[0].public_key;
+
+        // Step 2: Set up key rotation at epoch 101 with same 5 members.
+        // Create a committee set for the rotation epoch:
+        //   committees: {100: 5-member, 101: 5-member (same)}, epoch=100, pending=101
+        let rotation_epoch = dkg_epoch + 1;
+        let members: Vec<_> = rotation_setup.setup.committee().members().to_vec();
+        let committee_at_100 = Committee::new(members.clone(), dkg_epoch);
+        let committee_at_101 = Committee::new(members.clone(), rotation_epoch);
+
+        let mut rotation_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        let mut rotation_committees = BTreeMap::new();
+        rotation_committees.insert(dkg_epoch, committee_at_100);
+        rotation_committees.insert(rotation_epoch, committee_at_101);
+        rotation_committee_set
+            .set_epoch(dkg_epoch)
+            .set_pending_epoch_change(Some(rotation_epoch))
+            .set_committees(rotation_committees);
+
+        // Create rotation DkgManagers at epoch 101 with KeyRotation protocol type.
+        // Dealers: indices 0, 1, 4 (total weight = 3+2+2 = 7 >= threshold 4).
+        let dealer_indices = [0usize, 1, 4];
+        let mut rotation_certificates = Vec::new();
+        let mut rotation_messages_by_dealer: Vec<(Address, Messages)> = Vec::new();
+
+        for &dealer_idx in &dealer_indices {
+            let dealer_addr = rotation_setup.setup.address(dealer_idx);
+            let rotation_session_id =
+                SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
+            let mut dealer_manager = DkgManager::new(
+                dealer_addr,
+                &rotation_committee_set,
+                rotation_session_id.clone(),
+                rotation_setup.setup.encryption_keys[dealer_idx].clone(),
+                rotation_setup.setup.signing_keys[dealer_idx].clone(),
+                Box::new(InMemoryPublicMessagesStore::new()),
+                TEST_ALLOWED_DELTA,
+                TEST_CHAIN_ID,
+            )
+            .unwrap();
+            dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
+
+            // Create rotation messages (encrypted for epoch 101's nodes)
+            let msgs = dealer_manager.create_rotation_messages(&dkg_outputs[dealer_idx], &mut rng);
+            let rotation_messages = Messages::Rotation(msgs);
+            dealer_manager
+                .dealer_messages
+                .insert(dealer_addr, rotation_messages.clone());
+
+            // Self-sign
+            let own_sig = dealer_manager
+                .try_sign_rotation_messages(
+                    &dkg_outputs[dealer_idx],
+                    dealer_addr,
+                    &rotation_messages,
+                )
+                .unwrap();
+
+            // Get another validator's signature
+            let other_idx = if dealer_idx == 0 { 1 } else { 0 };
+            let other_addr = rotation_setup.setup.address(other_idx);
+            let other_rotation_session_id =
+                SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
+            let mut other_manager = DkgManager::new(
+                other_addr,
+                &rotation_committee_set,
+                other_rotation_session_id,
+                rotation_setup.setup.encryption_keys[other_idx].clone(),
+                rotation_setup.setup.signing_keys[other_idx].clone(),
+                Box::new(InMemoryPublicMessagesStore::new()),
+                TEST_ALLOWED_DELTA,
+                TEST_CHAIN_ID,
+            )
+            .unwrap();
+            other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
+            let other_sig = other_manager
+                .try_sign_rotation_messages(
+                    &dkg_outputs[other_idx],
+                    dealer_addr,
+                    &rotation_messages,
+                )
+                .unwrap();
+
+            // Create rotation certificate
+            let epoch_for_cert = dealer_manager.dkg_config.epoch;
+            let committee_for_cert = rotation_committee_set
+                .committees()
+                .get(&rotation_epoch)
+                .unwrap();
+            let cert = create_rotation_test_certificate(
+                committee_for_cert,
+                &rotation_messages,
+                dealer_addr,
+                vec![
+                    MemberSignature::new(epoch_for_cert, dealer_addr, own_sig),
+                    MemberSignature::new(epoch_for_cert, other_addr, other_sig),
+                ],
+            )
+            .unwrap();
+            rotation_certificates.push(CertificateV1::Rotation(cert));
+            rotation_messages_by_dealer.push((dealer_addr, rotation_messages));
+        }
+
+        // Step 3: Create a 6-member target committee for epoch 102 with a new member
+        // inserted at position 2, shifting members 2, 3, 4.
+        let new_member_addr = Address::new([99u8; 32]);
+        let new_member_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let new_member_signing_key = Bls12381PrivateKey::generate(&mut rng);
+
+        let mut target_members: Vec<_> = members.clone();
+        target_members.insert(
+            2,
+            CommitteeMember::new(
+                new_member_addr,
+                new_member_signing_key.public_key(),
+                EncryptionPublicKey::from_private_key(&new_member_encryption_key),
+                2,
+            ),
+        );
+
+        let target_epoch = dkg_epoch + 2;
+        let previous_committee = Committee::new(members, rotation_epoch);
+        let target_committee = Committee::new(target_members, target_epoch);
+
+        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        let mut committees = BTreeMap::new();
+        committees.insert(rotation_epoch, previous_committee);
+        committees.insert(target_epoch, target_committee);
+        committee_set
+            .set_epoch(rotation_epoch)
+            .set_pending_epoch_change(Some(target_epoch))
+            .set_committees(committees);
+
+        // Test with a shifted member (addr_4, previous party_id=4, target party_id=5).
+        let shifted_member_index = 4usize;
+        let shifted_addr = rotation_setup.setup.address(shifted_member_index);
+
+        // Create an InMemoryPublicMessagesStore with the rotation messages
+        let mut store = InMemoryPublicMessagesStore::new();
+        for (dealer_addr, messages) in &rotation_messages_by_dealer {
+            let rotation_msgs = match messages {
+                Messages::Rotation(m) => m,
+                _ => panic!("Expected rotation messages"),
+            };
+            store
+                .store_rotation_messages(dealer_addr, rotation_msgs)
+                .unwrap();
+        }
+
+        // Create DkgManager for the shifted member at epoch 102
+        let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::KeyRotation);
+        let mut manager = DkgManager::new(
+            shifted_addr,
+            &committee_set,
+            session_id,
+            rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
+            rotation_setup.setup.signing_keys[shifted_member_index].clone(),
+            Box::new(store),
+            TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
+        )
+        .unwrap();
+
+        // Verify the party_id shift
+        assert_eq!(manager.party_id, 5, "Target party_id should be 5");
+        assert_eq!(
+            manager
+                .previous_committee
+                .as_ref()
+                .unwrap()
+                .index_of(&shifted_addr),
+            Some(4),
+            "Previous party_id should be 4"
+        );
+
+        let previous_threshold = manager.previous_threshold.unwrap();
+
+        // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
+        let reconstructed = manager
+            .reconstruct_from_rotation_certificates(&rotation_certificates, previous_threshold)
+            .unwrap();
+
+        // Verify the reconstructed output has valid data
+        assert_eq!(
+            reconstructed.public_key, expected_public_key,
+            "Reconstructed public key should match original DKG"
+        );
+        assert!(
+            !reconstructed.key_shares.shares.is_empty(),
+            "Should have key shares from rotation reconstruction"
         );
     }
 }
