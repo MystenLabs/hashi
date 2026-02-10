@@ -8,6 +8,7 @@ use sui_futures::service::Service;
 
 pub mod communication;
 pub mod config;
+pub mod constants;
 pub mod db;
 pub mod deposits;
 pub mod grpc;
@@ -176,14 +177,18 @@ impl Hashi {
             self.db.clone(),
             epoch,
         ));
+        let address = self.config.validator_address()?;
+        let chain_id = self.config.sui_chain_id();
         Ok(mpc::DkgManager::new(
-            self.config.validator_address()?,
+            address,
             committee_set,
             session_id,
             encryption_key,
             signing_key,
             store,
             WEIGHT_REDUCTION_ALLOWED_DELTA,
+            chain_id,
+            self.config.test_weight_divisor,
         )?)
     }
 
