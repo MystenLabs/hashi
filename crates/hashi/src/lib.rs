@@ -8,6 +8,7 @@ use sui_futures::service::Service;
 
 pub mod communication;
 pub mod config;
+pub mod constants;
 pub mod db;
 pub mod deposits;
 pub mod grpc;
@@ -171,30 +172,17 @@ impl Hashi {
         ));
         let address = self.config.validator_address()?;
         let chain_id = self.config.sui_chain_id();
-        if let Some(divisor) = self.config.test_weight_divisor {
-            Ok(mpc::DkgManager::new_for_testing(
-                address,
-                committee_set,
-                session_id,
-                encryption_key,
-                signing_key,
-                store,
-                WEIGHT_REDUCTION_ALLOWED_DELTA,
-                chain_id,
-                divisor,
-            )?)
-        } else {
-            Ok(mpc::DkgManager::new(
-                address,
-                committee_set,
-                session_id,
-                encryption_key,
-                signing_key,
-                store,
-                WEIGHT_REDUCTION_ALLOWED_DELTA,
-                chain_id,
-            )?)
-        }
+        Ok(mpc::DkgManager::new(
+            address,
+            committee_set,
+            session_id,
+            encryption_key,
+            signing_key,
+            store,
+            WEIGHT_REDUCTION_ALLOWED_DELTA,
+            chain_id,
+            self.config.test_weight_divisor,
+        )?)
     }
 
     fn initialize_btc_monitor(&self) -> anyhow::Result<Service> {
