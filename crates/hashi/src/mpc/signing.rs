@@ -28,8 +28,8 @@ pub struct SigningManager {
     key_shares: avss::SharesForNode,
     verifying_key: G,
     presignatures: Presignatures,
-    /// Key: sui_request_id (hex-encoded Sui address identifying the request)
-    partial_signing_outputs: HashMap<String, PartialSigningOutput>,
+    /// Key: Sui address identifying the signing request
+    partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
 }
 
 impl SigningManager {
@@ -55,13 +55,13 @@ impl SigningManager {
     pub async fn sign(
         &mut self,
         p2p_channel: &impl P2PChannel,
-        sui_request_id: &str,
+        sui_request_id: Address,
         message: &[u8],
         beacon_value: &S,
         derivation_address: Option<&DerivationAddress>,
         timeout: Duration,
     ) -> SigningResult<SchnorrSignature> {
-        let (presig, partial_sigs) = generate_partial_signatures(
+        let (public_nonce, partial_sigs) = generate_partial_signatures(
             message,
             &mut self.presignatures,
             beacon_value,
@@ -71,9 +71,9 @@ impl SigningManager {
         )
         .map_err(|e| SigningError::CryptoError(e.to_string()))?;
         self.partial_signing_outputs.insert(
-            sui_request_id.to_string(),
+            sui_request_id,
             PartialSigningOutput {
-                presig,
+                public_nonce,
                 partial_sigs: partial_sigs.clone(),
             },
         );
@@ -85,9 +85,7 @@ impl SigningManager {
             .map(|m| m.validator_address())
             .filter(|addr| *addr != self.address)
             .collect();
-        let request = GetPartialSignaturesRequest {
-            sui_request_id: sui_request_id.to_string(),
-        };
+        let request = GetPartialSignaturesRequest { sui_request_id };
         let deadline = Instant::now() + timeout;
         loop {
             if all_partial_sigs.len() >= self.threshold as usize {
@@ -108,8 +106,11 @@ impl SigningManager {
             for (addr, result) in results {
                 match result {
                     Ok(response) => {
-                        if response.presig != presig {
-                            tracing::info!("Peer {} returned different presig, skipping", addr);
+                        if response.public_nonce != public_nonce {
+                            tracing::info!(
+                                "Peer {} returned different public_nonce, skipping",
+                                addr
+                            );
                             continue;
                         }
                         remaining_peers.remove(&addr);
@@ -123,7 +124,7 @@ impl SigningManager {
         }
         aggregate_signatures(
             message,
-            &presig,
+            &public_nonce,
             beacon_value,
             &all_partial_sigs,
             self.threshold,
@@ -147,7 +148,7 @@ impl SigningManager {
                 ))
             })?;
         Ok(GetPartialSignaturesResponse {
-            presig: output.presig,
+            public_nonce: output.public_nonce,
             partial_sigs: output.partial_sigs.clone(),
         })
     }
