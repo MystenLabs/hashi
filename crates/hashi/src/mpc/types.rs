@@ -401,7 +401,6 @@ pub struct GetPartialSignaturesRequest {
 
 #[derive(Clone, Debug)]
 pub struct GetPartialSignaturesResponse {
-    pub public_nonce: G,
     pub partial_sigs: Vec<Eval<S>>,
 }
 

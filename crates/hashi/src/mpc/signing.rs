@@ -106,13 +106,6 @@ impl SigningManager {
             for (addr, result) in results {
                 match result {
                     Ok(response) => {
-                        if response.public_nonce != public_nonce {
-                            tracing::info!(
-                                "Peer {} returned different public_nonce, skipping",
-                                addr
-                            );
-                            continue;
-                        }
                         remaining_peers.remove(&addr);
                         all_partial_sigs.extend(response.partial_sigs);
                     }
@@ -148,7 +141,6 @@ impl SigningManager {
                 ))
             })?;
         Ok(GetPartialSignaturesResponse {
-            public_nonce: output.public_nonce,
             partial_sigs: output.partial_sigs.clone(),
         })
     }

@@ -125,9 +125,6 @@ message GetPartialSignaturesRequest {
 }
 
 message GetPartialSignaturesResponse {
-  // The public nonce.
-  optional sui.rpc.v2.Bcs public_nonce = 1;
-
   // Partial signatures.
-  optional sui.rpc.v2.Bcs partial_sigs = 2;
+  optional sui.rpc.v2.Bcs partial_sigs = 1;
 }
