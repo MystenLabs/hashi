@@ -10,6 +10,7 @@ mod client;
 pub use client::Client;
 
 pub mod bridge_service;
+pub mod screener_client;
 
 /// Wrapper that triggers graceful HTTP server shutdown on drop.
 ///

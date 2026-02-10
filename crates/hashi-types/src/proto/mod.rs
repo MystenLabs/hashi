@@ -4,6 +4,15 @@ include!("generated/sui.hashi.v1alpha.rs");
 /// Byte encoded FILE_DESCRIPTOR_SET.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/sui.hashi.v1alpha.fds.bin");
 
+/// Screener service proto definitions
+pub mod screener {
+    include!("generated/sui.hashi.screener.v1alpha.rs");
+
+    /// Byte encoded FILE_DESCRIPTOR_SET for screener service.
+    pub const FILE_DESCRIPTOR_SET: &[u8] =
+        include_bytes!("generated/sui.hashi.screener.v1alpha.fds.bin");
+}
+
 #[cfg(test)]
 mod tests {
     use super::FILE_DESCRIPTOR_SET;

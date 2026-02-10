@@ -8,6 +8,7 @@ use sui_futures::service::Service;
 
 pub mod communication;
 pub mod config;
+pub mod constants;
 pub mod db;
 pub mod deposits;
 pub mod grpc;
@@ -38,6 +39,7 @@ pub struct Hashi {
     dkg_manager: OnceLock<Arc<RwLock<mpc::DkgManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
+    screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -57,6 +59,7 @@ impl Hashi {
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            screener_client: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -79,6 +82,7 @@ impl Hashi {
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            screener_client: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -136,6 +140,10 @@ impl Hashi {
         self.mpc_handle.get()
     }
 
+    pub fn screener_client(&self) -> Option<&grpc::screener_client::ScreenerClient> {
+        self.screener_client.get().and_then(|opt| opt.as_ref())
+    }
+
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
         let (onchain_state, service) = onchain::OnchainState::new(
             self.config.sui_rpc.as_deref().unwrap(),
@@ -171,30 +179,17 @@ impl Hashi {
         ));
         let address = self.config.validator_address()?;
         let chain_id = self.config.sui_chain_id();
-        if let Some(divisor) = self.config.test_weight_divisor {
-            Ok(mpc::DkgManager::new_for_testing(
-                address,
-                committee_set,
-                session_id,
-                encryption_key,
-                signing_key,
-                store,
-                WEIGHT_REDUCTION_ALLOWED_DELTA,
-                chain_id,
-                divisor,
-            )?)
-        } else {
-            Ok(mpc::DkgManager::new(
-                address,
-                committee_set,
-                session_id,
-                encryption_key,
-                signing_key,
-                store,
-                WEIGHT_REDUCTION_ALLOWED_DELTA,
-                chain_id,
-            )?)
-        }
+        Ok(mpc::DkgManager::new(
+            address,
+            committee_set,
+            session_id,
+            encryption_key,
+            signing_key,
+            store,
+            WEIGHT_REDUCTION_ALLOWED_DELTA,
+            chain_id,
+            self.config.test_weight_divisor,
+        )?)
     }
 
     fn initialize_btc_monitor(&self) -> anyhow::Result<Service> {
@@ -224,6 +219,35 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
+        let screener = if let Some(endpoint) = self.config.screener_endpoint() {
+            match grpc::screener_client::ScreenerClient::new(endpoint) {
+                Ok(client) => {
+                    tracing::info!("Screener client configured for {}", client.endpoint());
+                    Some(client)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to configure screener client for {}: {}",
+                        endpoint,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::warn!("No screener endpoint configured; AML screening will be skipped");
+            None
+        };
+
+        self.metrics
+            .screener_enabled
+            .set(if screener.is_some() { 1 } else { 0 });
+
+        self.screener_client
+            .set(screener)
+            .map_err(|_| anyhow!("Screener client already initialized"))?;
+
+        // Initialize
         let onchain_service = self.initialize_onchain_state().await?;
         if self.is_in_current_committee() {
             let epoch = self.onchain_state().epoch();

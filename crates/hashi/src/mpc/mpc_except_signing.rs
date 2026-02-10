@@ -1,7 +1,9 @@
-use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
+use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
+use crate::constants::SUI_MAINNET_CHAIN_ID;
+use crate::constants::SUI_TESTNET_CHAIN_ID;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
 pub use crate::mpc::types::ComplaintResponses;
@@ -45,7 +47,6 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
-use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Bls12381PrivateKey;
@@ -57,7 +58,6 @@ use rand::rngs::StdRng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
@@ -110,34 +110,15 @@ impl DkgManager {
         public_message_store: Box<dyn PublicMessagesStore>,
         allowed_delta: u16,
         chain_id: &str,
+        weight_divisor: Option<u16>,
     ) -> DkgResult<Self> {
-        Self::new_for_testing(
-            address,
-            committee_set,
-            session_id,
-            encryption_key,
-            signing_key,
-            public_message_store,
-            allowed_delta,
-            chain_id,
-            1, // default: no weight reduction
-        )
-    }
-
-    /// Constructor with test weight divisor for integration tests.
-    /// Use `new()` for production code.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_for_testing(
-        address: Address,
-        committee_set: &CommitteeSet,
-        session_id: SessionId,
-        encryption_key: PrivateKey<EncryptionGroupElement>,
-        signing_key: Bls12381PrivateKey,
-        public_message_store: Box<dyn PublicMessagesStore>,
-        allowed_delta: u16,
-        chain_id: &str,
-        test_weight_divisor: u16,
-    ) -> DkgResult<Self> {
+        if weight_divisor.is_some() {
+            assert!(
+                chain_id != SUI_MAINNET_CHAIN_ID && chain_id != SUI_TESTNET_CHAIN_ID,
+                "weight_divisor must not be set on mainnet or testnet"
+            );
+        }
+        let weight_divisor = weight_divisor.unwrap_or(1);
         let epoch = committee_set
             .pending_epoch_change()
             .unwrap_or_else(|| committee_set.epoch());
@@ -147,8 +128,7 @@ impl DkgManager {
             .ok_or_else(|| DkgError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
         // TODO: Pass t and f as arguments instead of computing them
-        let (nodes, threshold) =
-            build_reduced_nodes(&committee, allowed_delta, test_weight_divisor)?;
+        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
         let dkg_config = DkgConfig::new(epoch, nodes, threshold, max_faulty)?;
@@ -176,7 +156,7 @@ impl DkgManager {
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
                 let (nodes, threshold) =
-                    build_reduced_nodes(prev_committee, allowed_delta, test_weight_divisor)?;
+                    build_reduced_nodes(prev_committee, allowed_delta, weight_divisor)?;
                 (Some(nodes), Some(threshold))
             }
             None => (None, None),
@@ -476,7 +456,7 @@ impl DkgManager {
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
         let results = send_to_many(
-            &dealer_data.recipients,
+            dealer_data.recipients.iter().copied(),
             dealer_data.request,
             |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
         )
@@ -654,7 +634,7 @@ impl DkgManager {
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
         let results = send_to_many(
-            &dealer_data.recipients,
+            dealer_data.recipients.iter().copied(),
             dealer_data.request,
             |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
         )
@@ -2080,28 +2060,6 @@ fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
     Blake2b256::digest(&bytes).digest
 }
 
-async fn send_to_many<Req, Resp, F, Fut>(
-    recipients: &[Address],
-    request: Req,
-    send: F,
-) -> Vec<(Address, ChannelResult<Resp>)>
-where
-    Req: Clone + Send + Sync,
-    Resp: Send,
-    F: Fn(Address, Req) -> Fut + Clone + Send + Sync,
-    Fut: Future<Output = ChannelResult<Resp>> + Send,
-{
-    join_all(recipients.iter().map(|&addr| {
-        let req = request.clone();
-        let send = send.clone();
-        async move {
-            let result = with_timeout_and_retry(|| send(addr, req.clone())).await;
-            (addr, result)
-        }
-    }))
-    .await
-}
-
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -2115,6 +2073,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::communication::ChannelResult;
+    use crate::mpc::types::GetPartialSignaturesRequest;
+    use crate::mpc::types::GetPartialSignaturesResponse;
     use crate::mpc::types::ProtocolType;
     use crate::mpc::types::RotationMessages;
     use crate::onchain::types::MemberInfo;
@@ -2361,6 +2322,7 @@ mod tests {
                 store,
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
+                None,
             )
             .unwrap()
         }
@@ -2553,6 +2515,14 @@ mod tests {
                 })?;
             Ok(response)
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("MockP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct MockOrderedBroadcastChannel {
@@ -2681,6 +2651,14 @@ mod tests {
                 self.error_message.clone(),
             ))
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("FailingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct SucceedingP2PChannel {
@@ -2744,6 +2722,14 @@ mod tests {
             _request: &GetPublicDkgOutputRequest,
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("SucceedingP2PChannel does not implement get_public_dkg_output")
+        }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("SucceedingP2PChannel does not implement get_partial_signatures")
         }
     }
 
@@ -2833,6 +2819,14 @@ mod tests {
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement get_public_dkg_output")
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("PartiallyFailingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     /// P2P channel that returns pre-collected complaint responses.
@@ -2889,6 +2883,14 @@ mod tests {
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement get_public_dkg_output")
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("PreCollectedP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct FailingOrderedBroadcastChannel {
@@ -2938,6 +2940,7 @@ mod tests {
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
+            None,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -2998,6 +3001,7 @@ mod tests {
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
             "test",
+            None,
         );
 
         let err = match result {
@@ -6377,6 +6381,14 @@ mod tests {
         ) -> crate::communication::ChannelResult<GetPublicDkgOutputResponse> {
             self.inner.get_public_dkg_output(party, request).await
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> crate::communication::ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("TrackingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     #[tokio::test]
@@ -7186,6 +7198,7 @@ mod tests {
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
+            None,
         )
         .unwrap();
 
@@ -8110,6 +8123,7 @@ mod tests {
             Box::new(store),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
+            None,
         )
         .unwrap();
 
@@ -8202,6 +8216,7 @@ mod tests {
                 Box::new(InMemoryPublicMessagesStore::new()),
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
+                None,
             )
             .unwrap();
             dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
@@ -8236,6 +8251,7 @@ mod tests {
                 Box::new(InMemoryPublicMessagesStore::new()),
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
+                None,
             )
             .unwrap();
             other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
@@ -8324,6 +8340,7 @@ mod tests {
             Box::new(store),
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
+            None,
         )
         .unwrap();
 

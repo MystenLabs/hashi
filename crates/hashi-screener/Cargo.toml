@@ -1,0 +1,35 @@
+[package]
+name = "hashi-screener"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+prometheus.workspace = true
+axum.workspace = true
+sui-http.workspace = true
+lru = "0.12"
+reqwest.workspace = true
+
+sui-futures.workspace = true
+
+tonic.workspace = true
+tonic-health.workspace = true
+tonic-reflection.workspace = true
+hashi-types = { path = "../hashi-types" }
+
+serde.workspace = true
+bitcoin.workspace = true
+sui-sdk-types.workspace = true
+tokio-stream = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tokio-stream = "0.1"
+
+[features]
+test-utils = ["tokio-stream"]

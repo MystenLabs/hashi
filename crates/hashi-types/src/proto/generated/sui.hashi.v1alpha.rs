@@ -1492,24 +1492,6 @@ pub struct GetReconfigCompletionSignatureResponse {
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendPartialSignaturesRequest {
-    /// The epoch for this MPC instance.
-    #[prost(uint64, optional, tag = "1")]
-    pub epoch: ::core::option::Option<u64>,
-    /// Hex-encoded Sui address identifying the withdrawal/deposit request.
-    #[prost(string, optional, tag = "2")]
-    pub sui_request_id: ::core::option::Option<::prost::alloc::string::String>,
-    /// The public presignature nonce.
-    #[prost(message, optional, tag = "3")]
-    pub public_presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// Partial signatures.
-    #[prost(message, optional, tag = "4")]
-    pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-/// Empty response; success indicated by lack of error.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendPartialSignaturesResponse {}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPartialSignaturesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
@@ -1520,11 +1502,8 @@ pub struct GetPartialSignaturesRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPartialSignaturesResponse {
-    /// The public presignature nonce.
-    #[prost(message, optional, tag = "1")]
-    pub public_presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
     /// Partial signatures.
-    #[prost(message, optional, tag = "2")]
+    #[prost(message, optional, tag = "1")]
     pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 /// Generated client implementations.
@@ -1754,36 +1733,6 @@ pub mod mpc_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Push partial signatures to another party.
-        pub async fn send_partial_signatures(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SendPartialSignaturesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SendPartialSignaturesResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.MpcService/SendPartialSignatures",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.MpcService",
-                        "SendPartialSignatures",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
         /// Pull partial signatures from another party.
         pub async fn get_partial_signatures(
             &mut self,
@@ -1867,14 +1816,6 @@ pub mod mpc_service_server {
             request: tonic::Request<super::GetReconfigCompletionSignatureRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetReconfigCompletionSignatureResponse>,
-            tonic::Status,
-        >;
-        /// Push partial signatures to another party.
-        async fn send_partial_signatures(
-            &self,
-            request: tonic::Request<super::SendPartialSignaturesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SendPartialSignaturesResponse>,
             tonic::Status,
         >;
         /// Pull partial signatures from another party.
@@ -2180,52 +2121,6 @@ pub mod mpc_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetReconfigCompletionSignatureSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sui.hashi.v1alpha.MpcService/SendPartialSignatures" => {
-                    #[allow(non_camel_case_types)]
-                    struct SendPartialSignaturesSvc<T: MpcService>(pub Arc<T>);
-                    impl<
-                        T: MpcService,
-                    > tonic::server::UnaryService<super::SendPartialSignaturesRequest>
-                    for SendPartialSignaturesSvc<T> {
-                        type Response = super::SendPartialSignaturesResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SendPartialSignaturesRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as MpcService>::send_partial_signatures(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SendPartialSignaturesSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -2697,6 +2697,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashi-screener"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bitcoin",
+ "hashi-types",
+ "lru",
+ "prometheus",
+ "reqwest",
+ "serde",
+ "sui-futures",
+ "sui-http",
+ "sui-sdk-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tonic-reflection",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hashi-types"
 version = "0.0.0"
 dependencies = [
@@ -5356,6 +5381,7 @@ dependencies = [
  "futures",
  "hashi",
  "hashi-btc",
+ "hashi-screener",
  "hashi-types",
  "prometheus",
  "reqwest",
