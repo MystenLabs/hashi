@@ -186,6 +186,39 @@ impl Default for TestNetworksBuilder {
 mod tests {
     use super::*;
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
+
+    fn assert_nodes_agree_on_mpc_key(nodes: &[HashiNodeHandle]) {
+        let pk = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(pk, node_pk, "Node {i} public key differs from node 0");
+        }
+    }
+
+    /// Wait for all nodes to reach at least `target_epoch`.
+    /// Returns the actual epoch of `nodes[0]` after the wait (may exceed `target_epoch`).
+    async fn wait_for_rotation(nodes: &[HashiNodeHandle], target_epoch: u64) -> u64 {
+        let futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_epoch(target_epoch, ROTATION_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+        nodes[0].current_epoch().unwrap()
+    }
+
+    async fn force_rotate_and_assert_key_agreement(
+        test_networks: &mut TestNetworks,
+        target_epoch: u64,
+    ) -> u64 {
+        test_networks.sui_network.force_close_epoch().await.unwrap();
+        let epoch = wait_for_rotation(test_networks.hashi_network().nodes(), target_epoch).await;
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        epoch
+    }
 
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
@@ -234,7 +267,7 @@ mod tests {
 
         // Wait for DKG to complete before modifying shared state to avoid lock conflicts
         test_networks.hashi_network().nodes()[0]
-            .wait_for_dkg_completion(DKG_TIMEOUT)
+            .wait_for_mpc_key(DKG_TIMEOUT)
             .await?;
 
         // Validate subscribing works by just updating a validator's onchain info
@@ -267,14 +300,16 @@ mod tests {
             .build()
             .await?;
         let nodes = test_networks.hashi_network().nodes();
-        let dkg_futures: Vec<_> = nodes
+        let mpc_key_futures: Vec<_> = nodes
             .iter()
-            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
             .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
+
+        assert_nodes_agree_on_mpc_key(nodes);
         Ok(())
     }
 
@@ -289,26 +324,47 @@ mod tests {
 
         // Wait for DKG to complete on all nodes
         let nodes = test_networks.hashi_network().nodes();
-        let dkg_futures: Vec<_> = nodes
+        let mpc_key_futures: Vec<_> = nodes
             .iter()
-            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
             .collect();
 
-        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
+
+        // Save the public key before restart
+        let pk_before = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .mpc_handle()
+            .unwrap()
+            .public_key()
+            .expect("public key should be set after DKG");
 
         // Restart the first node
         test_networks.hashi_network_mut().nodes_mut()[0]
             .restart()
             .await?;
 
-        // Wait for the restarted node to see DKG completion via on-chain certificates
+        // Wait for the restarted node to recover DKG state
         test_networks.hashi_network().nodes()[0]
-            .wait_for_dkg_completion(DKG_TIMEOUT)
+            .wait_for_mpc_key(DKG_TIMEOUT)
             .await
             .expect("DKG recovery should complete within timeout");
+
+        // Verify the recovered key matches the original
+        let pk_after = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .mpc_handle()
+            .unwrap()
+            .public_key()
+            .expect("public key should be set after recovery");
+
+        assert_eq!(
+            pk_before, pk_after,
+            "Recovered DKG key should match original"
+        );
 
         Ok(())
     }
@@ -325,11 +381,11 @@ mod tests {
 
         // Wait for initial DKG completion on all nodes
         let nodes = test_networks.hashi_network().nodes();
-        let dkg_futures: Vec<_> = nodes
+        let mpc_key_futures: Vec<_> = nodes
             .iter()
-            .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
             .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} initial DKG failed: {e}"));
         }
@@ -354,13 +410,13 @@ mod tests {
             // Restart all nodes
             test_networks.hashi_network_mut().restart().await?;
 
-            // Wait for DKG completion on all nodes after restart
+            // Wait for DKG recovery on all nodes after restart
             let nodes = test_networks.hashi_network().nodes();
-            let dkg_futures: Vec<_> = nodes
+            let mpc_key_futures: Vec<_> = nodes
                 .iter()
-                .map(|node| node.wait_for_dkg_completion(DKG_TIMEOUT))
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
                 .collect();
-            let results: Vec<Result<()>> = futures::future::join_all(dkg_futures).await;
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| {
                     panic!(
@@ -387,6 +443,111 @@ mod tests {
                 RESTART_ITERATIONS
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_key_rotation() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for initial DKG completion on all nodes (epoch 1)
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            assert_nodes_agree_on_mpc_key(nodes);
+        }
+
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        // First key rotation
+        let epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+
+        // Second key rotation
+        force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_key_rotation_restart_recovery_across_two_rounds() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for initial DKG completion on all nodes
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+        }
+
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        // Round 1: restart after DKG, then rotate
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_mpc_key(DKG_TIMEOUT)
+            .await
+            .expect("Node 0 should recover MPC key after restart");
+        let epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+
+        // Round 2: restart after rotation, then rotate again
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_mpc_key(DKG_TIMEOUT)
+            .await
+            .expect("Node 0 should recover MPC key after restart");
+        force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
 
         Ok(())
     }

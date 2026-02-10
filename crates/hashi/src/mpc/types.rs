@@ -390,18 +390,17 @@ pub enum ComplaintsToProcessKey {
 
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
-    pub presig: G,
+    pub public_nonce: G,
     pub partial_sigs: Vec<Eval<S>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct GetPartialSignaturesRequest {
-    pub sui_request_id: String,
+    pub sui_request_id: Address,
 }
 
 #[derive(Clone, Debug)]
 pub struct GetPartialSignaturesResponse {
-    pub presig: G,
     pub partial_sigs: Vec<Eval<S>>,
 }
 

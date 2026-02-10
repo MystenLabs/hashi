@@ -1502,11 +1502,8 @@ pub struct GetPartialSignaturesRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPartialSignaturesResponse {
-    /// The presignature nonce.
-    #[prost(message, optional, tag = "1")]
-    pub presig: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
     /// Partial signatures.
-    #[prost(message, optional, tag = "2")]
+    #[prost(message, optional, tag = "1")]
     pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 /// Generated client implementations.

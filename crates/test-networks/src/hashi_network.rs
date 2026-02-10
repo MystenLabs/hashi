@@ -48,8 +48,7 @@ use crate::SuiNetworkHandle;
 const HTTPS_SCHEME: &str = "https://";
 const HTTP_SCHEME: &str = "http://";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
+const TEST_WEIGHT_DIVISOR: u16 = 100;
 
 pub struct HashiNodeHandle {
     config: HashiConfig,
@@ -164,15 +163,24 @@ impl HashiNodeHandle {
         }
     }
 
-    pub async fn wait_for_dkg_completion(&self, timeout: std::time::Duration) -> Result<()> {
-        tokio::time::timeout(timeout, self.wait_for_dkg_completion_inner())
-            .await
-            .map_err(|_| anyhow::anyhow!("DKG completion timed out after {:?}", timeout))
+    pub fn current_epoch(&self) -> Option<u64> {
+        self.hashi()
+            .onchain_state_opt()
+            .map(|s| s.state().hashi().committees.epoch())
     }
 
-    async fn wait_for_dkg_completion_inner(&self) {
+    pub async fn wait_for_epoch(
+        &self,
+        target_epoch: u64,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_epoch_inner(target_epoch))
+            .await
+            .map_err(|_| anyhow::anyhow!("Timed out waiting for Hashi epoch {target_epoch}"))
+    }
+
+    async fn wait_for_epoch_inner(&self, target_epoch: u64) {
         loop {
-            // Wait for hashi to finish initializing
             let onchain_state = match self.hashi().onchain_state_opt() {
                 Some(state) => state,
                 None => {
@@ -180,33 +188,8 @@ impl HashiNodeHandle {
                     continue;
                 }
             };
-            let epoch_threshold_and_committee = {
-                let state = onchain_state.state();
-                let epoch = state.hashi().committees.epoch();
-                state.hashi().committees.current_committee().map(|c| {
-                    let threshold = c.total_weight() * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR;
-                    (epoch, threshold, c.clone())
-                })
-            };
-            let (epoch, threshold, committee) = match epoch_threshold_and_committee {
-                Some(et) => et,
-                None => {
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let raw_certs = match onchain_state.fetch_certs(epoch).await {
-                Ok(Some((_, certs))) => certs,
-                Ok(None) | Err(_) => {
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let certified_weight: u64 = raw_certs
-                .iter()
-                .filter_map(|(dealer, _)| committee.weight_of(dealer).ok())
-                .sum();
-            if certified_weight >= threshold {
+            let epoch = onchain_state.state().hashi().committees.epoch();
+            if epoch >= target_epoch {
                 return;
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -279,6 +262,7 @@ impl HashiNetworkBuilder {
         let mut configs = Vec::with_capacity(self.num_nodes);
         for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
             let mut config = HashiConfig::new_for_testing();
+            config.test_weight_divisor = Some(TEST_WEIGHT_DIVISOR);
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);
@@ -359,7 +343,13 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let sender = private_key.public_key().derive_address();
     let validator_address = config.validator_address()?;
     let price = client.get_reference_gas_price().await?;
-
+    let service_info = client
+        .clone()
+        .ledger_client()
+        .get_service_info(GetServiceInfoRequest::default())
+        .await?
+        .into_inner();
+    let current_epoch = service_info.epoch.unwrap_or(0);
     let gas_objects = client
         .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
         .await?;
@@ -382,7 +372,7 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
     let public_key_input = Input::Pure(protocol_public_key.as_ref().to_vec().to_bcs()?);
     let proof_of_possession = Input::Pure(
         protocol_private_key
-            .proof_of_possession(0, validator_address)
+            .proof_of_possession(current_epoch, validator_address)
             .signature()
             .as_ref()
             .to_bcs()?,
@@ -476,9 +466,10 @@ async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> 
         .await?
         .into_inner();
 
-    assert!(
+    anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "register failed"
+        "register failed: {:?}",
+        response.transaction().effects().status().error_opt()
     );
 
     Ok(())

@@ -125,9 +125,6 @@ message GetPartialSignaturesRequest {
 }
 
 message GetPartialSignaturesResponse {
-  // The presignature nonce.
-  optional sui.rpc.v2.Bcs presig = 1;
-
   // Partial signatures.
-  optional sui.rpc.v2.Bcs partial_sigs = 2;
+  optional sui.rpc.v2.Bcs partial_sigs = 1;
 }

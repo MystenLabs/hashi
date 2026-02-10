@@ -32,7 +32,7 @@ use tokio::time::Duration;
 use tokio::time::sleep;
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
-const DEFAULT_EPOCH_DURATION_MS: u64 = 60_000;
+const DEFAULT_EPOCH_DURATION_MS: u64 = 86_400_000; // 24 hours; tests that need epoch changes should set a shorter duration
 const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 60;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 
@@ -94,6 +94,9 @@ pub struct SuiNetworkHandle {
 
     pub validator_keys: BTreeMap<Address, Ed25519PrivateKey>,
     pub user_keys: Vec<Ed25519PrivateKey>,
+
+    /// Admin interface ports for each validator (for triggering epoch changes)
+    pub admin_ports: Vec<u16>,
 }
 
 impl Drop for SuiNetworkHandle {
@@ -147,7 +150,11 @@ impl SuiNetworkBuilder {
             .clone()
             .ok_or_else(|| anyhow!("no directory configured"))?;
         self.generate_genesis(&dir)?;
-        let (validator_keys, user_keys) = load_keys(&dir)?;
+        let NetworkKeys {
+            validator_keys,
+            user_keys,
+            admin_ports,
+        } = load_keys(&dir)?;
 
         let rpc_port = get_available_port();
         let process = self.start_network(&dir, rpc_port)?;
@@ -165,6 +172,7 @@ impl SuiNetworkBuilder {
             epoch_duration_ms: self.epoch_duration_ms,
             validator_keys,
             user_keys,
+            admin_ports,
         };
 
         // Make sure SuiSystemState has been upgraded to v2
@@ -246,7 +254,13 @@ fn ed25519_private_key_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
     Ok(Ed25519PrivateKey::new((&bytes[..]).try_into()?))
 }
 
-fn load_keys(dir: &Path) -> Result<(BTreeMap<Address, Ed25519PrivateKey>, Vec<Ed25519PrivateKey>)> {
+struct NetworkKeys {
+    validator_keys: BTreeMap<Address, Ed25519PrivateKey>,
+    user_keys: Vec<Ed25519PrivateKey>,
+    admin_ports: Vec<u16>,
+}
+
+fn load_keys(dir: &Path) -> Result<NetworkKeys> {
     #[derive(serde::Deserialize)]
     struct Config {
         validator_configs: Vec<NodeConfig>,
@@ -257,6 +271,7 @@ fn load_keys(dir: &Path) -> Result<(BTreeMap<Address, Ed25519PrivateKey>, Vec<Ed
     #[serde(rename_all = "kebab-case")]
     struct NodeConfig {
         account_key_pair: RawKey,
+        admin_interface_port: u16,
     }
 
     #[derive(serde::Deserialize)]
@@ -268,11 +283,13 @@ fn load_keys(dir: &Path) -> Result<(BTreeMap<Address, Ed25519PrivateKey>, Vec<Ed
     let network_config: Config = serde_yaml::from_slice(&raw)?;
 
     let mut validator_keys = BTreeMap::new();
+    let mut admin_ports = vec![];
 
     for validator in network_config.validator_configs {
         let keypair = keypair_from_base64(&validator.account_key_pair.value)?;
         let address = keypair.public_key().derive_address();
         validator_keys.insert(address, keypair);
+        admin_ports.push(validator.admin_interface_port);
     }
 
     let mut user_keys = vec![];
@@ -281,7 +298,11 @@ fn load_keys(dir: &Path) -> Result<(BTreeMap<Address, Ed25519PrivateKey>, Vec<Ed
         user_keys.push(ed25519_private_key_from_base64(&raw_key)?);
     }
 
-    Ok((validator_keys, user_keys))
+    Ok(NetworkKeys {
+        validator_keys,
+        user_keys,
+        admin_ports,
+    })
 }
 
 impl SuiNetworkHandle {
@@ -371,6 +392,38 @@ impl SuiNetworkHandle {
             "fund failed"
         );
         Ok(())
+    }
+
+    pub async fn current_sui_epoch(&mut self) -> Result<u64> {
+        let resp = self
+            .client
+            .ledger_client()
+            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+            .await?;
+        Ok(resp.into_inner().epoch())
+    }
+
+    pub async fn force_close_epoch(&mut self) -> Result<()> {
+        let current_epoch = self.current_sui_epoch().await?;
+        let target_epoch = current_epoch + 1;
+        let client = reqwest::Client::new();
+        for port in &self.admin_ports {
+            let url = format!(
+                "http://127.0.0.1:{}/force-close-epoch?epoch={}",
+                port, current_epoch
+            );
+            client.post(&url).send().await?;
+        }
+        for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
+            if self.current_sui_epoch().await? >= target_epoch {
+                return Ok(());
+            }
+            sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
+        }
+        bail!(
+            "Epoch did not advance within {}s after force-close-epoch",
+            NETWORK_STARTUP_TIMEOUT_SECS
+        )
     }
 
     async fn upgrade_sui_system_state(&mut self) -> Result<()> {
