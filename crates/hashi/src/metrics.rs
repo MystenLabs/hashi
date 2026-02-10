@@ -5,11 +5,13 @@ use std::time::Instant;
 
 use prometheus::HistogramVec;
 use prometheus::IntCounterVec;
+use prometheus::IntGauge;
 use prometheus::IntGaugeVec;
 use prometheus::Registry;
 use prometheus::register_histogram_vec_with_registry;
 use prometheus::register_int_counter_vec_with_registry;
 use prometheus::register_int_gauge_vec_with_registry;
+use prometheus::register_int_gauge_with_registry;
 use sui_http::middleware::callback::MakeCallbackHandler;
 use sui_http::middleware::callback::ResponseHandler;
 
@@ -18,6 +20,7 @@ pub struct Metrics {
     inflight_requests: IntGaugeVec,
     requests: IntCounterVec,
     request_latency: HistogramVec,
+    pub screener_enabled: IntGauge,
 }
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
@@ -50,6 +53,12 @@ impl Metrics {
                 "Latency of RPC requests per route",
                 &["path"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            screener_enabled: register_int_gauge_with_registry!(
+                "hashi_screener_enabled",
+                "Whether AML screening is enabled (1) or disabled (0)",
                 registry,
             )
             .unwrap(),

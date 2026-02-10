@@ -200,6 +200,8 @@ impl HashiNodeHandle {
 pub struct HashiNetwork {
     ids: HashiIds,
     nodes: Vec<HashiNodeHandle>,
+    /// Keeps the mock screener gRPC server alive for the lifetime of the test network.
+    _screener_service: Service,
 }
 
 impl HashiNetwork {
@@ -242,6 +244,11 @@ impl HashiNetworkBuilder {
         bitcoin: &BitcoinNodeHandle,
         hashi_ids: HashiIds,
     ) -> Result<HashiNetwork> {
+        // Start a mock screener server for integration tests
+        let (screener_addr, screener_service) =
+            hashi_screener::test_utils::start_mock_screener_server().await;
+        let screener_endpoint = format!("http://{}", screener_addr);
+
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();
         let service_info = sui
@@ -271,6 +278,7 @@ impl HashiNetworkBuilder {
                 "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206".to_string(),
             );
             config.sui_chain_id = service_info.chain_id.clone();
+            config.screener_endpoint = Some(screener_endpoint.clone());
             config.db = Some(dir.join(validator_address.to_string()));
             configs.push(config);
         }
@@ -316,6 +324,7 @@ impl HashiNetworkBuilder {
         Ok(HashiNetwork {
             ids: hashi_ids,
             nodes,
+            _screener_service: screener_service,
         })
     }
 }

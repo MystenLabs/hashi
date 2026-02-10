@@ -26,6 +26,40 @@ impl Hashi {
         self.validate_deposit_request_on_sui(deposit_request)?;
         self.validate_deposit_request_on_bitcoin(deposit_request)
             .await?;
+        self.screen_deposit(deposit_request).await?;
+        Ok(())
+    }
+
+    /// Run AML/Sanctions checks for the deposit request.
+    /// If no screener client is configured, checks are skipped.
+    async fn screen_deposit(&self, deposit_request: &DepositRequest) -> anyhow::Result<()> {
+        let Some(screener) = self.screener_client() else {
+            tracing::debug!("AML checks skipped: no screener configured");
+            return Ok(());
+        };
+
+        // bitcoin
+        let txid_bytes: [u8; 32] = deposit_request.utxo.id.txid.into();
+        let btc_txid = bitcoin::Txid::from_byte_array(txid_bytes);
+        let source_tx_hash = btc_txid.to_string();
+
+        // sui
+        let destination_address = deposit_request.id.to_string();
+
+        let approved = screener
+            .approve_deposit(
+                &source_tx_hash,
+                &destination_address,
+                self.config.bitcoin_chain_id(),
+                self.config.sui_chain_id(),
+            )
+            .await
+            .map_err(|e| anyhow!("Screener service error: {e}"))?;
+
+        if !approved {
+            bail!("AML checks failed for tx {source_tx_hash}");
+        }
+
         Ok(())
     }
 

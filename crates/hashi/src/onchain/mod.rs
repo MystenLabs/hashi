@@ -251,6 +251,26 @@ impl OnchainState {
             .collect()
     }
 
+    pub fn withdrawal_requests(&self) -> Vec<types::WithdrawalRequest> {
+        self.state()
+            .hashi()
+            .withdrawal_queue
+            .requests()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn pending_withdrawals(&self) -> Vec<types::PendingWithdrawal> {
+        self.state()
+            .hashi()
+            .withdrawal_queue
+            .pending_withdrawals()
+            .values()
+            .cloned()
+            .collect()
+    }
+
     pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
         self.state()
             .hashi()
@@ -451,17 +471,26 @@ async fn scrape_hashi(
         config,
         treasury,
         deposit_queue,
-        withdrawal_queue: _,
+        withdrawal_queue,
         utxo_pool,
         proposals,
         tob,
     } = response.get_ref().object().contents().deserialize()?;
 
-    let (member_info, committees_per_epoch, treasury, deposit_queue, utxo_pool, proposals) = tokio::try_join!(
+    let (
+        member_info,
+        committees_per_epoch,
+        treasury,
+        deposit_queue,
+        withdrawal_queue,
+        utxo_pool,
+        proposals,
+    ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
+        scrape_withdrawal_queue(client.clone(), withdrawal_queue),
         scrape_utxo_pool(client.clone(), utxo_pool),
         scrape_proposals(client.clone(), proposals),
     )?;
@@ -483,6 +512,7 @@ async fn scrape_hashi(
             config: convert_move_config(config),
             treasury,
             deposit_queue,
+            withdrawal_queue,
             utxo_pool,
             proposals,
             tob_id: tob.id,
@@ -820,6 +850,122 @@ async fn scrape_deposit_requests(
     };
 
     Ok(deposit_requests)
+}
+
+async fn scrape_withdrawal_queue(
+    client: Client,
+    withdrawal_queue: move_types::WithdrawalRequestQueue,
+) -> Result<types::WithdrawalRequestQueue> {
+    let (requests, pending_withdrawals) = tokio::try_join!(
+        scrape_withdrawal_requests(client.clone(), withdrawal_queue.requests.id),
+        scrape_pending_withdrawals(client.clone(), withdrawal_queue.pending_withdrawals.id),
+    )?;
+
+    Ok(types::WithdrawalRequestQueue {
+        requests_id: withdrawal_queue.requests.id,
+        requests,
+        pending_withdrawals_id: withdrawal_queue.pending_withdrawals.id,
+        pending_withdrawals,
+    })
+}
+
+async fn scrape_withdrawal_requests(
+    client: Client,
+    requests_id: Address,
+) -> Result<BTreeMap<Address, types::WithdrawalRequest>> {
+    let requests: BTreeMap<Address, types::WithdrawalRequest> = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(requests_id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ])),
+        )
+        .and_then(|field| async move {
+            let withdrawal_request: move_types::WithdrawalRequest = field
+                .value()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok(withdrawal_request)
+        })
+        .map_ok(|move_types::WithdrawalRequest { info, .. }| {
+            (
+                info.id,
+                types::WithdrawalRequest {
+                    id: info.id,
+                    btc_amount: info.btc_amount,
+                    bitcoin_address: info.bitcoin_address,
+                    timestamp_ms: info.timestamp_ms,
+                    requester_address: info.requester_address,
+                },
+            )
+        })
+        .try_collect()
+        .await?;
+
+    Ok(requests)
+}
+
+async fn scrape_pending_withdrawals(
+    client: Client,
+    pending_withdrawals_id: Address,
+) -> Result<BTreeMap<Address, types::PendingWithdrawal>> {
+    let pending_withdrawals: BTreeMap<Address, types::PendingWithdrawal> = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(pending_withdrawals_id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ])),
+        )
+        .and_then(|field| async move {
+            let pending: move_types::PendingWithdrawal = field
+                .value()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok(pending)
+        })
+        .map_ok(
+            |move_types::PendingWithdrawal {
+                 txid,
+                 id,
+                 requests,
+                 inputs,
+                 outputs,
+                 timestamp_ms,
+                 randomness,
+             }| {
+                let request_ids = requests.into_iter().map(|r| r.id).collect();
+                let inputs = inputs.into_iter().map(convert_move_utxo).collect();
+                let outputs = outputs
+                    .into_iter()
+                    .map(|o| types::OutputUtxo {
+                        amount: o.amount,
+                        bitcoin_address: o.bitcoin_address,
+                    })
+                    .collect();
+                (
+                    id,
+                    types::PendingWithdrawal {
+                        id,
+                        txid,
+                        request_ids,
+                        inputs,
+                        outputs,
+                        timestamp_ms,
+                        randomness,
+                    },
+                )
+            },
+        )
+        .try_collect()
+        .await?;
+
+    Ok(pending_withdrawals)
 }
 
 fn convert_move_utxo(

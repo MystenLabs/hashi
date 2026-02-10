@@ -11,6 +11,13 @@ public struct Utxo has store {
     derivation_path: Option<address>,
 }
 
+/// A copyable, droppable view of a Utxo for use in events.
+public struct UtxoInfo has copy, drop, store {
+    id: UtxoId,
+    amount: u64,
+    derivation_path: Option<address>,
+}
+
 /// txid:vout
 public struct UtxoId has copy, drop, store {
     // a 32 byte sha256 of the transaction
@@ -45,6 +52,10 @@ public fun amount(self: &Utxo): u64 {
 
 public fun derivation_path(self: &Utxo): Option<address> {
     self.derivation_path
+}
+
+public fun to_info(self: &Utxo): UtxoInfo {
+    UtxoInfo { id: self.id, amount: self.amount, derivation_path: self.derivation_path }
 }
 
 public(package) fun delete(utxo: Utxo) {
