@@ -38,6 +38,7 @@ pub struct Hashi {
     dkg_manager: OnceLock<Arc<RwLock<mpc::DkgManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
+    screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -57,6 +58,7 @@ impl Hashi {
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            screener_client: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -79,6 +81,7 @@ impl Hashi {
             dkg_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            screener_client: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -134,6 +137,10 @@ impl Hashi {
 
     pub fn mpc_handle(&self) -> Option<&mpc::MpcHandle> {
         self.mpc_handle.get()
+    }
+
+    pub fn screener_client(&self) -> Option<&grpc::screener_client::ScreenerClient> {
+        self.screener_client.get().and_then(|opt| opt.as_ref())
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -207,6 +214,34 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
+        let screener = if let Some(endpoint) = self.config.screener_endpoint() {
+            match grpc::screener_client::ScreenerClient::new(endpoint) {
+                Ok(client) => {
+                    tracing::info!("Screener client configured for {}", client.endpoint());
+                    Some(client)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to configure screener client for {}: {}",
+                        endpoint,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::warn!("No screener endpoint configured; AML screening will be skipped");
+            None
+        };
+
+        self.metrics
+            .screener_enabled
+            .set(if screener.is_some() { 1 } else { 0 });
+
+        self.screener_client
+            .set(screener)
+            .map_err(|_| anyhow!("Screener client already initialized"))?;
+
         // Initialize
         let onchain_service = self.initialize_onchain_state().await?;
 

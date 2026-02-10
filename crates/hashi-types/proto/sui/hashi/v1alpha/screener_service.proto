@@ -1,0 +1,33 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package sui.hashi.screener.v1alpha;
+
+enum TransactionType {
+  UNSPECIFIED = 0;
+  DEPOSIT = 1;
+  WITHDRAWAL = 2;
+}
+
+message ApproveRequest {
+  // Transaction hash on the source chain.
+  string source_transaction_hash = 1;
+  // Address on the destination chain receiving the funds.
+  string destination_address = 2;
+  // CAIP-2 chain ID of the source chain (e.g. "bip122:000000000019d6689c085ae165831e93").
+  string source_chain_id = 3;
+  // CAIP-2 chain ID of the destination chain (e.g. "sui:35834a8a").
+  string destination_chain_id = 4;
+  // Whether this is a deposit or withdrawal.
+  TransactionType transaction_type = 5;
+}
+
+message ApproveResponse {
+  bool approved = 1;
+}
+
+service ScreenerService {
+  rpc Approve(ApproveRequest) returns (ApproveResponse);
+}

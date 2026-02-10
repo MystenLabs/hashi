@@ -35,6 +35,8 @@ tokio = { version = "1.46.1", features = ["full"] }
 prometheus = "0.13.0"
 tracing = "0.1.41"
 
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
+
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0.98"
 toml = "0.9.2"
