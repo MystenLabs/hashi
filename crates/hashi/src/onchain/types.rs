@@ -22,8 +22,7 @@ pub struct Hashi {
     pub config: Config,
     pub treasury: Treasury,
     pub deposit_queue: DepositRequestQueue,
-    // TODO create a withdrawal queue and populate
-    // pub withdrawal_queue: WithdrawalRequestQueue,
+    pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
     pub proposals: Proposals,
     pub tob_id: Address,
@@ -357,6 +356,59 @@ impl DepositRequestQueue {
     pub fn requests(&self) -> &BTreeMap<Address, DepositRequest> {
         &self.requests
     }
+}
+
+#[derive(Debug)]
+pub struct WithdrawalRequestQueue {
+    pub(super) requests_id: Address,
+    pub(super) requests: BTreeMap<Address, WithdrawalRequest>,
+    pub(super) pending_withdrawals_id: Address,
+    pub(super) pending_withdrawals: BTreeMap<Address, PendingWithdrawal>,
+}
+
+impl WithdrawalRequestQueue {
+    pub fn requests_id(&self) -> &Address {
+        &self.requests_id
+    }
+
+    pub fn requests(&self) -> &BTreeMap<Address, WithdrawalRequest> {
+        &self.requests
+    }
+
+    pub fn pending_withdrawals_id(&self) -> &Address {
+        &self.pending_withdrawals_id
+    }
+
+    pub fn pending_withdrawals(&self) -> &BTreeMap<Address, PendingWithdrawal> {
+        &self.pending_withdrawals
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+pub struct WithdrawalRequest {
+    pub id: Address,
+    pub btc_amount: u64,
+    pub bitcoin_address: Vec<u8>,
+    pub timestamp_ms: u64,
+    pub requester_address: Address,
+}
+
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+pub struct PendingWithdrawal {
+    pub id: Address,
+    pub txid: Address,
+    pub request_ids: Vec<Address>,
+    pub inputs: Vec<Utxo>,
+    pub outputs: Vec<OutputUtxo>,
+    pub timestamp_ms: u64,
+    pub randomness: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+pub struct OutputUtxo {
+    /// In satoshis
+    pub amount: u64,
+    pub bitcoin_address: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]

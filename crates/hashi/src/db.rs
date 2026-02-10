@@ -41,23 +41,22 @@ const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 
 impl Database {
-    pub fn open(path: &Path) -> Self {
-        let db = fjall::Database::builder(path).open().unwrap();
-        let encryption_keys = db
-            .keyspace(ENCRYPTION_KEYS_CF_NAME, KeyspaceCreateOptions::default)
-            .unwrap();
-        let dealer_messages = db
-            .keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)
-            .unwrap();
-        let rotation_messages = db
-            .keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)
-            .unwrap();
-        Self {
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        let db = fjall::Database::builder(path)
+            .open()
+            .map_err(|e| anyhow::anyhow!("failed to open database at {}: {e}", path.display()))?;
+        let encryption_keys =
+            db.keyspace(ENCRYPTION_KEYS_CF_NAME, KeyspaceCreateOptions::default)?;
+        let dealer_messages =
+            db.keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
+        let rotation_messages =
+            db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
+        Ok(Self {
             db,
             encryption_keys,
             dealer_messages,
             rotation_messages,
-        }
+        })
     }
 
     /// Store encryption key for the given epoch.
@@ -306,7 +305,7 @@ mod tests {
     #[test]
     fn test_encryption_key() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
 
@@ -319,7 +318,7 @@ mod tests {
         drop(db);
 
         // Test persistence across reopen
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
         assert_eq!(private_key, db.get_encryption_key(100).unwrap().unwrap());
         assert!(db.get_encryption_key(101).unwrap().is_none());
 
@@ -332,7 +331,7 @@ mod tests {
     #[test]
     fn test_automatic_cleanup_on_store() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let key1 = EncryptionPrivateKey::new(&mut rand::thread_rng());
         let key2 = EncryptionPrivateKey::new(&mut rand::thread_rng());
@@ -371,7 +370,7 @@ mod tests {
     #[test]
     fn test_dealer_messages() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let dealer1 = Address::new([1u8; 32]);
         let dealer2 = Address::new([2u8; 32]);
@@ -405,7 +404,7 @@ mod tests {
 
         // Verify persistence across reopen
         drop(db);
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
         assert!(db.get_dealer_message(1, &dealer1).unwrap().is_some());
         assert!(db.get_dealer_message(2, &dealer1).unwrap().is_some());
     }
@@ -413,7 +412,7 @@ mod tests {
     #[test]
     fn test_dealer_messages_auto_cleanup() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let dealer = Address::new([1u8; 32]);
         let message = create_test_message();
@@ -446,7 +445,7 @@ mod tests {
     #[test]
     fn test_list_all_dealer_messages() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let dealer1 = Address::new([1u8; 32]);
         let dealer2 = Address::new([2u8; 32]);
@@ -501,7 +500,7 @@ mod tests {
         use std::num::NonZeroU16;
 
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let dealer1 = Address::new([1u8; 32]);
         let dealer2 = Address::new([2u8; 32]);
@@ -536,7 +535,7 @@ mod tests {
 
         // Verify persistence across reopen
         drop(db);
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
         let all = db.list_all_rotation_messages(1).unwrap();
         assert_eq!(all.len(), 2);
     }
@@ -547,7 +546,7 @@ mod tests {
         use std::num::NonZeroU16;
 
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let dealer = Address::new([1u8; 32]);
         let mut messages: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
@@ -586,7 +585,7 @@ mod tests {
         use std::num::NonZeroU16;
 
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path());
+        let db = Database::open(tmpdir.path()).unwrap();
 
         let dealer1 = Address::new([1u8; 32]);
         let dealer2 = Address::new([2u8; 32]);

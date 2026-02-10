@@ -1,6 +1,6 @@
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, utxo::Utxo};
+use hashi::{btc::BTC, utxo::{Utxo, UtxoInfo}};
 use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
 
 const NUMBER_OF_RANDOM_BYTES: u16 = 32;
@@ -36,7 +36,7 @@ public struct PendingWithdrawal has store {
     randomness: vector<u8>,
 }
 
-public struct OutputUtxo has drop, store {
+public struct OutputUtxo has copy, drop, store {
     // In satoshis
     amount: u64,
     bitcoin_address: vector<u8>,
@@ -164,4 +164,56 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal) {
     inputs.destroy!(|utxo| {
         utxo.delete();
     });
+}
+
+public(package) fun emit_withdrawal_requested(self: &WithdrawalRequest) {
+    sui::event::emit(WithdrawalRequestedEvent {
+        request_id: self.info.id,
+        btc_amount: self.info.btc_amount,
+        bitcoin_address: self.info.bitcoin_address,
+        timestamp_ms: self.info.timestamp_ms,
+        requester_address: self.info.requester_address,
+    });
+}
+
+public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdrawal) {
+    sui::event::emit(WithdrawalPickedForProcessingEvent {
+        pending_id: self.id,
+        txid: self.txid,
+        request_ids: self.requests.map_ref!(|info| info.id),
+        inputs: self.inputs.map_ref!(|u| u.to_info()),
+        outputs: self.outputs,
+        timestamp_ms: self.timestamp_ms,
+        randomness: self.randomness,
+    });
+}
+
+public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
+    sui::event::emit(WithdrawalConfirmedEvent {
+        pending_id: self.id,
+        txid: self.txid,
+    });
+}
+
+public struct WithdrawalRequestedEvent has copy, drop {
+    request_id: address,
+    btc_amount: u64,
+    bitcoin_address: vector<u8>,
+    timestamp_ms: u64,
+    requester_address: address,
+}
+
+public struct WithdrawalPickedForProcessingEvent has copy, drop {
+    pending_id: address,
+    txid: address,
+    request_ids: vector<address>,
+    inputs: vector<UtxoInfo>,
+    outputs: vector<OutputUtxo>,
+    timestamp_ms: u64,
+    randomness: vector<u8>,
+}
+
+public struct WithdrawalConfirmedEvent has copy, drop {
+    pending_id: address,
+    txid: address,
 }
