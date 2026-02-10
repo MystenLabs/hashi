@@ -297,10 +297,7 @@ impl MpcService {
             .inner
             .dkg_manager()
             .ok_or_else(|| anyhow::anyhow!("DkgManager not initialized for key rotation"))?;
-        let source_epoch = dkg_manager
-            .read()
-            .map_err(|_| anyhow::anyhow!("DkgManager lock poisoned"))?
-            .source_epoch;
+        let source_epoch = dkg_manager.read().unwrap().source_epoch;
         let source_committee = onchain_state
             .state()
             .hashi()

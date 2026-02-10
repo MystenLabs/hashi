@@ -580,9 +580,8 @@ mod tests {
 
         // Wait for DKG to complete with 19 nodes
         {
-            let nodes = test_networks.hashi_network().nodes();
-            assert_eq!(nodes.len(), INITIAL_NODES);
-            let mpc_key_futures: Vec<_> = nodes
+            let active_nodes = &test_networks.hashi_network().nodes()[..INITIAL_NODES];
+            let mpc_key_futures: Vec<_> = active_nodes
                 .iter()
                 .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
                 .collect();
@@ -590,7 +589,7 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_nodes_agree_on_mpc_key(nodes);
+            assert_nodes_agree_on_mpc_key(active_nodes);
         }
 
         let initial_epoch = test_networks.hashi_network().nodes()[0]
@@ -603,10 +602,6 @@ mod tests {
             .hashi_network_mut()
             .register_and_start_pending_node(client)
             .await?;
-        assert_eq!(
-            test_networks.hashi_network().nodes().len(),
-            TOTAL_VALIDATORS
-        );
 
         // Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;
@@ -639,9 +634,8 @@ mod tests {
 
         // Wait for DKG to complete with 19 nodes
         {
-            let nodes = test_networks.hashi_network().nodes();
-            assert_eq!(nodes.len(), INITIAL_NODES);
-            let mpc_key_futures: Vec<_> = nodes
+            let active_nodes = &test_networks.hashi_network().nodes()[..INITIAL_NODES];
+            let mpc_key_futures: Vec<_> = active_nodes
                 .iter()
                 .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
                 .collect();
@@ -649,7 +643,7 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_nodes_agree_on_mpc_key(nodes);
+            assert_nodes_agree_on_mpc_key(active_nodes);
         }
 
         let initial_epoch = test_networks.hashi_network().nodes()[0]
@@ -658,8 +652,9 @@ mod tests {
 
         // 2. Force epoch change → key rotation with same 19 nodes.
         test_networks.sui_network.force_close_epoch().await?;
-        wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        let active_nodes = &test_networks.hashi_network().nodes()[..INITIAL_NODES];
+        wait_for_rotation(active_nodes, initial_epoch + 1).await;
+        assert_nodes_agree_on_mpc_key(active_nodes);
 
         // 3. Register and start the 20th node (new member)
         let client = test_networks.sui_network.client.clone();
@@ -667,10 +662,6 @@ mod tests {
             .hashi_network_mut()
             .register_and_start_pending_node(client)
             .await?;
-        assert_eq!(
-            test_networks.hashi_network().nodes().len(),
-            TOTAL_VALIDATORS
-        );
 
         // 4. Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;

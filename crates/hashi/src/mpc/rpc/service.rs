@@ -20,8 +20,6 @@ use hashi_types::proto::mpc_service_server::MpcService;
 use sui_sdk_types::Address;
 use tonic::Status;
 
-const ERR_DKG_MANAGER_LOCK_POISONED: &str = "DKG manager lock poisoned";
-
 #[tonic::async_trait]
 impl MpcService for HttpService {
     #[tracing::instrument(skip(self, request))]
@@ -35,9 +33,7 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let dkg_manager = self.dkg_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = dkg_manager
-                .write()
-                .map_err(|_| Status::internal(ERR_DKG_MANAGER_LOCK_POISONED))?;
+            let mut mgr = dkg_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
                 .map_err(dkg_error_to_status)
@@ -57,9 +53,7 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
             let dkg_manager = self.dkg_manager()?;
-            let mgr = dkg_manager
-                .read()
-                .map_err(|_| Status::internal(ERR_DKG_MANAGER_LOCK_POISONED))?;
+            let mgr = dkg_manager.read().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_retrieve_messages_request(&internal_request)
                 .map_err(dkg_error_to_status)?
@@ -80,9 +74,7 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let dkg_manager = self.dkg_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = dkg_manager
-                .write()
-                .map_err(|_| Status::internal(ERR_DKG_MANAGER_LOCK_POISONED))?;
+            let mut mgr = dkg_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_complain_request(&internal_request)
                 .map_err(dkg_error_to_status)
@@ -102,9 +94,7 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
             let dkg_manager = self.dkg_manager()?;
-            let mgr = dkg_manager
-                .read()
-                .map_err(|_| Status::internal(ERR_DKG_MANAGER_LOCK_POISONED))?;
+            let mgr = dkg_manager.read().unwrap();
             mgr.handle_get_public_dkg_output_request(&internal_request)
                 .map_err(dkg_error_to_status)?
         };
