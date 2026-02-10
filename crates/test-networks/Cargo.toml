@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 hashi = { path = "../hashi" }
 hashi-btc = { path = "../hashi-btc" }
+hashi-screener = { path = "../hashi-screener", features = ["test-utils"] }
 hashi-types = { path = "../hashi-types" }
 
 sui-futures.workspace = true

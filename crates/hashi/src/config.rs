@@ -119,6 +119,11 @@ pub struct Config {
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_run_as_leader: Option<ForceRunAsLeader>,
+
+    /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
+    /// When not set, AML screening is skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screener_endpoint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -284,6 +289,10 @@ impl Config {
 
     pub fn force_run_as_leader(&self) -> ForceRunAsLeader {
         self.force_run_as_leader.clone().unwrap_or_default()
+    }
+
+    pub fn screener_endpoint(&self) -> Option<&str> {
+        self.screener_endpoint.as_deref()
     }
 
     // Creates a new config suitable for testing. In particular this config will:
