@@ -8,6 +8,8 @@ use crate::mpc::RetrieveMessagesRequest;
 use crate::mpc::RetrieveMessagesResponse;
 use crate::mpc::SendMessagesRequest;
 use crate::mpc::SendMessagesResponse;
+use crate::mpc::types::GetPartialSignaturesRequest;
+use crate::mpc::types::GetPartialSignaturesResponse;
 use async_trait::async_trait;
 use sui_sdk_types::Address;
 use thiserror::Error;
@@ -60,6 +62,12 @@ pub trait P2PChannel: Send + Sync {
         party: &Address,
         request: &GetPublicDkgOutputRequest,
     ) -> ChannelResult<GetPublicDkgOutputResponse>;
+
+    async fn get_partial_signatures(
+        &self,
+        party: &Address,
+        request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse>;
 }
 
 /// Ordered broadcast channel for consensus-critical messages

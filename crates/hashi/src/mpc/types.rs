@@ -3,7 +3,9 @@
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::random_oracle::RandomOracle;
 use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
@@ -385,6 +387,39 @@ pub enum ComplaintsToProcessKey {
     Dkg(Address),
     Rotation(Address, ShareIndex),
 }
+
+#[derive(Clone, Debug)]
+pub struct PartialSigningOutput {
+    pub public_nonce: G,
+    pub partial_sigs: Vec<Eval<S>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GetPartialSignaturesRequest {
+    pub sui_request_id: Address,
+}
+
+#[derive(Clone, Debug)]
+pub struct GetPartialSignaturesResponse {
+    pub partial_sigs: Vec<Eval<S>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SigningError {
+    #[error("Invalid message from {sender}: {reason}")]
+    InvalidMessage { sender: Address, reason: String },
+
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    #[error("Cryptographic error: {0}")]
+    CryptoError(String),
+
+    #[error("Signing timed out: collected {collected} partial sigs, need {threshold}")]
+    Timeout { collected: usize, threshold: u16 },
+}
+
+pub type SigningResult<T> = Result<T, SigningError>;
 
 #[cfg(test)]
 mod tests {
