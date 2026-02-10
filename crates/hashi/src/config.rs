@@ -123,6 +123,11 @@ pub struct Config {
     /// Weight divisor for testing. Reduces validator weights to improve integration test performance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_weight_divisor: Option<u16>,
+
+    /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
+    /// When not set, AML screening is skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screener_endpoint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -292,6 +297,10 @@ impl Config {
 
     pub fn test_weight_divisor(&self) -> u16 {
         self.test_weight_divisor.unwrap_or(1)
+    }
+
+    pub fn screener_endpoint(&self) -> Option<&str> {
+        self.screener_endpoint.as_deref()
     }
 
     // Creates a new config suitable for testing. In particular this config will:
