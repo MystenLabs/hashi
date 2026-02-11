@@ -185,8 +185,20 @@ impl Default for TestNetworksBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto::groups::Scalar;
+    use fastcrypto::serde_helpers::ToFromByteArray;
+    use fastcrypto_tbls::polynomial::Poly;
+    use fastcrypto_tbls::threshold_schnorr::G;
+    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_tbls::threshold_schnorr::avss;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
+    use fastcrypto_tbls::types::ShareIndex;
+
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
+    const SIGNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn assert_nodes_agree_on_mpc_key(nodes: &[HashiNodeHandle]) {
         let pk = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
@@ -218,6 +230,83 @@ mod tests {
         let epoch = wait_for_rotation(test_networks.hashi_network().nodes(), target_epoch).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
         epoch
+    }
+
+    struct MockDealerNonces {
+        public_keys: Vec<G>,
+        /// `nonce_shares[l][i]` = share of nonce `l` for share-index `i` (0-indexed).
+        nonce_shares: Vec<Vec<S>>,
+    }
+
+    fn mock_nonces_for_dealers(
+        rng: &mut rand::rngs::ThreadRng,
+        num_dealers: u16,
+        batch_size_per_weight: u16,
+        t: u16,
+        n: u16,
+    ) -> Vec<MockDealerNonces> {
+        (0..num_dealers)
+            .map(|_| {
+                let nonces: Vec<S> = (0..batch_size_per_weight).map(|_| S::rand(rng)).collect();
+                let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                let nonce_shares: Vec<Vec<S>> = nonces
+                    .iter()
+                    .map(|&nonce| {
+                        mock_shares(rng, nonce, t, n)
+                            .iter()
+                            .map(|e| e.value)
+                            .collect()
+                    })
+                    .collect();
+                MockDealerNonces {
+                    public_keys,
+                    nonce_shares,
+                }
+            })
+            .collect()
+    }
+
+    fn mock_presignatures(
+        nonces_for_dealer: &[MockDealerNonces],
+        share_ids: &[ShareIndex],
+        batch_size_per_weight: u16,
+        f: usize,
+    ) -> Presignatures {
+        let receiver_outputs: Vec<batch_avss::ReceiverOutput> = nonces_for_dealer
+            .iter()
+            .map(|dealer| {
+                let shares: Vec<batch_avss::ShareBatch> = share_ids
+                    .iter()
+                    .map(|&sid| {
+                        let share_idx = u16::from(sid) as usize - 1;
+                        batch_avss::ShareBatch {
+                            index: sid,
+                            batch: (0..batch_size_per_weight as usize)
+                                .map(|l| dealer.nonce_shares[l][share_idx])
+                                .collect(),
+                            blinding_share: Default::default(),
+                        }
+                    })
+                    .collect();
+                batch_avss::ReceiverOutput {
+                    my_shares: batch_avss::SharesForNode { shares },
+                    public_keys: dealer.public_keys.clone(),
+                }
+            })
+            .collect();
+        Presignatures::new(receiver_outputs, batch_size_per_weight, f).unwrap()
+    }
+
+    fn mock_shares(
+        rng: &mut rand::rngs::ThreadRng,
+        secret: S,
+        t: u16,
+        n: u16,
+    ) -> Vec<fastcrypto_tbls::types::IndexedValue<S>> {
+        let p = Poly::rand_fixed_c0(t - 1, secret, rng);
+        (1..=n)
+            .map(|i| p.eval(ShareIndex::new(i).unwrap()))
+            .collect()
     }
 
     #[tokio::test]
@@ -549,6 +638,148 @@ mod tests {
             .expect("Node 0 should recover MPC key after restart");
         force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
 
+        Ok(())
+    }
+
+    // TODO: Replace presigning simulation after presigning is completed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_signing_e2e() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for DKG so gRPC servers and onchain state are fully initialized.
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        // Read DKG config from each node's DkgManager.
+        let mut node_infos: Vec<(
+            /* party_id */ u16,
+            /* address */ sui_sdk_types::Address,
+            /* share_ids */ Vec<ShareIndex>,
+        )> = Vec::new();
+        let (threshold, max_faulty, total_weight) = {
+            let dkg_mgr = nodes[0].hashi().dkg_manager();
+            let mgr = dkg_mgr.read().unwrap();
+            (
+                mgr.dkg_config.threshold,
+                mgr.dkg_config.max_faulty,
+                mgr.dkg_config.nodes.total_weight(),
+            )
+        };
+        for node in nodes {
+            let dkg_mgr = node.hashi().dkg_manager();
+            let mgr = dkg_mgr.read().unwrap();
+            let share_ids = mgr.dkg_config.nodes.share_ids_of(mgr.party_id).unwrap();
+            node_infos.push((mgr.party_id, mgr.address, share_ids));
+        }
+
+        let n = total_weight;
+        let t = threshold;
+        let f = max_faulty as usize;
+        let batch_size_per_weight: u16 = 5;
+        let mut rng = rand::thread_rng();
+
+        // Fake signing key shares.
+        let sk = S::rand(&mut rng);
+        let vk = G::generator() * sk;
+        let all_sk_shares = mock_shares(&mut rng, sk, t, n);
+
+        // Fake nonce shares for presigning.
+        let nonces_for_dealer = mock_nonces_for_dealers(&mut rng, n, batch_size_per_weight, t, n);
+
+        // Build ReceiverOutputs per node and create Presignatures + SigningManager.
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        for (node_idx, node) in nodes.iter().enumerate() {
+            let (_party_id, address, ref share_ids) = node_infos[node_idx];
+            let key_shares = avss::SharesForNode {
+                shares: share_ids
+                    .iter()
+                    .map(|&sid| {
+                        // ShareIndex is 1-based; all_sk_shares is 0-indexed by share index - 1.
+                        all_sk_shares[u16::from(sid) as usize - 1].clone()
+                    })
+                    .collect(),
+            };
+            let presignatures =
+                mock_presignatures(&nonces_for_dealer, share_ids, batch_size_per_weight, f);
+            let committee = {
+                let dkg_mgr = node.hashi().dkg_manager();
+                let mgr = dkg_mgr.read().unwrap();
+                mgr.committee.clone()
+            };
+            let signing_manager = hashi::mpc::SigningManager::new(
+                address,
+                committee,
+                t,
+                key_shares,
+                vk,
+                presignatures,
+            );
+            node.hashi().init_signing_manager(signing_manager);
+        }
+
+        // All nodes call sign() concurrently.
+        let message = b"Hello, Hashi signing!";
+        let beacon_value = S::rand(&mut rng);
+        let sui_request_id = sui_sdk_types::Address::ZERO;
+        let sign_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                let signing_manager = node.hashi().signing_manager();
+                let onchain_state = node.hashi().onchain_state().clone();
+                let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
+                let beacon = beacon_value;
+                async move {
+                    hashi::mpc::SigningManager::sign(
+                        &signing_manager,
+                        &p2p_channel,
+                        sui_request_id,
+                        message,
+                        &beacon,
+                        None,
+                        SIGNING_TIMEOUT,
+                    )
+                    .await
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(sign_futures).await;
+        let mut signatures = Vec::new();
+        for (i, result) in results.into_iter().enumerate() {
+            let sig = result.unwrap_or_else(|e| panic!("Node {i} signing failed: {e}"));
+            signatures.push(sig);
+        }
+
+        // All nodes should produce the same signature.
+        let sig0_bytes = signatures[0].to_byte_array();
+        for (i, sig) in signatures.iter().enumerate().skip(1) {
+            assert_eq!(
+                sig0_bytes,
+                sig.to_byte_array(),
+                "Node {i} signature differs from node 0"
+            );
+        }
         Ok(())
     }
 }

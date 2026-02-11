@@ -29,4 +29,6 @@ futures.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
+fastcrypto-tbls.workspace = true
+rand.workspace = true
 tracing-subscriber.workspace = true

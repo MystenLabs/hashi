@@ -127,6 +127,13 @@ impl Hashi {
             .clone()
     }
 
+    pub fn init_signing_manager(&self, manager: mpc::SigningManager) {
+        self.signing_manager
+            .set(Arc::new(RwLock::new(manager)))
+            .map_err(|_| anyhow!("SigningManager already initialized"))
+            .unwrap();
+    }
+
     pub fn set_signing_manager(&self, manager: mpc::SigningManager) {
         *self
             .signing_manager

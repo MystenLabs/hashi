@@ -9,6 +9,8 @@ use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use hashi_types::committee::Committee;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
 use tokio::time::Instant;
@@ -57,7 +59,7 @@ impl SigningManager {
     }
 
     pub async fn sign(
-        &mut self,
+        signing_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         sui_request_id: Address,
         message: &[u8],
@@ -65,40 +67,55 @@ impl SigningManager {
         derivation_address: Option<&DerivationAddress>,
         timeout: Duration,
     ) -> SigningResult<SchnorrSignature> {
-        let (public_nonce, partial_sigs) = generate_partial_signatures(
-            message,
-            &mut self.presignatures,
-            beacon_value,
-            &self.key_shares,
-            &self.verifying_key,
-            derivation_address,
-        )
-        .map_err(|e| SigningError::CryptoError(e.to_string()))?;
-        self.partial_signing_outputs.insert(
-            sui_request_id,
-            PartialSigningOutput {
+        let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
+            let mut mgr = signing_manager.write().unwrap();
+            let mgr = &mut *mgr;
+            let (public_nonce, partial_sigs) = generate_partial_signatures(
+                message,
+                &mut mgr.presignatures,
+                beacon_value,
+                &mgr.key_shares,
+                &mgr.verifying_key,
+                derivation_address,
+            )
+            .map_err(|e| SigningError::CryptoError(e.to_string()))?;
+            mgr.partial_signing_outputs.insert(
+                sui_request_id,
+                PartialSigningOutput {
+                    public_nonce,
+                    partial_sigs: partial_sigs.clone(),
+                },
+            );
+            let threshold = mgr.threshold;
+            let address = mgr.address;
+            let committee = mgr.committee.clone();
+            let verifying_key = mgr.verifying_key;
+            (
                 public_nonce,
-                partial_sigs: partial_sigs.clone(),
-            },
-        );
+                partial_sigs,
+                threshold,
+                address,
+                committee,
+                verifying_key,
+            )
+        }; // write lock released
         let mut all_partial_sigs = partial_sigs;
-        let mut remaining_peers: HashSet<Address> = self
-            .committee
+        let mut remaining_peers: HashSet<Address> = committee
             .members()
             .iter()
             .map(|m| m.validator_address())
-            .filter(|addr| *addr != self.address)
+            .filter(|addr| *addr != address)
             .collect();
         let request = GetPartialSignaturesRequest { sui_request_id };
         let deadline = Instant::now() + timeout;
         loop {
-            if all_partial_sigs.len() >= self.threshold as usize {
+            if all_partial_sigs.len() >= threshold as usize {
                 break;
             }
             if Instant::now() >= deadline {
                 return Err(SigningError::Timeout {
                     collected: all_partial_sigs.len(),
-                    threshold: self.threshold,
+                    threshold,
                 });
             }
             let results = send_to_many(
@@ -124,8 +141,8 @@ impl SigningManager {
             &public_nonce,
             beacon_value,
             &all_partial_sigs,
-            self.threshold,
-            &self.verifying_key,
+            threshold,
+            &verifying_key,
             derivation_address,
         )
         .map_err(|e| SigningError::CryptoError(e.to_string()))
