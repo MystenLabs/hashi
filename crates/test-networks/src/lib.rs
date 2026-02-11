@@ -790,15 +790,15 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
 
-        // Read DKG config from each node's DkgManager.
+        // Read DKG config from each node's MpcManager.
         let mut node_infos: Vec<(
             /* party_id */ u16,
             /* address */ sui_sdk_types::Address,
             /* share_ids */ Vec<ShareIndex>,
         )> = Vec::new();
         let (threshold, max_faulty, total_weight) = {
-            let dkg_mgr = nodes[0].hashi().dkg_manager().unwrap();
-            let mgr = dkg_mgr.read().unwrap();
+            let mpc_mgr = nodes[0].hashi().mpc_manager().unwrap();
+            let mgr = mpc_mgr.read().unwrap();
             (
                 mgr.dkg_config.threshold,
                 mgr.dkg_config.max_faulty,
@@ -806,8 +806,8 @@ mod tests {
             )
         };
         for node in nodes {
-            let dkg_mgr = node.hashi().dkg_manager().unwrap();
-            let mgr = dkg_mgr.read().unwrap();
+            let mpc_mgr = node.hashi().mpc_manager().unwrap();
+            let mgr = mpc_mgr.read().unwrap();
             let share_ids = mgr.dkg_config.nodes.share_ids_of(mgr.party_id).unwrap();
             node_infos.push((mgr.party_id, mgr.address, share_ids));
         }
@@ -842,8 +842,8 @@ mod tests {
             let presignatures =
                 mock_presignatures(&nonces_for_dealer, share_ids, batch_size_per_weight, f);
             let committee = {
-                let dkg_mgr = node.hashi().dkg_manager().unwrap();
-                let mgr = dkg_mgr.read().unwrap();
+                let mpc_mgr = node.hashi().mpc_manager().unwrap();
+                let mgr = mpc_mgr.read().unwrap();
                 mgr.committee.clone()
             };
             let signing_manager = hashi::mpc::SigningManager::new(

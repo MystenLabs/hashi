@@ -36,7 +36,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    dkg_manager: OnceLock<Arc<RwLock<mpc::DkgManager>>>,
+    mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
     signing_manager: OnceLock<Arc<RwLock<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
@@ -57,7 +57,7 @@ impl Hashi {
             metrics,
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
-            dkg_manager: OnceLock::new(),
+            mpc_manager: OnceLock::new(),
             signing_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
@@ -81,7 +81,7 @@ impl Hashi {
             metrics,
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
-            dkg_manager: OnceLock::new(),
+            mpc_manager: OnceLock::new(),
             signing_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
@@ -102,12 +102,12 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn dkg_manager(&self) -> Option<Arc<RwLock<mpc::DkgManager>>> {
-        self.dkg_manager.get().cloned()
+    pub fn mpc_manager(&self) -> Option<Arc<RwLock<mpc::MpcManager>>> {
+        self.mpc_manager.get().cloned()
     }
 
-    pub fn set_dkg_manager(&self, manager: mpc::DkgManager) {
-        match self.dkg_manager.get() {
+    pub fn set_mpc_manager(&self, manager: mpc::MpcManager) {
+        match self.mpc_manager.get() {
             Some(lock) => {
                 // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
                 // Poisoning indicates a bug, so we propagate the panic rather than recover.
@@ -115,7 +115,7 @@ impl Hashi {
             }
             None => {
                 // First-time initialization (e.g. new committee member joining mid-rotation).
-                let _ = self.dkg_manager.set(Arc::new(RwLock::new(manager)));
+                let _ = self.mpc_manager.set(Arc::new(RwLock::new(manager)));
             }
         }
     }
@@ -183,11 +183,11 @@ impl Hashi {
         Ok(service)
     }
 
-    pub fn create_dkg_manager(
+    pub fn create_mpc_manager(
         &self,
         epoch: u64,
         protocol_type: mpc::types::ProtocolType,
-    ) -> anyhow::Result<mpc::DkgManager> {
+    ) -> anyhow::Result<mpc::MpcManager> {
         let state = self.onchain_state().state();
         let committee_set = &state.hashi().committees;
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
@@ -205,7 +205,7 @@ impl Hashi {
         ));
         let address = self.config.validator_address()?;
         let chain_id = self.config.sui_chain_id();
-        Ok(mpc::DkgManager::new(
+        Ok(mpc::MpcManager::new(
             address,
             committee_set,
             session_id,
@@ -277,15 +277,15 @@ impl Hashi {
         let onchain_service = self.initialize_onchain_state().await?;
         if self.is_in_current_committee() {
             let epoch = self.onchain_state().epoch();
-            let dkg_manager = self
-                .create_dkg_manager(epoch, mpc::types::ProtocolType::Dkg)
+            let mpc_manager = self
+                .create_mpc_manager(epoch, mpc::types::ProtocolType::Dkg)
                 .map_err(|e| {
-                    tracing::error!("Failed to create DkgManager: {e}");
+                    tracing::error!("Failed to create MpcManager: {e}");
                     e
                 })?;
-            self.dkg_manager
-                .set(Arc::new(RwLock::new(dkg_manager)))
-                .map_err(|_| anyhow!("DkgManager already set"))?;
+            self.mpc_manager
+                .set(Arc::new(RwLock::new(mpc_manager)))
+                .map_err(|_| anyhow!("MpcManager already set"))?;
         } else {
             tracing::info!(
                 "Node is not in the current committee; skipping initial DKG manager creation"

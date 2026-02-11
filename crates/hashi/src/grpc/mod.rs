@@ -123,11 +123,11 @@ impl HttpService {
         (local_addr, service)
     }
 
-    pub fn dkg_manager(
+    pub fn mpc_manager(
         &self,
-    ) -> Result<Arc<std::sync::RwLock<crate::mpc::DkgManager>>, tonic::Status> {
+    ) -> Result<Arc<std::sync::RwLock<crate::mpc::MpcManager>>, tonic::Status> {
         self.inner
-            .dkg_manager()
+            .mpc_manager()
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 

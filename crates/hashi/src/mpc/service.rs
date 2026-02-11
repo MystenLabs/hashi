@@ -14,8 +14,8 @@ use tracing::warn;
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
-use crate::mpc::DkgManager;
 use crate::mpc::DkgOutput;
+use crate::mpc::MpcManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::ProtocolType;
@@ -95,7 +95,7 @@ impl MpcService {
         } else if self.inner.is_in_current_committee() {
             loop {
                 // TODO: Store DKG public key on-chain, and read it from there if it already exists.
-                // Note that restart is already supported in `DkgManager`, so the latter is not strictly necessary despite more direct.
+                // Note that restart is already supported in `MpcManager`, so the latter is not strictly necessary despite more direct.
                 match self.recover_mpc_state().await {
                     Ok(output) => {
                         let _ = self.key_ready_tx.send(Some(output.public_key));
@@ -166,10 +166,10 @@ impl MpcService {
     async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let (epoch, committee) = get_epoch_and_committee(&onchain_state)?;
-        let dkg_manager = self
+        let mpc_manager = self
             .inner
-            .dkg_manager()
-            .expect("DkgManager must be set before run_dkg");
+            .mpc_manager()
+            .expect("MpcManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
         let mut tob_channel = SuiTobChannel::new(
@@ -179,7 +179,7 @@ impl MpcService {
             signer,
             committee,
         );
-        let output = DkgManager::run(&dkg_manager, &p2p_channel, &mut tob_channel)
+        let output = MpcManager::run(&mpc_manager, &p2p_channel, &mut tob_channel)
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
         Ok(output)
@@ -232,7 +232,7 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
-        // Create the DkgManager once before the retry loop so retries reuse
+        // Create the MpcManager once before the retry loop so retries reuse
         // the same manager (and its accumulated messages) instead of generating
         // fresh random dealer messages that conflict with previously sent ones.
         if let Err(e) = self.setup_key_rotation(target_epoch) {
@@ -278,8 +278,8 @@ impl MpcService {
     fn setup_key_rotation(&self, target_epoch: u64) -> anyhow::Result<()> {
         let rotation_manager = self
             .inner
-            .create_dkg_manager(target_epoch, ProtocolType::KeyRotation)?;
-        self.inner.set_dkg_manager(rotation_manager);
+            .create_mpc_manager(target_epoch, ProtocolType::KeyRotation)?;
+        self.inner.set_mpc_manager(rotation_manager);
         Ok(())
     }
 
@@ -293,11 +293,11 @@ impl MpcService {
             .get(&target_epoch)
             .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {}", target_epoch))?
             .clone();
-        let dkg_manager = self
+        let mpc_manager = self
             .inner
-            .dkg_manager()
-            .ok_or_else(|| anyhow::anyhow!("DkgManager not initialized for key rotation"))?;
-        let source_epoch = dkg_manager.read().unwrap().source_epoch;
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for key rotation"))?;
+        let source_epoch = mpc_manager.read().unwrap().source_epoch;
         let source_committee = onchain_state
             .state()
             .hashi()
@@ -320,8 +320,8 @@ impl MpcService {
             signer,
             target_committee,
         );
-        let output = DkgManager::run_key_rotation(
-            &dkg_manager,
+        let output = MpcManager::run_key_rotation(
+            &mpc_manager,
             &previous_certs,
             &p2p_channel,
             &mut tob_channel,
