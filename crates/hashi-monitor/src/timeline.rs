@@ -10,7 +10,7 @@ use crate::domain::Finding;
 use crate::domain::UnixSeconds;
 use crate::domain::WithdrawalEvent;
 
-/// Per-withdrawal accumulator (single representatives for E1/E2/E3).
+/// Per-withdrawal timeline.
 #[derive(Clone, Debug, Default)]
 pub struct Timeline {
     e1: Option<E1SuiInit>,
@@ -18,6 +18,9 @@ pub struct Timeline {
     e3: Option<E3SuiApproved>,
 }
 
+/// Mental model: events in [t1, t2] start obligations.
+///      - Safety checks are always done.
+///      - Liveness checks are only done if the successor happens before the horizon.
 impl Timeline {
     /// Build a timeline from events and run audit checks.
     pub fn new_audit(

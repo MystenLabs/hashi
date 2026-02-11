@@ -19,11 +19,11 @@ pub struct AuditWindow {
     pub t1: UnixSeconds,
     /// End of the audit window (events with timestamp <= t2 trigger checks).
     pub t2: UnixSeconds,
-    /// Horizon for Guardian logs (E2). Liveness for E1->E2 is decidable up to this point.
+    /// Horizon for Guardian logs.
     pub guardian_horizon: UnixSeconds,
-    /// Horizon for Sui logs (E3). Liveness for E2->E3 is decidable up to this point.
+    /// Horizon for Sui logs.
     pub sui_horizon: UnixSeconds,
-    /// Horizon for BTC RPC. Liveness for E3->BTC is decidable up to this point.
+    /// Horizon for BTC RPC.
     pub btc_horizon: UnixSeconds,
 }
 
@@ -89,9 +89,6 @@ pub fn run_audit(cfg: &Config, t1: UnixSeconds, t2: UnixSeconds) -> anyhow::Resu
     );
 
     // Step 4: evaluate checks.
-    // Mental model: events in [t1, t2] start obligations.
-    // - Safety (predecessor/link) checks are immediate.
-    // - Liveness checks are only evaluated when the corresponding successor horizon includes the deadline.
     tracing::info!(
         e1_total = e1_all.len(),
         e2_total = e2_all.len(),
