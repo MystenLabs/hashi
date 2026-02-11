@@ -9,6 +9,8 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 
+use crate::constants::SUI_MAINNET_CHAIN_ID;
+
 /// Load an Ed25519 private key from a file path or inline PEM string.
 ///
 /// Supported formats:
@@ -119,6 +121,16 @@ pub struct Config {
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_run_as_leader: Option<ForceRunAsLeader>,
+
+    /// Weight divisor for testing. Reduces validator weights to improve integration test performance.
+    /// Can only be set if `sui_chain_id` is not mainnet or testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_weight_divisor: Option<u16>,
+
+    /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
+    /// When not set, AML screening is skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screener_endpoint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -219,9 +231,7 @@ impl Config {
     }
 
     pub fn sui_chain_id(&self) -> &str {
-        self.sui_chain_id
-            .as_deref()
-            .unwrap_or("4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S")
+        self.sui_chain_id.as_deref().unwrap_or(SUI_MAINNET_CHAIN_ID)
     }
 
     pub fn bitcoin_chain_id(&self) -> &str {
@@ -284,6 +294,14 @@ impl Config {
 
     pub fn force_run_as_leader(&self) -> ForceRunAsLeader {
         self.force_run_as_leader.clone().unwrap_or_default()
+    }
+
+    pub fn test_weight_divisor(&self) -> u16 {
+        self.test_weight_divisor.unwrap_or(1)
+    }
+
+    pub fn screener_endpoint(&self) -> Option<&str> {
+        self.screener_endpoint.as_deref()
     }
 
     // Creates a new config suitable for testing. In particular this config will:

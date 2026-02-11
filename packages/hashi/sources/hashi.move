@@ -159,7 +159,7 @@ public(package) fun epoch_certs_and_committee(
     if (!self.tob.contains(epoch)) {
         self.tob.add(epoch, hashi::tob::create(epoch, protocol_type, ctx));
     };
-    (self.tob.borrow_mut(epoch), self.committee_set.current_committee())
+    (self.tob.borrow_mut(epoch), self.committee_set.get_committee(epoch))
 }
 
 // ======== Test-only Functions ========

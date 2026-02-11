@@ -12,6 +12,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
 use std::sync::Arc;
+use sui_futures::service::Service;
 use sui_sdk_types::Address;
 use tracing::debug;
 use tracing::error;
@@ -31,8 +32,15 @@ impl LeaderService {
         Self { inner: hashi }
     }
 
-    // TODO: return a handle so we can gracefully shutdown, etc
-    pub async fn start(self) -> () {
+    /// Start the leader service and return a `Service` for lifecycle management.
+    pub fn start(self) -> Service {
+        Service::new().spawn_aborting(async move {
+            self.run().await;
+            Ok(())
+        })
+    }
+
+    async fn run(self) {
         info!("Starting leader service");
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
 

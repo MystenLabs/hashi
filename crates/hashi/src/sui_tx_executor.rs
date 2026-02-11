@@ -47,7 +47,7 @@ use sui_transaction_builder::TransactionBuilder;
 use crate::Hashi;
 use crate::config::Config;
 use crate::config::HashiIds;
-use crate::dkg::types::CertificateV1;
+use crate::mpc::types::CertificateV1;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
 

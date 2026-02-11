@@ -15,8 +15,10 @@ use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use crate::onchain::scrape_member_info;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
+use crate::onchain::types::WithdrawalRequest;
 use hashi_types::move_types::HashiEvent;
 
 pub async fn watcher(mut client: Client, state: OnchainState) {
@@ -234,6 +236,68 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .deposit_queue
                     .requests
                     .remove(&expired_deposit_deleted_event.request_id);
+            }
+            HashiEvent::WithdrawalRequestedEvent(withdrawal_requested_event) => {
+                let withdrawal_request = WithdrawalRequest {
+                    id: withdrawal_requested_event.request_id,
+                    btc_amount: withdrawal_requested_event.btc_amount,
+                    bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
+                    timestamp_ms: withdrawal_requested_event.timestamp_ms,
+                    requester_address: withdrawal_requested_event.requester_address,
+                };
+                state
+                    .state_mut()
+                    .hashi
+                    .withdrawal_queue
+                    .requests
+                    .insert(withdrawal_request.id, withdrawal_request);
+            }
+            HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
+                let mut state = state.state_mut();
+
+                // Remove requests from the queue
+                for request_id in &event.request_ids {
+                    state.hashi.withdrawal_queue.requests.remove(request_id);
+                }
+
+                // Add to pending withdrawals
+                let pending = PendingWithdrawal {
+                    id: event.pending_id,
+                    txid: event.txid,
+                    request_ids: event.request_ids.clone(),
+                    inputs: event
+                        .inputs
+                        .iter()
+                        .map(|u| super::types::Utxo {
+                            id: u.id.into(),
+                            amount: u.amount,
+                            derivation_path: u.derivation_path,
+                        })
+                        .collect(),
+                    outputs: event
+                        .outputs
+                        .iter()
+                        .map(|o| super::types::OutputUtxo {
+                            amount: o.amount,
+                            bitcoin_address: o.bitcoin_address.clone(),
+                        })
+                        .collect(),
+                    timestamp_ms: event.timestamp_ms,
+                    randomness: event.randomness.clone(),
+                };
+                state
+                    .hashi
+                    .withdrawal_queue
+                    .pending_withdrawals
+                    .insert(pending.id, pending);
+            }
+            HashiEvent::WithdrawalConfirmedEvent(event) => {
+                state
+                    .state_mut()
+                    .hashi
+                    .withdrawal_queue
+                    .pending_withdrawals
+                    .remove(&event.pending_id);
             }
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
                 state.state_mut().hashi.utxo_pool.spent_utxos.insert(

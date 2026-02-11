@@ -55,7 +55,8 @@ fun submit_cert_internal(
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
-    assert!(epoch == hashi.committee_set().epoch());
+    let pending = hashi.committee_set().pending_epoch_change();
+    assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
     let (epoch_certs, committee) = hashi.epoch_certs_and_committee(epoch, protocol_type, ctx);
     let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
     hashi::tob::submit_cert(

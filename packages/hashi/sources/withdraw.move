@@ -29,7 +29,7 @@ public fun request_withdrawal(
     assert!(btc.value() >= hashi.config().withdrawal_minimum());
 
     let request = withdrawal_request(btc, bitcoin_address, clock, ctx);
-
+    request.emit_withdrawal_requested();
     hashi.withdrawal_queue_mut().insert_request(request);
 }
 
@@ -86,7 +86,7 @@ entry fun pick_withdrawal_for_processing(
         r,
         ctx,
     );
-
+    pending.emit_withdrawal_picked_for_processing();
     hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending);
 }
 
@@ -106,6 +106,7 @@ entry fun confirm_withdrawal(
     // TODO create and insert new UTXO for change if it hasn't already been
     // inserted
 
+    withdrawal.emit_withdrawal_confirmed();
     withdrawal.destroy_pending_withdrawal();
 }
 

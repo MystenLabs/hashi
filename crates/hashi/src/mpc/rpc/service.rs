@@ -1,9 +1,12 @@
-use crate::dkg::spawn_blocking;
-use crate::dkg::types;
-use crate::dkg::types::DkgError;
 use crate::grpc::HttpService;
+use crate::mpc::spawn_blocking;
+use crate::mpc::types;
+use crate::mpc::types::DkgError;
+use crate::mpc::types::SigningError;
 use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
+use hashi_types::proto::GetPartialSignaturesRequest;
+use hashi_types::proto::GetPartialSignaturesResponse;
 use hashi_types::proto::GetPublicDkgOutputRequest;
 use hashi_types::proto::GetPublicDkgOutputResponse;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
@@ -118,6 +121,27 @@ impl MpcService for HttpService {
             },
         ))
     }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn get_partial_signatures(
+        &self,
+        request: tonic::Request<GetPartialSignaturesRequest>,
+    ) -> Result<tonic::Response<GetPartialSignaturesResponse>, Status> {
+        authenticate_caller(&request)?;
+        let external_request = request.into_inner();
+        let internal_request = types::GetPartialSignaturesRequest::try_from(&external_request)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let response = {
+            let signing_manager = self.signing_manager();
+            let mgr = signing_manager.read().unwrap();
+            validate_epoch(mgr.epoch(), external_request.epoch)?;
+            mgr.handle_get_partial_signatures_request(&internal_request)
+                .map_err(signing_error_to_status)?
+        };
+        Ok(tonic::Response::new(GetPartialSignaturesResponse::from(
+            &response,
+        )))
+    }
 }
 
 fn authenticate_caller<T>(request: &tonic::Request<T>) -> Result<Address, Status> {
@@ -137,6 +161,15 @@ fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Statu
         )));
     }
     Ok(())
+}
+
+fn signing_error_to_status(err: SigningError) -> Status {
+    match &err {
+        SigningError::InvalidMessage { .. } => Status::invalid_argument(err.to_string()),
+        SigningError::NotFound(_) => Status::not_found(err.to_string()),
+        SigningError::CryptoError(_) => Status::internal(err.to_string()),
+        SigningError::Timeout { .. } => Status::deadline_exceeded(err.to_string()),
+    }
 }
 
 fn dkg_error_to_status(err: DkgError) -> Status {

@@ -5,14 +5,16 @@ use tonic::Response;
 use tonic_rustls::Channel;
 use tonic_rustls::Endpoint;
 
-use crate::dkg::types::ComplainRequest;
-use crate::dkg::types::ComplaintResponses;
-use crate::dkg::types::GetPublicDkgOutputRequest;
-use crate::dkg::types::GetPublicDkgOutputResponse;
-use crate::dkg::types::RetrieveMessagesRequest;
-use crate::dkg::types::RetrieveMessagesResponse;
-use crate::dkg::types::SendMessagesRequest;
-use crate::dkg::types::SendMessagesResponse;
+use crate::mpc::types::ComplainRequest;
+use crate::mpc::types::ComplaintResponses;
+use crate::mpc::types::GetPartialSignaturesRequest;
+use crate::mpc::types::GetPartialSignaturesResponse;
+use crate::mpc::types::GetPublicDkgOutputRequest;
+use crate::mpc::types::GetPublicDkgOutputResponse;
+use crate::mpc::types::RetrieveMessagesRequest;
+use crate::mpc::types::RetrieveMessagesResponse;
+use crate::mpc::types::SendMessagesRequest;
+use crate::mpc::types::SendMessagesResponse;
 use crate::tls::make_client_config_no_verification;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
 use hashi_types::proto::GetServiceInfoRequest;
@@ -130,6 +132,20 @@ impl Client {
             .get_public_dkg_output(proto_request)
             .await?;
         GetPublicDkgOutputResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    pub async fn get_partial_signatures(
+        &self,
+        epoch: u64,
+        request: &GetPartialSignaturesRequest,
+    ) -> Result<GetPartialSignaturesResponse> {
+        let proto_request = request.to_proto(epoch);
+        let response = self
+            .mpc_service_client()
+            .get_partial_signatures(proto_request)
+            .await?;
+        GetPartialSignaturesResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 

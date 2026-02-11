@@ -1,15 +1,35 @@
-//! Distributed Key Generation (DKG) module
-
-pub mod rpc;
-pub mod types;
-
-use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
+use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
-use crate::dkg::types::CertificateV1;
-use crate::dkg::types::DealerCertificate;
-use crate::dkg::types::DealerMessagesHash;
+use crate::constants::SUI_MAINNET_CHAIN_ID;
+use crate::constants::SUI_TESTNET_CHAIN_ID;
+use crate::mpc::types::CertificateV1;
+pub use crate::mpc::types::ComplainRequest;
+pub use crate::mpc::types::ComplaintResponses;
+pub use crate::mpc::types::ComplaintsToProcessKey;
+use crate::mpc::types::DealerCertificate;
+pub use crate::mpc::types::DealerFlowData;
+use crate::mpc::types::DealerMessagesHash;
+pub use crate::mpc::types::DealerOutputsKey;
+use crate::mpc::types::DkgConfig;
+pub use crate::mpc::types::DkgError;
+pub use crate::mpc::types::DkgOutput;
+pub use crate::mpc::types::DkgResult;
+pub use crate::mpc::types::EncryptionGroupElement;
+pub use crate::mpc::types::GetPublicDkgOutputRequest;
+pub use crate::mpc::types::GetPublicDkgOutputResponse;
+pub use crate::mpc::types::MessageHash;
+pub use crate::mpc::types::Messages;
+pub use crate::mpc::types::ProtocolType;
+pub use crate::mpc::types::PublicDkgOutput;
+pub use crate::mpc::types::RetrieveMessagesRequest;
+pub use crate::mpc::types::RetrieveMessagesResponse;
+use crate::mpc::types::RotationComplainContext;
+use crate::mpc::types::RotationMessages;
+pub use crate::mpc::types::SendMessagesRequest;
+pub use crate::mpc::types::SendMessagesResponse;
+pub use crate::mpc::types::SessionId;
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
@@ -27,7 +47,6 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
-use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Bls12381PrivateKey;
@@ -39,33 +58,10 @@ use rand::rngs::StdRng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use sui_sdk_types::Address;
-pub use types::ComplainRequest;
-pub use types::ComplaintResponses;
-pub use types::ComplaintsToProcessKey;
-pub use types::DealerFlowData;
-pub use types::DealerOutputsKey;
-use types::DkgConfig;
-pub use types::DkgError;
-pub use types::DkgOutput;
-pub use types::DkgResult;
-pub use types::EncryptionGroupElement;
-pub use types::GetPublicDkgOutputRequest;
-pub use types::GetPublicDkgOutputResponse;
-pub use types::MessageHash;
-pub use types::Messages;
-pub use types::PublicDkgOutput;
-pub use types::RetrieveMessagesRequest;
-pub use types::RetrieveMessagesResponse;
-use types::RotationComplainContext;
-use types::RotationMessages;
-pub use types::SendMessagesRequest;
-pub use types::SendMessagesResponse;
-pub use types::SessionId;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
@@ -88,6 +84,11 @@ pub struct DkgManager {
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
     pub previous_threshold: Option<u16>,
+    /// Used to reconstruct source session IDs during certificate reconstruction.
+    chain_id: String,
+    /// The epoch from which to read previous messages during reconstruction.
+    pub source_epoch: u64,
+    previous_output: Option<DkgOutput>,
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
@@ -96,10 +97,10 @@ pub struct DkgManager {
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, ComplaintResponses>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
-    previous_output: Option<DkgOutput>,
 }
 
 impl DkgManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
         committee_set: &CommitteeSet,
@@ -108,23 +109,54 @@ impl DkgManager {
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
         allowed_delta: u16,
+        chain_id: &str,
+        weight_divisor: Option<u16>,
     ) -> DkgResult<Self> {
+        if weight_divisor.is_some() {
+            assert!(
+                chain_id != SUI_MAINNET_CHAIN_ID && chain_id != SUI_TESTNET_CHAIN_ID,
+                "weight_divisor must not be set on mainnet or testnet"
+            );
+        }
+        let weight_divisor = weight_divisor.unwrap_or(1);
+        let epoch = committee_set
+            .pending_epoch_change()
+            .unwrap_or_else(|| committee_set.epoch());
         let committee = committee_set
-            .current_committee()
-            .ok_or_else(|| DkgError::InvalidConfig("no committee for current epoch".into()))?
+            .committees()
+            .get(&epoch)
+            .ok_or_else(|| DkgError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
         // TODO: Pass t and f as arguments instead of computing them
-        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta)?;
+        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
-        let dkg_config = DkgConfig::new(committee_set.epoch(), nodes, threshold, max_faulty)?;
+        let dkg_config = DkgConfig::new(epoch, nodes, threshold, max_faulty)?;
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
-        let previous_committee = committee_set.previous_committee().cloned();
+        let (source_epoch, previous_committee) = if committee_set.pending_epoch_change().is_some() {
+            // Live reconfig
+            let source = committee_set.epoch();
+            (source, committee_set.committees().get(&source).cloned())
+        } else {
+            match epoch.checked_sub(1).and_then(|prev| {
+                committee_set
+                    .committees()
+                    .get(&prev)
+                    .cloned()
+                    .map(|c| (prev, c))
+            }) {
+                // Rotation recovery
+                Some((prev, committee)) => (prev, Some(committee)),
+                // Initial DKG
+                None => (committee_set.epoch(), None),
+            }
+        };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold) = build_reduced_nodes(prev_committee, allowed_delta)?;
+                let (nodes, threshold) =
+                    build_reduced_nodes(prev_committee, allowed_delta, weight_divisor)?;
                 (Some(nodes), Some(threshold))
             }
             None => (None, None),
@@ -146,6 +178,8 @@ impl DkgManager {
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
+            chain_id: chain_id.to_string(),
+            source_epoch,
             previous_output: None,
         };
         manager.load_stored_messages()?;
@@ -356,12 +390,25 @@ impl DkgManager {
         {
             let mut mgr = dkg_manager.write().unwrap();
             mgr.previous_output = Some(previous.clone());
-            // Clear state from previous round
+            // Clear DKG entries inserted by reconstruct_from_dkg_certificates.
+            // Without this, handle_send_messages_request rejects incoming
+            // rotation messages due to hash mismatch with stale DKG entries.
             mgr.dealer_messages.clear();
             mgr.dealer_outputs.clear();
             mgr.complaints_to_process.clear();
             mgr.message_responses.clear();
             mgr.complaint_responses.clear();
+            // Reload rotation messages from DB for restart recovery.
+            // For live rotation this is a no-op (no messages stored yet).
+            // For restart, this restores rotation messages that were
+            // loaded in the constructor but wiped by the clear above.
+            for (dealer, message) in mgr
+                .public_messages_store
+                .list_all_rotation_messages()
+                .map_err(|e| DkgError::StorageError(e.to_string()))?
+            {
+                mgr.dealer_messages.insert(dealer, message);
+            }
         }
         if is_member_of_previous_committee {
             // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
@@ -409,7 +456,7 @@ impl DkgManager {
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
         let results = send_to_many(
-            &dealer_data.recipients,
+            dealer_data.recipients.iter().copied(),
             dealer_data.request,
             |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
         )
@@ -587,7 +634,7 @@ impl DkgManager {
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
         let results = send_to_many(
-            &dealer_data.recipients,
+            dealer_data.recipients.iter().copied(),
             dealer_data.request,
             |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
         )
@@ -748,7 +795,13 @@ impl DkgManager {
                 p2p_channel,
             )
             .await?;
-            certified_share_indices.extend(dealer_share_indices);
+            // Only add indices not already tracked (avoids duplicates when
+            // the dealer phase already stored outputs for this node's own shares).
+            for idx in dealer_share_indices {
+                if !certified_share_indices.contains(&idx) {
+                    certified_share_indices.push(idx);
+                }
+            }
             certified_dealers.insert(dealer);
         }
         let output = {
@@ -1616,6 +1669,8 @@ impl DkgManager {
         &mut self,
         certificates: &[CertificateV1],
     ) -> DkgResult<DkgOutput> {
+        let source_session_id =
+            SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
         let mut certified_dealers = HashMap::new();
         for cert in certificates {
             let CertificateV1::Dkg(dkg_cert) = cert else {
@@ -1625,9 +1680,10 @@ impl DkgManager {
             };
             let msg = dkg_cert.message();
             let dealer_address = msg.dealer_address;
+            let source_epoch = self.source_epoch;
             let message = self
                 .public_messages_store
-                .get_dealer_message(&dealer_address)
+                .get_dealer_message(source_epoch, &dealer_address)
                 .map_err(|e| DkgError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     DkgError::StorageError(format!(
@@ -1635,7 +1691,7 @@ impl DkgManager {
                         dealer_address
                     ))
                 })?;
-            let messages = Messages::Dkg(message);
+            let messages = Messages::Dkg(message.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
                 return Err(DkgError::ProtocolFailed(format!(
@@ -1644,7 +1700,16 @@ impl DkgManager {
                 )));
             }
             self.dealer_messages.insert(dealer_address, messages);
-            self.process_certified_dkg_message(dealer_address)?;
+            let session_id = source_session_id
+                .dealer_session_id(&dealer_address)
+                .to_vec();
+            self.process_and_store_message(
+                session_id,
+                &message,
+                None,
+                DealerOutputsKey::Dkg(dealer_address),
+                ComplaintsToProcessKey::Dkg(dealer_address),
+            )?;
             certified_dealers.insert(dealer_address, cert.clone());
         }
         // Unlike normal flow which accumulates until threshold in a loop, reconstruction
@@ -1678,6 +1743,11 @@ impl DkgManager {
         certificates: &[CertificateV1],
         previous_threshold: u16,
     ) -> DkgResult<DkgOutput> {
+        let source_session_id = SessionId::new(
+            &self.chain_id,
+            self.source_epoch,
+            &ProtocolType::KeyRotation,
+        );
         // Each dealer only rotates their own shares from the previous epoch, so share indices
         // are unique across dealers (no duplicates in `certified_share_indices`).
         let mut certified_share_indices = Vec::new();
@@ -1689,9 +1759,10 @@ impl DkgManager {
             };
             let msg = rotation_cert.message();
             let dealer_address = msg.dealer_address;
+            let source_epoch = self.source_epoch;
             let rotation_msgs = self
                 .public_messages_store
-                .get_rotation_messages(&dealer_address)
+                .get_rotation_messages(source_epoch, &dealer_address)
                 .map_err(|e| DkgError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     DkgError::StorageError(format!(
@@ -1709,8 +1780,7 @@ impl DkgManager {
             }
             self.dealer_messages.insert(dealer_address, messages);
             for (share_index, message) in rotation_msgs {
-                let session_id = self
-                    .session_id
+                let session_id = source_session_id
                     .rotation_session_id(&dealer_address, share_index)
                     .to_vec();
                 let output_key = DealerOutputsKey::Rotation(share_index);
@@ -1798,7 +1868,7 @@ impl DkgManager {
                 .expect("key rotation requires epoch > 0");
             (previous_committee, epoch)
         };
-        let request = types::GetPublicDkgOutputRequest { epoch };
+        let request = GetPublicDkgOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
             .iter()
@@ -1903,6 +1973,7 @@ fn compute_bft_threshold(total_weight: u16) -> DkgResult<u16> {
 fn build_reduced_nodes(
     committee: &Committee,
     allowed_delta: u16,
+    test_weight_divisor: u16,
 ) -> DkgResult<(Nodes<EncryptionGroupElement>, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
@@ -1911,7 +1982,7 @@ fn build_reduced_nodes(
         .map(|(index, member)| Node {
             id: index as u16,
             pk: member.encryption_public_key().to_owned(),
-            weight: member.weight() as u16,
+            weight: (member.weight() as u16 / test_weight_divisor).max(1),
         })
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
@@ -1923,28 +1994,6 @@ fn build_reduced_nodes(
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
     let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
     Blake2b256::digest(&bytes).digest
-}
-
-async fn send_to_many<Req, Resp, F, Fut>(
-    recipients: &[Address],
-    request: Req,
-    send: F,
-) -> Vec<(Address, ChannelResult<Resp>)>
-where
-    Req: Clone + Send + Sync,
-    Resp: Send,
-    F: Fn(Address, Req) -> Fut + Clone + Send + Sync,
-    Fut: Future<Output = ChannelResult<Resp>> + Send,
-{
-    join_all(recipients.iter().map(|&addr| {
-        let req = request.clone();
-        let send = send.clone();
-        async move {
-            let result = with_timeout_and_retry(|| send(addr, req.clone())).await;
-            (addr, result)
-        }
-    }))
-    .await
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
@@ -1960,8 +2009,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::types::ProtocolType;
-    use crate::dkg::types::RotationMessages;
+    use crate::communication::ChannelResult;
+    use crate::mpc::types::GetPartialSignaturesRequest;
+    use crate::mpc::types::GetPartialSignaturesResponse;
+    use crate::mpc::types::ProtocolType;
+    use crate::mpc::types::RotationMessages;
     use crate::onchain::types::MemberInfo;
     use fastcrypto::encoding::Encoding;
     use fastcrypto::encoding::Hex;
@@ -1981,6 +2033,9 @@ mod tests {
 
     /// Use 0 for allowed_delta in tests to disable weight reduction.
     const TEST_ALLOWED_DELTA: u16 = 0;
+    /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
+    const TEST_WEIGHT_DIVISOR: u16 = 1;
+    const TEST_CHAIN_ID: &str = "testchain";
 
     struct MockPublicMessagesStore;
 
@@ -1993,7 +2048,11 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            _dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Ok(None)
         }
 
@@ -2011,6 +2070,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             _dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Ok(None)
@@ -2184,8 +2244,11 @@ mod tests {
             store: Box<dyn PublicMessagesStore>,
         ) -> DkgManager {
             let address = Address::new([validator_index as u8; 32]);
-            let session_id =
-                SessionId::new("testchain", self.committee_set.epoch(), &ProtocolType::Dkg);
+            let session_id = SessionId::new(
+                TEST_CHAIN_ID,
+                self.committee_set.epoch(),
+                &ProtocolType::Dkg,
+            );
             DkgManager::new(
                 address,
                 &self.committee_set,
@@ -2194,6 +2257,8 @@ mod tests {
                 self.signing_keys[validator_index].clone(),
                 store,
                 TEST_ALLOWED_DELTA,
+                TEST_CHAIN_ID,
+                None,
             )
             .unwrap()
         }
@@ -2203,7 +2268,11 @@ mod tests {
         }
 
         fn session_id(&self) -> SessionId {
-            SessionId::new("testchain", self.committee_set.epoch(), &ProtocolType::Dkg)
+            SessionId::new(
+                TEST_CHAIN_ID,
+                self.committee_set.epoch(),
+                &ProtocolType::Dkg,
+            )
         }
 
         fn committee(&self) -> &Committee {
@@ -2382,6 +2451,14 @@ mod tests {
                 })?;
             Ok(response)
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("MockP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct MockOrderedBroadcastChannel {
@@ -2510,6 +2587,14 @@ mod tests {
                 self.error_message.clone(),
             ))
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("FailingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct SucceedingP2PChannel {
@@ -2573,6 +2658,14 @@ mod tests {
             _request: &GetPublicDkgOutputRequest,
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("SucceedingP2PChannel does not implement get_public_dkg_output")
+        }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("SucceedingP2PChannel does not implement get_partial_signatures")
         }
     }
 
@@ -2662,6 +2755,14 @@ mod tests {
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("PartiallyFailingP2PChannel does not implement get_public_dkg_output")
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("PartiallyFailingP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     /// P2P channel that returns pre-collected complaint responses.
@@ -2718,6 +2819,14 @@ mod tests {
         ) -> ChannelResult<GetPublicDkgOutputResponse> {
             unimplemented!("PreCollectedP2PChannel does not implement get_public_dkg_output")
         }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("PreCollectedP2PChannel does not implement get_partial_signatures")
+        }
     }
 
     struct FailingOrderedBroadcastChannel {
@@ -2766,6 +2875,8 @@ mod tests {
             signing_key,
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
+            None,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -2825,6 +2936,8 @@ mod tests {
             signing_keys[0].clone(),
             Box::new(MockPublicMessagesStore),
             TEST_ALLOWED_DELTA,
+            "test",
+            None,
         );
 
         let err = match result {
@@ -2832,7 +2945,7 @@ mod tests {
             Ok(_) => panic!("Should fail with no committee for epoch"),
         };
         assert!(
-            err.to_string().contains("no committee for current epoch"),
+            err.to_string().contains("no committee for epoch"),
             "Error should mention missing committee"
         );
     }
@@ -2897,7 +3010,11 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Ok(self.stored.get(dealer).cloned())
         }
 
@@ -2920,6 +3037,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Ok(self.rotation_stored.get(dealer).cloned())
@@ -2945,7 +3063,11 @@ mod tests {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
-        fn get_dealer_message(&self, _dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            _dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Err(anyhow::anyhow!("Storage failure"))
         }
 
@@ -2963,6 +3085,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             _dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Err(anyhow::anyhow!("Storage failure"))
@@ -6103,7 +6226,11 @@ mod tests {
             Ok(())
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
+        fn get_dealer_message(
+            &self,
+            _epoch: u64,
+            dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
             Ok(self.stored.get(dealer).cloned())
         }
 
@@ -6126,6 +6253,7 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            _epoch: u64,
             dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
             Ok(self.rotation_stored.get(dealer).cloned())
@@ -6188,6 +6316,14 @@ mod tests {
             request: &GetPublicDkgOutputRequest,
         ) -> crate::communication::ChannelResult<GetPublicDkgOutputResponse> {
             self.inner.get_public_dkg_output(party, request).await
+        }
+
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> crate::communication::ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!("TrackingP2PChannel does not implement get_partial_signatures")
         }
     }
 
@@ -6441,6 +6577,20 @@ mod tests {
             self.certificates.values().cloned().collect()
         }
 
+        /// Sets previous_committee, previous_nodes, and previous_threshold on a
+        /// DKG manager so it can be used for rotation tests. In production, these
+        /// are set by DkgManager::new when pending_epoch_change is set.
+        fn prepare_for_rotation(&self, manager: &mut DkgManager) {
+            let previous_committee = self.setup.committee_set.previous_committee().cloned();
+            if let Some(ref prev) = previous_committee {
+                let (nodes, threshold) =
+                    build_reduced_nodes(prev, TEST_ALLOWED_DELTA, TEST_WEIGHT_DIVISOR).unwrap();
+                manager.previous_nodes = Some(nodes);
+                manager.previous_threshold = Some(threshold);
+            }
+            manager.previous_committee = previous_committee;
+        }
+
         /// Creates a manager that has completed DKG and is ready for rotation.
         fn create_receiver_with_completed_dkg(
             &self,
@@ -6464,6 +6614,7 @@ mod tests {
             receiver_manager.dealer_outputs.clear();
             receiver_manager.complaints_to_process.clear();
             receiver_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut receiver_manager);
 
             (receiver_manager, dkg_output)
         }
@@ -6496,6 +6647,7 @@ mod tests {
             receiver_manager.dealer_outputs.clear();
             receiver_manager.complaints_to_process.clear();
             receiver_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut receiver_manager);
 
             (receiver_manager, dkg_output)
         }
@@ -6522,6 +6674,7 @@ mod tests {
             dealer_manager.dealer_outputs.clear();
             dealer_manager.complaints_to_process.clear();
             dealer_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut dealer_manager);
 
             // Create rotation messages and store for reuse
             let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -6562,6 +6715,7 @@ mod tests {
             dealer_manager.dealer_outputs.clear();
             dealer_manager.complaints_to_process.clear();
             dealer_manager.message_responses.clear();
+            self.prepare_for_rotation(&mut dealer_manager);
 
             // Create rotation messages and store for reuse
             let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -6777,6 +6931,10 @@ mod tests {
         let (mut test_manager, test_dkg_output, _) =
             rotation_setup.create_rotation_dealer_with_memory_store(0);
         let test_addr = rotation_setup.setup.address(0);
+        // In this test, DKG was done at epoch 100 (current epoch). The constructor
+        // sets source_epoch = 99 (rotation recovery heuristic), but reconstruction
+        // needs the epoch at which DKG messages were actually created.
+        test_manager.source_epoch = rotation_setup.setup.epoch();
         test_manager.previous_output = Some(test_dkg_output.clone());
         let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -6961,11 +7119,12 @@ mod tests {
 
         let mut new_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
         new_committee_set
-            .set_epoch(epoch)
+            .set_epoch(epoch - 1)
+            .set_pending_epoch_change(Some(epoch))
             .set_committees(committees);
 
         // Create new member's DkgManager
-        let session_id = SessionId::new("testchain", epoch, &ProtocolType::Dkg);
+        let session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg);
         let new_member_manager = DkgManager::new(
             new_member_addr,
             &new_committee_set,
@@ -6974,6 +7133,8 @@ mod tests {
             new_member_signing_key,
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
+            None,
         )
         .unwrap();
 
@@ -7501,8 +7662,12 @@ mod tests {
                 .store_dealer_message(dealer, message)
         }
 
-        fn get_dealer_message(&self, dealer: &Address) -> anyhow::Result<Option<avss::Message>> {
-            self.inner.lock().unwrap().get_dealer_message(dealer)
+        fn get_dealer_message(
+            &self,
+            epoch: u64,
+            dealer: &Address,
+        ) -> anyhow::Result<Option<avss::Message>> {
+            self.inner.lock().unwrap().get_dealer_message(epoch, dealer)
         }
 
         fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
@@ -7522,9 +7687,13 @@ mod tests {
 
         fn get_rotation_messages(
             &self,
+            epoch: u64,
             dealer: &Address,
         ) -> anyhow::Result<Option<RotationMessages>> {
-            self.inner.lock().unwrap().get_rotation_messages(dealer)
+            self.inner
+                .lock()
+                .unwrap()
+                .get_rotation_messages(epoch, dealer)
         }
 
         fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
@@ -7562,6 +7731,7 @@ mod tests {
             // Clear state to prepare for rotation
             dealer_manager.dealer_messages.clear();
             dealer_manager.dealer_outputs.clear();
+            rotation_setup.prepare_for_rotation(&mut dealer_manager);
 
             // Create and store rotation messages
             let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -7591,10 +7761,11 @@ mod tests {
             .unwrap();
         new_dealer_manager.dealer_messages.clear();
         new_dealer_manager.dealer_outputs.clear();
+        rotation_setup.prepare_for_rotation(&mut new_dealer_manager);
 
         // Load rotation messages from store (simulating restart recovery)
         let stored_messages = shared_store
-            .get_rotation_messages(&dealer_addr)
+            .get_rotation_messages(0, &dealer_addr)
             .unwrap()
             .expect("Rotation messages should be in store");
 
@@ -7703,6 +7874,7 @@ mod tests {
         let mut party_manager = rotation_setup
             .setup
             .create_manager_with_store(party_index, Box::new(shared_store.clone()));
+        rotation_setup.prepare_for_rotation(&mut party_manager);
 
         // Verify rotation messages were loaded from store
         for dealer_addr in rotation_messages_map.keys() {

@@ -1,15 +1,17 @@
 use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
-use crate::dkg::types::ComplainRequest;
-use crate::dkg::types::ComplaintResponses;
-use crate::dkg::types::GetPublicDkgOutputRequest;
-use crate::dkg::types::GetPublicDkgOutputResponse;
-use crate::dkg::types::RetrieveMessagesRequest;
-use crate::dkg::types::RetrieveMessagesResponse;
-use crate::dkg::types::SendMessagesRequest;
-use crate::dkg::types::SendMessagesResponse;
 use crate::grpc::Client;
+use crate::mpc::types::ComplainRequest;
+use crate::mpc::types::ComplaintResponses;
+use crate::mpc::types::GetPartialSignaturesRequest;
+use crate::mpc::types::GetPartialSignaturesResponse;
+use crate::mpc::types::GetPublicDkgOutputRequest;
+use crate::mpc::types::GetPublicDkgOutputResponse;
+use crate::mpc::types::RetrieveMessagesRequest;
+use crate::mpc::types::RetrieveMessagesResponse;
+use crate::mpc::types::SendMessagesRequest;
+use crate::mpc::types::SendMessagesResponse;
 use crate::onchain::OnchainState;
 use async_trait::async_trait;
 use sui_sdk_types::Address;
@@ -79,6 +81,17 @@ impl P2PChannel for RpcP2PChannel {
     ) -> ChannelResult<GetPublicDkgOutputResponse> {
         self.get_client(party)?
             .get_public_dkg_output(request)
+            .await
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        party: &Address,
+        request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        self.get_client(party)?
+            .get_partial_signatures(self.epoch, request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
