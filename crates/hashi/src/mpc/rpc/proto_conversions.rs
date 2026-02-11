@@ -382,3 +382,52 @@ impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputRe
         })
     }
 }
+
+//
+// GetPartialSignaturesRequest
+//
+
+impl types::GetPartialSignaturesRequest {
+    pub fn to_proto(&self, epoch: u64) -> proto::GetPartialSignaturesRequest {
+        proto::GetPartialSignaturesRequest {
+            epoch: Some(epoch),
+            sui_request_id: Some(self.sui_request_id.to_string()),
+        }
+    }
+}
+
+impl TryFrom<&proto::GetPartialSignaturesRequest> for types::GetPartialSignaturesRequest {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::GetPartialSignaturesRequest) -> Result<Self, Self::Error> {
+        let sui_request_id = parse_address(
+            required(value.sui_request_id.as_ref(), "sui_request_id")?,
+            "sui_request_id",
+        )?;
+        Ok(Self { sui_request_id })
+    }
+}
+
+//
+// GetPartialSignaturesResponse
+//
+
+impl From<&types::GetPartialSignaturesResponse> for proto::GetPartialSignaturesResponse {
+    fn from(value: &types::GetPartialSignaturesResponse) -> Self {
+        Self {
+            partial_sigs: Some(serialize_bcs(&value.partial_sigs)),
+        }
+    }
+}
+
+impl TryFrom<&proto::GetPartialSignaturesResponse> for types::GetPartialSignaturesResponse {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &proto::GetPartialSignaturesResponse) -> Result<Self, Self::Error> {
+        let partial_sigs = deserialize_bcs(
+            required(value.partial_sigs.as_ref(), "partial_sigs")?,
+            "partial_sigs",
+        )?;
+        Ok(Self { partial_sigs })
+    }
+}

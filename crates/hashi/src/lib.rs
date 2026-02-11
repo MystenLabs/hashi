@@ -37,6 +37,7 @@ pub struct Hashi {
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
     dkg_manager: OnceLock<Arc<RwLock<mpc::DkgManager>>>,
+    signing_manager: OnceLock<Arc<RwLock<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
@@ -57,6 +58,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            signing_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
@@ -80,6 +82,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             dkg_manager: OnceLock::new(),
+            signing_manager: OnceLock::new(),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
@@ -115,6 +118,29 @@ impl Hashi {
                 let _ = self.dkg_manager.set(Arc::new(RwLock::new(manager)));
             }
         }
+    }
+
+    pub fn signing_manager(&self) -> Arc<RwLock<mpc::SigningManager>> {
+        self.signing_manager
+            .get()
+            .expect("SigningManager not initialized")
+            .clone()
+    }
+
+    pub fn init_signing_manager(&self, manager: mpc::SigningManager) {
+        self.signing_manager
+            .set(Arc::new(RwLock::new(manager)))
+            .map_err(|_| anyhow!("SigningManager already initialized"))
+            .unwrap();
+    }
+
+    pub fn set_signing_manager(&self, manager: mpc::SigningManager) {
+        *self
+            .signing_manager
+            .get()
+            .expect("SigningManager not initialized")
+            .write()
+            .unwrap() = manager;
     }
 
     pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {

@@ -7,6 +7,8 @@ use tonic_rustls::Endpoint;
 
 use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
+use crate::mpc::types::GetPartialSignaturesRequest;
+use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::GetPublicDkgOutputRequest;
 use crate::mpc::types::GetPublicDkgOutputResponse;
 use crate::mpc::types::RetrieveMessagesRequest;
@@ -130,6 +132,20 @@ impl Client {
             .get_public_dkg_output(proto_request)
             .await?;
         GetPublicDkgOutputResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    pub async fn get_partial_signatures(
+        &self,
+        epoch: u64,
+        request: &GetPartialSignaturesRequest,
+    ) -> Result<GetPartialSignaturesResponse> {
+        let proto_request = request.to_proto(epoch);
+        let response = self
+            .mpc_service_client()
+            .get_partial_signatures(proto_request)
+            .await?;
+        GetPartialSignaturesResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
