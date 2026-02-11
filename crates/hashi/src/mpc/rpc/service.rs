@@ -169,6 +169,9 @@ fn signing_error_to_status(err: SigningError) -> Status {
         SigningError::NotFound(_) => Status::not_found(err.to_string()),
         SigningError::CryptoError(_) => Status::internal(err.to_string()),
         SigningError::Timeout { .. } => Status::deadline_exceeded(err.to_string()),
+        SigningError::TooManyInvalidSignatures { .. } => {
+            Status::failed_precondition(err.to_string())
+        }
     }
 }
 

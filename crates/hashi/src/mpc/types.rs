@@ -417,6 +417,11 @@ pub enum SigningError {
 
     #[error("Signing timed out: collected {collected} partial sigs, need {threshold}")]
     Timeout { collected: usize, threshold: u16 },
+
+    #[error(
+        "Too many invalid partial signatures to recover: collected {collected}, threshold {threshold}"
+    )]
+    TooManyInvalidSignatures { collected: usize, threshold: u16 },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;
