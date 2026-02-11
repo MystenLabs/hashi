@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bitcoin.workspace = true
-serde.workspace = true
+clap.workspace = true
 hashi-guardian-shared = { path = "../hashi-guardian-shared" }
+serde.workspace = true
+serde_yaml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

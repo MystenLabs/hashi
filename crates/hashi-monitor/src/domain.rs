@@ -7,7 +7,8 @@
 //!
 //! Safety checks: for every event in E_{i+1}, there exists a corresponding event in E_i.
 //! Liveness checks: for every event in E_i, there exists a corresponding event in E_{i+1} within time `t`.
-//!     In addition, we also need to check that for every E3, there exists a corresponding BTC spend (E4).
+//!
+//! E3 triggers a BTC RPC check to verify the transaction exists on Bitcoin (liveness).
 //!
 //! For now, only information critical for security or liveness checks is added to the events.
 //! TODO: More info can be added later to the event fields, e.g., external_address, amount, etc.
@@ -58,7 +59,7 @@ pub struct E3SuiApproved {
     pub timestamp: UnixSeconds,
 }
 
-/// A unified view of withdrawal-related events.
+/// A unified view of events relevant to the withdrawal flow.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WithdrawalEvent {
     SuiInit(E1SuiInit),

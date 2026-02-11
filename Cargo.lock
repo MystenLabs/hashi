@@ -2690,8 +2690,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitcoin",
+ "clap",
  "hashi-guardian-shared",
  "serde",
+ "serde_yaml",
  "tracing",
  "tracing-subscriber",
 ]

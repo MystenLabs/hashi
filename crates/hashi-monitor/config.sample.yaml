@@ -1,0 +1,18 @@
+# Sample configuration for hashi-monitor
+
+# Liveness delay bounds (seconds)
+e1_e2_delay_secs: 300   # E1 (Sui init) -> E2 (Guardian approval)
+e2_e3_delay_secs: 300   # E2 (Guardian approval) -> E3 (Sui approval)
+e3_e4_delay_secs: 600   # E3 (Sui approval) -> BTC broadcast
+
+# Optional: extra slack for clock skew and ingestion jitter (default: 60s)
+# slack_secs: 60
+
+guardian:
+  s3_bucket: "hashi-guardian-logs"
+
+sui:
+  rpc_url: "https://fullnode.testnet.sui.io:443"
+
+btc:
+  rpc_url: "http://localhost:8332"
