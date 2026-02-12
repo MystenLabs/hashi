@@ -1,17 +1,14 @@
 //! Domain model for the monitor.
 //!
 //! We model the cross-system withdrawal flow as a sequence of event sets:
-//! - E1: Sui withdrawal initiation (user intent)
-//! - E2: Guardian approval
-//! - E3: Hashi approval (on Sui)
+//! - E1: Hashi approval event on sui (PendingWithdrawal creation)
+//! - E2: Guardian approval event on S3
+//! - E3: BTC tx broadcast
 //!
-//! Safety checks: for every event in E_{i+1}, there exists a corresponding event in E_i.
-//! Liveness checks: for every event in E_i, there exists a corresponding event in E_{i+1} within time `t`.
+//! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
+//! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 //!
-//! E3 triggers a BTC RPC check to verify the transaction exists on Bitcoin (liveness).
-//!
-//! For now, only information critical for security or liveness checks is added to the events.
-//! TODO: More info can be added later to the event fields, e.g., external_address, amount, etc.
+//! E2 also triggers a BTC RPC check to verify the transaction exists on Bitcoin.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -19,93 +16,117 @@ use std::fmt;
 use bitcoin::Txid;
 use hashi_guardian_shared::WithdrawalID;
 
-/// Unix timestamp (seconds).
-///
-/// Used for liveness checks ("event in E_{i+1} within time t").
 pub type UnixSeconds = u64;
 
-/// (E1) A Sui-side withdrawal initiation event.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct E1SuiInit {
-    /// Stable ID for the withdrawal request.
-    pub wid: WithdrawalID,
-    /// Unix timestamp of the cursor checkpoint in which this init appears.
-    pub timestamp: UnixSeconds,
+pub fn now_unix_seconds() -> UnixSeconds {
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
-/// (E2) Guardian signing and approval event.
+// TODO: Add external_address, amount, etc?
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct E2GuardianApproved {
+pub struct WithdrawalEvent {
+    /// Who produced the event?
+    source: EventType,
+
     /// Stable withdrawal identifier.
-    pub wid: WithdrawalID,
+    wid: WithdrawalID,
 
-    /// Bitcoin transaction id authorized by the Guardian.
-    pub btc_txid: Txid,
+    /// Unix timestamp of sui checkpoint / s3 log / btc block
+    timestamp: UnixSeconds,
 
-    /// Unix timestamp in the corresponding Guardian log record.
-    pub timestamp: UnixSeconds,
-}
-
-/// (E3) Hashi signing and approval event on Sui.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct E3SuiApproved {
-    /// Stable withdrawal identifier.
-    pub wid: WithdrawalID,
-
-    /// Bitcoin transaction id approved by Hashi and recorded on Sui.
-    pub btc_txid: Txid,
-
-    /// Unix timestamp of the cursor checkpoint in which approval appears.
-    pub timestamp: UnixSeconds,
-}
-
-/// A unified view of events relevant to the withdrawal flow.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WithdrawalEvent {
-    SuiInit(E1SuiInit),
-    GuardianApproved(E2GuardianApproved),
-    SuiApproved(E3SuiApproved),
+    /// btc txid
+    btc_txid: Txid,
 }
 
 impl WithdrawalEvent {
-    /// Unix timestamp (seconds) associated with this event.
+    pub fn new(
+        source: EventType,
+        wid: WithdrawalID,
+        timestamp: UnixSeconds,
+        btc_txid: Txid,
+    ) -> Self {
+        Self {
+            source,
+            wid,
+            timestamp,
+            btc_txid,
+        }
+    }
+
+    pub fn source(&self) -> &EventType {
+        &self.source
+    }
+    pub fn wid(&self) -> WithdrawalID {
+        self.wid
+    }
     pub fn timestamp(&self) -> UnixSeconds {
+        self.timestamp
+    }
+    pub fn btc_txid(&self) -> Txid {
+        self.btc_txid
+    }
+}
+
+/// Event source or type
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EventType {
+    E1HashiApproved,
+    E2GuardianApproved,
+    E3BtcConfirmed,
+}
+
+impl EventType {
+    pub(crate) fn successor(&self) -> Option<Self> {
         match self {
-            Self::SuiInit(e) => e.timestamp,
-            Self::GuardianApproved(e) => e.timestamp,
-            Self::SuiApproved(e) => e.timestamp,
+            EventType::E1HashiApproved => Some(EventType::E2GuardianApproved),
+            EventType::E2GuardianApproved => Some(EventType::E3BtcConfirmed),
+            EventType::E3BtcConfirmed => None,
+        }
+    }
+
+    pub(crate) fn predecessor(&self) -> Option<Self> {
+        match self {
+            EventType::E1HashiApproved => None,
+            EventType::E2GuardianApproved => Some(EventType::E1HashiApproved),
+            EventType::E3BtcConfirmed => Some(EventType::E2GuardianApproved),
         }
     }
 }
 
 /// Findings emitted by the monitor.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Finding {
-    /// Safety violation: observed an `E_{i+1}` event without a corresponding `E_i`.
-    /// The recorded event type implicitly tells us the missing predecessor's event type.
-    SafetyMissingPredecessor(WithdrawalEvent),
-
-    /// Liveness violation: observed an `E_{i}` event without a corresponding `E_{i+1}` after some delay.
-    /// The recorded event type implicitly tells us the missing successor's event type.
-    LivenessMissingSuccessor(WithdrawalEvent),
-
-    /// Use for all other internal errors.
-    InternalError {
-        /// The observed event that triggered the check.
-        observed: WithdrawalEvent,
-
-        /// The other event that conflicted with `observed`.
-        other: WithdrawalEvent,
-
-        /// Details of the finding
-        details: String,
-    },
+pub enum MonitorError {
+    InternalError(String),
 }
 
-impl fmt::Display for Finding {
+impl fmt::Display for MonitorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
-impl StdError for Finding {}
+impl StdError for MonitorError {}
+
+/// Per-source cursors tracking how far we've read from each data source.
+#[derive(Clone, Copy, Debug)]
+pub struct Cursors {
+    pub sui: UnixSeconds,
+    pub guardian: UnixSeconds,
+    pub btc: UnixSeconds,
+}
+
+impl Cursors {
+    pub fn for_event_type(&self, et: EventType) -> UnixSeconds {
+        match et {
+            EventType::E1HashiApproved => self.sui,
+            EventType::E2GuardianApproved => self.guardian,
+            EventType::E3BtcConfirmed => self.btc,
+        }
+    }
+}

@@ -1,22 +1,24 @@
 use std::path::Path;
 
+use crate::domain::EventType;
 use serde::Deserialize;
 
 /// Configuration for the cursorless batch auditor.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
-    /// Liveness delay bound for E1 -> E2.
+    /// Next event delay bound for E1 -> E2.
     pub e1_e2_delay_secs: u64,
 
-    /// Liveness delay bound for E2 -> E3.
+    /// Next event delay bound for E2 -> E3.
     pub e2_e3_delay_secs: u64,
 
-    /// Liveness delay bound for E3 -> E4.
-    pub e3_e4_delay_secs: u64,
+    /// E_{i+1} is allowed to occur up to clock_skew seconds before E_i (default: 60s).
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew: u64,
 
-    /// Extra slack to account for clock skew and ingestion jitter (default: 60s).
-    #[serde(default = "default_slack_secs")]
-    pub slack_secs: u64,
+    /// Poll interval for continuous auditor (default: 300s).
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
 
     pub guardian: GuardianConfig,
     pub sui: SuiConfig,
@@ -41,8 +43,12 @@ pub struct BtcConfig {
     pub rpc_url: String,
 }
 
-fn default_slack_secs() -> u64 {
+fn default_clock_skew() -> u64 {
     60
+}
+
+fn default_poll_interval_secs() -> u64 {
+    300 // 5 mins
 }
 
 impl Config {
@@ -50,5 +56,13 @@ impl Config {
         let bytes = std::fs::read(path)?;
         let cfg = serde_yaml::from_slice(&bytes)?;
         Ok(cfg)
+    }
+
+    pub fn next_event_delay(&self, source: EventType) -> Option<u64> {
+        match source {
+            EventType::E1HashiApproved => Some(self.e1_e2_delay_secs),
+            EventType::E2GuardianApproved => Some(self.e2_e3_delay_secs),
+            EventType::E3BtcConfirmed => None, // no next event
+        }
     }
 }

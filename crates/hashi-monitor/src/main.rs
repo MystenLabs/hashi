@@ -1,20 +1,38 @@
+use std::path::PathBuf;
+
 use clap::Parser;
+use clap::Subcommand;
 
 #[derive(Debug, Parser)]
 #[command(name = "hashi-monitor")]
 #[command(about = "Monitor correlating Hashi / Guardian / Sui events")]
 struct Cli {
-    /// Path to YAML config file.
-    #[arg(long)]
-    config: std::path::PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Start of audit window, as unix seconds.
-    #[arg(long)]
-    t1: u64,
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run a one-time batch audit over [t1, t2].
+    Batch {
+        /// Path to YAML config file.
+        #[arg(long)]
+        config: PathBuf,
 
-    /// End of audit window, as unix seconds.
-    #[arg(long)]
-    t2: u64,
+        /// Start of audit window, as unix seconds.
+        #[arg(long)]
+        t1: u64,
+
+        /// End of audit window, as unix seconds.
+        #[arg(long)]
+        t2: u64,
+    },
+    /// Run continuous monitoring.
+    Continuous {
+        /// Path to YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -22,9 +40,18 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let cfg = hashi_monitor::config::Config::load_yaml(&cli.config)?;
-
-    hashi_monitor::audit::run_audit(&cfg, cli.t1, cli.t2)?;
+    match cli.command {
+        Command::Batch { config, t1, t2 } => {
+            let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
+            let auditor = hashi_monitor::audit::BatchAuditor::new(cfg, t1, t2)?;
+            auditor.run()?;
+        }
+        Command::Continuous { config } => {
+            let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
+            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg);
+            auditor.run();
+        }
+    }
 
     Ok(())
 }

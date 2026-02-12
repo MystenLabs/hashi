@@ -1,10 +1,14 @@
 /// Normalized event types and findings.
 pub mod domain;
 
-/// Cursorless batch audit (CLI) helpers.
+/// Withdrawal state machine.
+pub mod state_machine;
+
+/// Auditor implementations.
 pub mod audit;
+
+/// RPC and S3 utilities.
+pub mod rpc;
 
 /// CLI config types.
 pub mod config;
-
-pub mod timeline;
