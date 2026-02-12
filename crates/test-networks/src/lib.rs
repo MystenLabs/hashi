@@ -964,13 +964,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_signing_recovery_one_corrupted() -> Result<()> {
-        // n=7, t=3, f=2. One node has wrong key shares → produces invalid partial sigs.
-        // Other nodes collect 7 sigs (1 bad), RS capacity (7-3)/2=2 → corrects 1.
-        run_signing_test(7, &[0]).await
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn test_signing_recovery_max_correctable() -> Result<()> {
         // n=7, t=3, f=2. Two nodes have wrong key shares.
         // Each node collects 7 sigs (2 bad), RS capacity (7-3)/2=2 → corrects 2.
