@@ -221,6 +221,9 @@ impl MpcManager {
                 self.store_rotation_messages(sender, msgs)?;
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
+            Messages::NonceGeneration { .. } => {
+                todo!("Nonce generation message handling")
+            }
         };
         let response = SendMessagesResponse { signature };
         self.message_responses.insert(sender, response.clone());
@@ -252,6 +255,9 @@ impl MpcManager {
             .get(&request.dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No message from dealer".into()))?;
         let responses = match messages {
+            Messages::NonceGeneration { .. } => {
+                todo!("Nonce generation complaint handling")
+            }
             Messages::Dkg(message) => {
                 let partial_output = self
                     .dealer_outputs
@@ -861,8 +867,8 @@ impl MpcManager {
     ) -> DkgResult<BLS12381Signature> {
         let message = match messages {
             Messages::Dkg(msg) => msg,
-            Messages::Rotation(_) => {
-                panic!("try_sign_dkg_message called with rotation messages")
+            Messages::Rotation(_) | Messages::NonceGeneration { .. } => {
+                panic!("try_sign_dkg_message called with non-DKG messages")
             }
         };
         let dealer_session_id = self.session_id.dealer_session_id(&dealer);
@@ -904,8 +910,8 @@ impl MpcManager {
             .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?
         {
             Messages::Dkg(msg) => msg.clone(),
-            Messages::Rotation(_) => {
-                panic!("process_certified_dkg_message called with rotation messages")
+            Messages::Rotation(_) | Messages::NonceGeneration { .. } => {
+                panic!("process_certified_dkg_message called with non-DKG messages")
             }
         };
         let session_id = self.session_id.dealer_session_id(&dealer).to_vec();
@@ -932,8 +938,8 @@ impl MpcManager {
             .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?
         {
             Messages::Rotation(msgs) => msgs.clone(),
-            Messages::Dkg(_) => {
-                panic!("process_certified_rotation_message called with DKG message")
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("process_certified_rotation_message called with non-rotation messages")
             }
         };
         for (share_index, message) in rotation_messages {
@@ -1256,7 +1262,7 @@ impl MpcManager {
                 .expect("cannot have complaint without message");
             let message = match messages {
                 Messages::Dkg(msg) => msg.clone(),
-                Messages::Rotation(_) => {
+                Messages::Rotation(_) | Messages::NonceGeneration { .. } => {
                     panic!("Expected DKG message in recover_shares_via_complaint");
                 }
             };
@@ -1277,8 +1283,8 @@ impl MpcManager {
                 };
             let complaint_response = match response {
                 ComplaintResponses::Dkg(resp) => resp,
-                ComplaintResponses::Rotation(_) => {
-                    tracing::info!("Unexpected rotation response in DKG complaint recovery");
+                ComplaintResponses::Rotation(_) | ComplaintResponses::NonceGeneration(_) => {
+                    tracing::info!("Unexpected non-DKG response in DKG complaint recovery");
                     continue;
                 }
             };
@@ -1355,9 +1361,9 @@ impl MpcManager {
                 Ok(response) => {
                     let rotation_responses = match response {
                         ComplaintResponses::Rotation(resps) => resps,
-                        ComplaintResponses::Dkg(_) => {
+                        ComplaintResponses::Dkg(_) | ComplaintResponses::NonceGeneration(_) => {
                             tracing::info!(
-                                "Unexpected DKG response in rotation complaint recovery"
+                                "Unexpected non-rotation response in rotation complaint recovery"
                             );
                             continue;
                         }
@@ -1451,8 +1457,8 @@ impl MpcManager {
             .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?;
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
-            Messages::Dkg(_) => {
-                panic!("prepare_rotation_complain_request called with DKG message")
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("prepare_rotation_complain_request called with non-rotation messages")
             }
         };
         let complained_shares: Vec<(ShareIndex, complaint::Complaint)> = self
@@ -1539,8 +1545,8 @@ impl MpcManager {
     ) -> DkgResult<BLS12381Signature> {
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
-            Messages::Dkg(_) => {
-                panic!("try_sign_rotation_messages called with DKG message")
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
         let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
@@ -1677,6 +1683,9 @@ impl MpcManager {
                     DkgError::InvalidConfig("Key rotation requires previous threshold".into())
                 })?;
                 self.reconstruct_from_rotation_certificates(certificates, previous_threshold)
+            }
+            Some(CertificateV1::NonceGeneration { .. }) => {
+                todo!("Reconstruct previous output from nonce generation certificates")
             }
         }
     }
@@ -5796,7 +5805,9 @@ mod tests {
         // Get the DKG message
         let dealer_message = match dealer_messages {
             Messages::Dkg(msg) => msg,
-            Messages::Rotation(_) => panic!("Expected DKG message in create_valid_complaint"),
+            Messages::Rotation(_) | Messages::NonceGeneration { .. } => {
+                panic!("Expected DKG message in create_valid_complaint")
+            }
         };
         let config = setup.dkg_config();
         let session_id = setup.session_id();
@@ -6823,7 +6834,9 @@ mod tests {
         // Get the rotation messages map from the enum
         let rotation_map = match &rotation_messages {
             Messages::Rotation(map) => map,
-            Messages::Dkg(_) => panic!("Expected rotation messages"),
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("Expected rotation messages")
+            }
         };
 
         // Verify outputs were stored (rotation_dealer has weight=3, so creates 3 rotation messages)
@@ -6946,7 +6959,9 @@ mod tests {
         // Tamper with bundle: add a message with a share_index that belongs to party 2 (index 6)
         let rotation_map = match &rotation_messages {
             Messages::Rotation(map) => map.clone(),
-            Messages::Dkg(_) => panic!("Expected rotation messages"),
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("Expected rotation messages")
+            }
         };
         let stolen_share_index = std::num::NonZeroU16::new(6).unwrap(); // Belongs to party 2, not party 0
         // Use any message as the content - the validation will fail on share_index ownership
@@ -7267,7 +7282,9 @@ mod tests {
         // Verify we have enough rotation messages for this test
         let rotation_map = match &rotation_messages {
             Messages::Rotation(map) => map,
-            Messages::Dkg(_) => panic!("Expected rotation messages"),
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("Expected rotation messages")
+            }
         };
         assert!(
             rotation_map.len() >= 3,
@@ -7427,7 +7444,9 @@ mod tests {
         // Get the rotation messages map
         let valid_rotation_map = match &valid_rotation_messages {
             Messages::Rotation(map) => map.clone(),
-            Messages::Dkg(_) => panic!("Expected rotation messages"),
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("Expected rotation messages")
+            }
         };
 
         // Get the share index and value for the first rotation message
@@ -7595,7 +7614,9 @@ mod tests {
         // Get the rotation messages map
         let valid_rotation_map = match &valid_rotation_messages {
             Messages::Rotation(map) => map.clone(),
-            Messages::Dkg(_) => panic!("Expected rotation messages"),
+            Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
+                panic!("Expected rotation messages")
+            }
         };
 
         // Get share info for the first rotation message
@@ -7681,7 +7702,9 @@ mod tests {
         // Response contains ALL shares from this dealer (if dealer cheated on one, reveal all)
         let rotation_responses = match &response {
             ComplaintResponses::Rotation(map) => map,
-            ComplaintResponses::Dkg(_) => panic!("Expected rotation complaint response"),
+            ComplaintResponses::Dkg(_) | ComplaintResponses::NonceGeneration(_) => {
+                panic!("Expected rotation complaint response")
+            }
         };
         // Dealer has weight=3, so 3 share indices, all should be in response
         assert_eq!(rotation_responses.len(), 3);

@@ -440,6 +440,9 @@ impl SuiTxExecutor {
         let (inner_cert, function_name) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert"),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert"),
+            CertificateV1::NonceGeneration { .. } => {
+                todo!("Nonce generation certificate submission")
+            }
         };
 
         let message = inner_cert.message();

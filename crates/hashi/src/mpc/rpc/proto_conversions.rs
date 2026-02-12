@@ -1,6 +1,7 @@
 use crate::mpc::types;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
@@ -82,6 +83,13 @@ impl types::SendMessagesRequest {
                     messages: rotation_messages_to_proto(messages),
                 })
             }
+            types::Messages::NonceGeneration {
+                batch_index,
+                message,
+            } => Messages::NonceMessage(proto::NonceMessage {
+                batch_index: Some(*batch_index),
+                message: Some(serialize_bcs(message)),
+            }),
         };
         proto::SendMessagesRequest {
             epoch: Some(epoch),
@@ -103,10 +111,19 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
             Some(Messages::RotationMessages(rotation)) => {
                 types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
             }
+            Some(Messages::NonceMessage(nonce)) => {
+                let batch_index = required(nonce.batch_index, "nonce_message.batch_index")?;
+                let message: batch_avss::Message = deserialize_bcs(
+                    required(nonce.message.as_ref(), "nonce_message.message")?,
+                    "nonce_message.message",
+                )?;
+                types::Messages::NonceGeneration {
+                    batch_index,
+                    message,
+                }
+            }
             None => {
-                return Err(TryFromProtoError::missing(
-                    "dkg_message or rotation_messages",
-                ));
+                return Err(TryFromProtoError::missing("messages"));
             }
         };
         Ok(Self { messages })
@@ -172,6 +189,13 @@ impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse 
                     messages: rotation_messages_to_proto(messages),
                 })
             }
+            types::Messages::NonceGeneration {
+                batch_index,
+                message,
+            } => Messages::NonceMessage(proto::NonceMessage {
+                batch_index: Some(*batch_index),
+                message: Some(serialize_bcs(message)),
+            }),
         };
         Self {
             messages: Some(messages),
@@ -192,10 +216,19 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
             Some(Messages::RotationMessages(rotation)) => {
                 types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
             }
+            Some(Messages::NonceMessage(nonce)) => {
+                let batch_index = required(nonce.batch_index, "nonce_message.batch_index")?;
+                let message: batch_avss::Message = deserialize_bcs(
+                    required(nonce.message.as_ref(), "nonce_message.message")?,
+                    "nonce_message.message",
+                )?;
+                types::Messages::NonceGeneration {
+                    batch_index,
+                    message,
+                }
+            }
             None => {
-                return Err(TryFromProtoError::missing(
-                    "dkg_message or rotation_messages",
-                ));
+                return Err(TryFromProtoError::missing("messages"));
             }
         };
         Ok(Self { messages })
@@ -287,6 +320,9 @@ impl From<&types::ComplaintResponses> for proto::ComplainResponse {
                     responses: rotation_responses_to_proto(responses),
                 })
             }
+            types::ComplaintResponses::NonceGeneration(response) => {
+                Responses::NonceResponse(serialize_bcs(response))
+            }
         };
         Self {
             responses: Some(responses),
@@ -310,9 +346,12 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
                     parse_rotation_responses_map(&rotation.responses)?,
                 ))
             }
-            None => Err(TryFromProtoError::missing(
-                "dkg_response or rotation_responses",
-            )),
+            Some(Responses::NonceResponse(nonce_response)) => {
+                let response: complaint::ComplaintResponse<batch_avss::SharesForNode> =
+                    deserialize_bcs(nonce_response, "nonce_response")?;
+                Ok(types::ComplaintResponses::NonceGeneration(response))
+            }
+            None => Err(TryFromProtoError::missing("responses")),
         }
     }
 }
