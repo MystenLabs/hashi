@@ -13,7 +13,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run a one-time batch audit over [t1, t2].
+    /// Run a one-time batch audit over [start, end].
     Batch {
         /// Path to YAML config file.
         #[arg(long)]
@@ -21,17 +21,21 @@ enum Command {
 
         /// Start of audit window, as unix seconds.
         #[arg(long)]
-        t1: u64,
+        start: u64,
 
         /// End of audit window, as unix seconds.
         #[arg(long)]
-        t2: u64,
+        end: u64,
     },
     /// Run continuous monitoring.
     Continuous {
         /// Path to YAML config file.
         #[arg(long)]
         config: PathBuf,
+
+        /// Start of audit period, as unix seconds.
+        #[arg(long)]
+        start: u64,
     },
 }
 
@@ -41,14 +45,14 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Batch { config, t1, t2 } => {
+        Command::Batch { config, start, end } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let auditor = hashi_monitor::audit::BatchAuditor::new(cfg, t1, t2)?;
+            let auditor = hashi_monitor::audit::BatchAuditor::new(cfg, start, end)?;
             auditor.run()?;
         }
-        Command::Continuous { config } => {
+        Command::Continuous { config, start } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg);
+            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg, start);
             auditor.run();
         }
     }

@@ -30,7 +30,7 @@ pub fn now_unix_seconds() -> UnixSeconds {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalEvent {
     /// Who produced the event?
-    source: EventType,
+    source: WithdrawalEventType,
 
     /// Stable withdrawal identifier.
     wid: WithdrawalID,
@@ -44,7 +44,7 @@ pub struct WithdrawalEvent {
 
 impl WithdrawalEvent {
     pub fn new(
-        source: EventType,
+        source: WithdrawalEventType,
         wid: WithdrawalID,
         timestamp: UnixSeconds,
         btc_txid: Txid,
@@ -57,7 +57,7 @@ impl WithdrawalEvent {
         }
     }
 
-    pub fn source(&self) -> &EventType {
+    pub fn source(&self) -> &WithdrawalEventType {
         &self.source
     }
     pub fn wid(&self) -> WithdrawalID {
@@ -73,26 +73,26 @@ impl WithdrawalEvent {
 
 /// Event source or type
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum EventType {
+pub enum WithdrawalEventType {
     E1HashiApproved,
     E2GuardianApproved,
     E3BtcConfirmed,
 }
 
-impl EventType {
+impl WithdrawalEventType {
     pub fn successor(&self) -> Option<Self> {
         match self {
-            EventType::E1HashiApproved => Some(EventType::E2GuardianApproved),
-            EventType::E2GuardianApproved => Some(EventType::E3BtcConfirmed),
-            EventType::E3BtcConfirmed => None,
+            WithdrawalEventType::E1HashiApproved => Some(WithdrawalEventType::E2GuardianApproved),
+            WithdrawalEventType::E2GuardianApproved => Some(WithdrawalEventType::E3BtcConfirmed),
+            WithdrawalEventType::E3BtcConfirmed => None,
         }
     }
 
     pub fn predecessor(&self) -> Option<Self> {
         match self {
-            EventType::E1HashiApproved => None,
-            EventType::E2GuardianApproved => Some(EventType::E1HashiApproved),
-            EventType::E3BtcConfirmed => Some(EventType::E2GuardianApproved),
+            WithdrawalEventType::E1HashiApproved => None,
+            WithdrawalEventType::E2GuardianApproved => Some(WithdrawalEventType::E1HashiApproved),
+            WithdrawalEventType::E3BtcConfirmed => Some(WithdrawalEventType::E2GuardianApproved),
         }
     }
 }
@@ -100,7 +100,19 @@ impl EventType {
 /// Findings emitted by the monitor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorError {
-    InternalError(String),
+    DuplicateEventForSameWid,
+    InvalidWid,
+    InvalidBtcTxid,
+    EventOccurredAfterDeadline {
+        event: WithdrawalEvent,
+        deadline: UnixSeconds,
+        occurred_at: UnixSeconds, // same as event.timestamp
+    },
+    ExpectedEventMissing {
+        event_type: WithdrawalEventType,
+        deadline: UnixSeconds,
+        cursor: UnixSeconds,
+    },
 }
 
 impl fmt::Display for MonitorError {
@@ -122,11 +134,11 @@ pub struct Cursors {
 }
 
 impl Cursors {
-    pub fn for_event_type(&self, et: EventType) -> UnixSeconds {
+    pub fn for_event_type(&self, et: WithdrawalEventType) -> UnixSeconds {
         match et {
-            EventType::E1HashiApproved => self.sui,
-            EventType::E2GuardianApproved => self.guardian,
-            EventType::E3BtcConfirmed => self.btc,
+            WithdrawalEventType::E1HashiApproved => self.sui,
+            WithdrawalEventType::E2GuardianApproved => self.guardian,
+            WithdrawalEventType::E3BtcConfirmed => self.btc,
         }
     }
 }

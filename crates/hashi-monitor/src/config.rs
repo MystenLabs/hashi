@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::domain::EventType;
+use crate::domain::WithdrawalEventType;
 use serde::Deserialize;
 
 /// Configuration for the cursorless batch auditor.
@@ -58,11 +58,11 @@ impl Config {
         Ok(cfg)
     }
 
-    pub fn next_event_delay(&self, source: EventType) -> Option<u64> {
+    pub fn next_event_delay(&self, source: WithdrawalEventType) -> Option<u64> {
         match source {
-            EventType::E1HashiApproved => Some(self.e1_e2_delay_secs),
-            EventType::E2GuardianApproved => Some(self.e2_e3_delay_secs),
-            EventType::E3BtcConfirmed => None, // no next event
+            WithdrawalEventType::E1HashiApproved => Some(self.e1_e2_delay_secs),
+            WithdrawalEventType::E2GuardianApproved => Some(self.e2_e3_delay_secs),
+            WithdrawalEventType::E3BtcConfirmed => None, // no next event
         }
     }
 }

@@ -12,19 +12,19 @@ Audits the cross-system withdrawal flow:
 - **Successor existence**: For every E1, E2 should occur within `e1_e2_delay_secs`. For every E2, E3 should occur within `e2_e3_delay_secs`.
 
 ### Two modes
-1. **Batch**: One-time audit over a time range `[t1, t2]`.
-2. **Continuous**: Long-running monitor that polls for new events.
+1. **Batch**: One-time audit over a time range `[start, end]`.
+2. **Continuous**: Intended long-running monitor that will poll for new events.
 
 ## Usage
 
 ### Batch audit
 ```bash
-cargo run -p hashi-monitor -- batch --config config.sample.yaml --t1 1700000000 --t2 1700003600
+cargo run -p hashi-monitor -- batch --config config.sample.yaml --start 1700000000 --end 1700003600
 ```
 
 ### Continuous monitoring
 ```bash
-cargo run -p hashi-monitor -- continuous --config config.sample.yaml
+cargo run -p hashi-monitor -- continuous --config config.sample.yaml --start 1700000000
 ```
 
 ## Config
@@ -52,5 +52,13 @@ btc:
 ```
 
 ## Status
-The CLI and audit logic are wired up. TODOs:
-- `rpc.rs`: Implement Sui RPC, Guardian S3, and BTC RPC integrations.
+This crate is currently a scaffold for a future full audit implementation.
+
+- Implemented now:
+  - Domain model and withdrawal state-machine checks.
+  - Batch/continuous auditor structure and CLI wiring.
+- Deferred to a follow-up PR:
+  - Sui event download/polling.
+  - Guardian S3 event download/polling.
+  - BTC confirmation lookup.
+  - `batch` and `continuous` are wired through the CLI but currently stop at deferred `todo!` implementation points.
