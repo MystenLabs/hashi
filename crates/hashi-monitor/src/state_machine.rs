@@ -139,8 +139,12 @@ impl WithdrawalStateMachine {
         if !self.expects(EventType::E3BtcConfirmed) {
             return None;
         }
-        let txid = self.btc_txid().expect("if there is an expectation for BTC tx, then btc_txid must exist");
-        let wid = self.wid().expect("if there is an expectation for BTC tx, then wid must exist");
+        let txid = self
+            .btc_txid()
+            .expect("if there is an expectation for BTC tx, then btc_txid must exist");
+        let wid = self
+            .wid()
+            .expect("if there is an expectation for BTC tx, then wid must exist");
 
         match crate::rpc::lookup_btc_confirmation(cfg, txid) {
             Ok(Some(block_time)) => {
