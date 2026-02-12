@@ -327,8 +327,8 @@ mod tests {
 
     fn read_dkg_config(nodes: &[HashiNodeHandle]) -> (Vec<NodeDkgInfo>, DkgConfig) {
         let (threshold, max_faulty, total_weight) = {
-            let dkg_mgr = nodes[0].hashi().dkg_manager().unwrap();
-            let mgr = dkg_mgr.read().unwrap();
+            let mpc_mgr = nodes[0].hashi().mpc_manager().unwrap();
+            let mgr = mpc_mgr.read().unwrap();
             (
                 mgr.dkg_config.threshold,
                 mgr.dkg_config.max_faulty,
@@ -338,8 +338,8 @@ mod tests {
         let node_infos: Vec<_> = nodes
             .iter()
             .map(|node| {
-                let dkg_mgr = node.hashi().dkg_manager().unwrap();
-                let mgr = dkg_mgr.read().unwrap();
+                let mpc_mgr = node.hashi().mpc_manager().unwrap();
+                let mgr = mpc_mgr.read().unwrap();
                 let share_ids = mgr.dkg_config.nodes.share_ids_of(mgr.party_id).unwrap();
                 NodeDkgInfo {
                     address: mgr.address,
@@ -402,8 +402,8 @@ mod tests {
                 cfg.max_faulty,
             );
             let committee = {
-                let dkg_mgr = node.hashi().dkg_manager().unwrap();
-                let mgr = dkg_mgr.read().unwrap();
+                let mpc_mgr = node.hashi().mpc_manager().unwrap();
+                let mgr = mpc_mgr.read().unwrap();
                 mgr.committee.clone()
             };
             let signing_manager = hashi::mpc::SigningManager::new(

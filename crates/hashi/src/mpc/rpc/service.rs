@@ -30,9 +30,9 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::SendMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let dkg_manager = self.dkg_manager()?;
+        let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = dkg_manager.write().unwrap();
+            let mut mgr = mpc_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
                 .map_err(dkg_error_to_status)
@@ -51,8 +51,8 @@ impl MpcService for HttpService {
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let dkg_manager = self.dkg_manager()?;
-            let mgr = dkg_manager.read().unwrap();
+            let mpc_manager = self.mpc_manager()?;
+            let mgr = mpc_manager.read().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_retrieve_messages_request(&internal_request)
                 .map_err(dkg_error_to_status)?
@@ -71,9 +71,9 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let dkg_manager = self.dkg_manager()?;
+        let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = dkg_manager.write().unwrap();
+            let mut mgr = mpc_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_complain_request(&internal_request)
                 .map_err(dkg_error_to_status)
@@ -92,8 +92,8 @@ impl MpcService for HttpService {
         let internal_request = types::GetPublicDkgOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let dkg_manager = self.dkg_manager()?;
-            let mgr = dkg_manager.read().unwrap();
+            let mpc_manager = self.mpc_manager()?;
+            let mgr = mpc_manager.read().unwrap();
             mgr.handle_get_public_dkg_output_request(&internal_request)
                 .map_err(dkg_error_to_status)?
         };
