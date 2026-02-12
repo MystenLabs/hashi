@@ -153,8 +153,8 @@ impl Monitor {
             MonitorMessage::ConfirmDeposit(pending_deposit) => {
                 self.confirm_deposit(pending_deposit);
             }
-            MonitorMessage::GetRecentFeeRate(percentile, result_tx) => {
-                self.get_recent_fee_rate(percentile, result_tx);
+            MonitorMessage::GetRecentFeeRate(conf_target, result_tx) => {
+                self.get_recent_fee_rate(conf_target, result_tx);
             }
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
                 self.broadcast_transaction(tx, result_tx);
@@ -198,10 +198,21 @@ impl Monitor {
 
     fn get_recent_fee_rate(
         &mut self,
-        _percentile: u32,
-        _result_tx: oneshot::Sender<Result<FeeRate>>,
+        conf_target: u16,
+        result_tx: oneshot::Sender<Result<FeeRate>>,
     ) {
-        todo!()
+        let result = self
+            .bitcoind_rpc
+            .estimate_smart_fee(conf_target, None)
+            .map_err(anyhow::Error::from)
+            .and_then(|res| {
+                let amount = res
+                    .fee_rate
+                    .ok_or_else(|| anyhow::anyhow!("Node could not estimate fee rate"))?;
+                // Convert from BTC/kvB to sat/kwu (1 kvB = 4 kwu).
+                Ok(FeeRate::from_sat_per_kwu(amount.to_sat() / 4))
+            });
+        let _ = result_tx.send(result);
     }
 
     fn broadcast_transaction(
@@ -449,10 +460,10 @@ impl MonitorClient {
         rx.await.map_err(|e| anyhow::anyhow!(e))?
     }
 
-    pub async fn get_recent_fee_rate(&self, percentile: u32) -> Result<FeeRate> {
+    pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(MonitorMessage::GetRecentFeeRate(percentile, tx))
+            .send(MonitorMessage::GetRecentFeeRate(conf_target, tx))
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         rx.await.map_err(|e| anyhow::anyhow!(e))?
@@ -474,10 +485,8 @@ enum MonitorMessage {
     // confirm indefinitely, unless the proivded channel is closed.
     ConfirmDeposit(PendingDeposit),
 
-    // Returns the Nth-percentile fee rate of confirmed transactions on the
-    // network, over the last several blocks.
-    // TODO: should lookback window be configurable?
-    GetRecentFeeRate(u32, oneshot::Sender<Result<FeeRate>>),
+    // Returns an estimated fee rate targeting confirmation within `conf_target` blocks.
+    GetRecentFeeRate(u16, oneshot::Sender<Result<FeeRate>>),
 
     // Broadcast a transaction to the network.
     BroadcastTransaction(bitcoin::Transaction, oneshot::Sender<Result<()>>),
