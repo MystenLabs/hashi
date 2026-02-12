@@ -314,6 +314,203 @@ mod tests {
             .collect()
     }
 
+    struct NodeDkgInfo {
+        address: sui_sdk_types::Address,
+        share_ids: Vec<ShareIndex>,
+    }
+
+    struct DkgConfig {
+        threshold: u16,
+        max_faulty: usize,
+        total_weight: u16,
+    }
+
+    fn read_dkg_config(nodes: &[HashiNodeHandle]) -> (Vec<NodeDkgInfo>, DkgConfig) {
+        let (threshold, max_faulty, total_weight) = {
+            let dkg_mgr = nodes[0].hashi().dkg_manager().unwrap();
+            let mgr = dkg_mgr.read().unwrap();
+            (
+                mgr.dkg_config.threshold,
+                mgr.dkg_config.max_faulty,
+                mgr.dkg_config.nodes.total_weight(),
+            )
+        };
+        let node_infos: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                let dkg_mgr = node.hashi().dkg_manager().unwrap();
+                let mgr = dkg_mgr.read().unwrap();
+                let share_ids = mgr.dkg_config.nodes.share_ids_of(mgr.party_id).unwrap();
+                NodeDkgInfo {
+                    address: mgr.address,
+                    share_ids,
+                }
+            })
+            .collect();
+        (
+            node_infos,
+            DkgConfig {
+                threshold,
+                max_faulty: max_faulty as usize,
+                total_weight,
+            },
+        )
+    }
+
+    /// Initialize SigningManagers on all nodes with mock key shares and presignatures.
+    /// Nodes at indices in `corrupt_node_indices` receive wrong key shares.
+    /// Returns the verifying key.
+    fn init_signing_managers(
+        nodes: &[HashiNodeHandle],
+        node_infos: &[NodeDkgInfo],
+        cfg: &DkgConfig,
+        corrupt_node_indices: &[usize],
+    ) -> G {
+        let mut rng = rand::thread_rng();
+        let n = cfg.total_weight;
+        let t = cfg.threshold;
+        let batch_size_per_weight: u16 = 5;
+
+        let sk = S::rand(&mut rng);
+        let vk = G::generator() * sk;
+        let all_sk_shares = mock_shares(&mut rng, sk, t, n);
+
+        // Wrong key shares for corrupted nodes.
+        let wrong_sk = S::rand(&mut rng);
+        let wrong_sk_shares = mock_shares(&mut rng, wrong_sk, t, n);
+
+        let nonces_for_dealer = mock_nonces_for_dealers(&mut rng, n, batch_size_per_weight, t, n);
+
+        for (node_idx, node) in nodes.iter().enumerate() {
+            let info = &node_infos[node_idx];
+            let shares_source = if corrupt_node_indices.contains(&node_idx) {
+                &wrong_sk_shares
+            } else {
+                &all_sk_shares
+            };
+            let key_shares = avss::SharesForNode {
+                shares: info
+                    .share_ids
+                    .iter()
+                    .map(|&sid| shares_source[u16::from(sid) as usize - 1].clone())
+                    .collect(),
+            };
+            let presignatures = mock_presignatures(
+                &nonces_for_dealer,
+                &info.share_ids,
+                batch_size_per_weight,
+                cfg.max_faulty,
+            );
+            let committee = {
+                let dkg_mgr = node.hashi().dkg_manager().unwrap();
+                let mgr = dkg_mgr.read().unwrap();
+                mgr.committee.clone()
+            };
+            let signing_manager = hashi::mpc::SigningManager::new(
+                info.address,
+                committee,
+                t,
+                key_shares,
+                vk,
+                presignatures,
+            );
+            node.hashi().init_signing_manager(signing_manager);
+        }
+        vk
+    }
+
+    /// Have all nodes call sign() concurrently, returning per-node results.
+    async fn sign_on_all_nodes(
+        nodes: &[HashiNodeHandle],
+        message: &'static [u8],
+        epoch: u64,
+    ) -> Vec<
+        hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
+    > {
+        let beacon_value = S::rand(&mut rand::thread_rng());
+        let sui_request_id = sui_sdk_types::Address::ZERO;
+        let sign_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                let signing_manager = node.hashi().signing_manager();
+                let onchain_state = node.hashi().onchain_state().clone();
+                let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
+                let beacon = beacon_value;
+                async move {
+                    hashi::mpc::SigningManager::sign(
+                        &signing_manager,
+                        &p2p_channel,
+                        sui_request_id,
+                        message,
+                        &beacon,
+                        None,
+                        SIGNING_TIMEOUT,
+                    )
+                    .await
+                }
+            })
+            .collect();
+        futures::future::join_all(sign_futures).await
+    }
+
+    fn assert_all_signatures_match(
+        results: Vec<
+            hashi::mpc::types::SigningResult<
+                fastcrypto::groups::secp256k1::schnorr::SchnorrSignature,
+            >,
+        >,
+    ) {
+        let mut signatures = Vec::new();
+        for (i, result) in results.into_iter().enumerate() {
+            let sig = result.unwrap_or_else(|e| panic!("Node {i} signing failed: {e}"));
+            signatures.push(sig);
+        }
+        let sig0_bytes = signatures[0].to_byte_array();
+        for (i, sig) in signatures.iter().enumerate().skip(1) {
+            assert_eq!(
+                sig0_bytes,
+                sig.to_byte_array(),
+                "Node {i} signature differs from node 0"
+            );
+        }
+    }
+
+    async fn run_signing_test(num_nodes: usize, corrupt_node_indices: &[usize]) -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(num_nodes)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let (node_infos, cfg) = read_dkg_config(nodes);
+        init_signing_managers(nodes, &node_infos, &cfg, corrupt_node_indices);
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+
+        let message: &[u8] = b"Hello, Hashi signing!";
+        let results = sign_on_all_nodes(nodes, message, epoch).await;
+        assert_all_signatures_match(results);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
@@ -762,143 +959,21 @@ mod tests {
 
     // TODO: Replace presigning simulation after presigning is completed.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_signing_e2e() -> Result<()> {
-        const TEST_NUM_NODES: usize = 4;
+    async fn test_signing_happy_path() -> Result<()> {
+        run_signing_test(4, &[]).await
+    }
 
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_signing_recovery_one_corrupted() -> Result<()> {
+        // n=7, t=3, f=2. One node has wrong key shares → produces invalid partial sigs.
+        // Other nodes collect 7 sigs (1 bad), RS capacity (7-3)/2=2 → corrects 1.
+        run_signing_test(7, &[0]).await
+    }
 
-        let test_networks = TestNetworksBuilder::new()
-            .with_nodes(TEST_NUM_NODES)
-            .build()
-            .await?;
-
-        // Wait for DKG so gRPC servers and onchain state are fully initialized.
-        let nodes = test_networks.hashi_network().nodes();
-        let mpc_key_futures: Vec<_> = nodes
-            .iter()
-            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
-            .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
-        }
-
-        // Read DKG config from each node's DkgManager.
-        let mut node_infos: Vec<(
-            /* party_id */ u16,
-            /* address */ sui_sdk_types::Address,
-            /* share_ids */ Vec<ShareIndex>,
-        )> = Vec::new();
-        let (threshold, max_faulty, total_weight) = {
-            let dkg_mgr = nodes[0].hashi().dkg_manager().unwrap();
-            let mgr = dkg_mgr.read().unwrap();
-            (
-                mgr.dkg_config.threshold,
-                mgr.dkg_config.max_faulty,
-                mgr.dkg_config.nodes.total_weight(),
-            )
-        };
-        for node in nodes {
-            let dkg_mgr = node.hashi().dkg_manager().unwrap();
-            let mgr = dkg_mgr.read().unwrap();
-            let share_ids = mgr.dkg_config.nodes.share_ids_of(mgr.party_id).unwrap();
-            node_infos.push((mgr.party_id, mgr.address, share_ids));
-        }
-
-        let n = total_weight;
-        let t = threshold;
-        let f = max_faulty as usize;
-        let batch_size_per_weight: u16 = 5;
-        let mut rng = rand::thread_rng();
-
-        // Fake signing key shares.
-        let sk = S::rand(&mut rng);
-        let vk = G::generator() * sk;
-        let all_sk_shares = mock_shares(&mut rng, sk, t, n);
-
-        // Fake nonce shares for presigning.
-        let nonces_for_dealer = mock_nonces_for_dealers(&mut rng, n, batch_size_per_weight, t, n);
-
-        // Build ReceiverOutputs per node and create Presignatures + SigningManager.
-        let epoch = nodes[0].hashi().onchain_state().epoch();
-        for (node_idx, node) in nodes.iter().enumerate() {
-            let (_party_id, address, ref share_ids) = node_infos[node_idx];
-            let key_shares = avss::SharesForNode {
-                shares: share_ids
-                    .iter()
-                    .map(|&sid| {
-                        // ShareIndex is 1-based; all_sk_shares is 0-indexed by share index - 1.
-                        all_sk_shares[u16::from(sid) as usize - 1].clone()
-                    })
-                    .collect(),
-            };
-            let presignatures =
-                mock_presignatures(&nonces_for_dealer, share_ids, batch_size_per_weight, f);
-            let committee = {
-                let dkg_mgr = node.hashi().dkg_manager().unwrap();
-                let mgr = dkg_mgr.read().unwrap();
-                mgr.committee.clone()
-            };
-            let signing_manager = hashi::mpc::SigningManager::new(
-                address,
-                committee,
-                t,
-                key_shares,
-                vk,
-                presignatures,
-            );
-            node.hashi().init_signing_manager(signing_manager);
-        }
-
-        // All nodes call sign() concurrently.
-        let message = b"Hello, Hashi signing!";
-        let beacon_value = S::rand(&mut rng);
-        let sui_request_id = sui_sdk_types::Address::ZERO;
-        let sign_futures: Vec<_> = nodes
-            .iter()
-            .map(|node| {
-                let signing_manager = node.hashi().signing_manager();
-                let onchain_state = node.hashi().onchain_state().clone();
-                let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
-                let beacon = beacon_value;
-                async move {
-                    hashi::mpc::SigningManager::sign(
-                        &signing_manager,
-                        &p2p_channel,
-                        sui_request_id,
-                        message,
-                        &beacon,
-                        None,
-                        SIGNING_TIMEOUT,
-                    )
-                    .await
-                }
-            })
-            .collect();
-
-        let results = futures::future::join_all(sign_futures).await;
-        let mut signatures = Vec::new();
-        for (i, result) in results.into_iter().enumerate() {
-            let sig = result.unwrap_or_else(|e| panic!("Node {i} signing failed: {e}"));
-            signatures.push(sig);
-        }
-
-        // All nodes should produce the same signature.
-        let sig0_bytes = signatures[0].to_byte_array();
-        for (i, sig) in signatures.iter().enumerate().skip(1) {
-            assert_eq!(
-                sig0_bytes,
-                sig.to_byte_array(),
-                "Node {i} signature differs from node 0"
-            );
-        }
-        Ok(())
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_signing_recovery_max_correctable() -> Result<()> {
+        // n=7, t=3, f=2. Two nodes have wrong key shares.
+        // Each node collects 7 sigs (2 bad), RS capacity (7-3)/2=2 → corrects 2.
+        run_signing_test(7, &[0, 1]).await
     }
 }

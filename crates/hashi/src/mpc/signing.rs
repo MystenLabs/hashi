@@ -262,6 +262,8 @@ fn aggregate_signatures_with_recovery(
     let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
     let decoder = RSDecoder::new(indices.clone(), threshold as usize);
     let coefficients = decoder.decode(&values)?;
+    // TODO: This re-interpolates a polynomial we have already decoded. Refactor `fastcrypto` to
+    // expose the constant term directly from the RS decoded message, avoiding redundant work.
     let poly = Poly::from(coefficients);
     let corrected_sigs: Vec<Eval<S>> = indices
         .iter()
@@ -600,7 +602,7 @@ mod tests {
                     &mgr.verifying_key,
                     None,
                 )
-                    .unwrap();
+                .unwrap();
                 mgr.partial_signing_outputs.insert(
                     request_id,
                     PartialSigningOutput {
@@ -762,8 +764,8 @@ mod tests {
             None,
             Duration::from_secs(30),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
     }
@@ -789,7 +791,7 @@ mod tests {
                 &mgr.verifying_key,
                 None,
             )
-                .unwrap();
+            .unwrap();
             mgr.partial_signing_outputs.insert(
                 req_id,
                 PartialSigningOutput {
@@ -810,8 +812,8 @@ mod tests {
             None,
             Duration::from_secs(30),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
     }
@@ -837,8 +839,8 @@ mod tests {
             None,
             Duration::from_secs(30),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
     }
@@ -864,8 +866,8 @@ mod tests {
             None,
             Duration::from_secs(30),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
     }
@@ -895,7 +897,7 @@ mod tests {
             None,
             Duration::from_secs(30),
         )
-            .await;
+        .await;
 
         assert!(
             matches!(result, Err(SigningError::TooManyInvalidSignatures { .. })),
@@ -930,7 +932,7 @@ mod tests {
             None,
             Duration::from_millis(1), // very short timeout
         )
-            .await;
+        .await;
 
         assert!(
             matches!(result, Err(SigningError::Timeout { .. })),
@@ -956,7 +958,7 @@ mod tests {
             &data.vk,
             None,
         )
-            .unwrap();
+        .unwrap();
 
         verify_schnorr(&data.vk, message, &sig);
     }
