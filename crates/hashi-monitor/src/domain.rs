@@ -7,8 +7,6 @@
 //!
 //! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
-//!
-//! E2 also triggers a BTC RPC check to verify the transaction exists on Bitcoin.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -82,7 +80,7 @@ pub enum EventType {
 }
 
 impl EventType {
-    pub(crate) fn successor(&self) -> Option<Self> {
+    pub fn successor(&self) -> Option<Self> {
         match self {
             EventType::E1HashiApproved => Some(EventType::E2GuardianApproved),
             EventType::E2GuardianApproved => Some(EventType::E3BtcConfirmed),
@@ -90,7 +88,7 @@ impl EventType {
         }
     }
 
-    pub(crate) fn predecessor(&self) -> Option<Self> {
+    pub fn predecessor(&self) -> Option<Self> {
         match self {
             EventType::E1HashiApproved => None,
             EventType::E2GuardianApproved => Some(EventType::E1HashiApproved),
@@ -118,6 +116,8 @@ impl StdError for MonitorError {}
 pub struct Cursors {
     pub sui: UnixSeconds,
     pub guardian: UnixSeconds,
+    // note: btc cursor is usually just the current time as we just do point queries;
+    // we define it for uniformity.
     pub btc: UnixSeconds,
 }
 
