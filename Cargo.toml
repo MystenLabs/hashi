@@ -10,7 +10,7 @@ sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b1601
 sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "b160100865f53f0ef8e9bc9c5ec51a74c2d2736a" }
 
 sui-http = "0.1.0"
-bitcoin = "0.32.7"
+bitcoin = { version = "0.32.7", features =["serde"] }
 bitcoincore-rpc = "0.19.0"
 
 # Dependencies for grpc and protobuf

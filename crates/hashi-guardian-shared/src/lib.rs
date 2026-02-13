@@ -3,7 +3,6 @@ pub mod crypto;
 pub mod epoch_store;
 pub mod errors;
 pub mod proto_conversions;
-pub mod s3_logger;
 pub mod test_utils;
 
 mod enclave_state;

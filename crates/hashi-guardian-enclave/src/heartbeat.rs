@@ -66,13 +66,13 @@ impl HeartbeatWriter {
 mod tests {
     use super::*;
 
+    use crate::s3_logger::S3Logger;
     use crate::OperatorInitTestArgs;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_guardian_shared::s3_logger::S3Logger;
     use hashi_guardian_shared::S3Config;
 
     fn mk_s3_logger(client: Client) -> S3Logger {

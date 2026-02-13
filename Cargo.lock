@@ -2652,6 +2652,8 @@ name = "hashi-guardian-enclave"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-credential-types",
  "aws-nitro-enclaves-nsm-api",
  "aws-sdk-s3",
  "aws-smithy-mocks",
@@ -2663,6 +2665,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_bytes",
+ "serde_json",
  "tokio",
  "tonic",
  "tracing",
@@ -2673,10 +2676,6 @@ dependencies = [
 name = "hashi-guardian-shared"
 version = "0.1.0"
 dependencies = [
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
- "aws-smithy-mocks",
  "bcs",
  "bitcoin",
  "blake2",
