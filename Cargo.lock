@@ -2557,8 +2557,11 @@ dependencies = [
  "backon",
  "base64ct",
  "bcs",
+ "bdk_chain",
+ "bdk_core",
  "bin-version",
  "bitcoin",
+ "bitcoincore-rpc",
  "blst",
  "bytes",
  "clap",
@@ -2567,9 +2570,9 @@ dependencies = [
  "fastcrypto-tbls",
  "fjall",
  "futures",
- "hashi-btc",
  "hashi-types",
  "hex",
+ "kyoto-cbf",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
@@ -2603,25 +2606,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "x509-parser",
-]
-
-[[package]]
-name = "hashi-btc"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "bdk_chain",
- "bdk_core",
- "bitcoin",
- "bitcoincore-rpc",
- "clap",
- "kyoto-cbf",
- "serde",
- "serde_derive",
- "sui-futures",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5365,7 +5349,6 @@ dependencies = [
  "fastcrypto-tbls",
  "futures",
  "hashi",
- "hashi-btc",
  "hashi-screener",
  "hashi-types",
  "prometheus",

@@ -15,7 +15,6 @@ COPY --from=busybox . /
 # Copy only manifests
 COPY Cargo.toml Cargo.lock /src/
 COPY crates/hashi/Cargo.toml /src/crates/hashi/Cargo.toml
-COPY crates/hashi-btc/Cargo.toml /src/crates/hashi-btc/Cargo.toml
 COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
 
 WORKDIR /src
@@ -24,8 +23,6 @@ WORKDIR /src
 RUN mkdir -p crates/hashi/src \
  && echo 'fn main(){}' > crates/hashi/src/main.rs \
  && touch crates/hashi/src/lib.rs \
- && mkdir -p crates/hashi-btc/src \
- && touch crates/hashi-btc/src/lib.rs \
  && mkdir -p crates/hashi-types/src \
  && touch crates/hashi-types/src/lib.rs
 
@@ -44,7 +41,6 @@ ARG GIT_REVISION=unknown
 ENV GIT_REVISION=${GIT_REVISION}
 
 COPY crates/hashi /src/crates/hashi
-COPY crates/hashi-btc /src/crates/hashi-btc
 COPY crates/hashi-types /src/crates/hashi-types
 
 # Touch source files to invalidate cargo's fingerprint cache for local crates

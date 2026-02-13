@@ -289,7 +289,7 @@ impl HashiNetworkBuilder {
             config.operator_private_key = Some(private_key.to_pem()?);
             config.sui_rpc = Some(sui_rpc.clone());
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
-            config.bitcoin_rpc_auth = Some(hashi_btc::config::BtcRpcAuth::UserPass(
+            config.bitcoin_rpc_auth = Some(hashi::btc_monitor::config::BtcRpcAuth::UserPass(
                 crate::bitcoin_node::RPC_USER.into(),
                 crate::bitcoin_node::RPC_PASSWORD.into(),
             ));

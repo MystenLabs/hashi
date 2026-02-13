@@ -11,7 +11,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::config::MonitorConfig;
+use super::config::MonitorConfig;
 
 /// Monitor loop that tracks the state of the Bitcoin chain.
 ///

@@ -15,7 +15,10 @@ hashi-types = { path = "../hashi-types" }
 
 # Bitcoin dependencies
 bitcoin.workspace = true
-hashi-btc = { path = "../hashi-btc" }
+bitcoincore-rpc.workspace = true
+bdk_chain = "0.23.1"
+bdk_core = "0.6.1"
+kyoto-cbf = "0.13.2"
 
 # Dependencies for the protobuf definitions
 tonic.workspace = true
