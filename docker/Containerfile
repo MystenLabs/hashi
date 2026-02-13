@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+
+FROM stagex/pallet-rust@sha256:84621c4c29330c8a969489671d46227a0a43f52cdae243f5b91e95781dbfe5ed AS pallet-rust
+FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
+FROM stagex/core-filesystem@sha256:da28831927652291b0fa573092fd41c8c96ca181ea224df7bff40e1833c3db13 AS core-filesystem
+
+#
+# Fetch stage: download dependencies (network access required)
+#
+FROM pallet-rust AS fetch
+
+# Shell needed by cc-based build scripts (blst, ring, etc.)
+COPY --from=busybox . /
+
+COPY Cargo.toml Cargo.lock /src/
+COPY crates /src/crates
+
+WORKDIR /src
+
+RUN ["cargo", "fetch", "--locked"]
+
+#
+# Build stage: compile the binary (no network access)
+#
+FROM fetch AS build
+
+ARG GIT_REVISION=unknown
+ENV GIT_REVISION=${GIT_REVISION}
+ENV TARGET=x86_64-unknown-linux-musl
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+
+RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
+
+#
+# Package stage: minimal runtime image
+#
+FROM core-filesystem
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi /usr/bin/hashi
+ENTRYPOINT ["/usr/bin/hashi"]
