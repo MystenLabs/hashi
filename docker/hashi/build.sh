@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
 IMAGE_NAME="${IMAGE_NAME:-hashi}"
 GIT_REVISION="$(git -C "$REPO_ROOT" describe --always --exclude '*' --dirty --abbrev=8)"
 IMAGE_TAG="${IMAGE_TAG:-${GIT_REVISION}}"
