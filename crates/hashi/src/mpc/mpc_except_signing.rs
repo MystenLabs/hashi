@@ -44,6 +44,7 @@ use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
@@ -89,6 +90,7 @@ pub struct MpcManager {
     /// The epoch from which to read previous messages during reconstruction.
     pub source_epoch: u64,
     previous_output: Option<DkgOutput>,
+    batch_size_per_weight: u16,
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
@@ -97,6 +99,7 @@ pub struct MpcManager {
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, ComplaintResponses>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
+    pub dealer_nonce_outputs: HashMap<Address, batch_avss::ReceiverOutput>,
 }
 
 impl MpcManager {
@@ -111,6 +114,7 @@ impl MpcManager {
         allowed_delta: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
+        batch_size_per_weight: u16,
     ) -> DkgResult<Self> {
         if weight_divisor.is_some() {
             assert!(
@@ -181,6 +185,8 @@ impl MpcManager {
             chain_id: chain_id.to_string(),
             source_epoch,
             previous_output: None,
+            batch_size_per_weight,
+            dealer_nonce_outputs: HashMap::new(),
         };
         manager.load_stored_messages()?;
         Ok(manager)
@@ -222,7 +228,9 @@ impl MpcManager {
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
             Messages::NonceGeneration { .. } => {
-                todo!("Nonce generation message handling")
+                self.dealer_messages
+                    .insert(sender, request.messages.clone());
+                self.try_sign_nonce_message(sender, &request.messages)?
             }
         };
         let response = SendMessagesResponse { signature };
@@ -255,9 +263,6 @@ impl MpcManager {
             .get(&request.dealer)
             .ok_or_else(|| DkgError::ProtocolFailed("No message from dealer".into()))?;
         let responses = match messages {
-            Messages::NonceGeneration { .. } => {
-                todo!("Nonce generation complaint handling")
-            }
             Messages::Dkg(message) => {
                 let partial_output = self
                     .dealer_outputs
@@ -334,6 +339,44 @@ impl MpcManager {
                     responses.insert(share_index, response);
                 }
                 ComplaintResponses::Rotation(responses)
+            }
+            Messages::NonceGeneration {
+                batch_index,
+                message,
+            } => {
+                let nonce_output =
+                    self.dealer_nonce_outputs
+                        .get(&request.dealer)
+                        .ok_or_else(|| {
+                            DkgError::ProtocolFailed("No nonce output for complained dealer".into())
+                        })?;
+                let dealer_party_id = self.committee.index_of(&request.dealer).ok_or_else(|| {
+                    DkgError::InvalidMessage {
+                        sender: request.dealer,
+                        reason: "Dealer not in committee".into(),
+                    }
+                })? as u16;
+                let base_sid = SessionId::new(
+                    &self.chain_id,
+                    self.dkg_config.epoch,
+                    &ProtocolType::NonceGeneration {
+                        batch_index: *batch_index,
+                    },
+                );
+                let dealer_session_id = base_sid.dealer_session_id(&request.dealer);
+                let receiver = batch_avss::Receiver::new(
+                    self.dkg_config.nodes.clone(),
+                    self.party_id,
+                    dealer_party_id,
+                    self.dkg_config.threshold,
+                    dealer_session_id.to_vec(),
+                    self.encryption_key.clone(),
+                    self.batch_size_per_weight,
+                )
+                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+                let complaint_response =
+                    receiver.handle_complaint(message, &request.complaint, nonce_output)?;
+                ComplaintResponses::NonceGeneration(complaint_response)
             }
         };
         self.complaint_responses
@@ -897,6 +940,63 @@ impl MpcManager {
             avss::ProcessedMessage::Complaint(_) => Err(DkgError::InvalidMessage {
                 sender: dealer,
                 reason: "Invalid shares".to_string(),
+            }),
+        }
+    }
+
+    fn try_sign_nonce_message(
+        &mut self,
+        dealer: Address,
+        messages: &Messages,
+    ) -> DkgResult<BLS12381Signature> {
+        let (batch_index, message) = match messages {
+            Messages::NonceGeneration {
+                batch_index,
+                message,
+            } => (*batch_index, message),
+            Messages::Dkg(_) | Messages::Rotation(_) => {
+                panic!("try_sign_nonce_message called with non-nonce messages")
+            }
+        };
+        let dealer_party_id =
+            self.committee
+                .index_of(&dealer)
+                .ok_or_else(|| DkgError::InvalidMessage {
+                    sender: dealer,
+                    reason: "Dealer not in committee".into(),
+                })? as u16;
+        let base_sid = SessionId::new(
+            &self.chain_id,
+            self.dkg_config.epoch,
+            &ProtocolType::NonceGeneration { batch_index },
+        );
+        let dealer_session_id = base_sid.dealer_session_id(&dealer);
+        let receiver = batch_avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            dealer_party_id,
+            self.dkg_config.threshold,
+            dealer_session_id.to_vec(),
+            self.encryption_key.clone(),
+            self.batch_size_per_weight,
+        )
+        .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        let result = receiver.process_message(message)?;
+        match result {
+            batch_avss::ProcessedMessage::Valid(output) => {
+                self.dealer_nonce_outputs.insert(dealer, output);
+                let nonce_message = DealerMessagesHash {
+                    dealer_address: dealer,
+                    messages_hash: compute_messages_hash(messages),
+                };
+                let signature =
+                    self.signing_key
+                        .sign(self.dkg_config.epoch, self.address, &nonce_message);
+                Ok(signature.signature().clone())
+            }
+            batch_avss::ProcessedMessage::Complaint(_) => Err(DkgError::InvalidMessage {
+                sender: dealer,
+                reason: "Invalid nonce shares".to_string(),
             }),
         }
     }
@@ -2109,6 +2209,7 @@ mod tests {
     /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
     const TEST_WEIGHT_DIVISOR: u16 = 1;
     const TEST_CHAIN_ID: &str = "testchain";
+    const TEST_BATCH_SIZE_PER_WEIGHT: u16 = 50;
 
     struct MockPublicMessagesStore;
 
@@ -2332,6 +2433,7 @@ mod tests {
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
                 None,
+                TEST_BATCH_SIZE_PER_WEIGHT,
             )
             .unwrap()
         }
@@ -2950,6 +3052,7 @@ mod tests {
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
         )
         .expect("Should create manager from CommitteeSet");
 
@@ -3011,6 +3114,7 @@ mod tests {
             TEST_ALLOWED_DELTA,
             "test",
             None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
         );
 
         let err = match result {
@@ -7214,6 +7318,7 @@ mod tests {
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
         )
         .unwrap();
 
@@ -8147,6 +8252,7 @@ mod tests {
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
         )
         .unwrap();
 
@@ -8240,6 +8346,7 @@ mod tests {
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
                 None,
+                TEST_BATCH_SIZE_PER_WEIGHT,
             )
             .unwrap();
             dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
@@ -8275,6 +8382,7 @@ mod tests {
                 TEST_ALLOWED_DELTA,
                 TEST_CHAIN_ID,
                 None,
+                TEST_BATCH_SIZE_PER_WEIGHT,
             )
             .unwrap();
             other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
@@ -8364,6 +8472,7 @@ mod tests {
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
         )
         .unwrap();
 
@@ -8395,5 +8504,755 @@ mod tests {
             !reconstructed.key_shares.shares.is_empty(),
             "Should have key shares from rotation reconstruction"
         );
+    }
+
+    fn create_nonce_dealer_message(
+        setup: &TestSetup,
+        dealer_index: usize,
+        batch_index: u32,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> Messages {
+        let config = setup.dkg_config();
+        let dealer_address = setup.address(dealer_index);
+        let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
+        let base_sid = SessionId::new(
+            TEST_CHAIN_ID,
+            setup.epoch(),
+            &ProtocolType::NonceGeneration { batch_index },
+        );
+        let dealer_session_id = base_sid.dealer_session_id(&dealer_address);
+        let dealer = batch_avss::Dealer::new(
+            config.nodes.clone(),
+            dealer_party_id,
+            config.threshold,
+            config.max_faulty,
+            dealer_session_id.to_vec(),
+            TEST_BATCH_SIZE_PER_WEIGHT,
+        )
+        .unwrap();
+        let message = dealer.create_message(rng).unwrap();
+        Messages::NonceGeneration {
+            batch_index,
+            message,
+        }
+    }
+
+    /// Creates a cheating nonce message that corrupts the encrypted shares for party 0.
+    fn create_cheating_nonce_message(
+        setup: &TestSetup,
+        dealer_index: usize,
+        batch_index: u32,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> Messages {
+        use fastcrypto::groups::GroupElement;
+        use fastcrypto::groups::secp256k1::ProjectivePoint;
+        use fastcrypto::hash::Sha3_512;
+        type S = <ProjectivePoint as GroupElement>::ScalarType;
+
+        let config = setup.dkg_config();
+        let dealer_address = setup.address(dealer_index);
+        let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
+        let base_sid = SessionId::new(
+            TEST_CHAIN_ID,
+            setup.epoch(),
+            &ProtocolType::NonceGeneration { batch_index },
+        );
+        let dealer_session_id = base_sid.dealer_session_id(&dealer_address);
+
+        let dealer_weight = config.nodes.weight_of(dealer_party_id).unwrap() as usize;
+        let batch_size = dealer_weight * TEST_BATCH_SIZE_PER_WEIGHT as usize;
+        let total_weight = config.nodes.total_weight();
+
+        // Create random polynomials (one per nonce in the batch)
+        let polynomials: Vec<Poly<S>> = (0..batch_size)
+            .map(|_| Poly::<S>::rand(config.threshold - 1, rng))
+            .collect();
+
+        // Compute full public keys (g^{secret_l} for each nonce)
+        let full_public_keys: Vec<ProjectivePoint> = polynomials
+            .iter()
+            .map(|p| ProjectivePoint::generator() * p.c0())
+            .collect();
+
+        // Blinding polynomial
+        let blinding_poly = Poly::<S>::rand(config.threshold - 1, rng);
+        let blinding_commit = ProjectivePoint::generator() * blinding_poly.c0();
+
+        // Evaluate all polynomials at all share indices
+        let share_evals: Vec<_> = polynomials
+            .iter()
+            .map(|p| p.eval_range(total_weight))
+            .collect();
+        let blinding_evals = blinding_poly.eval_range(total_weight);
+
+        // Build pk_and_msgs: encrypt SharesForNode for each party
+        let mut pk_and_msgs: Vec<_> = config
+            .nodes
+            .iter()
+            .map(|node| {
+                let share_ids = config.nodes.share_ids_of(node.id).unwrap();
+                let shares_for_node = batch_avss::SharesForNode {
+                    shares: share_ids
+                        .into_iter()
+                        .map(|index| batch_avss::ShareBatch {
+                            index,
+                            batch: share_evals.iter().map(|evals| evals[index]).collect(),
+                            blinding_share: blinding_evals[index],
+                        })
+                        .collect(),
+                };
+                (node.pk.clone(), bcs::to_bytes(&shares_for_node).unwrap())
+            })
+            .collect();
+
+        // Corrupt party 0's plaintext (flip one bit before encryption)
+        pk_and_msgs[0].1[7] ^= 1;
+
+        // Encrypt with the corrupted plaintext
+        let random_oracle = RandomOracle::new(&Hex::encode(dealer_session_id.to_vec()));
+        let ciphertext = MultiRecipientEncryption::encrypt(
+            &pk_and_msgs,
+            &random_oracle.extend("encryption"),
+            rng,
+        );
+
+        // Compute challenge: hash(full_public_keys, blinding_commit, ciphertext)
+        let challenge_oracle = random_oracle.extend("challenge");
+        let inner_hash = Sha3_512::digest(
+            bcs::to_bytes(&(full_public_keys.clone(), &blinding_commit, &ciphertext)).unwrap(),
+        )
+        .digest;
+        let challenge: Vec<S> = (0..batch_size)
+            .map(|l| challenge_oracle.evaluate_to_group_element(&(l, inner_hash.to_vec())))
+            .collect();
+
+        // Compute response polynomial: blinding_poly + sum(p_l * gamma_l)
+        // Using eval_range then interpolate (same approach as the original code)
+        let blinding_evals_t = blinding_poly
+            .eval_range(total_weight)
+            .take(config.threshold);
+        let response_evals = share_evals
+            .into_iter()
+            .map(|e| e.take(config.threshold))
+            .zip(challenge.iter())
+            .fold(blinding_evals_t, |acc, (p_l, gamma_l)| acc + p_l * gamma_l);
+        // Convert EvalRange to Vec<Eval> for interpolation
+        let eval_points: Vec<_> = (1..=config.threshold)
+            .map(|i| {
+                let idx = ShareIndex::new(i).unwrap();
+                fastcrypto_tbls::types::IndexedValue {
+                    index: idx,
+                    value: response_evals[idx],
+                }
+            })
+            .collect();
+        let response_polynomial = Poly::<S>::interpolate(&eval_points).unwrap();
+
+        let message = bcs::from_bytes::<batch_avss::Message>(
+            &bcs::to_bytes(&(
+                full_public_keys,
+                blinding_commit,
+                ciphertext,
+                response_polynomial,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        Messages::NonceGeneration {
+            batch_index,
+            message,
+        }
+    }
+
+    /// Creates a complaint for a nonce message by decrypting with a wrong key.
+    fn create_nonce_complaint(
+        setup: &TestSetup,
+        nonce_messages: &Messages,
+        complainer_party_id: u16,
+        dealer_index: usize,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> complaint::Complaint {
+        let (batch_index, message) = match nonce_messages {
+            Messages::NonceGeneration {
+                batch_index,
+                message,
+            } => (*batch_index, message),
+            _ => panic!("Expected NonceGeneration message"),
+        };
+        let config = setup.dkg_config();
+        let dealer_address = setup.address(dealer_index);
+        let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
+        let base_sid = SessionId::new(
+            TEST_CHAIN_ID,
+            setup.epoch(),
+            &ProtocolType::NonceGeneration { batch_index },
+        );
+        let dealer_session_id = base_sid.dealer_session_id(&dealer_address);
+        let wrong_key = PrivateKey::<EncryptionGroupElement>::new(rng);
+        let receiver = batch_avss::Receiver::new(
+            config.nodes.clone(),
+            complainer_party_id,
+            dealer_party_id,
+            config.threshold,
+            dealer_session_id.to_vec(),
+            wrong_key,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+        )
+        .unwrap();
+        match receiver.process_message(message).unwrap() {
+            batch_avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint with wrong key"),
+        }
+    }
+
+    /// Send a message via handle_send_messages_request and assert success.
+    fn send_and_assert_ok(
+        receiver: &mut MpcManager,
+        dealer_address: Address,
+        messages: &Messages,
+    ) -> SendMessagesResponse {
+        let request = SendMessagesRequest {
+            messages: messages.clone(),
+        };
+        let response = receiver
+            .handle_send_messages_request(dealer_address, &request)
+            .unwrap();
+        assert!(!response.signature.as_ref().is_empty());
+        response
+    }
+
+    /// Send a message and assert it returns an equivocation error.
+    fn send_and_assert_equivocation(
+        receiver: &mut MpcManager,
+        dealer_address: Address,
+        messages: &Messages,
+    ) {
+        let request = SendMessagesRequest {
+            messages: messages.clone(),
+        };
+        let result = receiver.handle_send_messages_request(dealer_address, &request);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DkgError::InvalidMessage { sender, reason } => {
+                assert_eq!(sender, dealer_address);
+                assert!(
+                    reason.contains("different messages"),
+                    "Expected equivocation error, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected InvalidMessage error, got: {:?}", other),
+        }
+    }
+
+    /// Retrieve a dealer's messages and verify hash matches.
+    fn retrieve_and_verify_hash(
+        manager: &MpcManager,
+        dealer_address: Address,
+        expected_messages: &Messages,
+    ) {
+        let request = RetrieveMessagesRequest {
+            dealer: dealer_address,
+        };
+        let response = manager.handle_retrieve_messages_request(&request).unwrap();
+        assert_eq!(
+            compute_messages_hash(&response.messages),
+            compute_messages_hash(expected_messages),
+        );
+    }
+
+    /// Complain and assert "No message from dealer" error.
+    fn complain_and_assert_no_message(
+        manager: &mut MpcManager,
+        dealer_address: Address,
+        complaint: complaint::Complaint,
+        share_index: Option<ShareIndex>,
+    ) {
+        let request = ComplainRequest {
+            dealer: dealer_address,
+            share_index,
+            complaint,
+        };
+        let result = manager.handle_complain_request(&request);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(
+            err.to_string().contains("No message from dealer"),
+            "Expected 'No message from dealer', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_handle_send_messages_request_rotation() {
+        let rotation_setup = RotationTestSetup::new();
+
+        // Create rotation dealer (party 0)
+        let dealer_idx = 0;
+        let (_, dealer_dkg_output, rotation_messages) =
+            rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        // Create receiver (party 2) with completed DKG
+        let receiver_idx = 2;
+        let (mut receiver, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
+        receiver.previous_output = Some(receiver_dkg_output);
+
+        let _ = dealer_dkg_output;
+        let response = send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
+        assert!(!response.signature.as_ref().is_empty());
+    }
+
+    #[test]
+    fn test_handle_send_messages_request_rotation_idempotent() {
+        let rotation_setup = RotationTestSetup::new();
+
+        let dealer_idx = 0;
+        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        let receiver_idx = 2;
+        let (mut receiver, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
+        receiver.previous_output = Some(receiver_dkg_output);
+
+        let response1 = send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
+        // Second call with identical request → cached response
+        let request = SendMessagesRequest {
+            messages: rotation_messages.clone(),
+        };
+        let response2 = receiver
+            .handle_send_messages_request(dealer_addr, &request)
+            .unwrap();
+        assert_eq!(response1.signature, response2.signature);
+    }
+
+    #[test]
+    fn test_handle_send_messages_request_rotation_equivocation() {
+        let rotation_setup = RotationTestSetup::new();
+
+        let dealer_idx = 0;
+        let (_, _, rotation_messages1) = rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        // Create a second, different rotation dealer message from the same party
+        let (_, _, rotation_messages2) = rotation_setup.create_rotation_dealer(dealer_idx);
+
+        let receiver_idx = 2;
+        let (mut receiver, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
+        receiver.previous_output = Some(receiver_dkg_output);
+
+        // First succeeds
+        send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages1);
+        // Second with different messages → equivocation error
+        send_and_assert_equivocation(&mut receiver, dealer_addr, &rotation_messages2);
+    }
+
+    #[test]
+    fn test_handle_retrieve_messages_request_rotation_success() {
+        let rotation_setup = RotationTestSetup::new();
+
+        let dealer_idx = 0;
+        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        let receiver_idx = 2;
+        let (mut receiver, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
+        receiver.previous_output = Some(receiver_dkg_output);
+
+        send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
+        retrieve_and_verify_hash(&receiver, dealer_addr, &rotation_messages);
+    }
+
+    #[test]
+    fn test_handle_complain_request_rotation_no_message_from_dealer() {
+        let rotation_setup = RotationTestSetup::new();
+        let mut rng = rand::thread_rng();
+
+        let dealer_idx = 0;
+        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        let share_index = match &rotation_messages {
+            Messages::Rotation(map) => *map.keys().next().unwrap(),
+            _ => unreachable!(),
+        };
+
+        // Create receiver with completed DKG but WITHOUT receiving dealer message
+        let receiver_idx = 2;
+        let (mut receiver, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
+        receiver.previous_output = Some(receiver_dkg_output.clone());
+
+        // Build a complaint using wrong key
+        let session_id = receiver
+            .session_id
+            .rotation_session_id(&dealer_addr, share_index);
+        let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
+        let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let Messages::Rotation(map) = &rotation_messages else {
+            unreachable!()
+        };
+        let msg = map.get(&share_index).unwrap();
+        let avss_receiver = avss::Receiver::new(
+            receiver.dkg_config.nodes.clone(),
+            receiver.party_id,
+            receiver.dkg_config.threshold,
+            session_id.to_vec(),
+            commitment,
+            wrong_key,
+        );
+        let complaint = match avss_receiver.process_message(msg).unwrap() {
+            avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint with wrong key"),
+        };
+
+        complain_and_assert_no_message(&mut receiver, dealer_addr, complaint, Some(share_index));
+    }
+
+    #[test]
+    fn test_handle_complain_request_rotation_no_output() {
+        let rotation_setup = RotationTestSetup::new();
+        let mut rng = rand::thread_rng();
+
+        let dealer_idx = 0;
+        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        let share_index = match &rotation_messages {
+            Messages::Rotation(map) => *map.keys().next().unwrap(),
+            _ => unreachable!(),
+        };
+
+        let receiver_idx = 2;
+        let (mut receiver, receiver_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
+        receiver.previous_output = Some(receiver_dkg_output.clone());
+
+        // Insert dealer messages but do NOT process them (no dealer_outputs)
+        receiver
+            .dealer_messages
+            .insert(dealer_addr, rotation_messages.clone());
+
+        // Build complaint
+        let session_id = receiver
+            .session_id
+            .rotation_session_id(&dealer_addr, share_index);
+        let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
+        let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+        let Messages::Rotation(map) = &rotation_messages else {
+            unreachable!()
+        };
+        let msg = map.get(&share_index).unwrap();
+        let avss_receiver = avss::Receiver::new(
+            receiver.dkg_config.nodes.clone(),
+            receiver.party_id,
+            receiver.dkg_config.threshold,
+            session_id.to_vec(),
+            commitment,
+            wrong_key,
+        );
+        let complaint = match avss_receiver.process_message(msg).unwrap() {
+            avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint with wrong key"),
+        };
+
+        let request = ComplainRequest {
+            dealer: dealer_addr,
+            share_index: Some(share_index),
+            complaint,
+        };
+        let result = receiver.handle_complain_request(&request);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(
+            err.to_string().contains("No output for complained share"),
+            "Expected 'No output for complained share', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_handle_complain_request_rotation_caches_response() {
+        let rotation_setup = RotationTestSetup::new();
+        let mut rng = rand::thread_rng();
+
+        // Create victim party who will generate a complaint
+        let victim_idx = 2;
+        let (victim_manager, victim_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(victim_idx);
+
+        // Create rotation dealer with a cheating message
+        let dealer_idx = 0;
+        let (_, dealer_dkg_output, valid_rotation_messages) =
+            rotation_setup.create_rotation_dealer(dealer_idx);
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+        let valid_rotation_map = match &valid_rotation_messages {
+            Messages::Rotation(map) => map.clone(),
+            _ => unreachable!(),
+        };
+        let first_share_index = *valid_rotation_map.keys().next().unwrap();
+        let share_value = dealer_dkg_output
+            .key_shares
+            .shares
+            .iter()
+            .find(|s| s.index == first_share_index)
+            .map(|s| s.value)
+            .unwrap();
+
+        let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
+            &rotation_setup.setup,
+            &victim_manager.session_id,
+            &dealer_addr,
+            share_value,
+            first_share_index,
+            victim_idx as u16,
+            &mut rng,
+        );
+
+        let mut cheating_map = valid_rotation_map.clone();
+        cheating_map.insert(cheating_share_index, cheating_message.clone());
+        let cheating_messages = Messages::Rotation(cheating_map);
+
+        // Victim builds complaint
+        let session_id = victim_manager
+            .session_id
+            .rotation_session_id(&dealer_addr, first_share_index);
+        let commitment = victim_dkg_output
+            .commitments
+            .get(&first_share_index)
+            .copied();
+        let receiver = avss::Receiver::new(
+            victim_manager.dkg_config.nodes.clone(),
+            victim_manager.party_id,
+            victim_manager.dkg_config.threshold,
+            session_id.to_vec(),
+            commitment,
+            victim_manager.encryption_key.clone(),
+        );
+        let complaint = match receiver.process_message(&cheating_message).unwrap() {
+            avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint from corrupted share"),
+        };
+
+        // Responder processes the cheating messages successfully (their shares are valid)
+        let responder_idx = 1;
+        let (mut responder, responder_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(responder_idx);
+        responder.previous_output = Some(responder_dkg_output.clone());
+        responder
+            .dealer_messages
+            .insert(dealer_addr, cheating_messages.clone());
+        responder
+            .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &cheating_messages)
+            .unwrap();
+
+        let request = ComplainRequest {
+            dealer: dealer_addr,
+            share_index: Some(first_share_index),
+            complaint: complaint.clone(),
+        };
+
+        // First call computes and caches
+        let response1 = responder.handle_complain_request(&request).unwrap();
+        assert_eq!(responder.complaint_responses.len(), 1);
+
+        // Second call returns cached
+        let response2 = responder.handle_complain_request(&request).unwrap();
+        assert_eq!(
+            bcs::to_bytes(&response1).unwrap(),
+            bcs::to_bytes(&response2).unwrap(),
+            "Second call should return cached response"
+        );
+        assert_eq!(responder.complaint_responses.len(), 1);
+    }
+
+    #[test]
+    fn test_handle_send_messages_request_nonce() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+        let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+
+        let mut receiver = setup.create_manager(0);
+        send_and_assert_ok(&mut receiver, dealer_addr, &nonce_messages);
+    }
+
+    #[test]
+    fn test_handle_send_messages_request_nonce_idempotent() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+        let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+
+        let mut receiver = setup.create_manager(0);
+        let response1 = send_and_assert_ok(&mut receiver, dealer_addr, &nonce_messages);
+
+        let request = SendMessagesRequest {
+            messages: nonce_messages.clone(),
+        };
+        let response2 = receiver
+            .handle_send_messages_request(dealer_addr, &request)
+            .unwrap();
+        assert_eq!(response1.signature, response2.signature);
+    }
+
+    #[test]
+    fn test_handle_send_messages_request_nonce_equivocation() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+        let nonce_messages1 = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+        let nonce_messages2 = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+
+        let mut receiver = setup.create_manager(0);
+        send_and_assert_ok(&mut receiver, dealer_addr, &nonce_messages1);
+        send_and_assert_equivocation(&mut receiver, dealer_addr, &nonce_messages2);
+    }
+
+    #[test]
+    fn test_handle_retrieve_messages_request_nonce_success() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+        let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+
+        let mut receiver = setup.create_manager(0);
+        send_and_assert_ok(&mut receiver, dealer_addr, &nonce_messages);
+        retrieve_and_verify_hash(&receiver, dealer_addr, &nonce_messages);
+    }
+
+    #[test]
+    fn test_handle_complain_request_nonce_no_message_from_dealer() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+        let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+
+        // Create complaint using wrong key
+        let complaint = create_nonce_complaint(&setup, &nonce_messages, 0, dealer_idx, &mut rng);
+
+        // Receiver has no message from this dealer
+        let mut receiver = setup.create_manager(0);
+        complain_and_assert_no_message(&mut receiver, dealer_addr, complaint, None);
+    }
+
+    #[test]
+    fn test_handle_complain_request_nonce_no_output() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+        let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+
+        let complaint = create_nonce_complaint(&setup, &nonce_messages, 0, dealer_idx, &mut rng);
+
+        // Insert message manually without processing (no nonce_outputs)
+        let mut receiver = setup.create_manager(0);
+        receiver
+            .dealer_messages
+            .insert(dealer_addr, nonce_messages.clone());
+
+        let request = ComplainRequest {
+            dealer: dealer_addr,
+            share_index: None,
+            complaint,
+        };
+        let result = receiver.handle_complain_request(&request);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(
+            err.to_string()
+                .contains("No nonce output for complained dealer"),
+            "Expected nonce output error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_handle_complain_request_nonce_caches_response() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+
+        // Create cheating nonce message (corrupts party 0's shares)
+        let cheating_messages = create_cheating_nonce_message(&setup, dealer_idx, 0, &mut rng);
+
+        // Party 0 processes the cheating message → gets complaint
+        let Messages::NonceGeneration {
+            batch_index,
+            ref message,
+        } = cheating_messages
+        else {
+            unreachable!()
+        };
+        let config = setup.dkg_config();
+        let dealer_party_id = setup.committee().index_of(&dealer_addr).unwrap() as u16;
+        let base_sid = SessionId::new(
+            TEST_CHAIN_ID,
+            setup.epoch(),
+            &ProtocolType::NonceGeneration { batch_index },
+        );
+        let dealer_session_id = base_sid.dealer_session_id(&dealer_addr);
+        let receiver0 = batch_avss::Receiver::new(
+            config.nodes.clone(),
+            0, // party 0
+            dealer_party_id,
+            config.threshold,
+            dealer_session_id.to_vec(),
+            setup.encryption_keys[0].clone(),
+            TEST_BATCH_SIZE_PER_WEIGHT,
+        )
+        .unwrap();
+        let complaint = match receiver0.process_message(message).unwrap() {
+            batch_avss::ProcessedMessage::Complaint(c) => c,
+            _ => panic!("Expected complaint from corrupted nonce shares"),
+        };
+
+        // Party 2 processes the same cheating message → valid output (their shares are fine)
+        let mut party2 = setup.create_manager(2);
+        send_and_assert_ok(&mut party2, dealer_addr, &cheating_messages);
+        assert!(party2.dealer_nonce_outputs.contains_key(&dealer_addr));
+
+        let request = ComplainRequest {
+            dealer: dealer_addr,
+            share_index: None,
+            complaint: complaint.clone(),
+        };
+
+        // First call → computes and caches
+        let response1 = party2.handle_complain_request(&request).unwrap();
+        assert_eq!(party2.complaint_responses.len(), 1);
+        assert!(party2.complaint_responses.contains_key(&dealer_addr));
+
+        // Second call → returns cached
+        let response2 = party2.handle_complain_request(&request).unwrap();
+        assert_eq!(
+            bcs::to_bytes(&response1).unwrap(),
+            bcs::to_bytes(&response2).unwrap(),
+            "Second call should return cached response"
+        );
+        assert_eq!(party2.complaint_responses.len(), 1);
     }
 }
