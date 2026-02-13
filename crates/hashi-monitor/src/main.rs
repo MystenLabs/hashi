@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::Subcommand;
+use hashi_monitor::domain::now_unix_seconds;
 
 #[derive(Debug, Parser)]
 #[command(name = "hashi-monitor")]
@@ -23,9 +24,9 @@ enum Command {
         #[arg(long)]
         start: u64,
 
-        /// End of audit window, as unix seconds.
+        /// End of audit window, as unix seconds. Defaults to current time.
         #[arg(long)]
-        end: u64,
+        end: Option<u64>,
     },
     /// Run continuous monitoring.
     Continuous {
@@ -39,7 +40,8 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     init_tracing_subscriber(false);
 
     let cli = Cli::parse();
@@ -47,13 +49,27 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Batch { config, start, end } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let auditor = hashi_monitor::audit::BatchAuditor::new(cfg, start, end)?;
-            auditor.run()?;
+            let end = end.unwrap_or_else(now_unix_seconds);
+            let mut auditor = hashi_monitor::audit::BatchAuditor::new(cfg, start, end)?;
+            auditor
+                .run()
+                .await
+                .unwrap_or_else(|e| panic!("infra failure: {e:#}"));
+
+            if !auditor.findings.is_empty() {
+                let msg = auditor
+                    .findings
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(anyhow::anyhow!("findings:\n{msg}"));
+            }
         }
         Command::Continuous { config, start } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
             let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg, start);
-            auditor.run();
+            auditor.run().await;
         }
     }
 

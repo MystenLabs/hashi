@@ -2740,6 +2740,7 @@ dependencies = [
  "hashi-guardian-shared",
  "serde",
  "serde_yaml",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

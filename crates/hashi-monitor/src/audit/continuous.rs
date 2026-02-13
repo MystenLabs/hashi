@@ -20,7 +20,7 @@ impl ContinuousAuditor {
         todo!("set cursor appropriately given the start time")
     }
 
-    pub fn run(&mut self) {
+    pub async fn run(&mut self) {
         todo!("implement me")
     }
 }
