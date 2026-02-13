@@ -1,5 +1,5 @@
 [package]
-name = "test-networks"
+name = "e2e-tests"
 version = "0.0.0"
 edition = "2024"
 

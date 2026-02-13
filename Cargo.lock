@@ -1921,6 +1921,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "e2e-tests"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64ct",
+ "bitcoin",
+ "bitcoincore-rpc",
+ "fastcrypto",
+ "fastcrypto-tbls",
+ "futures",
+ "hashi",
+ "hashi-screener",
+ "hashi-types",
+ "prometheus",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sui-crypto",
+ "sui-futures",
+ "sui-rpc",
+ "sui-sdk-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.14.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5335,36 +5365,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "test-networks"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "base64ct",
- "bitcoin",
- "bitcoincore-rpc",
- "fastcrypto",
- "fastcrypto-tbls",
- "futures",
- "hashi",
- "hashi-screener",
- "hashi-types",
- "prometheus",
- "rand 0.8.5",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "sui-crypto",
- "sui-futures",
- "sui-rpc",
- "sui-sdk-types",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
