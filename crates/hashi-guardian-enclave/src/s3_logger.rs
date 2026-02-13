@@ -1,8 +1,8 @@
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
-use hashi_guardian_shared::S3BucketInfo;
-use hashi_guardian_shared::S3Config;
+use hashi_types::guardian::S3BucketInfo;
+use hashi_types::guardian::S3Config;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -12,8 +12,8 @@ use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
-use hashi_guardian_shared::GuardianError::S3Error;
-use hashi_guardian_shared::GuardianResult;
+use hashi_types::guardian::GuardianError::S3Error;
+use hashi_types::guardian::GuardianResult;
 use serde::Serialize;
 use tracing::info;
 
@@ -258,7 +258,7 @@ mod tests {
         let config = S3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
-            bucket_info: hashi_guardian_shared::S3BucketInfo {
+            bucket_info: hashi_types::guardian::S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
             },

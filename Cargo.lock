@@ -2568,7 +2568,6 @@ dependencies = [
  "fjall",
  "futures",
  "hashi-btc",
- "hashi-guardian-shared",
  "hashi-types",
  "hex",
  "prometheus",
@@ -2658,7 +2657,6 @@ dependencies = [
  "aws-sdk-s3",
  "aws-smithy-mocks",
  "bitcoin",
- "hashi-guardian-shared",
  "hashi-types",
  "hpke",
  "k256",
@@ -2670,29 +2668,6 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "hashi-guardian-shared"
-version = "0.1.0"
-dependencies = [
- "bcs",
- "bitcoin",
- "blake2",
- "ed25519-consensus",
- "fastcrypto",
- "fastcrypto-tbls",
- "hashi-types",
- "hpke",
- "k256",
- "miniscript 13.0.0",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sui-sdk-types",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2726,22 +2701,32 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bcs",
+ "bitcoin",
+ "blake2",
  "bytes",
+ "ed25519-consensus",
  "ed25519-dalek",
  "fastcrypto",
  "fastcrypto-tbls",
+ "hpke",
+ "k256",
+ "miniscript 13.0.0",
  "proptest",
  "prost",
  "prost-types",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "serde",
  "serde_derive",
+ "serde_json",
  "sui-crypto",
  "sui-rpc",
  "sui-sdk-types",
  "test-strategy",
+ "tokio",
  "tonic",
  "tonic-prost",
+ "tracing",
 ]
 
 [[package]]
