@@ -187,7 +187,14 @@ impl CommitteeSet {
         }
 
         // replace info
-        info_entry.insert_entry(info);
+        match info_entry {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(info);
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(info);
+            }
+        }
     }
 
     pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {
