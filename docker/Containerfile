@@ -5,29 +5,54 @@ FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c
 FROM stagex/core-filesystem@sha256:da28831927652291b0fa573092fd41c8c96ca181ea224df7bff40e1833c3db13 AS core-filesystem
 
 #
-# Fetch stage: download dependencies (network access required)
+# Deps stage: fetch and compile external dependencies (cached until Cargo.toml/Cargo.lock change)
 #
-FROM pallet-rust AS fetch
+FROM pallet-rust AS deps
 
 # Shell needed by cc-based build scripts (blst, ring, etc.)
 COPY --from=busybox . /
 
+# Copy only manifests
 COPY Cargo.toml Cargo.lock /src/
-COPY crates /src/crates
+COPY crates/hashi/Cargo.toml /src/crates/hashi/Cargo.toml
+COPY crates/hashi-btc/Cargo.toml /src/crates/hashi-btc/Cargo.toml
+COPY crates/hashi-guardian-shared/Cargo.toml /src/crates/hashi-guardian-shared/Cargo.toml
+COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
 
 WORKDIR /src
 
-RUN ["cargo", "fetch", "--locked"]
+# Create stub source files so cargo can resolve and compile all external deps
+RUN mkdir -p crates/hashi/src \
+ && echo 'fn main(){}' > crates/hashi/src/main.rs \
+ && touch crates/hashi/src/lib.rs \
+ && mkdir -p crates/hashi-btc/src \
+ && touch crates/hashi-btc/src/lib.rs \
+ && mkdir -p crates/hashi-guardian-shared/src \
+ && touch crates/hashi-guardian-shared/src/lib.rs \
+ && mkdir -p crates/hashi-types/src \
+ && touch crates/hashi-types/src/lib.rs
+
+ENV TARGET=x86_64-unknown-linux-musl
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+
+RUN cargo fetch
+RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
 
 #
-# Build stage: compile the binary (no network access)
+# Build stage: compile with real source (only local crates recompile)
 #
-FROM fetch AS build
+FROM deps AS build
 
 ARG GIT_REVISION=unknown
 ENV GIT_REVISION=${GIT_REVISION}
-ENV TARGET=x86_64-unknown-linux-musl
-ENV RUSTFLAGS="-C target-feature=+crt-static"
+
+COPY crates/hashi /src/crates/hashi
+COPY crates/hashi-btc /src/crates/hashi-btc
+COPY crates/hashi-guardian-shared /src/crates/hashi-guardian-shared
+COPY crates/hashi-types /src/crates/hashi-types
+
+# Touch source files to invalidate cargo's fingerprint cache for local crates
+RUN find crates/ -name "*.rs" -exec touch {} +
 
 RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
 
