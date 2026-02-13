@@ -1,5 +1,5 @@
 use crate::Enclave;
-use hashi_guardian_shared::*;
+use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 

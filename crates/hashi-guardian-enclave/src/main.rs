@@ -3,12 +3,12 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
-use hashi_guardian_shared::bitcoin_utils::construct_signing_messages;
-use hashi_guardian_shared::bitcoin_utils::sign_btc_tx;
-use hashi_guardian_shared::bitcoin_utils::TxUTXOs;
-use hashi_guardian_shared::crypto::Share;
-use hashi_guardian_shared::GuardianError::InvalidInputs;
-use hashi_guardian_shared::*;
+use hashi_types::guardian::bitcoin_utils::construct_signing_messages;
+use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
+use hashi_types::guardian::bitcoin_utils::TxUTXOs;
+use hashi_types::guardian::crypto::Share;
+use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
 use std::sync::Arc;
@@ -30,8 +30,8 @@ mod withdraw;
 use crate::heartbeat::HeartbeatWriter;
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
-use hashi_guardian_shared::epoch_store::ConsecutiveEpochStore;
 use hashi_types::committee::Committee as HashiCommittee;
+use hashi_types::guardian::epoch_store::ConsecutiveEpochStore;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
@@ -628,7 +628,7 @@ pub fn mock_logger() -> S3Logger {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_guardian_shared::S3Config;
+    use hashi_types::guardian::S3Config;
 
     // For unit tests we only need PutObject to succeed, because `sign_and_log()` calls `S3Logger::write()`.
     // The `then_output` helper creates a "simple" rule that repeats indefinitely.

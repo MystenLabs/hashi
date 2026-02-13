@@ -1,50 +1,50 @@
-use crate::bitcoin_utils::sign_btc_tx;
-use crate::bitcoin_utils::InputUTXO;
-use crate::bitcoin_utils::OutputUTXO;
-use crate::bitcoin_utils::TxUTXOs;
-use crate::bitcoin_utils::BTC_LIB;
-use crate::Ciphertext;
-use crate::CommitteeStore;
-use crate::EncPubKey;
-use crate::EncryptedShare;
-use crate::GetGuardianInfoResponse;
-use crate::GuardianInfo;
-use crate::GuardianSigned;
-use crate::HashiCommittee;
-use crate::HashiCommitteeMember;
-use crate::HashiSigned;
-use crate::OperatorInitRequest;
-use crate::ProvisionerInitRequest;
-use crate::ProvisionerInitState;
-use crate::RateLimiter;
-use crate::S3BucketInfo;
-use crate::S3Config;
-use crate::SetupNewKeyRequest;
-use crate::SetupNewKeyResponse;
-use crate::ShareCommitment;
-use crate::StandardWithdrawalRequest;
-use crate::StandardWithdrawalResponse;
-use crate::WithdrawalConfig;
-use crate::WithdrawalState;
-use crate::NUM_OF_SHARES;
+use super::Ciphertext;
+use super::CommitteeStore;
+use super::EncPubKey;
+use super::EncryptedShare;
+use super::GetGuardianInfoResponse;
+use super::GuardianInfo;
+use super::GuardianSigned;
+use super::HashiCommittee;
+use super::HashiCommitteeMember;
+use super::HashiSigned;
+use super::NUM_OF_SHARES;
+use super::OperatorInitRequest;
+use super::ProvisionerInitRequest;
+use super::ProvisionerInitState;
+use super::RateLimiter;
+use super::S3BucketInfo;
+use super::S3Config;
+use super::SetupNewKeyRequest;
+use super::SetupNewKeyResponse;
+use super::ShareCommitment;
+use super::StandardWithdrawalRequest;
+use super::StandardWithdrawalResponse;
+use super::WithdrawalConfig;
+use super::WithdrawalState;
+use super::bitcoin_utils::BTC_LIB;
+use super::bitcoin_utils::InputUTXO;
+use super::bitcoin_utils::OutputUTXO;
+use super::bitcoin_utils::TxUTXOs;
+use super::bitcoin_utils::sign_btc_tx;
+use crate::committee::Bls12381PrivateKey;
+use crate::committee::BlsSignatureAggregator;
+use crate::committee::EncryptionPrivateKey;
+use crate::committee::EncryptionPublicKey;
+use bitcoin::Amount;
+use bitcoin::Network;
 use bitcoin::hashes::Hash as _;
 use bitcoin::key::UntweakedPublicKey;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::TapLeafHash;
-use bitcoin::Amount;
-use bitcoin::Network;
 use ed25519_consensus::SigningKey;
-use hashi_types::committee::Bls12381PrivateKey;
-use hashi_types::committee::BlsSignatureAggregator;
-use hashi_types::committee::EncryptionPrivateKey;
-use hashi_types::committee::EncryptionPublicKey;
 use hpke::Deserializable;
 use std::num::NonZeroU16;
 use std::time::Duration;
-use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::Address as SuiAddress;
+use sui_sdk_types::bcs::FromBcs;
 
 // -------------------------------
 // Shared deterministic test values
@@ -68,7 +68,7 @@ impl GetGuardianInfoResponse {
 
         let info = GuardianInfo {
             share_commitments: None,
-            bucket_info: Some(crate::S3BucketInfo {
+            bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
             }),
@@ -126,10 +126,10 @@ impl GuardianSigned<SetupNewKeyResponse> {
 
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
-        let s3_config = crate::S3Config {
+        let s3_config = super::S3Config {
             access_key: "ak".into(),
             secret_key: "sk".into(),
-            bucket_info: crate::S3BucketInfo {
+            bucket_info: super::S3BucketInfo {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
             },
@@ -146,7 +146,7 @@ impl OperatorInitRequest {
         OperatorInitRequest {
             s3_config,
             share_commitments,
-            network: crate::Network::Regtest,
+            network: super::Network::Regtest,
         }
     }
 }
@@ -192,7 +192,7 @@ impl ProvisionerInitState {
         withdrawal_config: WithdrawalConfig,
         withdrawal_state: WithdrawalState,
         hashi_committees: CommitteeStore,
-        hashi_btc_master_pubkey: crate::BitcoinPubkey,
+        hashi_btc_master_pubkey: super::BitcoinPubkey,
     ) -> Self {
         ProvisionerInitState::new(
             hashi_committees,
@@ -206,7 +206,7 @@ impl ProvisionerInitState {
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let num_epochs_to_track = NonZeroU16::new(2).unwrap();
-        let epoch_window = crate::epoch_store::EpochWindow::new(0, num_epochs_to_track);
+        let epoch_window = super::epoch_store::EpochWindow::new(0, num_epochs_to_track);
         let max_withdrawable_per_epoch = Amount::from_sat(1000);
 
         ProvisionerInitState {

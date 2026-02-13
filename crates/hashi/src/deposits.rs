@@ -144,7 +144,7 @@ impl Hashi {
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> bitcoin::Address {
         let pubkey = if let Some(path) = derivation_path {
-            hashi_guardian_shared::bitcoin_utils::get_derived_pubkey(
+            hashi_types::guardian::bitcoin_utils::get_derived_pubkey(
                 hashi_pubkey,
                 &path.into_inner(),
             )
