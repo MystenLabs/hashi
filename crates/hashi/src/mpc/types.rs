@@ -94,6 +94,20 @@ impl SessionId {
         SessionId(oracle.evaluate(&dealer))
     }
 
+    pub fn nonce_dealer_session_id(
+        chain_id: &str,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> SessionId {
+        let base = Self::new(
+            chain_id,
+            epoch,
+            &ProtocolType::NonceGeneration { batch_index },
+        );
+        base.dealer_session_id(dealer)
+    }
+
     pub fn rotation_session_id(&self, dealer: &Address, share_index: ShareIndex) -> SessionId {
         let oracle = RandomOracle::new(&hex::encode(self.0));
         SessionId(oracle.evaluate(&(dealer, share_index.get())))
@@ -403,6 +417,7 @@ pub enum DealerOutputsKey {
 pub enum ComplaintsToProcessKey {
     Dkg(Address),
     Rotation(Address, ShareIndex),
+    NonceGeneration(Address),
 }
 
 #[derive(Clone, Debug)]

@@ -228,8 +228,7 @@ impl MpcManager {
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
             Messages::NonceGeneration { .. } => {
-                self.dealer_messages
-                    .insert(sender, request.messages.clone());
+                self.store_nonce_message(sender, &request.messages);
                 self.try_sign_nonce_message(sender, &request.messages)?
             }
         };
@@ -356,14 +355,12 @@ impl MpcManager {
                         reason: "Dealer not in committee".into(),
                     }
                 })? as u16;
-                let base_sid = SessionId::new(
+                let dealer_session_id = SessionId::nonce_dealer_session_id(
                     &self.chain_id,
                     self.dkg_config.epoch,
-                    &ProtocolType::NonceGeneration {
-                        batch_index: *batch_index,
-                    },
+                    *batch_index,
+                    &request.dealer,
                 );
-                let dealer_session_id = base_sid.dealer_session_id(&request.dealer);
                 let receiver = batch_avss::Receiver::new(
                     self.dkg_config.nodes.clone(),
                     self.party_id,
@@ -482,6 +479,34 @@ impl MpcManager {
             ordered_broadcast_channel,
         )
         .await
+    }
+
+    pub async fn run_nonce_generation(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        p2p_channel: &impl P2PChannel,
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+    ) -> DkgResult<()> {
+        // Clear stale state from previous batch.
+        {
+            let mut mgr = mpc_manager.write().unwrap();
+            mgr.dealer_nonce_outputs.clear();
+            mgr.dealer_messages
+                .retain(|_, v| !matches!(v, Messages::NonceGeneration { .. }));
+            mgr.complaints_to_process
+                .retain(|k, _| !matches!(k, ComplaintsToProcessKey::NonceGeneration(_)));
+            mgr.message_responses.clear();
+            mgr.complaint_responses.clear();
+        }
+        if let Err(e) =
+            Self::run_as_nonce_dealer(mpc_manager, batch_index, p2p_channel, tob_channel).await
+        {
+            tracing::error!(
+                "Nonce dealer phase failed: {}. Continuing as party only.",
+                e
+            );
+        }
+        Self::run_as_nonce_party(mpc_manager, p2p_channel, tob_channel).await
     }
 
     async fn run_as_dealer(
@@ -865,6 +890,183 @@ impl MpcManager {
         Ok(output)
     }
 
+    async fn run_as_nonce_dealer(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        p2p_channel: &impl P2PChannel,
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+    ) -> DkgResult<()> {
+        let dealer_data = {
+            let mgr = Arc::clone(mpc_manager);
+            spawn_blocking(move || {
+                let mut rng = StdRng::from_entropy();
+                let mut mgr = mgr.write().unwrap();
+                mgr.prepare_nonce_dealer_flow(batch_index, &mut rng)
+            })
+            .await?
+        };
+        let mut aggregator =
+            BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.messages_hash.clone());
+        aggregator
+            .add_signature(dealer_data.my_signature)
+            .expect("first signature should always be valid");
+        let results = send_to_many(
+            dealer_data.recipients.iter().copied(),
+            dealer_data.request,
+            |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
+        )
+        .await;
+        for (addr, result) in results {
+            match result {
+                Ok(response) => {
+                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
+                        tracing::info!("Invalid signature from {:?}: {}", addr, e);
+                    }
+                }
+                Err(e) => tracing::info!("Failed to send nonce message to {:?}: {}", addr, e),
+            }
+        }
+        if aggregator.weight() >= dealer_data.required_weight as u64 {
+            let nonce_cert = aggregator
+                .finish()
+                .expect("signatures should always be valid");
+            let cert = CertificateV1::NonceGeneration {
+                batch_index,
+                cert: nonce_cert,
+            };
+            with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
+                .await
+                .map_err(|e| {
+                    DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn run_as_nonce_party(
+        mpc_manager: &Arc<RwLock<Self>>,
+        p2p_channel: &impl P2PChannel,
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+    ) -> DkgResult<()> {
+        let required_weight = {
+            let mgr = mpc_manager.read().unwrap();
+            2 * mgr.dkg_config.max_faulty + 1
+        };
+        let mut certified_dealers = HashSet::new();
+        let mut dealer_weight_sum = 0u32;
+        loop {
+            if dealer_weight_sum >= required_weight as u32 {
+                break;
+            }
+            let cert = tob_channel
+                .receive()
+                .await
+                .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
+            let CertificateV1::NonceGeneration {
+                cert: nonce_cert, ..
+            } = cert
+            else {
+                continue;
+            };
+            let message = nonce_cert.message();
+            let dealer = message.dealer_address;
+            if certified_dealers.contains(&dealer) {
+                continue;
+            }
+            {
+                let mgr = Arc::clone(mpc_manager);
+                let cert = nonce_cert.clone();
+                let verified = spawn_blocking(move || {
+                    let mgr = mgr.read().unwrap();
+                    mgr.committee.verify_signature(&cert)
+                })
+                .await;
+                if let Err(e) = verified {
+                    tracing::info!(
+                        "Invalid nonce certificate signature from {:?}: {}",
+                        &dealer,
+                        e
+                    );
+                    continue;
+                }
+            }
+            let needs_retrieval = {
+                let mgr = mpc_manager.read().unwrap();
+                match mgr.dealer_messages.get(&dealer) {
+                    None => true,
+                    Some(stored_msg) => compute_messages_hash(stored_msg) != message.messages_hash,
+                }
+            };
+            if needs_retrieval {
+                tracing::info!(
+                    "Nonce certificate from dealer {:?} received but message missing or hash mismatch, retrieving from signers",
+                    &dealer
+                );
+                Self::retrieve_nonce_message(mpc_manager, message, &nonce_cert, p2p_channel)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "Failed to retrieve nonce message from any signer for dealer {:?}: {}",
+                            &dealer,
+                            e
+                        );
+                        e
+                    })?;
+            }
+            let has_complaint = {
+                let mgr = Arc::clone(mpc_manager);
+                spawn_blocking(move || {
+                    let mut mgr = mgr.write().unwrap();
+                    if !mgr.dealer_nonce_outputs.contains_key(&dealer)
+                        && !mgr
+                            .complaints_to_process
+                            .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer))
+                    {
+                        mgr.process_certified_nonce_message(dealer)?;
+                    }
+                    Ok::<_, DkgError>(
+                        mgr.complaints_to_process
+                            .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer)),
+                    )
+                })
+                .await?
+            };
+            if has_complaint {
+                let signers = {
+                    let mgr = mpc_manager.read().unwrap();
+                    nonce_cert
+                        .signers(&mgr.committee)
+                        .expect("certificate verified above")
+                };
+                Self::recover_nonce_shares_via_complaint(
+                    mpc_manager,
+                    &dealer,
+                    signers,
+                    p2p_channel,
+                )
+                .await?;
+            }
+            let dealer_weight = {
+                let mgr = mpc_manager.read().unwrap();
+                if !mgr.dealer_nonce_outputs.contains_key(&dealer) {
+                    tracing::warn!("No nonce output for {:?} after processing", dealer);
+                    continue;
+                }
+                let party_id = mgr
+                    .committee
+                    .index_of(&dealer)
+                    .expect("dealer must be in committee") as u16;
+                mgr.dkg_config
+                    .nodes
+                    .weight_of(party_id)
+                    .map_err(|_| DkgError::ProtocolFailed("Missing dealer weight".to_string()))?
+            };
+            dealer_weight_sum += dealer_weight as u32;
+            certified_dealers.insert(dealer);
+        }
+        Ok(())
+    }
+
     fn create_dealer_message(
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
@@ -901,6 +1103,11 @@ impl MpcManager {
             .store_rotation_messages(&dealer, messages)
             .map_err(|e| DkgError::StorageError(e.to_string()))?;
         Ok(())
+    }
+
+    fn store_nonce_message(&mut self, dealer: Address, messages: &Messages) {
+        // TODO: Persist nonce messages to DB for restart recovery.
+        self.dealer_messages.insert(dealer, messages.clone());
     }
 
     fn try_sign_dkg_message(
@@ -944,6 +1151,35 @@ impl MpcManager {
         }
     }
 
+    fn create_nonce_dealer_message(
+        &self,
+        batch_index: u32,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<Messages> {
+        let dealer_sid = SessionId::nonce_dealer_session_id(
+            &self.chain_id,
+            self.dkg_config.epoch,
+            batch_index,
+            &self.address,
+        );
+        let dealer = batch_avss::Dealer::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            self.dkg_config.threshold,
+            self.dkg_config.max_faulty,
+            dealer_sid.to_vec(),
+            self.batch_size_per_weight,
+        )
+        .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        let message = dealer
+            .create_message(rng)
+            .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        Ok(Messages::NonceGeneration {
+            batch_index,
+            message,
+        })
+    }
+
     fn try_sign_nonce_message(
         &mut self,
         dealer: Address,
@@ -965,12 +1201,12 @@ impl MpcManager {
                     sender: dealer,
                     reason: "Dealer not in committee".into(),
                 })? as u16;
-        let base_sid = SessionId::new(
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
             &self.chain_id,
             self.dkg_config.epoch,
-            &ProtocolType::NonceGeneration { batch_index },
+            batch_index,
+            &dealer,
         );
-        let dealer_session_id = base_sid.dealer_session_id(&dealer);
         let receiver = batch_avss::Receiver::new(
             self.dkg_config.nodes.clone(),
             self.party_id,
@@ -1025,6 +1261,55 @@ impl MpcManager {
             output_key,
             complaint_key,
         )
+    }
+
+    fn process_certified_nonce_message(&mut self, dealer: Address) -> DkgResult<()> {
+        let (batch_index, message) = match self
+            .dealer_messages
+            .get(&dealer)
+            .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?
+        {
+            Messages::NonceGeneration {
+                batch_index,
+                message,
+            } => (*batch_index, message.clone()),
+            Messages::Dkg(_) | Messages::Rotation(_) => {
+                panic!("process_certified_nonce_message called with non-nonce messages")
+            }
+        };
+        let dealer_party_id =
+            self.committee
+                .index_of(&dealer)
+                .ok_or_else(|| DkgError::InvalidMessage {
+                    sender: dealer,
+                    reason: "Dealer not in committee".into(),
+                })? as u16;
+        let dealer_sid = SessionId::nonce_dealer_session_id(
+            &self.chain_id,
+            self.dkg_config.epoch,
+            batch_index,
+            &dealer,
+        );
+        let receiver = batch_avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            dealer_party_id,
+            self.dkg_config.threshold,
+            dealer_sid.to_vec(),
+            self.encryption_key.clone(),
+            self.batch_size_per_weight,
+        )
+        .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        match receiver.process_message(&message)? {
+            batch_avss::ProcessedMessage::Valid(output) => {
+                self.dealer_nonce_outputs.insert(dealer, output);
+            }
+            batch_avss::ProcessedMessage::Complaint(complaint) => {
+                self.complaints_to_process
+                    .insert(ComplaintsToProcessKey::NonceGeneration(dealer), complaint);
+            }
+        }
+        Ok(())
     }
 
     fn process_certified_rotation_message(
@@ -1203,6 +1488,69 @@ impl MpcManager {
         )))
     }
 
+    async fn retrieve_nonce_message(
+        mpc_manager: &Arc<RwLock<Self>>,
+        message: &DealerMessagesHash,
+        certificate: &DealerCertificate,
+        p2p_channel: &impl P2PChannel,
+    ) -> DkgResult<()> {
+        let (request, signers) = {
+            let mgr = mpc_manager.read().unwrap();
+            if certificate
+                .is_signer(&mgr.address, &mgr.committee)
+                .map_err(|e| DkgError::CryptoError(e.to_string()))?
+            {
+                tracing::error!(
+                    "Self in certificate signers but nonce message not available for dealer {:?}.",
+                    message.dealer_address
+                );
+                return Err(DkgError::ProtocolFailed(
+                    "Self in certificate signers but nonce message not available".to_string(),
+                ));
+            }
+            let request = RetrieveMessagesRequest {
+                dealer: message.dealer_address,
+            };
+            let signers = certificate
+                .signers(&mgr.committee)
+                .map_err(|e| DkgError::InvalidCertificate(e.to_string()))?;
+            (request, signers)
+        };
+        for signer in signers {
+            match p2p_channel.retrieve_messages(&signer, &request).await {
+                Ok(response) => {
+                    if compute_messages_hash(&response.messages) == message.messages_hash {
+                        let Messages::NonceGeneration { .. } = &response.messages else {
+                            unreachable!(
+                                "Hash matched nonce certificate but got {:?}",
+                                std::mem::discriminant(&response.messages)
+                            );
+                        };
+                        let mut mgr = mpc_manager.write().unwrap();
+                        mgr.store_nonce_message(message.dealer_address, &response.messages);
+                        return Ok(());
+                    }
+                    tracing::info!(
+                        "Message hash mismatch from signer {:?} for nonce dealer {:?}",
+                        signer,
+                        message.dealer_address
+                    );
+                }
+                Err(e) => {
+                    tracing::info!(
+                        "Failed to retrieve nonce message from signer {:?}: {}",
+                        signer,
+                        e
+                    );
+                }
+            }
+        }
+        Err(DkgError::PairwiseCommunicationError(format!(
+            "Could not retrieve nonce message for dealer {:?} from any signer",
+            message.dealer_address
+        )))
+    }
+
     fn prepare_dealer_flow(
         &mut self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
@@ -1233,6 +1581,23 @@ impl MpcManager {
             }
         };
         let signature = self.try_sign_rotation_messages(previous, self.address, &messages)?;
+        Ok(self.build_dealer_flow_data(messages, signature))
+    }
+
+    fn prepare_nonce_dealer_flow(
+        &mut self,
+        batch_index: u32,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> DkgResult<DealerFlowData> {
+        let messages = match self.dealer_messages.get(&self.address) {
+            Some(msgs @ Messages::NonceGeneration { .. }) => msgs.clone(),
+            _ => {
+                let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
+                self.store_nonce_message(self.address, &msgs);
+                msgs
+            }
+        };
+        let signature = self.try_sign_nonce_message(self.address, &messages)?;
         Ok(self.build_dealer_flow_data(messages, signature))
     }
 
@@ -1416,6 +1781,110 @@ impl MpcManager {
         }
         Err(DkgError::ProtocolFailed(format!(
             "Not enough valid complaint responses for dealer {:?}",
+            dealer
+        )))
+    }
+
+    async fn recover_nonce_shares_via_complaint(
+        mpc_manager: &Arc<RwLock<Self>>,
+        dealer: &Address,
+        signers: Vec<Address>,
+        p2p_channel: &impl P2PChannel,
+    ) -> DkgResult<()> {
+        let (complaint_request, receiver, message) = {
+            let mgr = mpc_manager.read().unwrap();
+            let complaint = mgr
+                .complaints_to_process
+                .get(&ComplaintsToProcessKey::NonceGeneration(*dealer))
+                .ok_or_else(|| DkgError::ProtocolFailed("No nonce complaint for dealer".into()))?;
+            let complaint_request = ComplainRequest {
+                dealer: *dealer,
+                share_index: None,
+                complaint: complaint.clone(),
+            };
+            let (batch_index, message) = match mgr
+                .dealer_messages
+                .get(dealer)
+                .expect("cannot have complaint without message")
+            {
+                Messages::NonceGeneration {
+                    batch_index,
+                    message,
+                } => (*batch_index, message.clone()),
+                Messages::Dkg(_) | Messages::Rotation(_) => {
+                    panic!("Expected nonce message in recover_nonce_shares_via_complaint");
+                }
+            };
+            let dealer_party_id = mgr
+                .committee
+                .index_of(dealer)
+                .expect("dealer must be in committee") as u16;
+            let dealer_sid = SessionId::nonce_dealer_session_id(
+                &mgr.chain_id,
+                mgr.dkg_config.epoch,
+                batch_index,
+                dealer,
+            );
+            let receiver = batch_avss::Receiver::new(
+                mgr.dkg_config.nodes.clone(),
+                mgr.party_id,
+                dealer_party_id,
+                mgr.dkg_config.threshold,
+                dealer_sid.to_vec(),
+                mgr.encryption_key.clone(),
+                mgr.batch_size_per_weight,
+            )
+            .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+            (complaint_request, receiver, message)
+        };
+        let receiver = Arc::new(receiver);
+        let mut responses = Vec::new();
+        for signer in signers {
+            let response =
+                match with_timeout_and_retry(|| p2p_channel.complain(&signer, &complaint_request))
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::info!("Nonce complaint to {:?} failed: {}", signer, e);
+                        continue;
+                    }
+                };
+            let complaint_response = match response {
+                ComplaintResponses::NonceGeneration(resp) => resp,
+                ComplaintResponses::Dkg(_) | ComplaintResponses::Rotation(_) => {
+                    tracing::info!("Unexpected non-nonce response in nonce complaint recovery");
+                    continue;
+                }
+            };
+            responses.push(complaint_response);
+            let result = {
+                let receiver = Arc::clone(&receiver);
+                let message = message.clone();
+                let responses = responses.clone();
+                spawn_blocking(move || receiver.recover(&message, responses)).await
+            };
+            match result {
+                Ok(output) => {
+                    let mut mgr = mpc_manager.write().unwrap();
+                    mgr.dealer_nonce_outputs.insert(*dealer, output);
+                    mgr.complaints_to_process
+                        .remove(&ComplaintsToProcessKey::NonceGeneration(*dealer));
+                    return Ok(());
+                }
+                Err(FastCryptoError::InputTooShort(_)) => {
+                    continue;
+                }
+                Err(e) => {
+                    let error_msg =
+                        format!("Nonce share recovery failed for dealer {:?}: {}", dealer, e);
+                    tracing::error!("{}", error_msg);
+                    return Err(DkgError::CryptoError(error_msg));
+                }
+            }
+        }
+        Err(DkgError::ProtocolFailed(format!(
+            "Not enough valid nonce complaint responses for dealer {:?}",
             dealer
         )))
     }
@@ -3536,6 +4005,109 @@ mod tests {
                 j
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_dkg_with_complaint_recovery() {
+        let mut rng = rand::thread_rng();
+        let weights: [u16; 5] = [1, 1, 1, 2, 2];
+        let num_validators = weights.len();
+        let setup = TestSetup::with_weights(&weights);
+        let cheating_dealer_idx = 3; // weight=2
+        let test_party_idx = 0; // weight=1, victim of cheating
+
+        // Create all managers
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| setup.create_manager(i))
+            .collect();
+
+        // Phase 1: Create dealer messages. Dealer 3 creates a cheating message targeting party 0.
+        let dealer_messages: Vec<Messages> = (0..num_validators)
+            .map(|i| {
+                if i == cheating_dealer_idx {
+                    Messages::Dkg(create_cheating_message(
+                        &setup,
+                        i,
+                        test_party_idx as u16,
+                        &mut rng,
+                    ))
+                } else {
+                    Messages::Dkg(managers[i].create_dealer_message(&mut rng))
+                }
+            })
+            .collect();
+
+        // Phase 2: Collect signatures and create certificates.
+        // Validator 0 cannot sign cheating dealer 3's message (corrupt shares → complaint),
+        // but validators 1-4 can (their shares are fine).
+        let mut certificates = Vec::new();
+        for (dealer_idx, messages) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_idx);
+
+            let mut signatures = Vec::new();
+            for (mgr_idx, manager) in managers.iter_mut().enumerate() {
+                if dealer_idx == cheating_dealer_idx && mgr_idx == test_party_idx {
+                    // Validator 0 can't sign the cheating message — just store it
+                    let Messages::Dkg(msg) = messages else {
+                        unreachable!()
+                    };
+                    manager.store_dkg_message(dealer_addr, msg).unwrap();
+                    continue;
+                }
+                let sig = receive_dealer_messages(manager, messages, dealer_addr).unwrap();
+                signatures.push(sig);
+            }
+
+            let cert =
+                create_test_certificate(setup.committee(), messages, dealer_addr, signatures)
+                    .unwrap();
+            certificates.push(CertificateV1::Dkg(cert));
+        }
+
+        // Phase 3: Test run_as_dealer() and run_as_party() for validator 0
+        let test_manager = managers.remove(0);
+
+        let other_managers: HashMap<_, _> = managers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, setup.address(test_party_idx));
+
+        // TOB: certificates from dealers 1-4 (dealer 0's cert is created by run_as_dealer)
+        let other_certificates: Vec<_> = certificates.iter().skip(1).cloned().collect();
+        let mut mock_tob = MockOrderedBroadcastChannel::new(other_certificates);
+
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        MpcManager::run_as_dealer(&test_manager, &mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+        let output = MpcManager::run_as_party(&test_manager, &mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+
+        // Verify output is valid despite cheating dealer
+        assert_eq!(
+            output.key_shares.shares.len(),
+            weights[test_party_idx] as usize,
+        );
+        let total_weight: u16 = weights.iter().sum();
+        assert_eq!(output.commitments.len(), total_weight as usize);
+
+        // Verify complaint was resolved: output recovered, complaint removed
+        let mgr = test_manager.read().unwrap();
+        let cheating_addr = setup.address(cheating_dealer_idx);
+        assert!(
+            mgr.dealer_outputs
+                .contains_key(&DealerOutputsKey::Dkg(cheating_addr)),
+            "Should have recovered output for cheating dealer"
+        );
+        assert!(
+            !mgr.complaints_to_process
+                .contains_key(&ComplaintsToProcessKey::Dkg(cheating_addr)),
+            "Complaint should be removed after recovery"
+        );
     }
 
     /// Test setup for run() tests. Creates managers and certificates.
@@ -7242,6 +7814,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_key_rotation_with_complaint_recovery() {
+        let mut rng = rand::thread_rng();
+        let rotation_setup = RotationTestSetup::new();
+        // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+
+        let test_party_idx = 0; // weight=3, victim of cheating
+        let cheating_dealer_idx = 3; // weight=1
+
+        // Create test_manager (validator 0)
+        let (mut test_manager, test_dkg_output, _) =
+            rotation_setup.create_rotation_dealer_with_memory_store(test_party_idx);
+        let test_addr = rotation_setup.setup.address(test_party_idx);
+        test_manager.source_epoch = rotation_setup.setup.epoch();
+        test_manager.previous_output = Some(test_dkg_output.clone());
+
+        // Create cheating dealer (validator 3) to get DKG output and share values
+        let (cheating_dealer_mgr, cheating_dkg_output, honest_rotation_messages) =
+            rotation_setup.create_rotation_dealer_with_memory_store(cheating_dealer_idx);
+        let cheating_dealer_addr = rotation_setup.setup.address(cheating_dealer_idx);
+
+        // Replace the first share's rotation message with a cheating one
+        let honest_map = match &honest_rotation_messages {
+            Messages::Rotation(map) => map.clone(),
+            _ => panic!("Expected rotation messages"),
+        };
+        let first_share_index = *honest_map.keys().next().unwrap();
+        let share_value = cheating_dkg_output
+            .key_shares
+            .shares
+            .iter()
+            .find(|s| s.index == first_share_index)
+            .map(|s| s.value)
+            .unwrap();
+        let (_, cheating_message) = create_cheating_rotation_message(
+            &rotation_setup.setup,
+            &cheating_dealer_mgr.session_id,
+            &cheating_dealer_addr,
+            share_value,
+            first_share_index,
+            test_party_idx as u16,
+            &mut rng,
+        );
+        let mut cheating_map = honest_map;
+        cheating_map.insert(first_share_index, cheating_message);
+        let cheating_rotation_messages = Messages::Rotation(cheating_map);
+
+        // Collect signatures for the certificate before moving managers into MockP2P
+        let epoch = cheating_dealer_mgr.dkg_config.epoch;
+
+        // Signature from cheating dealer itself (validator 3)
+        let cheating_dealer_sig = {
+            let (mut mgr, output) =
+                rotation_setup.create_receiver_with_memory_store(cheating_dealer_idx);
+            mgr.previous_output = Some(output.clone());
+            mgr.dealer_messages
+                .insert(cheating_dealer_addr, cheating_rotation_messages.clone());
+            mgr.try_sign_rotation_messages(
+                &output,
+                cheating_dealer_addr,
+                &cheating_rotation_messages,
+            )
+            .unwrap()
+        };
+
+        // Create other managers for MockP2P (validators 1-4), collecting all signatures
+        // for the certificate. Recovery needs threshold (4) complaint responses from signers.
+        let mut other_managers_map = HashMap::new();
+        let mut signer_sigs = Vec::new();
+        for i in 1..5 {
+            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager.previous_output = Some(output.clone());
+            // Store and process cheating messages (their shares are fine)
+            manager
+                .dealer_messages
+                .insert(cheating_dealer_addr, cheating_rotation_messages.clone());
+            let sig = manager
+                .try_sign_rotation_messages(
+                    &output,
+                    cheating_dealer_addr,
+                    &cheating_rotation_messages,
+                )
+                .unwrap();
+            // Skip cheating dealer (already has separate signature)
+            if i != cheating_dealer_idx {
+                signer_sigs.push(MemberSignature::new(
+                    epoch,
+                    rotation_setup.setup.address(i),
+                    sig,
+                ));
+            }
+            other_managers_map.insert(rotation_setup.setup.address(i), manager);
+        }
+        let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+        // Create rotation certificate with signatures from cheating dealer + validators 1-4
+        let mut all_sigs = vec![MemberSignature::new(
+            epoch,
+            cheating_dealer_addr,
+            cheating_dealer_sig,
+        )];
+        all_sigs.extend(signer_sigs);
+        let rotation_certificates = {
+            let cert = create_rotation_test_certificate(
+                rotation_setup.setup.committee(),
+                &cheating_rotation_messages,
+                cheating_dealer_addr,
+                all_sigs,
+            )
+            .unwrap();
+            vec![CertificateV1::Rotation(cert)]
+        };
+
+        let test_manager = Arc::new(RwLock::new(test_manager));
+        let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
+
+        // Run key rotation — should detect complaint and recover
+        let new_output = MpcManager::run_key_rotation(
+            &test_manager,
+            &rotation_setup.certificates(),
+            &mock_p2p,
+            &mut mock_tob,
+        )
+        .await
+        .unwrap();
+
+        // Verify output is valid despite cheating dealer
+        assert_eq!(
+            new_output.key_shares.shares.len(),
+            3,
+            "Validator 0 (weight=3) should have 3 shares"
+        );
+        assert_eq!(
+            new_output.public_key, test_dkg_output.public_key,
+            "Public key should be preserved after rotation"
+        );
+        assert_eq!(
+            new_output.commitments.len(),
+            12,
+            "Should have commitments for all share indices"
+        );
+
+        // Verify complaint was resolved
+        let mgr = test_manager.read().unwrap();
+        assert!(
+            !mgr.complaints_to_process.keys().any(|k| matches!(
+                k,
+                ComplaintsToProcessKey::Rotation(addr, _) if *addr == cheating_dealer_addr
+            )),
+            "Rotation complaints should be removed after recovery"
+        );
+    }
+
+    #[tokio::test]
     async fn test_prepare_previous_output_for_new_member() {
         let rotation_setup = RotationTestSetup::new();
         // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
@@ -8515,12 +9240,12 @@ mod tests {
         let config = setup.dkg_config();
         let dealer_address = setup.address(dealer_index);
         let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
-        let base_sid = SessionId::new(
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
             TEST_CHAIN_ID,
             setup.epoch(),
-            &ProtocolType::NonceGeneration { batch_index },
+            batch_index,
+            &dealer_address,
         );
-        let dealer_session_id = base_sid.dealer_session_id(&dealer_address);
         let dealer = batch_avss::Dealer::new(
             config.nodes.clone(),
             dealer_party_id,
@@ -8552,12 +9277,12 @@ mod tests {
         let config = setup.dkg_config();
         let dealer_address = setup.address(dealer_index);
         let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
-        let base_sid = SessionId::new(
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
             TEST_CHAIN_ID,
             setup.epoch(),
-            &ProtocolType::NonceGeneration { batch_index },
+            batch_index,
+            &dealer_address,
         );
-        let dealer_session_id = base_sid.dealer_session_id(&dealer_address);
 
         let dealer_weight = config.nodes.weight_of(dealer_party_id).unwrap() as usize;
         let batch_size = dealer_weight * TEST_BATCH_SIZE_PER_WEIGHT as usize;
@@ -8683,12 +9408,12 @@ mod tests {
         let config = setup.dkg_config();
         let dealer_address = setup.address(dealer_index);
         let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
-        let base_sid = SessionId::new(
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
             TEST_CHAIN_ID,
             setup.epoch(),
-            &ProtocolType::NonceGeneration { batch_index },
+            batch_index,
+            &dealer_address,
         );
-        let dealer_session_id = base_sid.dealer_session_id(&dealer_address);
         let wrong_key = PrivateKey::<EncryptionGroupElement>::new(rng);
         let receiver = batch_avss::Receiver::new(
             config.nodes.clone(),
@@ -9209,12 +9934,12 @@ mod tests {
         };
         let config = setup.dkg_config();
         let dealer_party_id = setup.committee().index_of(&dealer_addr).unwrap() as u16;
-        let base_sid = SessionId::new(
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
             TEST_CHAIN_ID,
             setup.epoch(),
-            &ProtocolType::NonceGeneration { batch_index },
+            batch_index,
+            &dealer_addr,
         );
-        let dealer_session_id = base_sid.dealer_session_id(&dealer_addr);
         let receiver0 = batch_avss::Receiver::new(
             config.nodes.clone(),
             0, // party 0
@@ -9254,5 +9979,277 @@ mod tests {
             "Second call should return cached response"
         );
         assert_eq!(party2.complaint_responses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_nonce_generation() {
+        let mut rng = rand::thread_rng();
+        let weights: [u16; 5] = [1, 1, 1, 2, 2];
+        let num_validators = weights.len();
+        let setup = TestSetup::with_weights(&weights);
+        let batch_index = 0u32;
+
+        // Create all managers
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| setup.create_manager(i))
+            .collect();
+
+        // Phase 1: Create nonce dealer messages for all validators
+        let dealer_messages: Vec<Messages> = (0..num_validators)
+            .map(|i| create_nonce_dealer_message(&setup, i, batch_index, &mut rng))
+            .collect();
+
+        // Phase 2: Collect signatures and create certificates
+        let mut certificates = Vec::new();
+        for (dealer_idx, messages) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_idx);
+
+            let mut signatures = Vec::new();
+            for manager in managers.iter_mut() {
+                let response = send_and_assert_ok(manager, dealer_addr, messages);
+                let sig = MemberSignature::new(
+                    manager.dkg_config.epoch,
+                    manager.address,
+                    response.signature,
+                );
+                signatures.push(sig);
+            }
+
+            let cert =
+                create_test_certificate(setup.committee(), messages, dealer_addr, signatures)
+                    .unwrap();
+            certificates.push(CertificateV1::NonceGeneration { batch_index, cert });
+        }
+
+        // Phase 3: Test run_as_nonce_dealer() and run_as_nonce_party() for validator 0
+        let mut test_manager = managers.remove(0);
+        let max_faulty = test_manager.dkg_config.max_faulty;
+        let required_weight = 2 * max_faulty + 1;
+
+        // Create mock P2P channel with remaining managers
+        let other_managers: HashMap<_, _> = managers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+
+        // Pre-populate validator 0's manager with all dealer messages
+        for (j, messages) in dealer_messages.iter().enumerate() {
+            send_and_assert_ok(&mut test_manager, setup.address(j), messages);
+        }
+
+        // Create mock TOB with certificates from dealers 1-4
+        // (exclude dealer 0 since run_as_nonce_dealer will create its own)
+        let other_certificates: Vec<_> = certificates.iter().skip(1).cloned().collect();
+        let mut mock_tob = MockOrderedBroadcastChannel::new(other_certificates);
+
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        MpcManager::run_as_nonce_dealer(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+        MpcManager::run_as_nonce_party(&test_manager, &mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+
+        // Verify validator 0 has nonce outputs from enough dealers
+        let mgr = test_manager.read().unwrap();
+        let output_count = mgr.dealer_nonce_outputs.len();
+        assert!(
+            output_count >= required_weight as usize,
+            "Should have at least {} nonce outputs, got {}",
+            required_weight,
+            output_count
+        );
+        // Verify no complaints remain
+        assert!(
+            !mgr.complaints_to_process
+                .keys()
+                .any(|k| matches!(k, ComplaintsToProcessKey::NonceGeneration(_))),
+            "Should have no nonce complaints after successful run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recover_nonce_shares_via_complaint() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+        let batch_index = 0u32;
+
+        // Test party: validator 0 (will receive corrupted shares)
+        let test_party_idx = 0;
+        let mut test_manager = setup.create_manager(test_party_idx);
+        let test_addr = setup.address(test_party_idx);
+
+        // Dealer: validator 1
+        let dealer_idx = 1;
+        let dealer_addr = setup.address(dealer_idx);
+
+        // Create a cheating nonce message (corrupts party 0's shares)
+        let cheating_messages =
+            create_cheating_nonce_message(&setup, dealer_idx, batch_index, &mut rng);
+
+        // Store the cheating message in test manager
+        test_manager.store_nonce_message(dealer_addr, &cheating_messages);
+
+        // Process cheating message → generates complaint
+        test_manager
+            .process_certified_nonce_message(dealer_addr)
+            .unwrap();
+
+        // Verify complaint was generated
+        assert!(
+            test_manager
+                .complaints_to_process
+                .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer_addr)),
+            "Should have complaint for cheating dealer"
+        );
+        assert!(
+            !test_manager.dealer_nonce_outputs.contains_key(&dealer_addr),
+            "Should not have nonce output before recovery"
+        );
+
+        // Create other managers who can respond to complaints
+        // Their shares are NOT corrupted so they process successfully
+        let mut other_managers_map = HashMap::new();
+        for i in 1..5 {
+            let mut manager = setup.create_manager(i);
+            send_and_assert_ok(&mut manager, dealer_addr, &cheating_messages);
+            assert!(manager.dealer_nonce_outputs.contains_key(&dealer_addr));
+            other_managers_map.insert(setup.address(i), manager);
+        }
+
+        let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+        let signers: Vec<Address> = (1..5).map(|i| setup.address(i)).collect();
+
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        // Recover shares via complaint
+        let result = MpcManager::recover_nonce_shares_via_complaint(
+            &test_manager,
+            &dealer_addr,
+            signers,
+            &mock_p2p,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Recovery should succeed: {:?}",
+            result.err()
+        );
+
+        // Verify complaint was removed and output was created
+        let mgr = test_manager.read().unwrap();
+        assert!(
+            !mgr.complaints_to_process
+                .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer_addr)),
+            "Complaint should be removed after recovery"
+        );
+        assert!(
+            mgr.dealer_nonce_outputs.contains_key(&dealer_addr),
+            "Nonce output should exist after recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_nonce_generation_with_complaint_recovery() {
+        let mut rng = rand::thread_rng();
+        let weights: [u16; 5] = [1, 1, 1, 2, 2];
+        let num_validators = weights.len();
+        let setup = TestSetup::with_weights(&weights);
+        let batch_index = 0u32;
+        let test_party_idx = 0;
+        let cheating_dealer_idx = 3; // weight=2
+
+        // Create all managers
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| setup.create_manager(i))
+            .collect();
+
+        // Phase 1: Create dealer messages. Dealer 3 creates cheating message targeting party 0.
+        let dealer_messages: Vec<Messages> = (0..num_validators)
+            .map(|i| {
+                if i == cheating_dealer_idx {
+                    create_cheating_nonce_message(&setup, i, batch_index, &mut rng)
+                } else {
+                    create_nonce_dealer_message(&setup, i, batch_index, &mut rng)
+                }
+            })
+            .collect();
+
+        // Phase 2: Collect signatures and create certificates.
+        // Validator 0 cannot sign cheating dealer's message (corrupt shares).
+        let mut certificates = Vec::new();
+        for (dealer_idx, messages) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_idx);
+
+            let mut signatures = Vec::new();
+            for (mgr_idx, manager) in managers.iter_mut().enumerate() {
+                if dealer_idx == cheating_dealer_idx && mgr_idx == test_party_idx {
+                    // Validator 0 can't sign — just store the message
+                    manager.store_nonce_message(dealer_addr, messages);
+                    continue;
+                }
+                let response = send_and_assert_ok(manager, dealer_addr, messages);
+                let sig = MemberSignature::new(
+                    manager.dkg_config.epoch,
+                    manager.address,
+                    response.signature,
+                );
+                signatures.push(sig);
+            }
+
+            let cert =
+                create_test_certificate(setup.committee(), messages, dealer_addr, signatures)
+                    .unwrap();
+            certificates.push(CertificateV1::NonceGeneration { batch_index, cert });
+        }
+
+        // Phase 3: Run for validator 0
+        let test_manager = managers.remove(0);
+        let max_faulty = test_manager.dkg_config.max_faulty;
+        let required_weight = 2 * max_faulty + 1;
+
+        let other_managers: HashMap<_, _> = managers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, setup.address(test_party_idx));
+
+        let other_certificates: Vec<_> = certificates.iter().skip(1).cloned().collect();
+        let mut mock_tob = MockOrderedBroadcastChannel::new(other_certificates);
+
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        MpcManager::run_as_nonce_dealer(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+        MpcManager::run_as_nonce_party(&test_manager, &mock_p2p, &mut mock_tob)
+            .await
+            .unwrap();
+
+        // Verify enough nonce outputs collected
+        let mgr = test_manager.read().unwrap();
+        assert!(
+            mgr.dealer_nonce_outputs.len() >= required_weight as usize,
+            "Should have at least {} nonce outputs, got {}",
+            required_weight,
+            mgr.dealer_nonce_outputs.len()
+        );
+        // Verify cheating dealer's output was recovered
+        let cheating_addr = setup.address(cheating_dealer_idx);
+        assert!(
+            mgr.dealer_nonce_outputs.contains_key(&cheating_addr),
+            "Should have recovered nonce output for cheating dealer"
+        );
+        assert!(
+            !mgr.complaints_to_process
+                .contains_key(&ComplaintsToProcessKey::NonceGeneration(cheating_addr)),
+            "Nonce complaint should be removed after recovery"
+        );
     }
 }
