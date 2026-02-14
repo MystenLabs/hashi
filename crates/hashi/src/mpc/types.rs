@@ -47,15 +47,15 @@ impl DkgConfig {
         nodes: Nodes<EncryptionGroupElement>,
         threshold: u16,
         max_faulty: u16,
-    ) -> Result<Self, DkgError> {
+    ) -> Result<Self, MpcError> {
         if threshold <= max_faulty {
-            return Err(DkgError::InvalidThreshold(
+            return Err(MpcError::InvalidThreshold(
                 "threshold must be greater than max_faulty".into(),
             ));
         }
         let total_weight = nodes.total_weight();
         if threshold + 2 * max_faulty > total_weight {
-            return Err(DkgError::InvalidThreshold(format!(
+            return Err(MpcError::InvalidThreshold(format!(
                 "t + 2f ({}) must be <= total weight ({})",
                 threshold + 2 * max_faulty,
                 total_weight
@@ -208,13 +208,13 @@ impl DealerMessagesHash {
         epoch: u64,
         committee: &Committee,
         threshold: u64,
-    ) -> Result<DealerCertificate, DkgError> {
+    ) -> Result<DealerCertificate, MpcError> {
         let hash_bytes: [u8; 32] =
             cert.message
                 .messages_hash
                 .as_slice()
                 .try_into()
-                .map_err(|_| DkgError::InvalidMessage {
+                .map_err(|_| MpcError::InvalidMessage {
                     sender: cert.message.dealer_address,
                     reason: "invalid messages_hash length".into(),
                 })?;
@@ -231,7 +231,7 @@ impl DealerMessagesHash {
             committee,
             threshold,
         )
-        .map_err(|e| DkgError::InvalidCertificate(e.to_string()))
+        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
     }
 }
 
@@ -337,10 +337,10 @@ impl CertificateV1 {
     }
 }
 
-pub type DkgResult<T> = Result<T, DkgError>;
+pub type MpcResult<T> = Result<T, MpcError>;
 
 #[derive(Debug, thiserror::Error)]
-pub enum DkgError {
+pub enum MpcError {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
@@ -381,15 +381,15 @@ pub enum DkgError {
     ProtocolFailed(String),
 }
 
-impl From<FastCryptoError> for DkgError {
+impl From<FastCryptoError> for MpcError {
     fn from(e: FastCryptoError) -> Self {
-        DkgError::CryptoError(e.to_string())
+        MpcError::CryptoError(e.to_string())
     }
 }
 
-impl From<crate::communication::ChannelError> for DkgError {
+impl From<crate::communication::ChannelError> for MpcError {
     fn from(e: crate::communication::ChannelError) -> Self {
-        DkgError::BroadcastError(e.to_string())
+        MpcError::BroadcastError(e.to_string())
     }
 }
 
@@ -500,7 +500,7 @@ mod tests {
         let config = DkgConfig::new(100, nodes, 2, 2);
         assert!(config.is_err());
         match config.unwrap_err() {
-            DkgError::InvalidThreshold(msg) => {
+            MpcError::InvalidThreshold(msg) => {
                 assert!(msg.contains("threshold must be greater than max_faulty"));
             }
             _ => panic!("Wrong error type"),
@@ -514,7 +514,7 @@ mod tests {
         let config = DkgConfig::new(100, nodes, 3, 3);
         assert!(config.is_err());
         match config.unwrap_err() {
-            DkgError::InvalidThreshold(msg) => {
+            MpcError::InvalidThreshold(msg) => {
                 assert!(msg.contains("threshold must be greater than max_faulty"));
             }
             _ => panic!("Wrong error type"),
@@ -528,7 +528,7 @@ mod tests {
         let config = DkgConfig::new(100, nodes, 4, 2);
         assert!(config.is_err());
         match config.unwrap_err() {
-            DkgError::InvalidThreshold(msg) => {
+            MpcError::InvalidThreshold(msg) => {
                 assert!(msg.contains("t + 2f (8) must be <= total weight (5)"));
             }
             _ => panic!("Wrong error type"),

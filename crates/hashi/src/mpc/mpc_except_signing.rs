@@ -13,14 +13,14 @@ pub use crate::mpc::types::DealerFlowData;
 use crate::mpc::types::DealerMessagesHash;
 pub use crate::mpc::types::DealerOutputsKey;
 use crate::mpc::types::DkgConfig;
-pub use crate::mpc::types::DkgError;
 pub use crate::mpc::types::DkgOutput;
-pub use crate::mpc::types::DkgResult;
 pub use crate::mpc::types::EncryptionGroupElement;
 pub use crate::mpc::types::GetPublicDkgOutputRequest;
 pub use crate::mpc::types::GetPublicDkgOutputResponse;
 pub use crate::mpc::types::MessageHash;
 pub use crate::mpc::types::Messages;
+pub use crate::mpc::types::MpcError;
+pub use crate::mpc::types::MpcResult;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::PublicDkgOutput;
 pub use crate::mpc::types::RetrieveMessagesRequest;
@@ -115,7 +115,7 @@ impl MpcManager {
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
-    ) -> DkgResult<Self> {
+    ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
             assert!(
                 chain_id != SUI_MAINNET_CHAIN_ID && chain_id != SUI_TESTNET_CHAIN_ID,
@@ -129,7 +129,7 @@ impl MpcManager {
         let committee = committee_set
             .committees()
             .get(&epoch)
-            .ok_or_else(|| DkgError::InvalidConfig(format!("no committee for epoch {epoch}")))?
+            .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
         // TODO: Pass t and f as arguments instead of computing them
         let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
@@ -196,12 +196,12 @@ impl MpcManager {
         &mut self,
         sender: Address,
         request: &SendMessagesRequest,
-    ) -> DkgResult<SendMessagesResponse> {
+    ) -> MpcResult<SendMessagesResponse> {
         if let Some(existing_messages) = self.dealer_messages.get(&sender) {
             let existing_hash = compute_messages_hash(existing_messages);
             let incoming_hash = compute_messages_hash(&request.messages);
             if existing_hash != incoming_hash {
-                return Err(DkgError::InvalidMessage {
+                return Err(MpcError::InvalidMessage {
                     sender,
                     reason: "Dealer sent different messages".to_string(),
                 });
@@ -209,7 +209,7 @@ impl MpcManager {
             if let Some(response) = self.message_responses.get(&sender) {
                 return Ok(response.clone());
             }
-            return Err(DkgError::InvalidMessage {
+            return Err(MpcError::InvalidMessage {
                 sender,
                 reason: "Message previously rejected due to invalid shares".to_string(),
             });
@@ -223,7 +223,7 @@ impl MpcManager {
                 let previous = self
                     .previous_output
                     .clone()
-                    .ok_or_else(|| DkgError::ProtocolFailed("Rotation not started".into()))?;
+                    .ok_or_else(|| MpcError::ProtocolFailed("Rotation not started".into()))?;
                 self.store_rotation_messages(sender, msgs)?;
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
@@ -240,11 +240,11 @@ impl MpcManager {
     pub fn handle_retrieve_messages_request(
         &self,
         request: &RetrieveMessagesRequest,
-    ) -> DkgResult<RetrieveMessagesResponse> {
+    ) -> MpcResult<RetrieveMessagesResponse> {
         let messages = self
             .dealer_messages
             .get(&request.dealer)
-            .ok_or_else(|| DkgError::NotFound(format!("Messages for dealer {:?}", request.dealer)))?
+            .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))?
             .clone();
         Ok(RetrieveMessagesResponse { messages })
     }
@@ -252,7 +252,7 @@ impl MpcManager {
     pub fn handle_complain_request(
         &mut self,
         request: &ComplainRequest,
-    ) -> DkgResult<ComplaintResponses> {
+    ) -> MpcResult<ComplaintResponses> {
         // It is safe to return a response from cache since we already know that dealer was malicious.
         if let Some(cached_response) = self.complaint_responses.get(&request.dealer) {
             return Ok(cached_response.clone());
@@ -260,14 +260,14 @@ impl MpcManager {
         let messages = self
             .dealer_messages
             .get(&request.dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No message from dealer".into()))?;
+            .ok_or_else(|| MpcError::ProtocolFailed("No message from dealer".into()))?;
         let responses = match messages {
             Messages::Dkg(message) => {
                 let partial_output = self
                     .dealer_outputs
                     .get(&DealerOutputsKey::Dkg(request.dealer))
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed("No output for complained dealer".into())
+                        MpcError::ProtocolFailed("No output for complained dealer".into())
                     })?;
                 let session_id = self.session_id.dealer_session_id(&request.dealer);
                 let receiver = avss::Receiver::new(
@@ -284,15 +284,15 @@ impl MpcManager {
             }
             Messages::Rotation(rotation_messages) => {
                 let previous_output = self.previous_output.as_ref().ok_or_else(|| {
-                    DkgError::ProtocolFailed("No previous DKG output for rotation".into())
+                    MpcError::ProtocolFailed("No previous DKG output for rotation".into())
                 })?;
                 let complained_share_index = request.share_index.ok_or_else(|| {
-                    DkgError::ProtocolFailed("Rotation complaint requires share_index".into())
+                    MpcError::ProtocolFailed("Rotation complaint requires share_index".into())
                 })?;
                 let complained_message = rotation_messages
                     .get(&complained_share_index)
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
+                        MpcError::ProtocolFailed(format!(
                             "No rotation message for complained share_index {}",
                             complained_share_index
                         ))
@@ -301,7 +301,7 @@ impl MpcManager {
                     .dealer_outputs
                     .get(&DealerOutputsKey::Rotation(complained_share_index))
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed("No output for complained share".into())
+                        MpcError::ProtocolFailed("No output for complained share".into())
                     })?;
                 let commitment = previous_output
                     .commitments
@@ -347,7 +347,7 @@ impl MpcManager {
                     self.dealer_nonce_outputs
                         .get(&request.dealer)
                         .ok_or_else(|| {
-                            DkgError::ProtocolFailed("No nonce output for complained dealer".into())
+                            MpcError::ProtocolFailed("No nonce output for complained dealer".into())
                         })?;
                 let receiver = self.create_nonce_receiver(request.dealer, *batch_index)?;
                 let complaint_response =
@@ -363,20 +363,20 @@ impl MpcManager {
     pub fn handle_get_public_dkg_output_request(
         &self,
         request: &GetPublicDkgOutputRequest,
-    ) -> DkgResult<GetPublicDkgOutputResponse> {
+    ) -> MpcResult<GetPublicDkgOutputResponse> {
         let previous_epoch = self
             .dkg_config
             .epoch
             .checked_sub(1)
-            .ok_or_else(|| DkgError::InvalidConfig("no previous epoch exists".to_string()))?;
+            .ok_or_else(|| MpcError::InvalidConfig("no previous epoch exists".to_string()))?;
         if request.epoch != previous_epoch {
-            return Err(DkgError::NotFound(format!(
+            return Err(MpcError::NotFound(format!(
                 "no DKG output for epoch {} (current epoch is {})",
                 request.epoch, self.dkg_config.epoch
             )));
         }
         let output = self.previous_output.as_ref().ok_or_else(|| {
-            DkgError::NotFound(format!(
+            MpcError::NotFound(format!(
                 "DKG output for epoch {} not yet available",
                 request.epoch
             ))
@@ -391,7 +391,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let threshold = {
             let mgr = mpc_manager.read().unwrap();
             mgr.dkg_config.threshold
@@ -409,7 +409,7 @@ impl MpcManager {
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let (previous, is_member_of_previous_committee) =
             Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel).await?;
         {
@@ -430,7 +430,7 @@ impl MpcManager {
             for (dealer, message) in mgr
                 .public_messages_store
                 .list_all_rotation_messages()
-                .map_err(|e| DkgError::StorageError(e.to_string()))?
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
             {
                 mgr.dealer_messages.insert(dealer, message);
             }
@@ -465,7 +465,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         // Clear stale state from previous batch.
         {
             let mut mgr = mpc_manager.write().unwrap();
@@ -492,7 +492,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
         let dealer_data = {
             let mgr = Arc::clone(mpc_manager);
@@ -532,7 +532,7 @@ impl MpcManager {
             with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
                 .await
                 .map_err(|e| {
-                    DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
+                    MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
         }
         Ok(())
@@ -542,7 +542,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let threshold = {
             let mgr = mpc_manager.read().unwrap();
             mgr.dkg_config.threshold
@@ -556,7 +556,7 @@ impl MpcManager {
             let cert = tob_channel
                 .receive()
                 .await
-                .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
+                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::Dkg(dkg_cert) = cert else {
                 continue;
             };
@@ -614,7 +614,7 @@ impl MpcManager {
                     {
                         mgr.process_certified_dkg_message(dealer)?;
                     }
-                    Ok::<_, DkgError>(
+                    Ok::<_, MpcError>(
                         mgr.complaints_to_process
                             .contains_key(&ComplaintsToProcessKey::Dkg(dealer)),
                     )
@@ -648,7 +648,7 @@ impl MpcManager {
                 mgr.dkg_config
                     .nodes
                     .weight_of(party_id)
-                    .map_err(|_| DkgError::ProtocolFailed("Missing dealer weight".to_string()))?
+                    .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
             };
             dealer_weight_sum += dealer_weight as u32;
             certified_dealers.insert(dealer);
@@ -669,7 +669,7 @@ impl MpcManager {
         previous: &DkgOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
         let dealer_data = {
             let mgr = Arc::clone(mpc_manager);
@@ -713,7 +713,7 @@ impl MpcManager {
             with_timeout_and_retry(|| ordered_broadcast_channel.publish(cert.clone()))
                 .await
                 .map_err(|e| {
-                    DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
+                    MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
         }
         Ok(())
@@ -724,7 +724,7 @@ impl MpcManager {
         previous: &DkgOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let mut certified_share_indices: Vec<ShareIndex> = {
             let mgr = mpc_manager.read().unwrap();
             mgr.dealer_outputs
@@ -743,7 +743,7 @@ impl MpcManager {
             let cert = ordered_broadcast_channel
                 .receive()
                 .await
-                .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
+                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::Rotation(rotation_cert) = cert else {
                 continue;
             };
@@ -772,19 +772,19 @@ impl MpcManager {
             let dealer_share_indices = {
                 let mgr = mpc_manager.read().unwrap();
                 let previous_nodes = mgr.previous_nodes.as_ref().ok_or_else(|| {
-                    DkgError::InvalidConfig("Key rotation requires previous nodes".into())
+                    MpcError::InvalidConfig("Key rotation requires previous nodes".into())
                 })?;
                 let previous_committee = mgr.previous_committee.as_ref().ok_or_else(|| {
-                    DkgError::InvalidConfig("Key rotation requires previous committee".into())
+                    MpcError::InvalidConfig("Key rotation requires previous committee".into())
                 })?;
                 let dealer_party_id = previous_committee.index_of(&dealer).ok_or_else(|| {
-                    DkgError::InvalidMessage {
+                    MpcError::InvalidMessage {
                         sender: dealer,
                         reason: "Dealer not in previous committee".into(),
                     }
                 })? as u16;
                 previous_nodes.share_ids_of(dealer_party_id).map_err(|_| {
-                    DkgError::InvalidMessage {
+                    MpcError::InvalidMessage {
                         sender: dealer,
                         reason: "Dealer has no shares in previous committee".into(),
                     }
@@ -830,7 +830,7 @@ impl MpcManager {
                     }) {
                         mgr.process_certified_rotation_message(&dealer, &previous)?;
                     }
-                    Ok::<_, DkgError>(())
+                    Ok::<_, MpcError>(())
                 })
                 .await?;
             }
@@ -874,7 +874,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let dealer_data = {
             let mgr = Arc::clone(mpc_manager);
             spawn_blocking(move || {
@@ -916,7 +916,7 @@ impl MpcManager {
             with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
                 .await
                 .map_err(|e| {
-                    DkgError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
+                    MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
         }
         Ok(())
@@ -926,7 +926,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let required_weight = {
             let mgr = mpc_manager.read().unwrap();
             2 * mgr.dkg_config.max_faulty + 1
@@ -940,7 +940,7 @@ impl MpcManager {
             let cert = tob_channel
                 .receive()
                 .await
-                .map_err(|e| DkgError::BroadcastError(e.to_string()))?;
+                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::NonceGeneration {
                 cert: nonce_cert, ..
             } = cert
@@ -1003,7 +1003,7 @@ impl MpcManager {
                     {
                         mgr.process_certified_nonce_message(dealer)?;
                     }
-                    Ok::<_, DkgError>(
+                    Ok::<_, MpcError>(
                         mgr.complaints_to_process
                             .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer)),
                     )
@@ -1038,7 +1038,7 @@ impl MpcManager {
                 mgr.dkg_config
                     .nodes
                     .weight_of(party_id)
-                    .map_err(|_| DkgError::ProtocolFailed("Missing dealer weight".to_string()))?
+                    .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
             };
             dealer_weight_sum += dealer_weight as u32;
             certified_dealers.insert(dealer);
@@ -1062,12 +1062,12 @@ impl MpcManager {
         dealer.create_message(rng)
     }
 
-    fn store_dkg_message(&mut self, dealer: Address, message: &avss::Message) -> DkgResult<()> {
+    fn store_dkg_message(&mut self, dealer: Address, message: &avss::Message) -> MpcResult<()> {
         self.dealer_messages
             .insert(dealer, Messages::Dkg(message.clone()));
         self.public_messages_store
             .store_dealer_message(&dealer, message)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
 
@@ -1075,12 +1075,12 @@ impl MpcManager {
         &mut self,
         dealer: Address,
         messages: &RotationMessages,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         self.dealer_messages
             .insert(dealer, Messages::Rotation(messages.clone()));
         self.public_messages_store
             .store_rotation_messages(&dealer, messages)
-            .map_err(|e| DkgError::StorageError(e.to_string()))?;
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
 
@@ -1093,7 +1093,7 @@ impl MpcManager {
         &mut self,
         dealer: Address,
         messages: &Messages,
-    ) -> DkgResult<BLS12381Signature> {
+    ) -> MpcResult<BLS12381Signature> {
         let message = match messages {
             Messages::Dkg(msg) => msg,
             Messages::Rotation(_) | Messages::NonceGeneration { .. } => {
@@ -1123,7 +1123,7 @@ impl MpcManager {
                         .sign(self.dkg_config.epoch, self.address, &dkg_message);
                 Ok(signature.signature().clone())
             }
-            avss::ProcessedMessage::Complaint(_) => Err(DkgError::InvalidMessage {
+            avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
                 sender: dealer,
                 reason: "Invalid shares".to_string(),
             }),
@@ -1134,11 +1134,11 @@ impl MpcManager {
         &self,
         dealer: Address,
         batch_index: u32,
-    ) -> DkgResult<batch_avss::Receiver> {
+    ) -> MpcResult<batch_avss::Receiver> {
         let dealer_party_id =
             self.committee
                 .index_of(&dealer)
-                .ok_or_else(|| DkgError::InvalidMessage {
+                .ok_or_else(|| MpcError::InvalidMessage {
                     sender: dealer,
                     reason: "Dealer not in committee".into(),
                 })? as u16;
@@ -1157,14 +1157,14 @@ impl MpcManager {
             self.encryption_key.clone(),
             self.batch_size_per_weight,
         )
-        .map_err(|e| DkgError::CryptoError(e.to_string()))
+        .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
     fn create_nonce_dealer_message(
         &self,
         batch_index: u32,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<Messages> {
+    ) -> MpcResult<Messages> {
         let dealer_sid = SessionId::nonce_dealer_session_id(
             &self.chain_id,
             self.dkg_config.epoch,
@@ -1179,10 +1179,10 @@ impl MpcManager {
             dealer_sid.to_vec(),
             self.batch_size_per_weight,
         )
-        .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         let message = dealer
             .create_message(rng)
-            .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         Ok(Messages::NonceGeneration {
             batch_index,
             message,
@@ -1193,7 +1193,7 @@ impl MpcManager {
         &mut self,
         dealer: Address,
         messages: &Messages,
-    ) -> DkgResult<BLS12381Signature> {
+    ) -> MpcResult<BLS12381Signature> {
         let (batch_index, message) = match messages {
             Messages::NonceGeneration {
                 batch_index,
@@ -1217,20 +1217,20 @@ impl MpcManager {
                         .sign(self.dkg_config.epoch, self.address, &nonce_message);
                 Ok(signature.signature().clone())
             }
-            batch_avss::ProcessedMessage::Complaint(_) => Err(DkgError::InvalidMessage {
+            batch_avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
                 sender: dealer,
                 reason: "Invalid nonce shares".to_string(),
             }),
         }
     }
 
-    fn process_certified_dkg_message(&mut self, dealer: Address) -> DkgResult<()> {
+    fn process_certified_dkg_message(&mut self, dealer: Address) -> MpcResult<()> {
         let output_key = DealerOutputsKey::Dkg(dealer);
         let complaint_key = ComplaintsToProcessKey::Dkg(dealer);
         let message = match self
             .dealer_messages
             .get(&dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?
+            .ok_or_else(|| MpcError::ProtocolFailed("No message for dealer".into()))?
         {
             Messages::Dkg(msg) => msg.clone(),
             Messages::Rotation(_) | Messages::NonceGeneration { .. } => {
@@ -1250,11 +1250,11 @@ impl MpcManager {
         )
     }
 
-    fn process_certified_nonce_message(&mut self, dealer: Address) -> DkgResult<()> {
+    fn process_certified_nonce_message(&mut self, dealer: Address) -> MpcResult<()> {
         let (batch_index, message) = match self
             .dealer_messages
             .get(&dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No message for dealer".into()))?
+            .ok_or_else(|| MpcError::ProtocolFailed("No message for dealer".into()))?
         {
             Messages::NonceGeneration {
                 batch_index,
@@ -1267,7 +1267,7 @@ impl MpcManager {
         let dealer_party_id =
             self.committee
                 .index_of(&dealer)
-                .ok_or_else(|| DkgError::InvalidMessage {
+                .ok_or_else(|| MpcError::InvalidMessage {
                     sender: dealer,
                     reason: "Dealer not in committee".into(),
                 })? as u16;
@@ -1286,7 +1286,7 @@ impl MpcManager {
             self.encryption_key.clone(),
             self.batch_size_per_weight,
         )
-        .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         match receiver.process_message(&message)? {
             batch_avss::ProcessedMessage::Valid(output) => {
                 self.dealer_nonce_outputs.insert(dealer, output);
@@ -1303,11 +1303,11 @@ impl MpcManager {
         &mut self,
         dealer: &Address,
         previous_dkg_output: &DkgOutput,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let rotation_messages = match self
             .dealer_messages
             .get(dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?
+            .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?
         {
             Messages::Rotation(msgs) => msgs.clone(),
             Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
@@ -1352,7 +1352,7 @@ impl MpcManager {
         commitment: Option<G>,
         output_key: DealerOutputsKey,
         complaint_key: ComplaintsToProcessKey,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let receiver = avss::Receiver::new(
             nodes,
             party_id,
@@ -1375,7 +1375,7 @@ impl MpcManager {
     fn complete_dkg(
         &self,
         certified_dealers: impl Iterator<Item = Address>,
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
             .map(|dealer| {
@@ -1388,7 +1388,7 @@ impl MpcManager {
                     .dealer_outputs
                     .get(&DealerOutputsKey::Dkg(dealer))
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
+                        MpcError::ProtocolFailed(format!(
                             "No dealer output found for dealer: {:?}.",
                             dealer
                         ))
@@ -1396,7 +1396,7 @@ impl MpcManager {
                     .clone();
                 Ok((dealer_party_id, output))
             })
-            .collect::<Result<_, DkgError>>()?;
+            .collect::<Result<_, MpcError>>()?;
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
@@ -1417,18 +1417,18 @@ impl MpcManager {
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
             if certificate
                 .is_signer(&mgr.address, &mgr.committee)
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::error!(
                     "Self in certificate signers but message not available for dealer {:?}.",
                     message.dealer_address
                 );
-                return Err(DkgError::ProtocolFailed(
+                return Err(MpcError::ProtocolFailed(
                     "Self in certificate signers but message not available".to_string(),
                 ));
             }
@@ -1437,7 +1437,7 @@ impl MpcManager {
             };
             let signers = certificate
                 .signers(&mgr.committee)
-                .map_err(|e| DkgError::InvalidCertificate(e.to_string()))?;
+                .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
         // TODO: Implement gradual escalation strategy for better network efficiency:
@@ -1469,7 +1469,7 @@ impl MpcManager {
                 }
             }
         }
-        Err(DkgError::PairwiseCommunicationError(format!(
+        Err(MpcError::PairwiseCommunicationError(format!(
             "Could not retrieve message for dealer {:?} from any signer",
             message.dealer_address
         )))
@@ -1480,18 +1480,18 @@ impl MpcManager {
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
             if certificate
                 .is_signer(&mgr.address, &mgr.committee)
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::error!(
                     "Self in certificate signers but nonce message not available for dealer {:?}.",
                     message.dealer_address
                 );
-                return Err(DkgError::ProtocolFailed(
+                return Err(MpcError::ProtocolFailed(
                     "Self in certificate signers but nonce message not available".to_string(),
                 ));
             }
@@ -1500,7 +1500,7 @@ impl MpcManager {
             };
             let signers = certificate
                 .signers(&mgr.committee)
-                .map_err(|e| DkgError::InvalidCertificate(e.to_string()))?;
+                .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
         for signer in signers {
@@ -1532,7 +1532,7 @@ impl MpcManager {
                 }
             }
         }
-        Err(DkgError::PairwiseCommunicationError(format!(
+        Err(MpcError::PairwiseCommunicationError(format!(
             "Could not retrieve nonce message for dealer {:?} from any signer",
             message.dealer_address
         )))
@@ -1541,7 +1541,7 @@ impl MpcManager {
     fn prepare_dealer_flow(
         &mut self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<DealerFlowData> {
+    ) -> MpcResult<DealerFlowData> {
         let messages = match self.dealer_messages.get(&self.address) {
             Some(msgs @ Messages::Dkg(_)) => msgs.clone(),
             _ => {
@@ -1558,7 +1558,7 @@ impl MpcManager {
         &mut self,
         previous: &DkgOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<DealerFlowData> {
+    ) -> MpcResult<DealerFlowData> {
         let messages = match self.dealer_messages.get(&self.address) {
             Some(msgs @ Messages::Rotation(_)) => msgs.clone(),
             _ => {
@@ -1575,7 +1575,7 @@ impl MpcManager {
         &mut self,
         batch_index: u32,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> DkgResult<DealerFlowData> {
+    ) -> MpcResult<DealerFlowData> {
         let messages = match self.dealer_messages.get(&self.address) {
             Some(msgs @ Messages::NonceGeneration { .. }) => msgs.clone(),
             _ => {
@@ -1622,18 +1622,18 @@ impl MpcManager {
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
             if certificate
                 .is_signer(&mgr.address, &mgr.committee)
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::error!(
                     "Self in certificate signers but rotation messages not available for dealer {:?}.",
                     message.dealer_address
                 );
-                return Err(DkgError::ProtocolFailed(
+                return Err(MpcError::ProtocolFailed(
                     "Self in certificate signers but rotation messages not available".to_string(),
                 ));
             }
@@ -1641,7 +1641,7 @@ impl MpcManager {
                 dealer: message.dealer_address,
             };
             let signers = certificate.signers(&mgr.committee).map_err(|_| {
-                DkgError::ProtocolFailed(
+                MpcError::ProtocolFailed(
                     "Certificate does not match the current epoch or committee".to_string(),
                 )
             })?;
@@ -1677,7 +1677,7 @@ impl MpcManager {
                 }
             }
         }
-        Err(DkgError::PairwiseCommunicationError(
+        Err(MpcError::PairwiseCommunicationError(
             "Failed to retrieve rotation messages from any signer".to_string(),
         ))
     }
@@ -1687,13 +1687,13 @@ impl MpcManager {
         dealer: &Address,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let (complaint_request, receiver, message) = {
             let mgr = mpc_manager.read().unwrap();
             let complaint = mgr
                 .complaints_to_process
                 .get(&ComplaintsToProcessKey::Dkg(*dealer))
-                .ok_or_else(|| DkgError::ProtocolFailed("No complaint for dealer".into()))?;
+                .ok_or_else(|| MpcError::ProtocolFailed("No complaint for dealer".into()))?;
             let complaint_request = ComplainRequest {
                 dealer: *dealer,
                 share_index: None,
@@ -1762,11 +1762,11 @@ impl MpcManager {
                 Err(e) => {
                     let error_msg = format!("Share recovery failed for dealer {:?}: {}", dealer, e);
                     tracing::error!("{}", error_msg);
-                    return Err(DkgError::CryptoError(error_msg));
+                    return Err(MpcError::CryptoError(error_msg));
                 }
             }
         }
-        Err(DkgError::ProtocolFailed(format!(
+        Err(MpcError::ProtocolFailed(format!(
             "Not enough valid complaint responses for dealer {:?}",
             dealer
         )))
@@ -1777,13 +1777,13 @@ impl MpcManager {
         dealer: &Address,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let (complaint_request, receiver, message) = {
             let mgr = mpc_manager.read().unwrap();
             let complaint = mgr
                 .complaints_to_process
                 .get(&ComplaintsToProcessKey::NonceGeneration(*dealer))
-                .ok_or_else(|| DkgError::ProtocolFailed("No nonce complaint for dealer".into()))?;
+                .ok_or_else(|| MpcError::ProtocolFailed("No nonce complaint for dealer".into()))?;
             let complaint_request = ComplainRequest {
                 dealer: *dealer,
                 share_index: None,
@@ -1821,7 +1821,7 @@ impl MpcManager {
                 mgr.encryption_key.clone(),
                 mgr.batch_size_per_weight,
             )
-            .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
             (complaint_request, receiver, message)
         };
         let receiver = Arc::new(receiver);
@@ -1866,11 +1866,11 @@ impl MpcManager {
                     let error_msg =
                         format!("Nonce share recovery failed for dealer {:?}: {}", dealer, e);
                     tracing::error!("{}", error_msg);
-                    return Err(DkgError::CryptoError(error_msg));
+                    return Err(MpcError::CryptoError(error_msg));
                 }
             }
         }
-        Err(DkgError::ProtocolFailed(format!(
+        Err(MpcError::ProtocolFailed(format!(
             "Not enough valid nonce complaint responses for dealer {:?}",
             dealer
         )))
@@ -1882,7 +1882,7 @@ impl MpcManager {
         previous_dkg_output: &DkgOutput,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<()> {
+    ) -> MpcResult<()> {
         let (request, recovery_contexts) = {
             let mgr = mpc_manager.read().unwrap();
             let Some(RotationComplainContext {
@@ -1960,7 +1960,7 @@ impl MpcManager {
                                     dealer, share_index, e
                                 );
                                 tracing::error!("{}", error_msg);
-                                return Err(DkgError::CryptoError(error_msg));
+                                return Err(MpcError::CryptoError(error_msg));
                             }
                         }
                     }
@@ -1984,18 +1984,18 @@ impl MpcManager {
         Ok(())
     }
 
-    fn load_stored_messages(&mut self) -> DkgResult<()> {
+    fn load_stored_messages(&mut self) -> MpcResult<()> {
         for (dealer, message) in self
             .public_messages_store
             .list_all_dealer_messages()
-            .map_err(|e| DkgError::StorageError(e.to_string()))?
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
         {
             self.dealer_messages.insert(dealer, message);
         }
         for (dealer, message) in self
             .public_messages_store
             .list_all_rotation_messages()
-            .map_err(|e| DkgError::StorageError(e.to_string()))?
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
         {
             self.dealer_messages.insert(dealer, message);
         }
@@ -2006,11 +2006,11 @@ impl MpcManager {
         &self,
         dealer: &Address,
         previous_dkg_output: &DkgOutput,
-    ) -> DkgResult<Option<RotationComplainContext>> {
+    ) -> MpcResult<Option<RotationComplainContext>> {
         let messages = self
             .dealer_messages
             .get(dealer)
-            .ok_or_else(|| DkgError::ProtocolFailed("No rotation messages for dealer".into()))?;
+            .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?;
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
             Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
@@ -2046,7 +2046,7 @@ impl MpcManager {
             let message = rotation_messages
                 .get(share_index)
                 .ok_or_else(|| {
-                    DkgError::ProtocolFailed(format!(
+                    MpcError::ProtocolFailed(format!(
                         "No rotation message for share index {}",
                         share_index
                     ))
@@ -2098,7 +2098,7 @@ impl MpcManager {
         previous_dkg_output: &DkgOutput,
         dealer: Address,
         messages: &Messages,
-    ) -> DkgResult<BLS12381Signature> {
+    ) -> MpcResult<BLS12381Signature> {
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
             Messages::Dkg(_) | Messages::NonceGeneration { .. } => {
@@ -2106,21 +2106,21 @@ impl MpcManager {
             }
         };
         let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
-            DkgError::InvalidConfig("Key rotation requires previous committee".into())
+            MpcError::InvalidConfig("Key rotation requires previous committee".into())
         })?;
         let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
-            DkgError::InvalidConfig("Key rotation requires previous nodes".into())
+            MpcError::InvalidConfig("Key rotation requires previous nodes".into())
         })?;
         let dealer_party_id =
             previous_committee
                 .index_of(&dealer)
-                .ok_or_else(|| DkgError::InvalidMessage {
+                .ok_or_else(|| MpcError::InvalidMessage {
                     sender: dealer,
                     reason: "Dealer not in previous committee".into(),
                 })? as u16;
         let dealer_share_indices: HashSet<_> = previous_nodes
             .share_ids_of(dealer_party_id)
-            .map_err(|_| DkgError::InvalidMessage {
+            .map_err(|_| MpcError::InvalidMessage {
                 sender: dealer,
                 reason: "Dealer has no shares in previous committee".into(),
             })?
@@ -2129,7 +2129,7 @@ impl MpcManager {
         let mut outputs = Vec::with_capacity(rotation_messages.len());
         for (&share_index, message) in rotation_messages {
             if !dealer_share_indices.contains(&share_index) {
-                return Err(DkgError::InvalidMessage {
+                return Err(MpcError::InvalidMessage {
                     sender: dealer,
                     reason: format!("Share index {} does not belong to dealer", share_index),
                 });
@@ -2138,7 +2138,7 @@ impl MpcManager {
                 .dealer_outputs
                 .contains_key(&DealerOutputsKey::Rotation(share_index))
             {
-                return Err(DkgError::InvalidMessage {
+                return Err(MpcError::InvalidMessage {
                     sender: dealer,
                     reason: format!("Share index {} already processed", share_index),
                 });
@@ -2158,7 +2158,7 @@ impl MpcManager {
                     outputs.push((DealerOutputsKey::Rotation(share_index), output));
                 }
                 avss::ProcessedMessage::Complaint(_) => {
-                    return Err(DkgError::InvalidMessage {
+                    return Err(MpcError::InvalidMessage {
                         sender: dealer,
                         reason: format!("Invalid rotation share for index {}", share_index),
                     });
@@ -2181,7 +2181,7 @@ impl MpcManager {
         &mut self,
         previous_dkg_output: &DkgOutput,
         certified_share_indices: &[ShareIndex],
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let threshold = previous_dkg_output.threshold;
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
@@ -2191,7 +2191,7 @@ impl MpcManager {
                     .dealer_outputs
                     .get(&DealerOutputsKey::Rotation(share_index))
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
+                        MpcError::ProtocolFailed(format!(
                             "No rotation output found for share index: {}",
                             share_index
                         ))
@@ -2201,7 +2201,7 @@ impl MpcManager {
                     value: output.clone(),
                 })
             })
-            .collect::<Result<_, DkgError>>()?;
+            .collect::<Result<_, MpcError>>()?;
         let combined = avss::ReceiverOutput::complete_key_rotation(
             threshold,
             self.party_id,
@@ -2210,7 +2210,7 @@ impl MpcManager {
         )
         .expect(EXPECT_THRESHOLD_MET);
         if combined.vk != previous_dkg_output.public_key {
-            return Err(DkgError::ProtocolFailed(
+            return Err(MpcError::ProtocolFailed(
                 "Key rotation produced different public key".into(),
             ));
         }
@@ -2229,14 +2229,14 @@ impl MpcManager {
     fn reconstruct_previous_output(
         &mut self,
         certificates: &[CertificateV1],
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         match certificates.first() {
             Some(CertificateV1::Dkg(_)) | None => {
                 self.reconstruct_from_dkg_certificates(certificates)
             }
             Some(CertificateV1::Rotation(_)) => {
                 let previous_threshold = self.previous_threshold.ok_or_else(|| {
-                    DkgError::InvalidConfig("Key rotation requires previous threshold".into())
+                    MpcError::InvalidConfig("Key rotation requires previous threshold".into())
                 })?;
                 self.reconstruct_from_rotation_certificates(certificates, previous_threshold)
             }
@@ -2249,25 +2249,25 @@ impl MpcManager {
     fn reconstruct_from_dkg_certificates(
         &mut self,
         certificates: &[CertificateV1],
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let previous_committee = self.previous_committee.clone().ok_or_else(|| {
-            DkgError::InvalidConfig("DKG reconstruction requires previous committee".into())
+            MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
         })?;
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
-            DkgError::InvalidConfig("DKG reconstruction requires previous nodes".into())
+            MpcError::InvalidConfig("DKG reconstruction requires previous nodes".into())
         })?;
         let previous_threshold = self.previous_threshold.ok_or_else(|| {
-            DkgError::InvalidConfig("DKG reconstruction requires previous threshold".into())
+            MpcError::InvalidConfig("DKG reconstruction requires previous threshold".into())
         })?;
         let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
-            DkgError::InvalidConfig("This node is not in the previous committee".into())
+            MpcError::InvalidConfig("This node is not in the previous committee".into())
         })? as u16;
         let source_session_id =
             SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
         let mut certified_dealers = HashMap::new();
         for cert in certificates {
             let CertificateV1::Dkg(dkg_cert) = cert else {
-                return Err(DkgError::InvalidCertificate(
+                return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all DKG certificates".into(),
                 ));
             };
@@ -2277,9 +2277,9 @@ impl MpcManager {
             let message = self
                 .public_messages_store
                 .get_dealer_message(source_epoch, &dealer_address)
-                .map_err(|e| DkgError::StorageError(e.to_string()))?
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
-                    DkgError::StorageError(format!(
+                    MpcError::StorageError(format!(
                         "DKG message not found for dealer: {:?}",
                         dealer_address
                     ))
@@ -2287,7 +2287,7 @@ impl MpcManager {
             let messages = Messages::Dkg(message.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
-                return Err(DkgError::ProtocolFailed(format!(
+                return Err(MpcError::ProtocolFailed(format!(
                     "Message hash mismatch for dealer {:?}: stored message does not match certificate",
                     dealer_address
                 )));
@@ -2323,7 +2323,7 @@ impl MpcManager {
             })
             .sum();
         if total_weight < previous_threshold {
-            return Err(DkgError::NotEnoughApprovals {
+            return Err(MpcError::NotEnoughApprovals {
                 needed: previous_threshold as usize,
                 got: total_weight as usize,
             });
@@ -2339,7 +2339,7 @@ impl MpcManager {
                     .dealer_outputs
                     .get(&DealerOutputsKey::Dkg(dealer))
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
+                        MpcError::ProtocolFailed(format!(
                             "No dealer output found for dealer: {:?}.",
                             dealer
                         ))
@@ -2347,7 +2347,7 @@ impl MpcManager {
                     .clone();
                 Ok((dealer_party_id, output))
             })
-            .collect::<Result<_, DkgError>>()?;
+            .collect::<Result<_, MpcError>>()?;
         let combined_output =
             avss::ReceiverOutput::complete_dkg(previous_threshold, &previous_nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
@@ -2367,15 +2367,15 @@ impl MpcManager {
         &mut self,
         certificates: &[CertificateV1],
         previous_threshold: u16,
-    ) -> DkgResult<DkgOutput> {
+    ) -> MpcResult<DkgOutput> {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
-            DkgError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
+            MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
         })?;
         let previous_committee = self.previous_committee.clone().ok_or_else(|| {
-            DkgError::InvalidConfig("Rotation reconstruction requires previous committee".into())
+            MpcError::InvalidConfig("Rotation reconstruction requires previous committee".into())
         })?;
         let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
-            DkgError::InvalidConfig("This node is not in the previous committee".into())
+            MpcError::InvalidConfig("This node is not in the previous committee".into())
         })? as u16;
         let source_session_id = SessionId::new(
             &self.chain_id,
@@ -2387,7 +2387,7 @@ impl MpcManager {
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
             let CertificateV1::Rotation(rotation_cert) = cert else {
-                return Err(DkgError::InvalidCertificate(
+                return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all Rotation certificates".into(),
                 ));
             };
@@ -2397,9 +2397,9 @@ impl MpcManager {
             let rotation_msgs = self
                 .public_messages_store
                 .get_rotation_messages(source_epoch, &dealer_address)
-                .map_err(|e| DkgError::StorageError(e.to_string()))?
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
-                    DkgError::StorageError(format!(
+                    MpcError::StorageError(format!(
                         "Rotation messages not found for dealer: {:?}",
                         dealer_address
                     ))
@@ -2407,7 +2407,7 @@ impl MpcManager {
             let messages = Messages::Rotation(rotation_msgs.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
-                return Err(DkgError::ProtocolFailed(format!(
+                return Err(MpcError::ProtocolFailed(format!(
                     "Message hash mismatch for dealer {:?}: stored message does not match certificate",
                     dealer_address
                 )));
@@ -2436,7 +2436,7 @@ impl MpcManager {
         // Unlike normal flow which accumulates until threshold in a loop, reconstruction
         // receives all certificates at once. Check threshold for better error handling.
         if certified_share_indices.len() < previous_threshold as usize {
-            return Err(DkgError::NotEnoughApprovals {
+            return Err(MpcError::NotEnoughApprovals {
                 needed: previous_threshold as usize,
                 got: certified_share_indices.len(),
             });
@@ -2449,7 +2449,7 @@ impl MpcManager {
                     .dealer_outputs
                     .get(&DealerOutputsKey::Rotation(share_index))
                     .ok_or_else(|| {
-                        DkgError::ProtocolFailed(format!(
+                        MpcError::ProtocolFailed(format!(
                             "No rotation output found for share index: {}",
                             share_index
                         ))
@@ -2459,7 +2459,7 @@ impl MpcManager {
                     value: output.clone(),
                 })
             })
-            .collect::<Result<_, DkgError>>()?;
+            .collect::<Result<_, MpcError>>()?;
         let combined = avss::ReceiverOutput::complete_key_rotation(
             previous_threshold,
             previous_party_id,
@@ -2483,7 +2483,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         previous_committee_threshold: u64,
-    ) -> DkgResult<PublicDkgOutput> {
+    ) -> MpcResult<PublicDkgOutput> {
         let (previous_committee, epoch) = {
             let mgr = mpc_manager.read().unwrap();
             let previous_committee = mgr
@@ -2530,7 +2530,7 @@ impl MpcManager {
             }
         }
         let max_weight = responses.values().map(|(_, w)| *w).max().unwrap_or(0);
-        Err(DkgError::NotEnoughApprovals {
+        Err(MpcError::NotEnoughApprovals {
             needed: (previous_committee_threshold + 1) as usize,
             got: max_weight as usize,
         })
@@ -2540,7 +2540,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
-    ) -> DkgResult<(DkgOutput, bool)> {
+    ) -> MpcResult<(DkgOutput, bool)> {
         let (is_member_of_previous_committee, threshold_opt) = {
             let mgr = mpc_manager.read().unwrap();
             let is_member = mgr
@@ -2560,7 +2560,7 @@ impl MpcManager {
             .await?
         } else {
             let threshold = threshold_opt.ok_or_else(|| {
-                DkgError::InvalidConfig("Key rotation requires previous threshold".into())
+                MpcError::InvalidConfig("Key rotation requires previous threshold".into())
             })?;
             let public_output = Self::fetch_public_dkg_output_from_quorum(
                 mpc_manager,
@@ -2590,9 +2590,9 @@ fn compute_messages_hash(messages: &Messages) -> MessageHash {
     MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
 
-fn compute_bft_threshold(total_weight: u16) -> DkgResult<u16> {
+fn compute_bft_threshold(total_weight: u16) -> MpcResult<u16> {
     if total_weight == 0 {
-        return Err(DkgError::InvalidConfig(
+        return Err(MpcError::InvalidConfig(
             "committee has zero total weight".into(),
         ));
     }
@@ -2603,7 +2603,7 @@ fn build_reduced_nodes(
     committee: &Committee,
     allowed_delta: u16,
     test_weight_divisor: u16,
-) -> DkgResult<(Nodes<EncryptionGroupElement>, u16)> {
+) -> MpcResult<(Nodes<EncryptionGroupElement>, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
         .iter()
@@ -2617,7 +2617,7 @@ fn build_reduced_nodes(
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
     let threshold = compute_bft_threshold(total_weight)?;
     Nodes::new_reduced(nodes_vec, threshold, allowed_delta, 1)
-        .map_err(|e| DkgError::CryptoError(e.to_string()))
+        .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 
 fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
@@ -2715,7 +2715,7 @@ mod tests {
         manager: &mut MpcManager,
         messages: &Messages,
         dealer: Address,
-    ) -> DkgResult<MemberSignature> {
+    ) -> MpcResult<MemberSignature> {
         let Messages::Dkg(msg) = messages else {
             panic!("receive_dealer_messages called with rotation messages");
         };
@@ -2941,7 +2941,7 @@ mod tests {
         dealer_messages: &Messages,
         dealer_address: Address,
         signatures: Vec<MemberSignature>,
-    ) -> DkgResult<DealerCertificate> {
+    ) -> MpcResult<DealerCertificate> {
         let messages_hash = compute_messages_hash(dealer_messages);
         let dkg_message = DealerMessagesHash {
             dealer_address,
@@ -2951,11 +2951,11 @@ mod tests {
         for signature in signatures {
             aggregator
                 .add_signature(signature)
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         }
         aggregator
             .finish()
-            .map_err(|e| DkgError::CryptoError(e.to_string()))
+            .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
     fn create_rotation_test_certificate(
@@ -2963,7 +2963,7 @@ mod tests {
         rotation_messages: &Messages,
         dealer_address: Address,
         signatures: Vec<MemberSignature>,
-    ) -> DkgResult<DealerCertificate> {
+    ) -> MpcResult<DealerCertificate> {
         let messages_hash = compute_messages_hash(rotation_messages);
         let rotation_message = DealerMessagesHash {
             dealer_address,
@@ -2973,11 +2973,11 @@ mod tests {
         for signature in signatures {
             aggregator
                 .add_signature(signature)
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         }
         aggregator
             .finish()
-            .map_err(|e| DkgError::CryptoError(e.to_string()))
+            .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
     struct MockP2PChannel {
@@ -3798,7 +3798,7 @@ mod tests {
         // Verify operation fails with storage error
         assert!(result.is_err(), "Should fail when storage fails");
         match result {
-            Err(DkgError::StorageError(msg)) => {
+            Err(MpcError::StorageError(msg)) => {
                 assert!(
                     msg.contains("Storage failure"),
                     "Error should mention storage failure"
@@ -4844,7 +4844,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::BroadcastError(_)));
+        assert!(matches!(err, MpcError::BroadcastError(_)));
         assert!(err.to_string().contains("receive timeout"));
     }
     //
@@ -4936,7 +4936,7 @@ mod tests {
     async fn setup_party_and_run(
         test_setup: &WeightBasedTestSetup,
         party_index: usize,
-    ) -> (DkgResult<DkgOutput>, MockOrderedBroadcastChannel) {
+    ) -> (MpcResult<DkgOutput>, MockOrderedBroadcastChannel) {
         let party_addr = test_setup.setup.address(party_index);
 
         let mut party_manager = test_setup.setup.create_manager(party_index);
@@ -5302,7 +5302,7 @@ mod tests {
         // Should fail with PairwiseCommunicationError (could not retrieve message from any signer)
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::PairwiseCommunicationError(_)));
+        assert!(matches!(err, MpcError::PairwiseCommunicationError(_)));
 
         // Verify party has dealer1 message (processed before failure)
         let mgr = party_manager.read().unwrap();
@@ -5404,7 +5404,7 @@ mod tests {
         assert!(result.is_err(), "Expected error, got: {:?}", result);
         let err = result.unwrap_err();
         assert!(
-            matches!(err, DkgError::ProtocolFailed(_)),
+            matches!(err, MpcError::ProtocolFailed(_)),
             "Expected ProtocolFailed, got: {:?}",
             err
         );
@@ -5509,7 +5509,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::NotFound(_)));
+        assert!(matches!(err, MpcError::NotFound(_)));
         assert!(err.to_string().contains("Messages for dealer"));
     }
 
@@ -5535,7 +5535,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         assert!(err.to_string().contains("No message from dealer"));
     }
 
@@ -5566,7 +5566,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         // DKG error message uses "dealer" not "share"
         assert!(err.to_string().contains("No output for complained dealer"));
     }
@@ -5839,7 +5839,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         assert!(err.to_string().contains("No complaint for dealer"));
     }
 
@@ -5887,7 +5887,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, DkgError::ProtocolFailed(_)),
+            matches!(err, MpcError::ProtocolFailed(_)),
             "Expected ProtocolFailed, got: {:?}",
             err
         );
@@ -5950,7 +5950,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, DkgError::ProtocolFailed(_)),
+            matches!(err, MpcError::ProtocolFailed(_)),
             "Expected ProtocolFailed, got: {:?}",
             err
         );
@@ -6092,7 +6092,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, DkgError::CryptoError(_)),
+            matches!(err, MpcError::CryptoError(_)),
             "Expected CryptoError, got: {:?}",
             err
         );
@@ -6285,7 +6285,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         assert!(
             err.to_string()
                 .contains("Self in certificate signers but message not available")
@@ -6345,7 +6345,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::PairwiseCommunicationError(_)));
+        assert!(matches!(err, MpcError::PairwiseCommunicationError(_)));
         assert!(err.to_string().contains("Could not retrieve"));
     }
 
@@ -6439,7 +6439,7 @@ mod tests {
         dealer_address: Address,
         messages: &Messages,
         signatures: Vec<MemberSignature>,
-    ) -> DkgResult<DealerCertificate> {
+    ) -> MpcResult<DealerCertificate> {
         let messages_hash = compute_messages_hash(messages);
         let dkg_message = DealerMessagesHash {
             dealer_address,
@@ -6451,11 +6451,11 @@ mod tests {
         for signature in signatures {
             aggregator
                 .add_signature(signature)
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         }
         aggregator
             .finish()
-            .map_err(|e| DkgError::CryptoError(e.to_string()))
+            .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
     fn create_complaint_for_dealer(
@@ -6742,7 +6742,7 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            DkgError::InvalidMessage { sender, reason } => {
+            MpcError::InvalidMessage { sender, reason } => {
                 assert_eq!(sender, dealer_address);
                 assert!(reason.contains("different messages"));
             }
@@ -6778,7 +6778,7 @@ mod tests {
         let result1 = receiver_manager.handle_send_messages_request(dealer_addr, &request);
         assert!(result1.is_err(), "Invalid shares should return error");
         match result1.unwrap_err() {
-            DkgError::InvalidMessage { sender, reason } => {
+            MpcError::InvalidMessage { sender, reason } => {
                 assert_eq!(sender, dealer_addr);
                 assert!(reason.contains("Invalid shares"));
             }
@@ -6789,7 +6789,7 @@ mod tests {
         let result2 = receiver_manager.handle_send_messages_request(dealer_addr, &request);
         assert!(result2.is_err(), "Second call should also return error");
         match result2.unwrap_err() {
-            DkgError::InvalidMessage { sender, reason } => {
+            MpcError::InvalidMessage { sender, reason } => {
                 assert_eq!(sender, dealer_addr);
                 assert!(
                     reason.contains("previously rejected"),
@@ -7596,7 +7596,7 @@ mod tests {
         );
         let err = result.unwrap_err();
         match err {
-            DkgError::InvalidMessage { reason, .. } => {
+            MpcError::InvalidMessage { reason, .. } => {
                 assert!(
                     reason.contains("already processed"),
                     "Error should mention already processed: {}",
@@ -7645,7 +7645,7 @@ mod tests {
         );
         let err = result.unwrap_err();
         match err {
-            DkgError::InvalidMessage { reason, .. } => {
+            MpcError::InvalidMessage { reason, .. } => {
                 assert!(
                     reason.contains("does not belong to dealer"),
                     "Error should mention share doesn't belong to dealer: {}",
@@ -9446,7 +9446,7 @@ mod tests {
         let result = receiver.handle_send_messages_request(dealer_address, &request);
         assert!(result.is_err());
         match result.unwrap_err() {
-            DkgError::InvalidMessage { sender, reason } => {
+            MpcError::InvalidMessage { sender, reason } => {
                 assert_eq!(sender, dealer_address);
                 assert!(
                     reason.contains("different messages"),
@@ -9489,7 +9489,7 @@ mod tests {
         let result = manager.handle_complain_request(&request);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         assert!(
             err.to_string().contains("No message from dealer"),
             "Expected 'No message from dealer', got: {}",
@@ -9682,7 +9682,7 @@ mod tests {
         let result = receiver.handle_complain_request(&request);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         assert!(
             err.to_string().contains("No output for complained share"),
             "Expected 'No output for complained share', got: {}",
@@ -9891,7 +9891,7 @@ mod tests {
         let result = receiver.handle_complain_request(&request);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DkgError::ProtocolFailed(_)));
+        assert!(matches!(err, MpcError::ProtocolFailed(_)));
         assert!(
             err.to_string()
                 .contains("No nonce output for complained dealer"),

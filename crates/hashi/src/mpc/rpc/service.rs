@@ -1,7 +1,7 @@
 use crate::grpc::HttpService;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;
-use crate::mpc::types::DkgError;
+use crate::mpc::types::MpcError;
 use crate::mpc::types::SigningError;
 use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
@@ -175,8 +175,8 @@ fn signing_error_to_status(err: SigningError) -> Status {
     }
 }
 
-fn dkg_error_to_status(err: DkgError) -> Status {
-    use types::DkgError::*;
+fn dkg_error_to_status(err: MpcError) -> Status {
+    use types::MpcError::*;
     match &err {
         InvalidThreshold(_) | InvalidMessage { .. } | InvalidCertificate(_) => {
             Status::invalid_argument(err.to_string())
