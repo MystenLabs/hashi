@@ -49,19 +49,6 @@ impl BatchAuditWindow {
             guardian_end,
         }
     }
-
-    pub fn sui_start(&self) -> UnixSeconds {
-        self.sui_start
-    }
-    pub fn sui_end(self) -> UnixSeconds {
-        self.sui_end
-    }
-    pub fn guardian_start(&self) -> UnixSeconds {
-        self.guardian_start
-    }
-    pub fn guardian_end(self) -> UnixSeconds {
-        self.guardian_end
-    }
 }
 
 impl AuditWindow for BatchAuditWindow {
@@ -70,12 +57,21 @@ impl AuditWindow for BatchAuditWindow {
     }
 }
 
-/// A batch auditor that validates all events emitted during a given time period.
+/// A batch auditor that tries to validate all events emitted during a given time period `[t1, t2]`.
 ///
-/// It currently functions as follows:
-///     - first fetch all the necessary sui, guardian events
-///     - then perform all the checks
-/// An alternate streaming auditor can be implemented in the future if needed.
+/// It functions as follows:
+///     - fetch all sui events from `[t1 - e1_e2_delay_secs, t2 + clock_skew]`
+///     - fetch all guardian events from `[t1 - clock_skew, t2 + e1_e2_delay_secs]`
+///     - fetch btx tx & perform checks for all withdrawals with at least one event in the range `[t1, t2]`
+/// Finally, it outputs a timestamp `verified_up_to` to be used as `t1` in the next audit.
+///
+/// Notes:
+/// 1) A successful batch audit guarantees that any sui or guardian event emitted in the range `[t1, verified_up_to)`
+///    as measured by the emitter's clock is cross-verified. In other words, for all e_sui with sui timestamp in the verified range
+///    and for all e_guardian with guardian timestamp in the verified range, all the checks succeed.
+/// 2) Note that events emitted towards the end of the time range may not be fully verified, e.g., if t2 is current or if there is
+///    some issue with RPC. This info is captured by the `verified_up_to` timestamp.
+/// 3) The current approach is fetch-then-check. An alternate streaming auditor can be implemented in the future if needed.
 pub struct BatchAuditor {
     // immutable
     pub cfg: Config,
@@ -135,14 +131,14 @@ impl BatchAuditor {
     async fn fetch_all_sui_guardian_events(&mut self) -> anyhow::Result<()> {
         let mut stalled_iterations = 0_u8;
 
-        while self.cursors.sui < self.audit_window.sui_end()
-            || self.cursors.guardian < self.audit_window.guardian_end()
+        while self.cursors.sui < self.audit_window.sui_end
+            || self.cursors.guardian < self.audit_window.guardian_end
         {
             let prev_sui = self.cursors.sui;
             let prev_guardian = self.cursors.guardian;
 
-            let should_poll_sui = self.cursors.sui < self.audit_window.sui_end();
-            let should_poll_guardian = self.cursors.guardian < self.audit_window.guardian_end();
+            let should_poll_sui = self.cursors.sui < self.audit_window.sui_end;
+            let should_poll_guardian = self.cursors.guardian < self.audit_window.guardian_end;
 
             let (sui_result, guardian_result) = tokio::join!(
                 async {
@@ -198,11 +194,11 @@ impl BatchAuditor {
         tracing::info!(
             start = self.audit_window.user_start,
             end = self.audit_window.user_end,
-            sui_start = self.audit_window.sui_start(),
-            sui_target_end = self.audit_window.sui_end(),
+            sui_start = self.audit_window.sui_start,
+            sui_target_end = self.audit_window.sui_end,
             sui_cursor = self.cursors.sui,
-            guardian_start = self.audit_window.guardian_start(),
-            guardian_target_end = self.audit_window.guardian_end(),
+            guardian_start = self.audit_window.guardian_start,
+            guardian_target_end = self.audit_window.guardian_end,
             guardian_cursor = self.cursors.guardian,
             "finished batch polling"
         );
@@ -215,7 +211,6 @@ impl BatchAuditor {
         }
 
         // Gather all violations & also identify the earliest incomplete state machine (to signal when to start next)
-        // note that we only need to find earliest_incomplete_e2_timestamp for correctness; so we are being conservative.
         let mut verified_up_to = self.cursors.min();
         for sm in self.pending.values() {
             if !sm.is_in_audit_window(&self.audit_window) {
@@ -223,6 +218,8 @@ impl BatchAuditor {
             }
             self.findings.extend(sm.violations(&self.cursors));
             if !sm.is_valid() {
+                // we are being a little conservative here; e.g., if e_hashi, e_guardian exist and e_btc doesn't, then
+                // earliest event time might correspond to e_hashi. but even using e_guardian suffices.
                 verified_up_to = verified_up_to.min(
                     sm.earliest_event_time()
                         .expect("incomplete state machines must have one timestamp"),
