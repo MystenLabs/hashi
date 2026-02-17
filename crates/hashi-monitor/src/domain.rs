@@ -1,25 +1,23 @@
 //! Domain model for the monitor.
 //!
-//! We model the cross-system withdrawal flow as a sequence of event sets:
-//! - E1: Hashi approval event on sui (PendingWithdrawal creation)
-//! - E2: Guardian approval event on S3
-//! - E3: BTC tx broadcast
+//! We model the cross-system withdrawal flow as a sequence of events:
+//! - E1 or E_hashi: Hashi approval event on sui (PendingWithdrawal creation)
+//! - E2 or E_guardian: Guardian approval event on S3
+//! - E3 or E_btc: BTC tx broadcast
 //!
 //! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 
-use std::error::Error as StdError;
-use std::fmt;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use bitcoin::Txid;
 use hashi_guardian_shared::WithdrawalID;
+use serde::Deserialize;
 
 pub type UnixSeconds = u64;
 
 pub fn now_unix_seconds() -> UnixSeconds {
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
-
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -30,49 +28,21 @@ pub fn now_unix_seconds() -> UnixSeconds {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalEvent {
     /// Who produced the event?
-    source: WithdrawalEventType,
+    pub event_type: WithdrawalEventType,
 
     /// Stable withdrawal identifier.
-    wid: WithdrawalID,
+    pub wid: WithdrawalID,
 
     /// Unix timestamp of sui checkpoint / s3 log / btc block
-    timestamp: UnixSeconds,
+    pub timestamp: UnixSeconds,
 
     /// btc txid
-    btc_txid: Txid,
+    pub btc_txid: Txid,
 }
 
-impl WithdrawalEvent {
-    pub fn new(
-        source: WithdrawalEventType,
-        wid: WithdrawalID,
-        timestamp: UnixSeconds,
-        btc_txid: Txid,
-    ) -> Self {
-        Self {
-            source,
-            wid,
-            timestamp,
-            btc_txid,
-        }
-    }
-
-    pub fn source(&self) -> &WithdrawalEventType {
-        &self.source
-    }
-    pub fn wid(&self) -> WithdrawalID {
-        self.wid
-    }
-    pub fn timestamp(&self) -> UnixSeconds {
-        self.timestamp
-    }
-    pub fn btc_txid(&self) -> Txid {
-        self.btc_txid
-    }
-}
-
-/// Event source or type
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// Event source or type.
+/// Note: Make sure WithdrawalEventType::NON_TERMINAL_EVENTS and TERMINAL_EVENT are up-to-date.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Hash)]
 pub enum WithdrawalEventType {
     E1HashiApproved,
     E2GuardianApproved,
@@ -80,12 +50,20 @@ pub enum WithdrawalEventType {
 }
 
 impl WithdrawalEventType {
+    pub const NON_TERMINAL_EVENTS: [WithdrawalEventType; 2] =
+        [Self::E1HashiApproved, Self::E2GuardianApproved];
+    pub const TERMINAL_EVENT: Self = Self::E3BtcConfirmed;
+
     pub fn successor(&self) -> Option<Self> {
         match self {
             WithdrawalEventType::E1HashiApproved => Some(WithdrawalEventType::E2GuardianApproved),
             WithdrawalEventType::E2GuardianApproved => Some(WithdrawalEventType::E3BtcConfirmed),
             WithdrawalEventType::E3BtcConfirmed => None,
         }
+    }
+
+    pub fn has_successor(&self) -> bool {
+        self.successor().is_some()
     }
 
     pub fn predecessor(&self) -> Option<Self> {
@@ -97,40 +75,11 @@ impl WithdrawalEventType {
     }
 }
 
-/// Findings emitted by the monitor.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MonitorError {
-    DuplicateEventForSameWid,
-    InvalidWid,
-    InvalidBtcTxid,
-    EventOccurredAfterDeadline {
-        event: WithdrawalEvent,
-        deadline: UnixSeconds,
-        occurred_at: UnixSeconds, // same as event.timestamp
-    },
-    ExpectedEventMissing {
-        event_type: WithdrawalEventType,
-        deadline: UnixSeconds,
-        cursor: UnixSeconds,
-    },
-}
-
-impl fmt::Display for MonitorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl StdError for MonitorError {}
-
 /// Per-source cursors tracking how far we've read from each data source.
 #[derive(Clone, Copy, Debug)]
 pub struct Cursors {
     pub sui: UnixSeconds,
     pub guardian: UnixSeconds,
-    // note: btc cursor is usually just the current time as we just do point queries;
-    // we define it for uniformity.
-    pub btc: UnixSeconds,
 }
 
 impl Cursors {
@@ -138,7 +87,9 @@ impl Cursors {
         match et {
             WithdrawalEventType::E1HashiApproved => self.sui,
             WithdrawalEventType::E2GuardianApproved => self.guardian,
-            WithdrawalEventType::E3BtcConfirmed => self.btc,
+            WithdrawalEventType::E3BtcConfirmed => {
+                unreachable!("E3 cursor is tracked per-withdrawal via btc_checked_at")
+            }
         }
     }
 }

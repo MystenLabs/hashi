@@ -21,7 +21,7 @@ impl BatchAuditor {
     }
 
     pub fn in_window(&self, e: &WithdrawalEvent) -> bool {
-        e.timestamp() >= self.start && e.timestamp() <= self.end
+        e.timestamp >= self.start && e.timestamp <= self.end
     }
 
     pub fn run(&self) -> anyhow::Result<()> {

@@ -1,0 +1,28 @@
+use crate::domain::UnixSeconds;
+use crate::domain::WithdrawalEvent;
+use crate::domain::WithdrawalEventType;
+use std::fmt;
+
+/// Findings emitted by the monitor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MonitorError {
+    DuplicateEventForSameWid,
+    InvalidWid,
+    InvalidBtcTxid,
+    EventOccurredAfterDeadline {
+        event: WithdrawalEvent,
+        deadline: UnixSeconds,
+        occurred_at: UnixSeconds, // same as event.timestamp
+    },
+    ExpectedEventMissing {
+        event_type: WithdrawalEventType,
+        deadline: UnixSeconds,
+        cursor: UnixSeconds,
+    },
+}
+
+impl fmt::Display for MonitorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}

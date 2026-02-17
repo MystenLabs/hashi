@@ -1,29 +1,28 @@
+use anyhow::anyhow;
+use serde::Deserialize;
 use std::path::Path;
 
 use crate::domain::WithdrawalEventType;
-use serde::Deserialize;
 
 /// Configuration for the cursorless batch auditor.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
-    /// Next event delay bound for E1 -> E2.
-    pub e1_e2_delay_secs: u64,
+    /// Maximum allowed delay between consecutive events.
+    pub next_event_delays: NextEventDelays,
 
-    /// Next event delay bound for E2 -> E3.
-    pub e2_e3_delay_secs: u64,
-
-    /// E_{i+1} is allowed to occur up to clock_skew seconds before E_i (default: 60s).
+    /// E_{i+1} is allowed to occur up to clock_skew seconds before E_i (default: 300s).
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
-
-    /// Poll interval for continuous auditor (default: 300s).
-    #[serde(default = "default_poll_interval_secs")]
-    pub poll_interval_secs: u64,
 
     pub guardian: GuardianConfig,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
 }
+
+/// The maximum allowed delay between an event and it's successor in seconds.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "Vec<(WithdrawalEventType, u64)>")]
+pub struct NextEventDelays(Vec<(WithdrawalEventType, u64)>);
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct GuardianConfig {
@@ -44,11 +43,49 @@ pub struct BtcConfig {
 }
 
 fn default_clock_skew() -> u64 {
-    60
+    300
 }
 
-fn default_poll_interval_secs() -> u64 {
-    300 // 5 mins
+impl NextEventDelays {
+    /// The constructor ensures that there is one entry for every non-terminal event.
+    pub fn new(inputs: Vec<(WithdrawalEventType, u64)>) -> anyhow::Result<Self> {
+        let mut seen_sources = Vec::new();
+        for (source, _) in &inputs {
+            if seen_sources.contains(source) {
+                return Err(anyhow!(format!("duplicate delay entry for {:?}", source)));
+            }
+            seen_sources.push(*source);
+        }
+
+        if seen_sources.contains(&WithdrawalEventType::TERMINAL_EVENT) {
+            return Err(anyhow!(
+                "delay for terminal event is not allowed".to_string()
+            ));
+        }
+
+        for source in WithdrawalEventType::NON_TERMINAL_EVENTS {
+            if !seen_sources.contains(&source) {
+                return Err(anyhow!(format!("missing delay entry for {:?}", source)));
+            }
+        }
+
+        Ok(Self(inputs))
+    }
+
+    pub fn get_delay(&self, source: WithdrawalEventType) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|(event_source, _)| *event_source == source)
+            .map(|(_, next_event_delay_secs)| *next_event_delay_secs)
+    }
+}
+
+impl TryFrom<Vec<(WithdrawalEventType, u64)>> for NextEventDelays {
+    type Error = anyhow::Error;
+
+    fn try_from(entries: Vec<(WithdrawalEventType, u64)>) -> Result<Self, Self::Error> {
+        Self::new(entries)
+    }
 }
 
 impl Config {
@@ -59,10 +96,6 @@ impl Config {
     }
 
     pub fn next_event_delay(&self, source: WithdrawalEventType) -> Option<u64> {
-        match source {
-            WithdrawalEventType::E1HashiApproved => Some(self.e1_e2_delay_secs),
-            WithdrawalEventType::E2GuardianApproved => Some(self.e2_e3_delay_secs),
-            WithdrawalEventType::E3BtcConfirmed => None, // no next event
-        }
+        self.next_event_delays.get_delay(source)
     }
 }

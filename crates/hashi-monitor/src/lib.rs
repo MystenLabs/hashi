@@ -12,3 +12,6 @@ pub mod rpc;
 
 /// CLI config types.
 pub mod config;
+
+/// Error types
+pub mod errors;

@@ -5,160 +5,184 @@ use hashi_guardian_shared::WithdrawalID;
 
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::MonitorError;
 use crate::domain::UnixSeconds;
 use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
+use crate::domain::now_unix_seconds;
+use crate::errors::MonitorError;
 
 /// A record of all the events tracking a single withdrawal.
 ///
-/// `add_event` adds an event.
-///    - if neighbor exists, checks time gap between two.
-///    - if neighbor doesn't exist, adds an entry to expected_events signalling our expectation on the neighbor.
+/// `add_event` adds an event e and checks if it is appropriate w.r.t already seen events, e.g., arrived at expected time.
 ///
-/// `violations(cursors)`
-///    - check if there are any violations given current cursors
+/// `violations(cursors)` checks if there are any violations given current cursors
 ///
 /// Invariant: `expected_events` should not contain an event type that exists in `seen_events`.
-#[derive(Default)]
 pub struct WithdrawalStateMachine {
+    /// the set of events we have seen until now related to this withdrawal
     seen_events: Vec<WithdrawalEvent>,
+    /// an entry (e, t) in expected_events signals that we are expecting to hear e by time t
     expected_events: Vec<(WithdrawalEventType, UnixSeconds)>,
+    /// last time at which we checked for a btc withdrawal tx
+    btc_checked_at: Option<UnixSeconds>,
+    /// immutable wid
+    wid: WithdrawalID,
+    /// immutable txid
+    btc_txid: Txid,
+}
+
+pub enum BtcFetchOutcome {
+    NotExpected,
+    Unconfirmed,
+    Confirmed(Option<MonitorError>),
 }
 
 impl WithdrawalStateMachine {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn new_with_events(
-        events: Vec<WithdrawalEvent>,
-        cfg: &Config,
-    ) -> Result<Self, MonitorError> {
-        let mut s = Self::default();
-        for e in events {
-            s.add_event(e, cfg)?;
+    fn new_inner(event: &WithdrawalEvent) -> Self {
+        Self {
+            seen_events: Vec::new(),
+            expected_events: Vec::new(),
+            btc_checked_at: None,
+            wid: event.wid,
+            btc_txid: event.btc_txid,
         }
-        Ok(s)
     }
 
-    pub fn get(&self, source: WithdrawalEventType) -> Option<&WithdrawalEvent> {
+    pub fn new(event: WithdrawalEvent, cfg: &Config) -> Self {
+        let mut sm = Self::new_inner(&event);
+        sm.add_event(event, cfg).expect("First event never fails");
+        sm
+    }
+
+    pub fn get(&self, event_type: WithdrawalEventType) -> Option<&WithdrawalEvent> {
         self.seen_events
             .iter()
-            .find(|event| *event.source() == source)
+            .find(|event| event.event_type == event_type)
     }
 
-    pub fn btc_txid(&self) -> Option<Txid> {
-        self.seen_events.last().map(|event| event.btc_txid())
+    pub fn btc_txid(&self) -> Txid {
+        self.btc_txid
     }
 
-    pub fn wid(&self) -> Option<WithdrawalID> {
-        self.seen_events.last().map(|event| event.wid())
+    pub fn wid(&self) -> WithdrawalID {
+        self.wid
     }
 
-    pub fn expects(&self, source: WithdrawalEventType) -> bool {
+    pub fn expects(&self, event_type: WithdrawalEventType) -> bool {
         self.expected_events
             .iter()
-            .any(|(event, _)| *event == source)
+            .any(|(event, _)| *event == event_type)
     }
 
-    pub fn is_complete(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.expected_events.is_empty() && !self.seen_events.is_empty()
     }
 
-    pub fn add_event(&mut self, event: WithdrawalEvent, cfg: &Config) -> Result<(), MonitorError> {
-        let cur_event_source = *event.source();
-        let cur_event_timestamp = event.timestamp();
-        let cur_event_btc_txid = event.btc_txid();
-        let cur_event_wid = event.wid();
+    /// `add_event` adds an event e and checks the following. Let e's neighbors be [e.predecessor(), e.successor()].
+    ///    - if neighbor was seen before, checks time gap between two.
+    ///    - if neighbor was not seen, adds an entry to expected_events signalling our expectation.
+    ///         - we expect to see a predecessor at t - clock_skew, and a successor at t + next_event_delay(e)
+    ///
+    /// This is the minimal set of complete checks. A more extensive approach is to add an expectation for all other events except e.
+    /// Note that add_event doesn't assume anything about the order of events, e.g., we could ingest e2 -> e1 -> e3.
+    ///
+    /// Throws: DuplicateEventForSameWid, InvalidWid, InvalidBtcTxid, EventOccurredAfterDeadline
+    pub fn add_event(
+        &mut self,
+        new_event: WithdrawalEvent,
+        cfg: &Config,
+    ) -> Result<(), MonitorError> {
+        let WithdrawalEvent {
+            event_type: new_event_type,
+            wid: new_event_wid,
+            timestamp: new_event_timestamp,
+            btc_txid: new_event_btc_txid,
+        } = new_event;
 
-        if self
-            .seen_events
-            .iter()
-            .any(|e| *e.source() == cur_event_source)
-        {
-            return Err(MonitorError::DuplicateEventForSameWid);
+        if let Some(existing_event) = self.get(new_event.event_type) {
+            return if *existing_event == new_event {
+                Ok(())
+            } else {
+                Err(MonitorError::DuplicateEventForSameWid)
+            };
         }
 
-        if !self.seen_events.is_empty() && self.seen_events.iter().any(|e| e.wid() != cur_event_wid)
-        {
+        if self.wid != new_event_wid {
             return Err(MonitorError::InvalidWid);
         }
 
-        if !self.seen_events.is_empty()
-            && self
-                .seen_events
-                .iter()
-                .any(|e| e.btc_txid() != cur_event_btc_txid)
-        {
+        if self.btc_txid != new_event_btc_txid {
             return Err(MonitorError::InvalidBtcTxid);
         }
 
         // if neighbor is there, then we check that the gap between the two is as expected.
         for (src, deadline) in self.expected_events.iter() {
-            if *src == cur_event_source && *deadline < cur_event_timestamp {
+            if *src == new_event_type && *deadline < new_event_timestamp {
                 return Err(MonitorError::EventOccurredAfterDeadline {
-                    event,
+                    event: new_event,
                     deadline: *deadline,
-                    occurred_at: cur_event_timestamp,
+                    occurred_at: new_event_timestamp,
                 });
             }
         }
 
         // if neighbor is not there, then we add an expectation indicating when we expect to see it.
-        if let Some(predecessor_event_type) = cur_event_source.predecessor()
+        if let Some(predecessor_event_type) = new_event_type.predecessor()
             && self.get(predecessor_event_type).is_none()
         {
-            let predecessor_deadline = cur_event_timestamp + cfg.clock_skew;
+            let predecessor_deadline = new_event_timestamp + cfg.clock_skew;
             self.expected_events
                 .push((predecessor_event_type, predecessor_deadline));
         }
-        if let Some(successor_event_type) = cur_event_source.successor()
+        if let Some(successor_event_type) = new_event_type.successor()
             && self.get(successor_event_type).is_none()
         {
-            let successor_deadline = cur_event_timestamp
+            let successor_deadline = new_event_timestamp
                 + cfg
-                    .next_event_delay(cur_event_source)
+                    .next_event_delay(new_event_type)
                     .expect("has a successor");
             self.expected_events
                 .push((successor_event_type, successor_deadline));
         }
 
+        // remove any previously stored expected events
         self.expected_events
-            .retain(|(src, _)| *src != cur_event_source);
-        self.seen_events.push(event);
+            .retain(|(src, _)| *src != new_event_type);
+        // add to seen events
+        self.seen_events.push(new_event);
         Ok(())
     }
 
     /// If expecting BTC confirmation, query BTC RPC and add the event if confirmed.
-    ///     - Returns `Some(result)` if a fetch was attempted.
-    ///     - Returns `None` if not expecting or block not yet mined.
-    ///     - Panics upon btc rpc error.
-    pub fn try_fetch_btc_tx(&mut self, cfg: &Config) -> Option<Result<(), MonitorError>> {
+    ///     - Returns `Ok(BtcFetchOutcome::NotExpected)` if a BTC event is not expected.
+    ///     - Returns `Ok(BtcFetchOutcome::Unconfirmed)` if checked but block not yet mined.
+    ///     - Returns `Ok(BtcFetchOutcome::Confirmed(None))` if confirmed and E3 ingest succeeded.
+    ///     - Returns `Ok(BtcFetchOutcome::Confirmed(Some(err)))` if confirmed but E3 ingest produced a domain finding.
+    ///     - Returns `Err` for BTC RPC/infrastructure failures.
+    pub fn try_fetch_btc_tx(&mut self, cfg: &Config) -> anyhow::Result<BtcFetchOutcome> {
         if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
-            return None;
+            return Ok(BtcFetchOutcome::NotExpected);
         }
-        let txid = self
-            .btc_txid()
-            .expect("if there is an expectation for BTC tx, then btc_txid must exist");
-        let wid = self
-            .wid()
-            .expect("if there is an expectation for BTC tx, then wid must exist");
+        let btc_txid = self.btc_txid;
+        let wid = self.wid;
+        let cur_time = now_unix_seconds();
 
-        match crate::rpc::lookup_btc_confirmation(cfg, txid) {
+        match crate::rpc::lookup_btc_confirmation(cfg, btc_txid) {
             Ok(Some(block_time)) => {
-                let e3 = WithdrawalEvent::new(
-                    WithdrawalEventType::E3BtcConfirmed,
+                self.btc_checked_at = Some(cur_time);
+                let e3 = WithdrawalEvent {
+                    event_type: WithdrawalEventType::E3BtcConfirmed,
                     wid,
-                    block_time,
-                    txid,
-                );
-                Some(self.add_event(e3, cfg))
+                    btc_txid,
+                    timestamp: block_time,
+                };
+                Ok(BtcFetchOutcome::Confirmed(self.add_event(e3, cfg).err()))
             }
-            Ok(None) => None, // Not yet confirmed
-            Err(e) => {
-                panic!("btc rpc failed: {:?}", e);
+            Ok(None) => {
+                self.btc_checked_at = Some(cur_time);
+                Ok(BtcFetchOutcome::Unconfirmed)
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -167,7 +191,18 @@ impl WithdrawalStateMachine {
     pub fn violations(&self, cursors: &Cursors) -> Vec<MonitorError> {
         let mut out = Vec::new();
         for (event_type, deadline) in &self.expected_events {
-            let cursor = cursors.for_event_type(*event_type);
+            let cursor = match event_type {
+                WithdrawalEventType::E3BtcConfirmed => match self.btc_checked_at {
+                    Some(checked_at) => checked_at,
+                    None => {
+                        tracing::warn!(
+                            "callers should avoid reaching this branch by calling try_fetch_btc_tx before"
+                        );
+                        continue;
+                    }
+                },
+                _ => cursors.for_event_type(*event_type),
+            };
             if *deadline <= cursor {
                 out.push(MonitorError::ExpectedEventMissing {
                     event_type: *event_type,
@@ -187,14 +222,17 @@ mod tests {
     use super::*;
     use crate::config::BtcConfig;
     use crate::config::GuardianConfig;
+    use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
 
     fn cfg() -> Config {
         Config {
-            e1_e2_delay_secs: 100,
-            e2_e3_delay_secs: 200,
+            next_event_delays: NextEventDelays::new(vec![
+                (WithdrawalEventType::E1HashiApproved, 100),
+                (WithdrawalEventType::E2GuardianApproved, 200),
+            ])
+            .expect("valid intra-event delays"),
             clock_skew: 10,
-            poll_interval_secs: 1,
             guardian: GuardianConfig {
                 s3_bucket: "bucket".to_string(),
             },
@@ -217,31 +255,22 @@ mod tests {
         timestamp: UnixSeconds,
         fill: u8,
     ) -> WithdrawalEvent {
-        WithdrawalEvent::new(source, wid, timestamp, txid(fill))
-    }
-
-    #[test]
-    fn new_is_empty_not_complete() {
-        let sm = WithdrawalStateMachine::new();
-
-        assert!(!sm.is_complete());
-        assert!(
-            sm.violations(&Cursors {
-                sui: u64::MAX,
-                guardian: u64::MAX,
-                btc: u64::MAX,
-            })
-            .is_empty()
-        );
+        WithdrawalEvent {
+            event_type: source,
+            wid,
+            timestamp,
+            btc_txid: txid(fill),
+        }
     }
 
     #[test]
     fn add_event_rejects_duplicate_source() {
         let cfg = cfg();
 
-        let mut sm = WithdrawalStateMachine::new();
-        sm.add_event(event(WithdrawalEventType::E1HashiApproved, 1, 100, 1), &cfg)
-            .expect("first event is valid");
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 1, 100, 1),
+            &cfg,
+        );
 
         let err = sm
             .add_event(event(WithdrawalEventType::E1HashiApproved, 1, 110, 1), &cfg)
@@ -267,11 +296,12 @@ mod tests {
 
     #[test]
     fn in_order_flow_completes() {
-        let mut sm = WithdrawalStateMachine::new();
         let cfg = cfg();
 
-        sm.add_event(event(WithdrawalEventType::E1HashiApproved, 9, 100, 7), &cfg)
-            .expect("e1 is valid");
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 9, 100, 7),
+            &cfg,
+        );
         assert!(sm.expects(WithdrawalEventType::E2GuardianApproved));
 
         sm.add_event(
@@ -284,25 +314,25 @@ mod tests {
         sm.add_event(event(WithdrawalEventType::E3BtcConfirmed, 9, 300, 7), &cfg)
             .expect("e3 is valid");
 
-        assert!(sm.is_complete());
+        assert!(sm.is_valid());
     }
 
     #[test]
     fn add_event_rejects_event_past_deadline() {
-        let mut sm = WithdrawalStateMachine::new();
         let cfg = cfg();
-        let e1 = event(WithdrawalEventType::E1HashiApproved, 4, 100, 4);
-        let e2 = event(WithdrawalEventType::E2GuardianApproved, 4, 201, 4);
-
-        sm.add_event(e1, &cfg).expect("e1 is valid");
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 4, 100, 4),
+            &cfg,
+        );
+        let event = event(WithdrawalEventType::E2GuardianApproved, 4, 201, 4);
 
         let err = sm
-            .add_event(e2.clone(), &cfg)
+            .add_event(event.clone(), &cfg)
             .expect_err("e2 should fail after deadline");
         assert_eq!(
             err,
             MonitorError::EventOccurredAfterDeadline {
-                event: e2,
+                event,
                 deadline: 200,
                 occurred_at: 201,
             }
@@ -311,22 +341,21 @@ mod tests {
 
     #[test]
     fn violations_only_after_cursor_passes_deadline() {
-        let mut sm = WithdrawalStateMachine::new();
         let cfg = cfg();
-        sm.add_event(event(WithdrawalEventType::E1HashiApproved, 1, 100, 5), &cfg)
-            .expect("e1 is valid");
+        let sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 1, 100, 5),
+            &cfg,
+        );
 
         let no_violation = sm.violations(&Cursors {
             sui: 0,
             guardian: 199,
-            btc: 0,
         });
         assert!(no_violation.is_empty());
 
         let violations = sm.violations(&Cursors {
             sui: 0,
             guardian: 200,
-            btc: 0,
         });
         assert_eq!(violations.len(), 1);
         assert_eq!(

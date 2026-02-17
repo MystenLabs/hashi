@@ -1,14 +1,12 @@
 # Sample configuration for hashi-monitor
 
 # Liveness delay bounds (seconds)
-e1_e2_delay_secs: 300   # E1 (Hashi approval) -> E2 (Guardian signing)
-e2_e3_delay_secs: 300   # E2 (Guardian signing) -> E3 (BTC confirmed)
+next_event_delays:
+  - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
+  - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
 
-# Clock skew tolerance: E_{i+1} can occur up to clock_skew seconds before E_i (default: 60s)
-# clock_skew: 60
-
-# Poll interval for continuous mode (default: 10s)
-# poll_interval_secs: 10
+# Clock skew tolerance: E_{i+1} can occur up to clock_skew seconds before E_i (default: 300s)
+# clock_skew: 300
 
 guardian:
   s3_bucket: "hashi-guardian-logs"

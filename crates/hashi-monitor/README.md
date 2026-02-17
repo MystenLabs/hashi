@@ -9,7 +9,7 @@ Audits the cross-system withdrawal flow:
 
 ### Checks
 - **Predecessor existence**: For every E2, there exists a corresponding E1. For every E3, there exists a corresponding E2 with matching txid.
-- **Successor existence**: For every E1, E2 should occur within `e1_e2_delay_secs`. For every E2, E3 should occur within `e2_e3_delay_secs`.
+- **Successor existence**: For every source event, the configured successor delay bound must hold.
 
 ### Two modes
 1. **Batch**: One-time audit over a time range `[start, end]`.
@@ -31,15 +31,13 @@ cargo run -p hashi-monitor -- continuous --config config.sample.yaml --start 170
 See `config.sample.yaml` for a complete example:
 
 ```yaml
-# Liveness delay bounds (seconds)
-e1_e2_delay_secs: 300   # E1 (Hashi approval) -> E2 (Guardian signing)
-e2_e3_delay_secs: 300   # E2 (Guardian signing) -> E3 (BTC confirmed)
+# Next event delay bounds (seconds)
+next_event_delays:
+  - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
+  - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
 
-# Optional: clock skew tolerance (default: 60s)
-# clock_skew: 60
-
-# Optional: poll interval for continuous mode (default: 10s)
-# poll_interval_secs: 10
+# Optional: clock skew tolerance (default: 300s)
+# clock_skew: 300
 
 guardian:
   s3_bucket: "hashi-guardian-logs"
