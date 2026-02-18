@@ -8,7 +8,7 @@
 //! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 //!
-//! [TODO] Track IOP-203 which plans to add a check in Sui: match the withdrawal destination & amount that a user inputs with that in E_hashi.
+//! TODO: Track IOP-203 which plans to add a check in Sui: match the withdrawal destination & amount that a user inputs with that in E_hashi.
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
 use std::collections::BTreeSet;
