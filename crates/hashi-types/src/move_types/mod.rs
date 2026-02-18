@@ -278,6 +278,7 @@ pub struct UtxoPool {
 pub enum ProtocolType {
     Dkg,
     KeyRotation,
+    NonceGeneration,
 }
 
 /// Rust version of the Move struct `hashi::reconfig::ReconfigCompletionMessage`.

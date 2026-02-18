@@ -434,14 +434,15 @@ impl SuiTxExecutor {
 
     /// Execute a certificate submission transaction.
     ///
-    /// This submits a DKG or rotation certificate to the on-chain certificate store.
-    /// The certificate contains the dealer's message hash and committee signature.
+    /// This submits a DKG, rotation, or nonce generation certificate to the on-chain
+    /// certificate store. The certificate contains the dealer's message hash and
+    /// committee signature.
     pub async fn execute_submit_certificate(&mut self, cert: &CertificateV1) -> anyhow::Result<()> {
-        let (inner_cert, function_name) = match cert {
-            CertificateV1::Dkg(c) => (c, "submit_dkg_cert"),
-            CertificateV1::Rotation(c) => (c, "submit_rotation_cert"),
-            CertificateV1::NonceGeneration { .. } => {
-                todo!("Nonce generation certificate submission")
+        let (inner_cert, function_name, batch_index) = match cert {
+            CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
+            CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
+            CertificateV1::NonceGeneration { batch_index, cert } => {
+                (cert, "submit_nonce_cert", Some(*batch_index))
             }
         };
 
@@ -461,25 +462,27 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let epoch_arg = builder.pure(&epoch);
+        let mut args = vec![hashi_arg, epoch_arg];
+        if let Some(bi) = batch_index {
+            args.push(builder.pure(&bi));
+        }
         let dealer_arg = builder.pure(&dealer);
         let message_hash_arg = builder.pure(&message_hash);
         let signature_arg = builder.pure(&signature);
         let signers_bitmap_arg = builder.pure(&signers_bitmap);
-
+        args.extend([
+            dealer_arg,
+            message_hash_arg,
+            signature_arg,
+            signers_bitmap_arg,
+        ]);
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("cert_submission"),
                 Identifier::new(function_name).expect("valid identifier"),
             ),
-            vec![
-                hashi_arg,
-                epoch_arg,
-                dealer_arg,
-                message_hash_arg,
-                signature_arg,
-                signers_bitmap_arg,
-            ],
+            args,
         );
 
         let response = self.execute(builder).await?;

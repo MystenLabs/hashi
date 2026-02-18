@@ -88,6 +88,12 @@ pub struct State {
     hashi: types::Hashi,
 }
 
+#[derive(serde_derive::Serialize)]
+struct TobKey {
+    epoch: u64,
+    batch_index: Option<u32>,
+}
+
 impl OnchainState {
     pub async fn new(
         sui_rpc_url: &str,
@@ -293,12 +299,17 @@ impl OnchainState {
             .map(|c| c.bridge_service_client())
     }
 
-    /// Fetches the EpochCertsV1 for the given epoch from on-chain.
-    /// Returns None if no certs exist for this epoch.
+    /// Fetches the EpochCertsV1 for the given key from on-chain.
+    /// Returns None if no certs exist for this key.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
-    pub async fn fetch_epoch_certs(&self, epoch: u64) -> Result<Option<move_types::EpochCertsV1>> {
+    pub async fn fetch_epoch_certs(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+    ) -> Result<Option<move_types::EpochCertsV1>> {
         let tob_id = self.tob_id();
-        let epoch_key_bcs = bcs::to_bytes(&epoch)?;
+        let key = TobKey { epoch, batch_index };
+        let key_bcs = bcs::to_bytes(&key)?;
         let mut stream = self
             .0
             .client
@@ -314,7 +325,7 @@ impl OnchainState {
             )
             .pipe(Box::pin);
         while let Some(field) = stream.try_next().await? {
-            if field.name().value() == epoch_key_bcs.as_slice() {
+            if field.name().value() == key_bcs.as_slice() {
                 let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
                 return Ok(Some(epoch_certs));
             }
@@ -322,11 +333,12 @@ impl OnchainState {
         Ok(None)
     }
 
-    /// Fetches all certificates for the given epoch from on-chain.
+    /// Fetches all certificates for the given key from on-chain.
     /// Returns the protocol type and raw move types; caller is responsible for conversion.
     pub async fn fetch_certs(
         &self,
         epoch: u64,
+        batch_index: Option<u32>,
     ) -> Result<
         Option<(
             move_types::ProtocolType,
@@ -336,7 +348,7 @@ impl OnchainState {
             )>,
         )>,
     > {
-        let epoch_certs = match self.fetch_epoch_certs(epoch).await? {
+        let epoch_certs = match self.fetch_epoch_certs(epoch, batch_index).await? {
             Some(certs) => certs,
             None => return Ok(None),
         };
