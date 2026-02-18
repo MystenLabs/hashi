@@ -7,14 +7,14 @@ use sui_sdk_types::Address;
 use tabled::Table;
 use tabled::Tabled;
 
-use crate::client::HashiClient;
-use crate::config::Config;
-use crate::print_info;
-use crate::print_warning;
-use crate::types::display;
+use crate::cli::client::HashiClient;
+use crate::cli::config::CliConfig;
+use crate::cli::print_info;
+use crate::cli::print_warning;
+use crate::cli::types::display;
 
 /// List committee members
-pub async fn list_members(config: &Config, epoch: Option<u64>) -> Result<()> {
+pub async fn list_members(config: &CliConfig, epoch: Option<u64>) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let current_epoch = client.fetch_epoch();
@@ -73,7 +73,7 @@ pub async fn list_members(config: &Config, epoch: Option<u64>) -> Result<()> {
 }
 
 /// View a specific committee member
-pub async fn view_member(config: &Config, address: &str) -> Result<()> {
+pub async fn view_member(config: &CliConfig, address: &str) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let member_addr =
@@ -116,7 +116,7 @@ pub async fn view_member(config: &Config, address: &str) -> Result<()> {
 }
 
 /// Show current epoch information
-pub async fn show_epoch(config: &Config) -> Result<()> {
+pub async fn show_epoch(config: &CliConfig) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     print_info("Fetching epoch information...");

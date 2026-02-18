@@ -1,120 +1,67 @@
-//! Hashi CLI - Command-line interface for the Hashi bridge
+//! CLI module for the Hashi bridge
 //!
-//! A multi-purpose CLI for interacting with the Hashi bridge on Sui, including:
-//!
-//! - **Governance**: Create, vote on, and manage proposals
-//! - **Committee**: View committee members and epoch information
-//! - **Deposits**: Inspect and monitor deposit requests (coming soon)
-//! - **Configuration**: Manage CLI and on-chain configuration
-//!
-//! ## Usage
-//!
-//! ```bash
-//! # Governance
-//! hashi-cli proposal list
-//! hashi-cli proposal vote 0x123...
-//! hashi-cli proposal create upgrade <digest>
-//!
-//! # Committee
-//! hashi-cli committee list
-//! hashi-cli committee epoch
-//!
-//! # Configuration
-//! hashi-cli config template -o hashi-cli.toml
-//! hashi-cli config show
-//! ```
+//! Provides governance, committee, and configuration management commands.
 
 use clap::Args;
-use clap::Parser;
 use clap::Subcommand;
 use clap::builder::styling::AnsiColor;
 use clap::builder::styling::Effects;
 use clap::builder::styling::Styles;
 use colored::Colorize;
 
-mod client;
-mod commands;
-mod config;
-mod types;
+pub mod client;
+pub mod commands;
+pub mod config;
+pub mod types;
 
-const STYLES: Styles = Styles::styled()
+pub const STYLES: Styles = Styles::styled()
     .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
     .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
     .literal(AnsiColor::Green.on_default().effects(Effects::BOLD))
     .placeholder(AnsiColor::Cyan.on_default());
 
-#[derive(Parser)]
-#[clap(
-    name = "hashi-cli",
-    about = "CLI for Hashi committee members to manage proposals and vote",
-    version = env!("CARGO_PKG_VERSION"),
-    author = "Mysten Labs",
-    styles = STYLES
-)]
-struct Cli {
-    /// Path to the configuration file
+/// CLI-specific global options, flattened into each CLI subcommand.
+#[derive(Args)]
+pub struct CliGlobalOpts {
+    /// Path to the CLI configuration file
     #[clap(long, short, env = "HASHI_CLI_CONFIG")]
-    config: Option<std::path::PathBuf>,
+    pub config: Option<std::path::PathBuf>,
 
     /// Sui RPC URL (overrides config file)
     #[clap(long, env = "SUI_RPC_URL")]
-    sui_rpc_url: Option<String>,
+    pub sui_rpc_url: Option<String>,
 
     /// Hashi package ID (overrides config file)
     #[clap(long, env = "HASHI_PACKAGE_ID")]
-    package_id: Option<String>,
+    pub package_id: Option<String>,
 
     /// Hashi shared object ID (overrides config file)
     #[clap(long, env = "HASHI_OBJECT_ID")]
-    hashi_object_id: Option<String>,
+    pub hashi_object_id: Option<String>,
 
     /// Path to the keypair file for signing transactions
-    #[clap(long, short, env = "HASHI_KEYPAIR")]
-    keypair: Option<std::path::PathBuf>,
+    #[clap(long, short = 'k', env = "HASHI_KEYPAIR")]
+    pub keypair: Option<std::path::PathBuf>,
 
     /// Enable verbose output
     #[clap(long, short)]
-    verbose: bool,
+    pub verbose: bool,
 
     /// Skip all confirmation prompts
-    #[clap(long, short = 'y', global = true)]
-    yes: bool,
+    #[clap(long, short = 'y')]
+    pub yes: bool,
 
     /// Gas budget for transactions (in MIST). If not set, estimates via dry-run.
-    #[clap(long, global = true, env = "HASHI_GAS_BUDGET")]
-    gas_budget: Option<u64>,
+    #[clap(long, env = "HASHI_GAS_BUDGET")]
+    pub gas_budget: Option<u64>,
 
     /// Simulate the transaction without executing (dry-run)
-    #[clap(long, global = true)]
-    dry_run: bool,
-
-    #[clap(subcommand)]
-    command: Commands,
+    #[clap(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Subcommand)]
-enum Commands {
-    /// Proposal management commands
-    Proposal {
-        #[clap(subcommand)]
-        action: ProposalCommands,
-    },
-
-    /// Committee information commands
-    Committee {
-        #[clap(subcommand)]
-        action: CommitteeCommands,
-    },
-
-    /// Configuration management
-    Config {
-        #[clap(subcommand)]
-        action: ConfigCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum ProposalCommands {
+pub enum ProposalCommands {
     /// List all active proposals
     List {
         /// Filter by proposal type (upgrade, update-deposit-fee, etc.)
@@ -152,7 +99,7 @@ enum ProposalCommands {
 }
 
 #[derive(Subcommand)]
-enum CreateProposalCommands {
+pub enum CreateProposalCommands {
     /// Propose a package upgrade
     Upgrade {
         /// The digest of the new package (hex encoded)
@@ -195,18 +142,18 @@ enum CreateProposalCommands {
 /// Metadata provides additional context about the proposal (e.g., description, rationale).
 /// This information is stored on-chain and displayed when viewing proposals.
 #[derive(Args)]
-struct MetadataArgs {
+pub struct MetadataArgs {
     /// Metadata key-value pairs (format: key=value). Can be specified multiple times.
     ///
     /// Common keys: description, rationale, link
     ///
     /// Example: -m description="Upgrade to v2" -m link="https://..."
     #[clap(long, short, value_name = "KEY=VALUE")]
-    metadata: Vec<String>,
+    pub metadata: Vec<String>,
 }
 
 #[derive(Subcommand)]
-enum CommitteeCommands {
+pub enum CommitteeCommands {
     /// List current committee members
     List {
         /// Show for a specific epoch (defaults to current)
@@ -225,7 +172,7 @@ enum CommitteeCommands {
 }
 
 #[derive(Subcommand)]
-enum ConfigCommands {
+pub enum ConfigCommands {
     /// Generate a configuration file template
     Template {
         /// Output path for the config file
@@ -264,29 +211,33 @@ impl TxOptions {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+/// CLI command variants (without Server)
+pub enum CliCommand {
+    Proposal { action: ProposalCommands },
+    Committee { action: CommitteeCommands },
+    Config { action: ConfigCommands },
+}
 
-    init_tracing(cli.verbose);
+/// Run a CLI command
+pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()> {
+    init_tracing(opts.verbose);
 
-    // Load and merge configuration
-    let config = config::Config::load(
-        cli.config.as_deref(),
-        cli.sui_rpc_url,
-        cli.package_id,
-        cli.hashi_object_id,
-        cli.keypair,
+    let config = config::CliConfig::load(
+        opts.config.as_deref(),
+        opts.sui_rpc_url,
+        opts.package_id,
+        opts.hashi_object_id,
+        opts.keypair,
     )?;
 
     let tx_opts = TxOptions {
-        gas_budget: cli.gas_budget,
-        skip_confirm: cli.yes,
-        dry_run: cli.dry_run,
+        gas_budget: opts.gas_budget,
+        skip_confirm: opts.yes,
+        dry_run: opts.dry_run,
     };
 
-    match cli.command {
-        Commands::Proposal { action } => match action {
+    match command {
+        CliCommand::Proposal { action } => match action {
             ProposalCommands::List { r#type, detailed } => {
                 commands::proposal::list_proposals(&config, r#type, detailed).await?;
             }
@@ -338,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         },
-        Commands::Committee { action } => match action {
+        CliCommand::Committee { action } => match action {
             CommitteeCommands::List { epoch } => {
                 commands::committee::list_members(&config, epoch).await?;
             }
@@ -349,7 +300,7 @@ async fn main() -> anyhow::Result<()> {
                 commands::committee::show_epoch(&config).await?;
             }
         },
-        Commands::Config { action } => match action {
+        CliCommand::Config { action } => match action {
             ConfigCommands::Template { output } => {
                 commands::config::generate_template(&output)?;
             }

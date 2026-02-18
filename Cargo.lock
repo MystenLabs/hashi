@@ -2595,6 +2595,7 @@ dependencies = [
  "blst",
  "bytes",
  "clap",
+ "colored",
  "ed25519-dalek",
  "fastcrypto",
  "fastcrypto-tbls",
@@ -2620,6 +2621,7 @@ dependencies = [
  "sui-rpc",
  "sui-sdk-types",
  "sui-transaction-builder",
+ "tabled",
  "tap",
  "tempfile",
  "test-strategy",
@@ -2636,28 +2638,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "x509-parser",
-]
-
-[[package]]
-name = "hashi-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "colored",
- "hashi",
- "hashi-types",
- "hex",
- "serde",
- "sui-crypto",
- "sui-rpc",
- "sui-sdk-types",
- "sui-transaction-builder",
- "tabled",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

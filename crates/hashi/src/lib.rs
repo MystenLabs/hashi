@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use sui_futures::service::Service;
 
 pub mod btc_monitor;
+pub mod cli;
 pub mod communication;
 pub mod config;
 pub mod constants;
