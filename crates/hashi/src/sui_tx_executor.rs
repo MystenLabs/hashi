@@ -535,17 +535,9 @@ impl SuiTxExecutor {
         let outputs_arg = builder.pure(&outputs_bcs);
 
         let txid_arg = builder.pure(&approval.txid);
-        let cert_epoch_arg = builder.pure(&cert.epoch());
-        let cert_signature_arg = builder.pure(&cert.signature_bytes().to_vec());
-        let cert_signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
-        let cert_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("committee"),
-                Identifier::from_static("new_committee_signature"),
-            ),
-            vec![cert_epoch_arg, cert_signature_arg, cert_signers_bitmap_arg],
-        );
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
 
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
@@ -570,7 +562,9 @@ impl SuiTxExecutor {
                 selected_utxos_arg,
                 outputs_arg,
                 txid_arg,
-                cert_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
                 clock_arg,
                 random_arg,
             ],
@@ -604,17 +598,9 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
-        let cert_epoch_arg = builder.pure(&cert.epoch());
-        let cert_signature_arg = builder.pure(&cert.signature_bytes().to_vec());
-        let cert_signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
-        let cert_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("committee"),
-                Identifier::from_static("new_committee_signature"),
-            ),
-            vec![cert_epoch_arg, cert_signature_arg, cert_signers_bitmap_arg],
-        );
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
 
         builder.move_call(
             Function::new(
@@ -622,7 +608,13 @@ impl SuiTxExecutor {
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("confirm_withdrawal"),
             ),
-            vec![hashi_arg, withdrawal_id_arg, cert_arg],
+            vec![
+                hashi_arg,
+                withdrawal_id_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
         );
 
         let response = self.execute(builder).await?;

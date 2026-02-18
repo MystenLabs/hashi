@@ -1,3 +1,4 @@
+use anyhow::Context;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -38,7 +39,8 @@ impl BridgeService for HttpService {
         request: Request<SignDepositConfirmationRequest>,
     ) -> Result<Response<SignDepositConfirmationResponse>, Status> {
         authenticate_caller(&request)?;
-        let deposit_request = parse_deposit_request(request.get_ref());
+        let deposit_request = parse_deposit_request(request.get_ref())
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let member_signature = self
             .inner
             .validate_and_sign_deposit_confirmation(&deposit_request)
@@ -54,7 +56,8 @@ impl BridgeService for HttpService {
         request: Request<SignWithdrawalApprovalRequest>,
     ) -> Result<Response<SignWithdrawalApprovalResponse>, Status> {
         authenticate_caller(&request)?;
-        let approval = parse_withdrawal_approval(request.get_ref());
+        let approval = parse_withdrawal_approval(request.get_ref())
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_approval(&approval)
@@ -111,15 +114,18 @@ fn authenticate_caller<T>(request: &Request<T>) -> Result<Address, Status> {
         .ok_or_else(|| Status::permission_denied("unknown validator"))
 }
 
-fn parse_deposit_request(request: &SignDepositConfirmationRequest) -> DepositRequest {
-    let id = parse_address(&request.id);
-    let txid = parse_address(&request.txid);
+fn parse_deposit_request(
+    request: &SignDepositConfirmationRequest,
+) -> anyhow::Result<DepositRequest> {
+    let id = parse_address(&request.id)?;
+    let txid = parse_address(&request.txid)?;
     let derivation_path = request
         .derivation_path
         .as_ref()
-        .map(|bytes| parse_address(bytes));
+        .map(|bytes| parse_address(bytes))
+        .transpose()?;
 
-    DepositRequest {
+    Ok(DepositRequest {
         id,
         utxo: Utxo {
             id: UtxoId {
@@ -130,16 +136,18 @@ fn parse_deposit_request(request: &SignDepositConfirmationRequest) -> DepositReq
             derivation_path,
         },
         timestamp_ms: request.timestamp_ms,
-    }
+    })
 }
 
-fn parse_withdrawal_approval(request: &SignWithdrawalApprovalRequest) -> WithdrawalApproval {
-    let request_ids = request
+fn parse_withdrawal_approval(
+    request: &SignWithdrawalApprovalRequest,
+) -> anyhow::Result<WithdrawalApproval> {
+    let request_ids: Vec<Address> = request
         .request_ids
         .iter()
         .map(|bytes| parse_address(bytes))
-        .collect();
-    let selected_utxos = request
+        .collect::<anyhow::Result<_>>()?;
+    let selected_utxos: Vec<UtxoId> = request
         .selected_utxos
         .iter()
         .map(|utxo_id| {
@@ -147,11 +155,11 @@ fn parse_withdrawal_approval(request: &SignWithdrawalApprovalRequest) -> Withdra
                 .txid
                 .as_ref()
                 .map(|bytes| parse_address(bytes))
-                .expect("missing utxo txid");
-            let vout = utxo_id.vout.expect("missing utxo vout");
-            UtxoId { txid, vout }
+                .context("missing utxo txid")??;
+            let vout = utxo_id.vout.context("missing utxo vout")?;
+            Ok(UtxoId { txid, vout })
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
     let outputs = request
         .outputs
         .iter()
@@ -160,16 +168,16 @@ fn parse_withdrawal_approval(request: &SignWithdrawalApprovalRequest) -> Withdra
             bitcoin_address: output.bitcoin_address.to_vec(),
         })
         .collect();
-    let txid = parse_address(&request.txid);
+    let txid = parse_address(&request.txid)?;
 
-    WithdrawalApproval {
+    Ok(WithdrawalApproval {
         request_ids,
         selected_utxos,
         outputs,
         txid,
-    }
+    })
 }
 
-fn parse_address(bytes: &[u8]) -> sui_sdk_types::Address {
-    sui_sdk_types::Address::from_bytes(bytes).expect("invalid address")
+fn parse_address(bytes: &[u8]) -> anyhow::Result<sui_sdk_types::Address> {
+    sui_sdk_types::Address::from_bytes(bytes).context("invalid address")
 }

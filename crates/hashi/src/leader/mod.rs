@@ -281,12 +281,9 @@ impl LeaderService {
         let mut withdrawal_requests = self.inner.onchain_state().withdrawal_requests();
         withdrawal_requests.sort_by_key(|r| r.timestamp_ms);
 
-        info!(
-            "Processing {} withdrawal requests",
-            withdrawal_requests.len()
-        );
-
-        for request in &withdrawal_requests {
+        // TODO: process multiple at a time.
+        // For now we only process one to avoid a race condition on utxo selection
+        if let Some(request) = withdrawal_requests.first() {
             self.process_withdrawal_request(request).await;
         }
     }
@@ -376,14 +373,12 @@ impl LeaderService {
     // ========================================================================
 
     async fn process_pending_withdrawals(&self) {
-        let pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
+        let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
+        pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
 
-        info!(
-            "Processing {} pending withdrawals",
-            pending_withdrawals.len()
-        );
-
-        for pending in &pending_withdrawals {
+        // TODO: process multiple at a time.
+        // For now we only process one to avoid a race condition on utxo selection
+        if let Some(pending) = pending_withdrawals.first() {
             self.process_pending_withdrawal(pending).await;
         }
     }
