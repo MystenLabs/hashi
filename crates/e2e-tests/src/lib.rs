@@ -198,7 +198,6 @@ mod tests {
     use fastcrypto_tbls::threshold_schnorr::S;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
-    use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
     use fastcrypto_tbls::types::ShareIndex;
 
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -271,12 +270,12 @@ mod tests {
             .collect()
     }
 
-    fn mock_presignatures(
+    fn mock_presigning_pool(
         nonces_for_dealer: &[MockDealerNonces],
         share_ids: &[ShareIndex],
         batch_size_per_weight: u16,
         f: usize,
-    ) -> Presignatures {
+    ) -> hashi::mpc::PresigningPool {
         let receiver_outputs: Vec<batch_avss::ReceiverOutput> = nonces_for_dealer
             .iter()
             .map(|dealer| {
@@ -299,7 +298,7 @@ mod tests {
                 }
             })
             .collect();
-        Presignatures::new(receiver_outputs, batch_size_per_weight, f).unwrap()
+        hashi::mpc::PresigningPool::new(0, 0, receiver_outputs, batch_size_per_weight, f).unwrap()
     }
 
     fn mock_shares(
@@ -395,7 +394,7 @@ mod tests {
                     .map(|&sid| shares_source[u16::from(sid) as usize - 1].clone())
                     .collect(),
             };
-            let presignatures = mock_presignatures(
+            let pool = mock_presigning_pool(
                 &nonces_for_dealer,
                 &info.share_ids,
                 batch_size_per_weight,
@@ -406,14 +405,8 @@ mod tests {
                 let mgr = mpc_mgr.read().unwrap();
                 mgr.committee.clone()
             };
-            let signing_manager = hashi::mpc::SigningManager::new(
-                info.address,
-                committee,
-                t,
-                key_shares,
-                vk,
-                presignatures,
-            );
+            let signing_manager =
+                hashi::mpc::SigningManager::new(info.address, committee, t, key_shares, vk, pool);
             node.hashi().init_signing_manager(signing_manager);
         }
         vk

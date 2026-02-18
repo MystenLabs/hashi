@@ -6,6 +6,7 @@ use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
@@ -23,9 +24,51 @@ use crate::communication::P2PChannel;
 use crate::communication::send_to_many;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
+use crate::mpc::types::MpcError;
+use crate::mpc::types::MpcResult;
 use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
+
+#[allow(dead_code)]
+pub struct PresigningPool {
+    epoch: u64,
+    batch_index: u32,
+    presigs: Presignatures,
+    used_presigs_count: u64,
+}
+
+impl PresigningPool {
+    pub fn new(
+        epoch: u64,
+        batch_index: u32,
+        avss_outputs: Vec<batch_avss::ReceiverOutput>,
+        batch_size_per_weight: u16,
+        f: usize,
+    ) -> MpcResult<Self> {
+        let presigs = Presignatures::new(avss_outputs, batch_size_per_weight, f)
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        Ok(Self {
+            epoch,
+            batch_index,
+            presigs,
+            used_presigs_count: 0,
+        })
+    }
+
+    /// The actual presignature is consumed when the caller passes it to
+    /// `generate_partial_signatures()`, which calls `presigs.next()` internally.
+    /// We record consumption before that call so a crash between the two
+    /// safely skips (rather than reuses) the presignature on restart.
+    pub fn pre_consume(&mut self) -> SigningResult<&mut Presignatures> {
+        if self.presigs.len() == 0 {
+            return Err(SigningError::PoolExhausted);
+        }
+        self.used_presigs_count += 1;
+        // TODO: Persist `used_presigs_count`.
+        Ok(&mut self.presigs)
+    }
+}
 
 pub struct SigningManager {
     address: Address,
@@ -33,7 +76,7 @@ pub struct SigningManager {
     threshold: u16,
     key_shares: avss::SharesForNode,
     verifying_key: G,
-    presignatures: Presignatures,
+    pool: PresigningPool,
     /// Key: Sui address identifying the signing request
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
 }
@@ -45,7 +88,7 @@ impl SigningManager {
         threshold: u16,
         key_shares: avss::SharesForNode,
         verifying_key: G,
-        presignatures: Presignatures,
+        pool: PresigningPool,
     ) -> Self {
         Self {
             address,
@@ -53,7 +96,7 @@ impl SigningManager {
             threshold,
             key_shares,
             verifying_key,
-            presignatures,
+            pool,
             partial_signing_outputs: HashMap::new(),
         }
     }
@@ -92,9 +135,10 @@ impl SigningManager {
         let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
             let mut mgr = signing_manager.write().unwrap();
             let mgr = &mut *mgr;
+            let presigs = mgr.pool.pre_consume()?;
             let (public_nonce, partial_sigs) = generate_partial_signatures(
                 message,
-                &mut mgr.presignatures,
+                presigs,
                 beacon_value,
                 &mgr.key_shares,
                 &mgr.verifying_key,
@@ -554,15 +598,16 @@ mod tests {
                             public_keys: nonces_for_dealer[j].0.clone(),
                         })
                         .collect();
-                    let presignatures =
-                        Presignatures::new(outputs, batch_size_per_weight, f as usize).unwrap();
+                    let pool =
+                        PresigningPool::new(0, 0, outputs, batch_size_per_weight, f as usize)
+                            .unwrap();
                     let mgr = SigningManager::new(
                         test_address(i),
                         committee.clone(),
                         t,
                         key_shares,
                         vk,
-                        presignatures,
+                        pool,
                     );
                     Arc::new(RwLock::new(mgr))
                 })
@@ -596,7 +641,7 @@ mod tests {
                 let mgr = &mut *mgr;
                 let (pn, sigs) = generate_partial_signatures(
                     message,
-                    &mut mgr.presignatures,
+                    &mut mgr.pool.presigs,
                     beacon_value,
                     &mgr.key_shares,
                     &mgr.verifying_key,
@@ -785,7 +830,7 @@ mod tests {
             let mgr = &mut *mgr;
             let (pn, sigs) = generate_partial_signatures(
                 message,
-                &mut mgr.presignatures,
+                &mut mgr.pool.presigs,
                 &beacon,
                 &mgr.key_shares,
                 &mgr.verifying_key,

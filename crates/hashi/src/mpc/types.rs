@@ -454,6 +454,9 @@ pub enum SigningError {
         "Too many invalid partial signatures to recover: collected {collected}, threshold {threshold}"
     )]
     TooManyInvalidSignatures { collected: usize, threshold: u16 },
+
+    #[error("Pool exhausted")]
+    PoolExhausted,
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;
