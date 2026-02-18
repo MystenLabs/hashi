@@ -2,7 +2,9 @@
 
 use bitcoin::Txid;
 use hashi_guardian_shared::WithdrawalID;
+use std::collections::BTreeSet;
 
+use crate::OutputUTXO;
 use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::UnixSeconds;
@@ -10,6 +12,7 @@ use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use crate::errors::MonitorError;
+use crate::errors::MonitorError::*;
 
 /// A record of all the events tracking a single withdrawal.
 ///
@@ -29,6 +32,10 @@ pub struct WithdrawalStateMachine {
     wid: WithdrawalID,
     /// immutable txid
     btc_txid: Txid,
+    /// internal output utxos
+    internal_output_utxos: BTreeSet<OutputUTXO>,
+    /// external output utxos
+    external_output_utxos: BTreeSet<OutputUTXO>,
 }
 
 pub enum BtcFetchOutcome {
@@ -38,18 +45,16 @@ pub enum BtcFetchOutcome {
 }
 
 impl WithdrawalStateMachine {
-    fn new_inner(event: &WithdrawalEvent) -> Self {
-        Self {
+    pub fn new(event: WithdrawalEvent, cfg: &Config) -> Self {
+        let mut sm = Self {
             seen_events: Vec::new(),
             expected_events: Vec::new(),
             btc_checked_at: None,
             wid: event.wid,
             btc_txid: event.btc_txid,
-        }
-    }
-
-    pub fn new(event: WithdrawalEvent, cfg: &Config) -> Self {
-        let mut sm = Self::new_inner(&event);
+            internal_output_utxos: event.internal_output_utxos.clone(),
+            external_output_utxos: event.external_output_utxos.clone(),
+        };
         sm.add_event(event, cfg).expect("First event never fails");
         sm
     }
@@ -62,6 +67,12 @@ impl WithdrawalStateMachine {
 
     pub fn btc_txid(&self) -> Txid {
         self.btc_txid
+    }
+
+    pub fn all_outputs(&self) -> impl Iterator<Item = &OutputUTXO> {
+        self.external_output_utxos
+            .iter()
+            .chain(self.internal_output_utxos.iter())
     }
 
     pub fn wid(&self) -> WithdrawalID {
@@ -86,60 +97,67 @@ impl WithdrawalStateMachine {
     /// This is the minimal set of complete checks. A more extensive approach is to add an expectation for all other events except e.
     /// Note that add_event doesn't assume anything about the order of events, e.g., we could ingest e2 -> e1 -> e3.
     ///
-    /// Throws: DuplicateEventForSameWid, InvalidWid, InvalidBtcTxid, EventOccurredAfterDeadline
+    /// Throws: InvalidEventAdded, EventOccurredAfterDeadline
     pub fn add_event(
         &mut self,
         new_event: WithdrawalEvent,
         cfg: &Config,
     ) -> Result<(), MonitorError> {
-        let WithdrawalEvent {
-            event_type: new_event_type,
-            wid: new_event_wid,
-            timestamp: new_event_timestamp,
-            btc_txid: new_event_btc_txid,
-        } = new_event;
-
         if let Some(existing_event) = self.get(new_event.event_type) {
             return if *existing_event == new_event {
                 Ok(())
             } else {
-                Err(MonitorError::DuplicateEventForSameWid)
+                Err(InvalidEventAdded(
+                    "duplicate event for same wid with different contents".to_string(),
+                ))
             };
         }
 
-        if self.wid != new_event_wid {
-            return Err(MonitorError::InvalidWid);
+        if self.wid != new_event.wid {
+            return Err(InvalidEventAdded("invalid wid".to_string()));
         }
 
-        if self.btc_txid != new_event_btc_txid {
-            return Err(MonitorError::InvalidBtcTxid);
+        if self.btc_txid != new_event.btc_txid {
+            return Err(InvalidEventAdded("invalid btc_txid".to_string()));
+        }
+
+        if self.external_output_utxos != new_event.external_output_utxos {
+            return Err(InvalidEventAdded(
+                "invalid external_output_utxos".to_string(),
+            ));
+        }
+
+        if self.internal_output_utxos != new_event.internal_output_utxos {
+            return Err(InvalidEventAdded(
+                "invalid internal_output_utxos".to_string(),
+            ));
         }
 
         // if neighbor is there, then we check that the gap between the two is as expected.
         for (src, deadline) in self.expected_events.iter() {
-            if *src == new_event_type && *deadline < new_event_timestamp {
-                return Err(MonitorError::EventOccurredAfterDeadline {
-                    event: new_event,
+            if *src == new_event.event_type && *deadline < new_event.timestamp {
+                return Err(EventOccurredAfterDeadline {
+                    event: new_event.clone(),
                     deadline: *deadline,
-                    occurred_at: new_event_timestamp,
+                    occurred_at: new_event.timestamp,
                 });
             }
         }
 
         // if neighbor is not there, then we add an expectation indicating when we expect to see it.
-        if let Some(predecessor_event_type) = new_event_type.predecessor()
+        if let Some(predecessor_event_type) = new_event.event_type.predecessor()
             && self.get(predecessor_event_type).is_none()
         {
-            let predecessor_deadline = new_event_timestamp + cfg.clock_skew;
+            let predecessor_deadline = new_event.timestamp + cfg.clock_skew;
             self.expected_events
                 .push((predecessor_event_type, predecessor_deadline));
         }
-        if let Some(successor_event_type) = new_event_type.successor()
+        if let Some(successor_event_type) = new_event.event_type.successor()
             && self.get(successor_event_type).is_none()
         {
-            let successor_deadline = new_event_timestamp
+            let successor_deadline = new_event.timestamp
                 + cfg
-                    .next_event_delay(new_event_type)
+                    .next_event_delay(new_event.event_type)
                     .expect("has a successor");
             self.expected_events
                 .push((successor_event_type, successor_deadline));
@@ -147,7 +165,7 @@ impl WithdrawalStateMachine {
 
         // remove any previously stored expected events
         self.expected_events
-            .retain(|(src, _)| *src != new_event_type);
+            .retain(|(src, _)| *src != new_event.event_type);
         // add to seen events
         self.seen_events.push(new_event);
         Ok(())
@@ -168,15 +186,24 @@ impl WithdrawalStateMachine {
         let cur_time = now_unix_seconds();
 
         match crate::rpc::lookup_btc_confirmation(cfg, btc_txid) {
-            Ok(Some(block_time)) => {
+            Ok(Some((block_time, utxos))) => {
                 self.btc_checked_at = Some(cur_time);
-                let e3 = WithdrawalEvent {
+
+                if !utxos.iter().eq(self.all_outputs()) {
+                    return Ok(BtcFetchOutcome::Confirmed(Some(InvalidEventAdded(
+                        "btc outputs do not match expected outputs".to_string(),
+                    ))));
+                }
+
+                let e_btc = WithdrawalEvent {
                     event_type: WithdrawalEventType::E3BtcConfirmed,
                     wid,
                     btc_txid,
                     timestamp: block_time,
+                    external_output_utxos: self.external_output_utxos.clone(),
+                    internal_output_utxos: self.internal_output_utxos.clone(),
                 };
-                Ok(BtcFetchOutcome::Confirmed(self.add_event(e3, cfg).err()))
+                Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg).err()))
             }
             Ok(None) => {
                 self.btc_checked_at = Some(cur_time);
@@ -204,7 +231,7 @@ impl WithdrawalStateMachine {
                 _ => cursors.for_event_type(*event_type),
             };
             if *deadline <= cursor {
-                out.push(MonitorError::ExpectedEventMissing {
+                out.push(ExpectedEventMissing {
                     event_type: *event_type,
                     deadline: *deadline,
                     cursor,
@@ -217,7 +244,12 @@ impl WithdrawalStateMachine {
 
 #[cfg(test)]
 mod tests {
+    use bitcoin::Amount;
+    use bitcoin::address::NetworkUnchecked;
     use bitcoin::hashes::Hash as _;
+    use hashi_guardian_shared::BitcoinAddress;
+    use std::collections::BTreeSet;
+    use std::str::FromStr;
 
     use super::*;
     use crate::config::BtcConfig;
@@ -255,11 +287,33 @@ mod tests {
         timestamp: UnixSeconds,
         fill: u8,
     ) -> WithdrawalEvent {
+        let external_output_utxos = vec![OutputUTXO {
+            address: BitcoinAddress::<NetworkUnchecked>::from_str(
+                "mk2QpYatsKicvFVuTAQLBryyccRXMUaGHP",
+            )
+            .expect("valid btc address"),
+            amount: Amount::from_sat(1_000),
+        }]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        let internal_output_utxos = vec![OutputUTXO {
+            address: BitcoinAddress::<NetworkUnchecked>::from_str(
+                "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+            )
+            .expect("valid btc address"),
+            amount: Amount::from_sat(250),
+        }]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
         WithdrawalEvent {
             event_type: source,
             wid,
             timestamp,
             btc_txid: txid(fill),
+            external_output_utxos,
+            internal_output_utxos,
         }
     }
 
@@ -275,7 +329,10 @@ mod tests {
         let err = sm
             .add_event(event(WithdrawalEventType::E1HashiApproved, 1, 110, 1), &cfg)
             .expect_err("duplicate source should fail");
-        assert_eq!(err, MonitorError::DuplicateEventForSameWid);
+        assert_eq!(
+            err,
+            InvalidEventAdded("duplicate event for same wid with different contents".to_string())
+        );
 
         let wid_err = sm
             .add_event(
@@ -283,7 +340,7 @@ mod tests {
                 &cfg,
             )
             .expect_err("wid mismatch should fail");
-        assert_eq!(wid_err, MonitorError::InvalidWid);
+        assert_eq!(wid_err, InvalidEventAdded("invalid wid".to_string()));
 
         let txid_err = sm
             .add_event(
@@ -291,7 +348,7 @@ mod tests {
                 &cfg,
             )
             .expect_err("txid mismatch should fail");
-        assert_eq!(txid_err, MonitorError::InvalidBtcTxid);
+        assert_eq!(txid_err, InvalidEventAdded("invalid btc_txid".to_string()));
     }
 
     #[test]
@@ -331,7 +388,7 @@ mod tests {
             .expect_err("e2 should fail after deadline");
         assert_eq!(
             err,
-            MonitorError::EventOccurredAfterDeadline {
+            EventOccurredAfterDeadline {
                 event,
                 deadline: 200,
                 occurred_at: 201,
@@ -360,7 +417,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(
             violations[0],
-            MonitorError::ExpectedEventMissing {
+            ExpectedEventMissing {
                 event_type: WithdrawalEventType::E2GuardianApproved,
                 deadline: 200,
                 cursor: 200,

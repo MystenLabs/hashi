@@ -519,8 +519,8 @@ impl From<InputUTXO> for InputUTXOWire {
     }
 }
 
-/// Copy of bitcoin_utils::ExternalOutputUTXOWire with unchecked address
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Copy of bitcoin_utils::ExternalOutputUTXO with unchecked address
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd)]
 pub struct ExternalOutputUTXOWire {
     /// Bitcoin address to withdraw to
     pub address: BitcoinAddress<NetworkUnchecked>,

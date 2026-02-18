@@ -15,3 +15,5 @@ pub mod config;
 
 /// Error types
 pub mod errors;
+
+pub use hashi_guardian_shared::bitcoin_utils::ExternalOutputUTXOWire as OutputUTXO;

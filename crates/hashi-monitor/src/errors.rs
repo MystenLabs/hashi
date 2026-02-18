@@ -6,9 +6,7 @@ use std::fmt;
 /// Findings emitted by the monitor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorError {
-    DuplicateEventForSameWid,
-    InvalidWid,
-    InvalidBtcTxid,
+    InvalidEventAdded(String),
     EventOccurredAfterDeadline {
         event: WithdrawalEvent,
         deadline: UnixSeconds,
