@@ -247,7 +247,7 @@ mod tests {
     use bitcoin::Amount;
     use bitcoin::address::NetworkUnchecked;
     use bitcoin::hashes::Hash as _;
-    use hashi_guardian_shared::BitcoinAddress;
+    use hashi_types::guardian::BitcoinAddress;
     use std::collections::BTreeSet;
     use std::str::FromStr;
 
