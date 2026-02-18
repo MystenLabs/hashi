@@ -123,15 +123,19 @@ impl HttpService {
         (local_addr, service)
     }
 
-    pub fn dkg_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::DkgManager>> {
-        self.inner.dkg_manager()
+    pub fn mpc_manager(
+        &self,
+    ) -> Result<Arc<std::sync::RwLock<crate::mpc::MpcManager>>, tonic::Status> {
+        self.inner
+            .mpc_manager()
+            .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 
     pub fn signing_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::SigningManager>> {
         self.inner.signing_manager()
     }
 
-    pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
+    pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
         self.inner.btc_monitor()
     }
 

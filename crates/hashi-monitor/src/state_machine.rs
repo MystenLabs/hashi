@@ -1,7 +1,7 @@
 //! Withdrawal state machine for tracking event flow.
 
 use bitcoin::Txid;
-use hashi_guardian_shared::WithdrawalID;
+use hashi_types::guardian::WithdrawalID;
 use std::collections::BTreeSet;
 
 use crate::OutputUTXO;

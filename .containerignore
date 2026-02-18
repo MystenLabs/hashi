@@ -1,0 +1,6 @@
+.git/
+target/
+packages/
+design/
+docker/
+.github/

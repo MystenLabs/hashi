@@ -28,6 +28,14 @@ message RotationMessages {
   map<uint32, sui.rpc.v2.Bcs> messages = 1;
 }
 
+message NonceMessage {
+  // Which nonce generation round within the epoch.
+  optional uint32 batch_index = 1;
+
+  // BCS-encoded batch_avss::Message.
+  optional sui.rpc.v2.Bcs message = 2;
+}
+
 message SendMessagesRequest {
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
@@ -38,6 +46,9 @@ message SendMessagesRequest {
 
     // For key rotation: messages keyed by share index.
     RotationMessages rotation_messages = 3;
+
+    // For nonce generation: batch AVSS message with batch index.
+    NonceMessage nonce_message = 4;
   }
 }
 
@@ -61,6 +72,9 @@ message RetrieveMessagesResponse {
 
     // For key rotation: messages keyed by share index.
     RotationMessages rotation_messages = 2;
+
+    // For nonce generation: batch AVSS message with batch index.
+    NonceMessage nonce_message = 3;
   }
 }
 
@@ -90,6 +104,9 @@ message ComplainResponse {
 
     // For key rotation: responses keyed by share index.
     RotationResponses rotation_responses = 2;
+
+    // For nonce generation: single response.
+    sui.rpc.v2.Bcs nonce_response = 3;
   }
 }
 

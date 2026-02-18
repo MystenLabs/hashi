@@ -1,11 +1,11 @@
 use crate::getters::get_attestation;
 use crate::Enclave;
 use crate::S3Logger;
-use hashi_guardian_shared::crypto::combine_shares;
-use hashi_guardian_shared::crypto::commit_share;
-use hashi_guardian_shared::crypto::decrypt_share;
-use hashi_guardian_shared::crypto::Share;
-use hashi_guardian_shared::*;
+use hashi_types::guardian::crypto::combine_shares;
+use hashi_types::guardian::crypto::commit_share;
+use hashi_types::guardian::crypto::decrypt_share;
+use hashi_types::guardian::crypto::Share;
+use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
@@ -219,8 +219,8 @@ fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResul
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
-    use hashi_guardian_shared::crypto::NUM_OF_SHARES;
-    use hashi_guardian_shared::test_utils::create_btc_keypair;
+    use hashi_types::guardian::crypto::NUM_OF_SHARES;
+    use hashi_types::guardian::test_utils::create_btc_keypair;
     use k256::SecretKey;
 
     /// Helper: Generate test shares and initialized enclave

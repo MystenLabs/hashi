@@ -1,14 +1,20 @@
+use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto_tbls::polynomial::Eval;
+use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
+use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use hashi_types::committee::Committee;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
 use tokio::time::Instant;
@@ -56,81 +62,6 @@ impl SigningManager {
         self.committee.epoch()
     }
 
-    pub async fn sign(
-        &mut self,
-        p2p_channel: &impl P2PChannel,
-        sui_request_id: Address,
-        message: &[u8],
-        beacon_value: &S,
-        derivation_address: Option<&DerivationAddress>,
-        timeout: Duration,
-    ) -> SigningResult<SchnorrSignature> {
-        let (public_nonce, partial_sigs) = generate_partial_signatures(
-            message,
-            &mut self.presignatures,
-            beacon_value,
-            &self.key_shares,
-            &self.verifying_key,
-            derivation_address,
-        )
-        .map_err(|e| SigningError::CryptoError(e.to_string()))?;
-        self.partial_signing_outputs.insert(
-            sui_request_id,
-            PartialSigningOutput {
-                public_nonce,
-                partial_sigs: partial_sigs.clone(),
-            },
-        );
-        let mut all_partial_sigs = partial_sigs;
-        let mut remaining_peers: HashSet<Address> = self
-            .committee
-            .members()
-            .iter()
-            .map(|m| m.validator_address())
-            .filter(|addr| *addr != self.address)
-            .collect();
-        let request = GetPartialSignaturesRequest { sui_request_id };
-        let deadline = Instant::now() + timeout;
-        loop {
-            if all_partial_sigs.len() >= self.threshold as usize {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err(SigningError::Timeout {
-                    collected: all_partial_sigs.len(),
-                    threshold: self.threshold,
-                });
-            }
-            let results = send_to_many(
-                remaining_peers.iter().copied(),
-                request.clone(),
-                |addr, req| async move { p2p_channel.get_partial_signatures(&addr, &req).await },
-            )
-            .await;
-            for (addr, result) in results {
-                match result {
-                    Ok(response) => {
-                        remaining_peers.remove(&addr);
-                        all_partial_sigs.extend(response.partial_sigs);
-                    }
-                    Err(e) => {
-                        tracing::info!("Failed to get partial signatures from {}: {}", addr, e);
-                    }
-                }
-            }
-        }
-        aggregate_signatures(
-            message,
-            &public_nonce,
-            beacon_value,
-            &all_partial_sigs,
-            self.threshold,
-            &self.verifying_key,
-            derivation_address,
-        )
-        .map_err(|e| SigningError::CryptoError(e.to_string()))
-    }
-
     pub fn handle_get_partial_signatures_request(
         &self,
         request: &GetPartialSignaturesRequest,
@@ -147,5 +78,914 @@ impl SigningManager {
         Ok(GetPartialSignaturesResponse {
             partial_sigs: output.partial_sigs.clone(),
         })
+    }
+
+    pub async fn sign(
+        signing_manager: &Arc<RwLock<Self>>,
+        p2p_channel: &impl P2PChannel,
+        sui_request_id: Address,
+        message: &[u8],
+        beacon_value: &S,
+        derivation_address: Option<&DerivationAddress>,
+        timeout: Duration,
+    ) -> SigningResult<SchnorrSignature> {
+        let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
+            let mut mgr = signing_manager.write().unwrap();
+            let mgr = &mut *mgr;
+            let (public_nonce, partial_sigs) = generate_partial_signatures(
+                message,
+                &mut mgr.presignatures,
+                beacon_value,
+                &mgr.key_shares,
+                &mgr.verifying_key,
+                derivation_address,
+            )
+            .map_err(|e| SigningError::CryptoError(e.to_string()))?;
+            mgr.partial_signing_outputs.insert(
+                sui_request_id,
+                PartialSigningOutput {
+                    public_nonce,
+                    partial_sigs: partial_sigs.clone(),
+                },
+            );
+            let threshold = mgr.threshold;
+            let address = mgr.address;
+            let committee = mgr.committee.clone();
+            let verifying_key = mgr.verifying_key;
+            (
+                public_nonce,
+                partial_sigs,
+                threshold,
+                address,
+                committee,
+                verifying_key,
+            )
+        }; // write lock released
+        let mut all_partial_sigs = partial_sigs;
+        let mut remaining_peers: HashSet<Address> = committee
+            .members()
+            .iter()
+            .map(|m| m.validator_address())
+            .filter(|addr| *addr != address)
+            .collect();
+        let request = GetPartialSignaturesRequest { sui_request_id };
+        let deadline = Instant::now() + timeout;
+        loop {
+            if all_partial_sigs.len() >= threshold as usize {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(SigningError::Timeout {
+                    collected: all_partial_sigs.len(),
+                    threshold,
+                });
+            }
+            collect_from_peers(
+                p2p_channel,
+                &request,
+                &mut all_partial_sigs,
+                &mut remaining_peers,
+            )
+            .await;
+        }
+        let params = AggregationParams {
+            message,
+            public_nonce: &public_nonce,
+            beacon_value,
+            threshold,
+            verifying_key: &verifying_key,
+            derivation_address,
+        };
+        match aggregate_signatures(
+            params.message,
+            params.public_nonce,
+            params.beacon_value,
+            &all_partial_sigs,
+            params.threshold,
+            params.verifying_key,
+            params.derivation_address,
+        ) {
+            Ok(sig) => return Ok(sig),
+            Err(FastCryptoError::InvalidSignature) => {
+                tracing::info!(
+                    "Initial signature aggregation failed for {}, entering recovery",
+                    sui_request_id,
+                );
+            }
+            Err(e) => return Err(SigningError::CryptoError(e.to_string())),
+        }
+        recover_signature_with_reed_solomon(
+            p2p_channel,
+            sui_request_id,
+            &params,
+            &request,
+            deadline,
+            &mut all_partial_sigs,
+            &mut remaining_peers,
+        )
+        .await
+    }
+}
+
+struct AggregationParams<'a> {
+    message: &'a [u8],
+    public_nonce: &'a G,
+    beacon_value: &'a S,
+    threshold: u16,
+    verifying_key: &'a G,
+    derivation_address: Option<&'a DerivationAddress>,
+}
+
+async fn recover_signature_with_reed_solomon(
+    p2p_channel: &impl P2PChannel,
+    sui_request_id: Address,
+    params: &AggregationParams<'_>,
+    request: &GetPartialSignaturesRequest,
+    deadline: Instant,
+    all_partial_sigs: &mut Vec<Eval<S>>,
+    remaining_peers: &mut HashSet<Address>,
+) -> SigningResult<SchnorrSignature> {
+    loop {
+        let rs_correction_capacity = (all_partial_sigs
+            .len()
+            .saturating_sub(params.threshold as usize))
+            / 2;
+        if rs_correction_capacity >= 1 {
+            match aggregate_signatures_with_recovery(
+                params.message,
+                params.public_nonce,
+                params.beacon_value,
+                all_partial_sigs,
+                params.threshold,
+                params.verifying_key,
+                params.derivation_address,
+            ) {
+                Ok(sig) => return Ok(sig),
+                Err(FastCryptoError::TooManyErrors(max)) => {
+                    tracing::info!(
+                        "RS recovery failed for {}: too many errors (max correctable: {}), \
+                         collecting more sigs (have {})",
+                        sui_request_id,
+                        max,
+                        all_partial_sigs.len(),
+                    );
+                }
+                Err(e) => return Err(SigningError::CryptoError(e.to_string())),
+            }
+        }
+        if remaining_peers.is_empty() {
+            return Err(SigningError::TooManyInvalidSignatures {
+                collected: all_partial_sigs.len(),
+                threshold: params.threshold,
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(SigningError::Timeout {
+                collected: all_partial_sigs.len(),
+                threshold: params.threshold,
+            });
+        }
+        collect_from_peers(p2p_channel, request, all_partial_sigs, remaining_peers).await;
+    }
+}
+
+fn aggregate_signatures_with_recovery(
+    message: &[u8],
+    public_presig: &G,
+    beacon_value: &S,
+    partial_signatures: &[Eval<S>],
+    threshold: u16,
+    verifying_key: &G,
+    derivation_address: Option<&DerivationAddress>,
+) -> Result<SchnorrSignature, FastCryptoError> {
+    let indices: Vec<_> = partial_signatures.iter().map(|e| e.index).collect();
+    let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
+    let decoder = RSDecoder::new(indices.clone(), threshold as usize);
+    let coefficients = decoder.decode(&values)?;
+    // TODO: This re-interpolates a polynomial we have already decoded. Refactor `fastcrypto` to
+    // expose the constant term directly from the RS decoded message, avoiding redundant work.
+    let poly = Poly::from(coefficients);
+    let corrected_sigs: Vec<Eval<S>> = indices
+        .iter()
+        .take(threshold as usize)
+        .map(|&idx| poly.eval(idx))
+        .collect();
+    aggregate_signatures(
+        message,
+        public_presig,
+        beacon_value,
+        &corrected_sigs,
+        threshold,
+        verifying_key,
+        derivation_address,
+    )
+}
+
+async fn collect_from_peers(
+    p2p_channel: &impl P2PChannel,
+    request: &GetPartialSignaturesRequest,
+    all_partial_sigs: &mut Vec<Eval<S>>,
+    remaining_peers: &mut HashSet<Address>,
+) {
+    let results = send_to_many(
+        remaining_peers.iter().copied(),
+        request.clone(),
+        |addr, req| async move { p2p_channel.get_partial_signatures(&addr, &req).await },
+    )
+    .await;
+    for (addr, result) in results {
+        match result {
+            Ok(response) => {
+                remaining_peers.remove(&addr);
+                all_partial_sigs.extend(response.partial_sigs);
+            }
+            Err(e) => {
+                tracing::info!("Failed to get partial signatures from {}: {}", addr, e);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::communication::ChannelError;
+    use crate::communication::ChannelResult;
+    use crate::mpc::types::ComplainRequest;
+    use crate::mpc::types::ComplaintResponses;
+    use crate::mpc::types::GetPublicDkgOutputRequest;
+    use crate::mpc::types::GetPublicDkgOutputResponse;
+    use crate::mpc::types::RetrieveMessagesRequest;
+    use crate::mpc::types::RetrieveMessagesResponse;
+    use crate::mpc::types::SendMessagesRequest;
+    use crate::mpc::types::SendMessagesResponse;
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto::groups::Scalar;
+    use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
+    use fastcrypto::traits::AllowedRng;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use fastcrypto_tbls::types::ShareIndex;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn mock_shares(rng: &mut impl AllowedRng, secret: S, t: u16, n: u16) -> Vec<Eval<S>> {
+        let p = Poly::rand_fixed_c0(t - 1, secret, rng);
+        (1..=n)
+            .map(|i| p.eval(ShareIndex::new(i).unwrap()))
+            .collect()
+    }
+
+    fn test_address(i: usize) -> Address {
+        Address::new([i as u8; 32])
+    }
+
+    fn test_request_id() -> Address {
+        Address::new([0xAA; 32])
+    }
+
+    fn verify_schnorr(vk: &G, message: &[u8], sig: &SchnorrSignature) {
+        SchnorrPublicKey::try_from(vk)
+            .unwrap()
+            .verify(message, sig)
+            .unwrap();
+    }
+
+    struct MockSigningP2PChannel {
+        managers: HashMap<Address, Arc<RwLock<SigningManager>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for MockSigningP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponses> {
+            unimplemented!()
+        }
+        async fn get_public_dkg_output(
+            &self,
+            _: &Address,
+            _: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            let mgr = self
+                .managers
+                .get(party)
+                .ok_or(ChannelError::ClientNotFound(*party))?;
+            mgr.read()
+                .unwrap()
+                .handle_get_partial_signatures_request(request)
+                .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+        }
+    }
+
+    struct CannedP2PChannel {
+        responses: HashMap<Address, ChannelResult<GetPartialSignaturesResponse>>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for CannedP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponses> {
+            unimplemented!()
+        }
+        async fn get_public_dkg_output(
+            &self,
+            _: &Address,
+            _: &GetPublicDkgOutputRequest,
+        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            match self.responses.get(party) {
+                Some(Ok(resp)) => Ok(resp.clone()),
+                Some(Err(_)) => Err(ChannelError::RequestFailed(format!(
+                    "canned error for {}",
+                    party
+                ))),
+                None => Err(ChannelError::ClientNotFound(*party)),
+            }
+        }
+    }
+
+    fn canned_p2p_with_corruptions(
+        all_sigs: &[Vec<Eval<S>>],
+        corrupt_indices: &[usize],
+        rng: &mut impl AllowedRng,
+    ) -> CannedP2PChannel {
+        let mut responses = HashMap::new();
+        for (i, peer_sigs) in all_sigs.iter().enumerate().skip(1) {
+            let sigs = if corrupt_indices.contains(&i) {
+                peer_sigs
+                    .iter()
+                    .map(|e| Eval {
+                        index: e.index,
+                        value: S::rand(rng),
+                    })
+                    .collect()
+            } else {
+                peer_sigs.clone()
+            };
+            responses.insert(
+                test_address(i),
+                Ok(GetPartialSignaturesResponse { partial_sigs: sigs }),
+            );
+        }
+        CannedP2PChannel { responses }
+    }
+
+    struct SigningTestSetup {
+        managers: Vec<Arc<RwLock<SigningManager>>>,
+        verifying_key: G,
+    }
+
+    impl SigningTestSetup {
+        fn new(n: u16) -> Self {
+            let f = (n - 1) / 3;
+            let t = f + 1;
+            let mut rng = StdRng::seed_from_u64(42);
+
+            // Committee
+            let encryption_keys: Vec<_> = (0..n)
+                .map(|_| EncryptionPrivateKey::new(&mut rng))
+                .collect();
+            let members: Vec<_> = (0..n as usize)
+                .map(|i| {
+                    CommitteeMember::new(
+                        test_address(i),
+                        hashi_types::committee::Bls12381PrivateKey::generate(&mut rng).public_key(),
+                        EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                        1,
+                    )
+                })
+                .collect();
+            let committee = Committee::new(members, 100);
+
+            // Fake DKG
+            let sk = S::rand(&mut rng);
+            let vk = G::generator() * sk;
+            let sk_shares = mock_shares(&mut rng, sk, t, n);
+
+            // Fake presigning (same as fastcrypto test_signing)
+            let batch_size_per_weight: u16 = 10;
+            let nonces_for_dealer: Vec<_> = (0..n)
+                .map(|_| {
+                    let nonces: Vec<S> = (0..batch_size_per_weight)
+                        .map(|_| S::rand(&mut rng))
+                        .collect();
+                    let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                    let nonce_shares: Vec<Vec<S>> = nonces
+                        .iter()
+                        .map(|&nonce| {
+                            mock_shares(&mut rng, nonce, t, n)
+                                .iter()
+                                .map(|e| e.value)
+                                .collect()
+                        })
+                        .collect();
+                    (public_keys, nonce_shares)
+                })
+                .collect();
+
+            let managers: Vec<_> = (0..n as usize)
+                .map(|i| {
+                    let index = ShareIndex::new(i as u16 + 1).unwrap();
+                    let key_shares = avss::SharesForNode {
+                        shares: vec![sk_shares[i].clone()],
+                    };
+                    let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
+                        .map(|j| batch_avss::ReceiverOutput {
+                            my_shares: batch_avss::SharesForNode {
+                                shares: vec![batch_avss::ShareBatch {
+                                    index,
+                                    batch: (0..batch_size_per_weight as usize)
+                                        .map(|l| nonces_for_dealer[j].1[l][i])
+                                        .collect(),
+                                    blinding_share: S::zero(),
+                                }],
+                            },
+                            public_keys: nonces_for_dealer[j].0.clone(),
+                        })
+                        .collect();
+                    let presignatures =
+                        Presignatures::new(outputs, batch_size_per_weight, f as usize).unwrap();
+                    let mgr = SigningManager::new(
+                        test_address(i),
+                        committee.clone(),
+                        t,
+                        key_shares,
+                        vk,
+                        presignatures,
+                    );
+                    Arc::new(RwLock::new(mgr))
+                })
+                .collect();
+
+            Self {
+                managers,
+                verifying_key: vk,
+            }
+        }
+
+        /// Have peers generate + store partial sigs so their RPC handlers work.
+        /// If `skip` is Some(i), that manager is skipped (use for the caller who
+        /// will generate its own sigs inside `sign()`).
+        /// Returns (public_nonce, Vec of per-party partial sigs).
+        fn prepare_all(
+            &self,
+            message: &[u8],
+            beacon_value: &S,
+            request_id: Address,
+            skip: Option<usize>,
+        ) -> (G, Vec<Vec<Eval<S>>>) {
+            let mut public_nonce = None;
+            let mut all_sigs = Vec::new();
+            for (idx, mgr_lock) in self.managers.iter().enumerate() {
+                if skip == Some(idx) {
+                    all_sigs.push(Vec::new());
+                    continue;
+                }
+                let mut mgr = mgr_lock.write().unwrap();
+                let mgr = &mut *mgr;
+                let (pn, sigs) = generate_partial_signatures(
+                    message,
+                    &mut mgr.presignatures,
+                    beacon_value,
+                    &mgr.key_shares,
+                    &mgr.verifying_key,
+                    None,
+                )
+                .unwrap();
+                mgr.partial_signing_outputs.insert(
+                    request_id,
+                    PartialSigningOutput {
+                        public_nonce: pn,
+                        partial_sigs: sigs.clone(),
+                    },
+                );
+                if public_nonce.is_none() {
+                    public_nonce = Some(pn);
+                }
+                all_sigs.push(sigs);
+            }
+            (public_nonce.unwrap(), all_sigs)
+        }
+
+        /// Build a MockSigningP2PChannel containing all peers except `caller_index`.
+        fn mock_p2p_for(&self, caller_index: usize) -> MockSigningP2PChannel {
+            let managers = self
+                .managers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != caller_index)
+                .map(|(i, m)| (test_address(i), m.clone()))
+                .collect();
+            MockSigningP2PChannel { managers }
+        }
+    }
+
+    /// Pre-built partial sigs for aggregate_signatures_with_recovery tests.
+    struct AggregateTestData {
+        partial_sigs: Vec<Eval<S>>,
+        public_nonce: G,
+        vk: G,
+        beacon: S,
+        t: u16,
+        rng: StdRng,
+    }
+
+    /// Build 5 partial sigs from a (n=7, t=3, f=2) setup for RS recovery tests.
+    fn build_aggregate_test_data(seed: u64, message: &[u8]) -> AggregateTestData {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let f: u16 = 2;
+        let t: u16 = f + 1;
+        let n: u16 = 7;
+
+        let sk = S::rand(&mut rng);
+        let vk = G::generator() * sk;
+        let sk_shares = mock_shares(&mut rng, sk, t, n);
+
+        let batch_size_per_weight: u16 = 2;
+        let nonces_for_dealer: Vec<_> = (0..n)
+            .map(|_| {
+                let nonces: Vec<S> = (0..batch_size_per_weight)
+                    .map(|_| S::rand(&mut rng))
+                    .collect();
+                let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                let nonce_shares: Vec<Vec<S>> = nonces
+                    .iter()
+                    .map(|&nonce| {
+                        mock_shares(&mut rng, nonce, t, n)
+                            .iter()
+                            .map(|e| e.value)
+                            .collect()
+                    })
+                    .collect();
+                (public_keys, nonce_shares)
+            })
+            .collect();
+
+        let beacon = S::rand(&mut rng);
+
+        let mut public_nonce = None;
+        let mut partial_sigs: Vec<Eval<S>> = Vec::new();
+        for (i, sk_share) in sk_shares.iter().enumerate().take(5) {
+            let index = ShareIndex::new(i as u16 + 1).unwrap();
+            let key_shares = avss::SharesForNode {
+                shares: vec![sk_share.clone()],
+            };
+            let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
+                .map(|j| batch_avss::ReceiverOutput {
+                    my_shares: batch_avss::SharesForNode {
+                        shares: vec![batch_avss::ShareBatch {
+                            index,
+                            batch: (0..batch_size_per_weight as usize)
+                                .map(|l| nonces_for_dealer[j].1[l][i])
+                                .collect(),
+                            blinding_share: S::zero(),
+                        }],
+                    },
+                    public_keys: nonces_for_dealer[j].0.clone(),
+                })
+                .collect();
+            let mut presigs =
+                Presignatures::new(outputs, batch_size_per_weight, f as usize).unwrap();
+            let (pn, sigs) =
+                generate_partial_signatures(message, &mut presigs, &beacon, &key_shares, &vk, None)
+                    .unwrap();
+            if public_nonce.is_none() {
+                public_nonce = Some(pn);
+            }
+            partial_sigs.extend(sigs);
+        }
+
+        AggregateTestData {
+            partial_sigs,
+            public_nonce: public_nonce.unwrap(),
+            vk,
+            beacon,
+            t,
+            rng,
+        }
+    }
+
+    #[test]
+    fn test_handle_get_partial_signatures_found() {
+        let setup = SigningTestSetup::new(4);
+        let message = b"test";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        setup.prepare_all(message, &beacon, req_id, None);
+
+        let mgr = setup.managers[0].read().unwrap();
+        let resp = mgr
+            .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
+                sui_request_id: req_id,
+            })
+            .unwrap();
+        assert!(!resp.partial_sigs.is_empty());
+    }
+
+    #[test]
+    fn test_handle_get_partial_signatures_not_found() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = setup.managers[0].read().unwrap();
+        let result = mgr.handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
+            sui_request_id: test_request_id(),
+        });
+        assert!(matches!(result, Err(SigningError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_sign_happy_path() {
+        let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
+        let message = b"hello world";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        // All peers (except caller) prepare their partial sigs first.
+        setup.prepare_all(message, &beacon, req_id, Some(0));
+
+        let p2p = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_threshold_exact() {
+        // n=7, t=3, f=2. Caller has 1 share, needs 2 more from peers.
+        // Give exactly 2 peers partial sigs, rest return errors.
+        let setup = SigningTestSetup::new(7);
+        let message = b"threshold";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        // Only peers 1 and 2 prepare partial sigs.
+        for i in [1, 2] {
+            let mut mgr = setup.managers[i].write().unwrap();
+            let mgr = &mut *mgr;
+            let (pn, sigs) = generate_partial_signatures(
+                message,
+                &mut mgr.presignatures,
+                &beacon,
+                &mgr.key_shares,
+                &mgr.verifying_key,
+                None,
+            )
+            .unwrap();
+            mgr.partial_signing_outputs.insert(
+                req_id,
+                PartialSigningOutput {
+                    public_nonce: pn,
+                    partial_sigs: sigs,
+                },
+            );
+        }
+
+        // Peers 3-6 are in the mock but have no stored sigs → NotFound → ChannelError
+        let p2p = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_one_corrupted_rs_recovery() {
+        // n=7, t=3, f=2. One peer returns corrupted partial sig.
+        // Caller's 1 + 6 peers = 7 total, 1 bad → RS capacity (7-3)/2=2 → corrects 1.
+        let setup = SigningTestSetup::new(7);
+        let message = b"recovery";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, Some(0));
+        let p2p = canned_p2p_with_corruptions(&all_sigs, &[1], &mut StdRng::seed_from_u64(999));
+
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_multiple_corrupted_rs_recovery() {
+        // n=10, t=4, f=3. Two peers return corrupted sigs.
+        // Caller's 1 + 9 peers = 10 total, 2 bad → RS capacity (10-4)/2=3 → corrects 2.
+        let setup = SigningTestSetup::new(10);
+        let message = b"multi-recovery";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, Some(0));
+        let p2p = canned_p2p_with_corruptions(&all_sigs, &[1, 2], &mut StdRng::seed_from_u64(888));
+
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_too_many_invalid() {
+        // n=4, t=2, f=1. All 3 peers return corrupt sigs.
+        // aggregate_signatures uses first `threshold` sigs, so caller(valid) +
+        // any_peer(corrupted) → InvalidSignature.
+        // RS: 4 sigs, 3 bad, capacity=(4-2)/2=1 → TooManyErrors.
+        // No remaining peers → TooManyInvalidSignatures.
+        let setup = SigningTestSetup::new(4);
+        let message = b"too-many";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, Some(0));
+        let p2p =
+            canned_p2p_with_corruptions(&all_sigs, &[1, 2, 3], &mut StdRng::seed_from_u64(777));
+
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SigningError::TooManyInvalidSignatures { .. })),
+            "expected TooManyInvalidSignatures, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_timeout() {
+        // All peers fail → never reach threshold → timeout.
+        let setup = SigningTestSetup::new(4);
+        let message = b"timeout";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        let mut responses = HashMap::new();
+        for i in 1..4usize {
+            responses.insert(
+                test_address(i),
+                Err(ChannelError::RequestFailed("unavailable".into())),
+            );
+        }
+        let p2p = CannedP2PChannel { responses };
+
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_millis(1), // very short timeout
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SigningError::Timeout { .. })),
+            "expected Timeout, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_aggregate_with_recovery_correctable() {
+        // t=3, 5 sigs with 1 corrupted → RS corrects.
+        let message = b"rs-test";
+        let mut data = build_aggregate_test_data(123, message);
+
+        data.partial_sigs[0].value = S::rand(&mut data.rng);
+
+        let sig = aggregate_signatures_with_recovery(
+            message,
+            &data.public_nonce,
+            &data.beacon,
+            &data.partial_sigs,
+            data.t,
+            &data.vk,
+            None,
+        )
+        .unwrap();
+
+        verify_schnorr(&data.vk, message, &sig);
+    }
+
+    #[test]
+    fn test_aggregate_with_recovery_too_many_errors() {
+        // t=3, 5 sigs with 2 corrupted → RS capacity (5-3)/2=1, can't correct 2.
+        let message = b"rs-fail";
+        let mut data = build_aggregate_test_data(456, message);
+
+        data.partial_sigs[0].value = S::rand(&mut data.rng);
+        data.partial_sigs[1].value = S::rand(&mut data.rng);
+
+        let result = aggregate_signatures_with_recovery(
+            message,
+            &data.public_nonce,
+            &data.beacon,
+            &data.partial_sigs,
+            data.t,
+            &data.vk,
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(FastCryptoError::TooManyErrors(_))),
+            "expected TooManyErrors, got: {:?}",
+            result.err()
+        );
     }
 }

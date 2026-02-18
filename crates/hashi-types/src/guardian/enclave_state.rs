@@ -1,11 +1,11 @@
-use crate::epoch_store::ConsecutiveEpochStore;
-use crate::epoch_store::ConsecutiveEpochStoreRepr;
-use crate::epoch_store::EpochWindow;
-use crate::GuardianError::InternalError;
-use crate::GuardianError::InvalidInputs;
-use crate::GuardianError::RateLimitExceeded;
-use crate::GuardianResult;
-use crate::HashiCommittee;
+use super::GuardianError::InternalError;
+use super::GuardianError::InvalidInputs;
+use super::GuardianError::RateLimitExceeded;
+use super::GuardianResult;
+use super::HashiCommittee;
+use super::epoch_store::ConsecutiveEpochStore;
+use super::epoch_store::ConsecutiveEpochStoreRepr;
+use super::epoch_store::EpochWindow;
 use bitcoin::Amount;
 use serde::Serialize;
 
@@ -161,23 +161,21 @@ impl CommitteeStore {
 }
 
 #[derive(Serialize)]
-pub(crate) struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<hashi_types::move_types::Committee>);
+pub(crate) struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<crate::move_types::Committee>);
 
 impl From<CommitteeStore> for CommitteeStoreRepr {
     fn from(store: CommitteeStore) -> Self {
-        CommitteeStoreRepr(
-            ConsecutiveEpochStoreRepr::<hashi_types::move_types::Committee> {
-                window: store.0.epoch_window(),
-                entries: store.0.iter().map(|(_, c)| c.into()).collect(),
-            },
-        )
+        CommitteeStoreRepr(ConsecutiveEpochStoreRepr::<crate::move_types::Committee> {
+            window: store.0.epoch_window(),
+            entries: store.0.iter().map(|(_, c)| c.into()).collect(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::epoch_store::EpochWindow;
     use super::*;
-    use crate::epoch_store::EpochWindow;
     use std::num::NonZeroU16;
 
     fn nz(v: u16) -> NonZeroU16 {

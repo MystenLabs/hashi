@@ -7,7 +7,7 @@ edition = "2024"
 anyhow.workspace = true
 bitcoin.workspace = true
 clap.workspace = true
-hashi-guardian-shared = { path = "../hashi-guardian-shared" }
+hashi-types = { path = "../hashi-types" }
 serde.workspace = true
 serde_yaml.workspace = true
 tracing.workspace = true

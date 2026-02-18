@@ -4,12 +4,11 @@
 //! - Types with checked addresses that implement Serialize but not Deserialize
 //! - Types with unchecked addresses implement both Serialize and Deserialize
 
-use crate::BitcoinAddress;
-use crate::BitcoinKeypair;
-use crate::BitcoinPubkey;
-use crate::BitcoinSignature;
-use crate::GuardianError::InvalidInputs;
-use crate::GuardianResult;
+use super::BitcoinAddress;
+use super::BitcoinKeypair;
+use super::BitcoinPubkey;
+use super::BitcoinSignature;
+use super::GuardianError::InvalidInputs;
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
@@ -23,10 +22,10 @@ use bitcoin::transaction::Version;
 use bitcoin::*;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr;
-use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
 use fastcrypto_tbls::threshold_schnorr::Address as SuiAddress;
-use miniscript::descriptor::Tr;
+use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
 use miniscript::Descriptor;
+use miniscript::descriptor::Tr;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -95,7 +94,7 @@ pub struct TxUTXOs {
 fn validate_address_for_network(
     address: &BitcoinAddress<NetworkUnchecked>,
     network: Network,
-) -> GuardianResult<BitcoinAddress<NetworkChecked>> {
+) -> super::GuardianResult<BitcoinAddress<NetworkChecked>> {
     // Prefer the library's checked conversion to avoid accidentally assuming correctness.
     address.clone().require_network(network).map_err(|_| {
         InvalidInputs(format!(
@@ -116,7 +115,7 @@ impl InputUTXO {
         address: BitcoinAddress<NetworkUnchecked>,
         leaf_hash: TapLeafHash,
         network: Network,
-    ) -> GuardianResult<Self> {
+    ) -> super::GuardianResult<Self> {
         // TODO: Validate amount > 0.
         let address = validate_address_for_network(&address, network)?;
 
@@ -132,7 +131,7 @@ impl InputUTXO {
         })
     }
 
-    pub fn from_wire(input: InputUTXOWire, network: Network) -> GuardianResult<Self> {
+    pub fn from_wire(input: InputUTXOWire, network: Network) -> super::GuardianResult<Self> {
         Self::new(
             input.outpoint,
             input.amount,
@@ -188,13 +187,16 @@ impl ExternalOutputUTXO {
         address: BitcoinAddress<NetworkUnchecked>,
         amount: Amount,
         network: Network,
-    ) -> GuardianResult<Self> {
+    ) -> super::GuardianResult<Self> {
         // TODO: Validate amount > 0
         let address = validate_address_for_network(&address, network)?;
         Ok(Self { address, amount })
     }
 
-    pub fn from_wire(input: ExternalOutputUTXOWire, network: Network) -> GuardianResult<Self> {
+    pub fn from_wire(
+        input: ExternalOutputUTXOWire,
+        network: Network,
+    ) -> super::GuardianResult<Self> {
         Self::new(input.address, input.amount, network)
     }
 }
@@ -207,7 +209,7 @@ impl OutputUTXO {
         address: BitcoinAddress<NetworkUnchecked>,
         amount: Amount,
         network: Network,
-    ) -> GuardianResult<Self> {
+    ) -> super::GuardianResult<Self> {
         Ok(OutputUTXO::External(ExternalOutputUTXO::new(
             address, amount, network,
         )?))
@@ -221,7 +223,7 @@ impl OutputUTXO {
         })
     }
 
-    pub fn from_wire(output: OutputUTXOWire, network: Network) -> GuardianResult<Self> {
+    pub fn from_wire(output: OutputUTXOWire, network: Network) -> super::GuardianResult<Self> {
         Ok(match output {
             OutputUTXOWire::External(external) => {
                 OutputUTXO::External(ExternalOutputUTXO::from_wire(external, network)?)
@@ -262,7 +264,7 @@ impl OutputUTXO {
 
 impl TxUTXOs {
     /// Constructs a new `TxUTXOs` and validates all invariants.
-    pub fn new(inputs: Vec<InputUTXO>, outputs: Vec<OutputUTXO>) -> GuardianResult<Self> {
+    pub fn new(inputs: Vec<InputUTXO>, outputs: Vec<OutputUTXO>) -> super::GuardianResult<Self> {
         if inputs.is_empty() {
             return Err(InvalidInputs("input utxos must not be empty".into()));
         }
@@ -334,7 +336,7 @@ impl TxUTXOs {
             .sum()
     }
 
-    fn assert_positive_fees(&self) -> GuardianResult<()> {
+    fn assert_positive_fees(&self) -> super::GuardianResult<()> {
         let input_sum = self.inputs.iter().map(|utxo| utxo.amount).sum::<Amount>();
         let output_sum = self.outputs.iter().map(|utxo| utxo.amount()).sum();
         if input_sum <= output_sum {
@@ -578,11 +580,11 @@ impl From<TxUTXOs> for TxUTXOsWire {
 
 #[cfg(test)]
 mod bitcoin_tests {
+    use super::super::test_utils::create_btc_keypair;
     use super::*;
-    use crate::test_utils::create_btc_keypair;
+    use bitcoin::Network::Regtest;
     use bitcoin::key::UntweakedPublicKey;
     use bitcoin::taproot::ControlBlock;
-    use bitcoin::Network::Regtest;
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 
     const TEST_ENCLAVE_BTC_SK: [u8; 32] = [1u8; 32];

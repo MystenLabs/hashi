@@ -7,6 +7,7 @@ use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
@@ -141,6 +142,10 @@ pub struct GetPublicDkgOutputResponse {
 pub enum Messages {
     Dkg(avss::Message),
     Rotation(RotationMessages),
+    NonceGeneration {
+        batch_index: u32,
+        message: batch_avss::Message,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -174,6 +179,7 @@ pub struct ComplainRequest {
 pub enum ComplaintResponses {
     Dkg(complaint::ComplaintResponse<avss::SharesForNode>),
     Rotation(BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>),
+    NonceGeneration(complaint::ComplaintResponse<batch_avss::SharesForNode>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -222,6 +228,10 @@ pub type DealerCertificate = SignedMessage<DealerMessagesHash>;
 pub enum CertificateV1 {
     Dkg(DealerCertificate),
     Rotation(DealerCertificate),
+    NonceGeneration {
+        batch_index: u32,
+        cert: DealerCertificate,
+    },
 }
 
 impl CertificateV1 {
@@ -237,29 +247,31 @@ impl CertificateV1 {
 
     pub fn epoch(&self) -> u64 {
         match self {
-            CertificateV1::Dkg(cert) => cert.epoch(),
-            CertificateV1::Rotation(cert) => cert.epoch(),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.epoch(),
+            CertificateV1::NonceGeneration { cert, .. } => cert.epoch(),
         }
     }
 
     pub fn dealer_address(&self) -> Address {
         match self {
-            CertificateV1::Dkg(cert) => cert.message().dealer_address,
-            CertificateV1::Rotation(cert) => cert.message().dealer_address,
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => {
+                cert.message().dealer_address
+            }
+            CertificateV1::NonceGeneration { cert, .. } => cert.message().dealer_address,
         }
     }
 
     pub fn signature_bytes(&self) -> &[u8] {
         match self {
-            CertificateV1::Dkg(cert) => cert.signature_bytes(),
-            CertificateV1::Rotation(cert) => cert.signature_bytes(),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.signature_bytes(),
+            CertificateV1::NonceGeneration { cert, .. } => cert.signature_bytes(),
         }
     }
 
     pub fn signers_bitmap_bytes(&self) -> &[u8] {
         match self {
-            CertificateV1::Dkg(cert) => cert.signers_bitmap_bytes(),
-            CertificateV1::Rotation(cert) => cert.signers_bitmap_bytes(),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.signers_bitmap_bytes(),
+            CertificateV1::NonceGeneration { cert, .. } => cert.signers_bitmap_bytes(),
         }
     }
 
@@ -268,15 +280,15 @@ impl CertificateV1 {
         committee: &Committee,
     ) -> Result<Vec<Address>, sui_crypto::SignatureError> {
         match self {
-            CertificateV1::Dkg(cert) => cert.signers(committee),
-            CertificateV1::Rotation(cert) => cert.signers(committee),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.signers(committee),
+            CertificateV1::NonceGeneration { cert, .. } => cert.signers(committee),
         }
     }
 
     pub fn weight(&self, committee: &Committee) -> Result<u64, sui_crypto::SignatureError> {
         match self {
-            CertificateV1::Dkg(cert) => cert.weight(committee),
-            CertificateV1::Rotation(cert) => cert.weight(committee),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.weight(committee),
+            CertificateV1::NonceGeneration { cert, .. } => cert.weight(committee),
         }
     }
 
@@ -286,15 +298,17 @@ impl CertificateV1 {
         committee: &Committee,
     ) -> Result<bool, sui_crypto::SignatureError> {
         match self {
-            CertificateV1::Dkg(cert) => cert.is_signer(address, committee),
-            CertificateV1::Rotation(cert) => cert.is_signer(address, committee),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => {
+                cert.is_signer(address, committee)
+            }
+            CertificateV1::NonceGeneration { cert, .. } => cert.is_signer(address, committee),
         }
     }
 
     pub fn message(&self) -> &DealerMessagesHash {
         match self {
-            CertificateV1::Dkg(cert) => cert.message(),
-            CertificateV1::Rotation(cert) => cert.message(),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.message(),
+            CertificateV1::NonceGeneration { cert, .. } => cert.message(),
         }
     }
 
@@ -302,6 +316,9 @@ impl CertificateV1 {
         match self {
             CertificateV1::Dkg(_) => ProtocolType::Dkg,
             CertificateV1::Rotation(_) => ProtocolType::KeyRotation,
+            CertificateV1::NonceGeneration { batch_index, .. } => ProtocolType::NonceGeneration {
+                batch_index: *batch_index,
+            },
         }
     }
 }
@@ -417,6 +434,11 @@ pub enum SigningError {
 
     #[error("Signing timed out: collected {collected} partial sigs, need {threshold}")]
     Timeout { collected: usize, threshold: u16 },
+
+    #[error(
+        "Too many invalid partial signatures to recover: collected {collected}, threshold {threshold}"
+    )]
+    TooManyInvalidSignatures { collected: usize, threshold: u16 },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;

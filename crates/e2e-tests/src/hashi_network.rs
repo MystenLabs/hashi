@@ -34,7 +34,7 @@ use sui_sdk_types::Transaction;
 use sui_sdk_types::TransactionExpiration;
 use sui_sdk_types::TransactionKind;
 use sui_sdk_types::bcs::ToBcs;
-use tracing::info;
+use tracing::debug;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReconfigCompletionMessage {
@@ -221,19 +221,40 @@ impl HashiNetwork {
     pub fn ids(&self) -> HashiIds {
         self.ids
     }
+
+    pub async fn register_and_start_pending_node(&mut self, client: sui_rpc::Client) -> Result<()> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.service.is_none())
+            .ok_or_else(|| anyhow::anyhow!("no pending nodes to start"))?;
+        register_onchain(client, &node.config).await?;
+        node.start().await?;
+        Ok(())
+    }
 }
 
 pub struct HashiNetworkBuilder {
     pub num_nodes: usize,
+    /// `None` means all `num_nodes` are active (default).
+    pub num_initially_active_nodes: Option<usize>,
 }
 
 impl HashiNetworkBuilder {
     pub fn new() -> Self {
-        Self { num_nodes: 1 }
+        Self {
+            num_nodes: 1,
+            num_initially_active_nodes: None,
+        }
     }
 
     pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
         self.num_nodes = num_nodes;
+        self
+    }
+
+    pub fn with_initially_active(mut self, initially_active: usize) -> Self {
+        self.num_initially_active_nodes = Some(initially_active);
         self
     }
 
@@ -268,7 +289,7 @@ impl HashiNetworkBuilder {
             config.operator_private_key = Some(private_key.to_pem()?);
             config.sui_rpc = Some(sui_rpc.clone());
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
-            config.bitcoin_rpc_auth = Some(hashi_btc::config::BtcRpcAuth::UserPass(
+            config.bitcoin_rpc_auth = Some(hashi::btc_monitor::config::BtcRpcAuth::UserPass(
                 crate::bitcoin_node::RPC_USER.into(),
                 crate::bitcoin_node::RPC_PASSWORD.into(),
             ));
@@ -283,7 +304,13 @@ impl HashiNetworkBuilder {
             configs.push(config);
         }
 
-        let bls_keys: Vec<(Address, Bls12381PrivateKey, EncryptionPublicKey)> = configs
+        let initially_active = self.num_initially_active_nodes.unwrap_or(configs.len());
+        assert!(
+            initially_active <= configs.len(),
+            "initially_active ({initially_active}) must be <= num_nodes ({})",
+            configs.len()
+        );
+        let active_bls_keys: Vec<_> = configs[..initially_active]
             .iter()
             .map(|c| {
                 (
@@ -293,34 +320,32 @@ impl HashiNetworkBuilder {
                 )
             })
             .collect();
-
-        for config in &configs {
+        for config in &configs[..initially_active] {
             let client = sui.client.clone();
             register_onchain(client, config).await?;
         }
-
-        // Init the initial committee
+        // Initialize the initial committee with only active nodes
         start_reconfig(sui, hashi_ids).await?;
         // TODO: Remove this test-only logic once the node service handles committing the
         // MPC public key on-chain after DKG.
         let placeholder_mpc_public_key = vec![0u8; 33];
-        end_reconfig(sui, hashi_ids, &bls_keys, placeholder_mpc_public_key).await?;
-
+        end_reconfig(sui, hashi_ids, &active_bls_keys, placeholder_mpc_public_key).await?;
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
-            let validator_address = config.validator_address()?;
-            let mut node_handle = HashiNodeHandle::new(config)?;
-            node_handle.start().await?;
-            info!(
-                "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
-                validator_address,
-                node_handle.https_address(),
-                node_handle.http_address(),
-                node_handle.metrics_address()
-            );
+            let node_handle = HashiNodeHandle::new(config)?;
             nodes.push(node_handle);
         }
-
+        // Start only the active nodes
+        for node in &mut nodes[..initially_active] {
+            node.start().await?;
+            debug!(
+                "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
+                node.config.validator_address()?,
+                node.https_address(),
+                node.http_address(),
+                node.metrics_address()
+            );
+        }
         Ok(HashiNetwork {
             ids: hashi_ids,
             nodes,

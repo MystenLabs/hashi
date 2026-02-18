@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use hashi_guardian_shared::WithdrawalID;
+use hashi_types::guardian::WithdrawalID;
 
 use crate::config::Config;
 use crate::domain::Cursors;

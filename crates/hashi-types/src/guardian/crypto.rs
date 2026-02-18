@@ -1,23 +1,23 @@
-use crate::bitcoin_utils::BTC_LIB;
-use crate::GuardianError::InvalidInputs;
-use crate::GuardianResult;
-use crate::GuardianSigned;
-use crate::SigningIntent;
+use super::GuardianError::InvalidInputs;
+use super::GuardianResult;
+use super::GuardianSigned;
+use super::SigningIntent;
+use super::bitcoin_utils::BTC_LIB;
 use ed25519_consensus::SigningKey;
 use ed25519_consensus::VerificationKey;
-use hpke::aead::AesGcm256;
-use hpke::kdf::HkdfSha384;
-use hpke::kem::X25519HkdfSha256;
 use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
-use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::Field;
-use k256::elliptic_curve::PrimeField;
+use hpke::aead::AesGcm256;
+use hpke::kdf::HkdfSha384;
+use hpke::kem::X25519HkdfSha256;
 use k256::CompressedPoint;
 use k256::FieldBytes;
 use k256::ProjectivePoint;
 use k256::Scalar;
+use k256::elliptic_curve::Field;
+use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::group::GroupEncoding;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -322,8 +322,10 @@ mod tests {
         assert!(decrypt(&ciphertext, keypair.secret_key(), aad).is_ok_and(|x| x == bytes));
 
         let wrong_aad = Some(&[10; 32]);
-        assert!(decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
-            .is_err_and(|x| matches!(x, InvalidInputs(_))));
+        assert!(
+            decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
+                .is_err_and(|x| matches!(x, InvalidInputs(_)))
+        );
     }
 
     // Verify secret reconstruction with varying number of shares (0 to limit)
@@ -436,9 +438,11 @@ mod tests {
             result.is_err(),
             "combine_shares should reject shares with duplicate IDs"
         );
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Duplicate share ID"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Duplicate share ID")
+        );
     }
 }

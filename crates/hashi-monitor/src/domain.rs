@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use bitcoin::Txid;
-use hashi_guardian_shared::WithdrawalID;
+use hashi_types::guardian::WithdrawalID;
 use serde::Deserialize;
 
 use crate::OutputUTXO;
