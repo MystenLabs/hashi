@@ -60,6 +60,59 @@ pub struct SignDepositConfirmationResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
+/// Maps to crate::withdrawals::WithdrawalApproval
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignWithdrawalApprovalRequest {
+    /// Withdrawal request ids (each 32 bytes).
+    #[prost(bytes = "bytes", repeated, tag = "1")]
+    pub request_ids: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Selected UTXO ids to spend.
+    #[prost(message, repeated, tag = "2")]
+    pub selected_utxos: ::prost::alloc::vec::Vec<UtxoId>,
+    /// Transaction outputs (withdrawal destination + change).
+    #[prost(message, repeated, tag = "3")]
+    pub outputs: ::prost::alloc::vec::Vec<WithdrawalOutput>,
+    /// Bitcoin transaction id of the unsigned transaction (32 bytes).
+    #[prost(bytes = "bytes", tag = "4")]
+    pub txid: ::prost::bytes::Bytes,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WithdrawalOutput {
+    /// Amount in satoshis.
+    #[prost(uint64, tag = "1")]
+    pub amount: u64,
+    /// Bitcoin address (raw bytes).
+    #[prost(bytes = "bytes", tag = "2")]
+    pub bitcoin_address: ::prost::bytes::Bytes,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignWithdrawalApprovalResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignWithdrawalTransactionRequest {
+    /// The id of the PendingWithdrawal on Sui (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub pending_withdrawal_id: ::prost::bytes::Bytes,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignWithdrawalTransactionResponse {
+    /// Partial MPC Schnorr signature data.
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub partial_signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignWithdrawalConfirmationRequest {
+    /// Pending withdrawal id on Sui.
+    #[prost(bytes = "bytes", tag = "1")]
+    pub pending_withdrawal_id: ::prost::bytes::Bytes,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignWithdrawalConfirmationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
 /// Generated client implementations.
 pub mod bridge_service_client {
     #![allow(
@@ -208,6 +261,98 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Sign approval for a proposed withdrawal transaction, confirming that the
+        /// validator agrees the bitcoin transaction is valid and should be processed.
+        pub async fn sign_withdrawal_approval(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignWithdrawalApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignWithdrawalApprovalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalApproval",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignWithdrawalApproval",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Sign a bitcoin withdrawal transaction. The validator checks that a matching
+        /// PendingWithdrawal exists on-chain, then produces a partial signature.
+        pub async fn sign_withdrawal_transaction(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignWithdrawalTransactionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignWithdrawalTransactionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalTransaction",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignWithdrawalTransaction",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Sign committee approval to confirm a processed withdrawal on-chain.
+        pub async fn sign_withdrawal_confirmation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignWithdrawalConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignWithdrawalConfirmationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalConfirmation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignWithdrawalConfirmation",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -237,6 +382,32 @@ pub mod bridge_service_server {
             request: tonic::Request<super::SignDepositConfirmationRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignDepositConfirmationResponse>,
+            tonic::Status,
+        >;
+        /// Sign approval for a proposed withdrawal transaction, confirming that the
+        /// validator agrees the bitcoin transaction is valid and should be processed.
+        async fn sign_withdrawal_approval(
+            &self,
+            request: tonic::Request<super::SignWithdrawalApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignWithdrawalApprovalResponse>,
+            tonic::Status,
+        >;
+        /// Sign a bitcoin withdrawal transaction. The validator checks that a matching
+        /// PendingWithdrawal exists on-chain, then produces a partial signature.
+        async fn sign_withdrawal_transaction(
+            &self,
+            request: tonic::Request<super::SignWithdrawalTransactionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignWithdrawalTransactionResponse>,
+            tonic::Status,
+        >;
+        /// Sign committee approval to confirm a processed withdrawal on-chain.
+        async fn sign_withdrawal_confirmation(
+            &self,
+            request: tonic::Request<super::SignWithdrawalConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignWithdrawalConfirmationResponse>,
             tonic::Status,
         >;
     }
@@ -398,6 +569,159 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SignDepositConfirmationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalApproval" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignWithdrawalApprovalSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SignWithdrawalApprovalRequest>
+                    for SignWithdrawalApprovalSvc<T> {
+                        type Response = super::SignWithdrawalApprovalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SignWithdrawalApprovalRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_withdrawal_approval(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignWithdrawalApprovalSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalTransaction" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignWithdrawalTransactionSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<
+                        super::SignWithdrawalTransactionRequest,
+                    > for SignWithdrawalTransactionSvc<T> {
+                        type Response = super::SignWithdrawalTransactionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignWithdrawalTransactionRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_withdrawal_transaction(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignWithdrawalTransactionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalConfirmation" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignWithdrawalConfirmationSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<
+                        super::SignWithdrawalConfirmationRequest,
+                    > for SignWithdrawalConfirmationSvc<T> {
+                        type Response = super::SignWithdrawalConfirmationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignWithdrawalConfirmationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_withdrawal_confirmation(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignWithdrawalConfirmationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

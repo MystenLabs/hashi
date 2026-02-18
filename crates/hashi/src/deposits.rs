@@ -154,18 +154,18 @@ impl Hashi {
         self.bitcoin_address_from_pubkey(&pubkey)
     }
 
+    fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
+        let network = self.config.bitcoin_network();
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        bitcoin::Address::p2tr(&secp, *pubkey, None, network)
+    }
+
     fn bitcoin_address_from_script_pubkey(
         &self,
         script_pubkey: &ScriptBuf,
     ) -> anyhow::Result<bitcoin::Address> {
         bitcoin::Address::from_script(script_pubkey, self.config.bitcoin_network())
             .map_err(|e| anyhow!("Failed to extract address from script_pubkey: {}", e))
-    }
-
-    fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
-        let network = self.config.bitcoin_network();
-        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        bitcoin::Address::p2tr(&secp, *pubkey, None, network)
     }
 
     pub fn get_hashi_pubkey(&self) -> XOnlyPublicKey {

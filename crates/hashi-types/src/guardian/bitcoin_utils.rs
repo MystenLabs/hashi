@@ -31,6 +31,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::LazyLock;
+
 // ---------------------------------
 //    Constants & Type Aliases
 // ---------------------------------
@@ -409,7 +410,7 @@ pub fn construct_signing_messages(
 /// Constructs a Bitcoin transaction with the given inputs and outputs.
 ///
 /// Uses BTC tx version 2 and disables lock time.
-fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
+pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     Transaction {
         // The latest BTC tx version
         version: Version::TWO,
