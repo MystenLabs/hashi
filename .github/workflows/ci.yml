@@ -119,6 +119,9 @@ jobs:
           rustc --version
           cargo --version
 
+      - run: rustup component add rustfmt
+      - run: rustup component add clippy
+
       # Install buf
       - name: Install buf
         uses: bufbuild/buf-setup-action@v1.24.0

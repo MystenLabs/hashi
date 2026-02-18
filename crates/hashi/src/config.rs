@@ -103,7 +103,7 @@ pub struct Config {
     pub bitcoin_rpc: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bitcoin_rpc_auth: Option<hashi_btc::config::BtcRpcAuth>,
+    pub bitcoin_rpc_auth: Option<crate::btc_monitor::config::BtcRpcAuth>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_confirmation_threshold: Option<u32>,
@@ -240,8 +240,8 @@ impl Config {
             .unwrap_or("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
     }
 
-    pub fn bitcoin_network(&self) -> hashi_btc::config::Network {
-        hashi_btc::config::network_from_chain_id(self.bitcoin_chain_id()).unwrap()
+    pub fn bitcoin_network(&self) -> crate::btc_monitor::config::Network {
+        crate::btc_monitor::config::network_from_chain_id(self.bitcoin_chain_id()).unwrap()
     }
 
     pub fn bitcoin_rpc(&self) -> &str {
@@ -258,14 +258,14 @@ impl Config {
         self.bitcoin_start_height.unwrap_or(800_000)
     }
 
-    pub fn bitcoin_rpc_auth(&self) -> hashi_btc::config::bitcoincore_rpc::Auth {
+    pub fn bitcoin_rpc_auth(&self) -> crate::btc_monitor::config::bitcoincore_rpc::Auth {
         self.bitcoin_rpc_auth
             .as_ref()
-            .unwrap_or(&hashi_btc::config::BtcRpcAuth::None)
+            .unwrap_or(&crate::btc_monitor::config::BtcRpcAuth::None)
             .to_bitcoincore_rpc_auth()
     }
 
-    pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<hashi_btc::TrustedPeer>> {
+    pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<crate::btc_monitor::TrustedPeer>> {
         let peers = self
             .bitcoin_trusted_peers
             .as_ref()
@@ -274,7 +274,7 @@ impl Config {
                     .iter()
                     .map(|addr| {
                         addr.parse::<std::net::SocketAddr>()
-                            .map(hashi_btc::TrustedPeer::from)
+                            .map(crate::btc_monitor::TrustedPeer::from)
                     })
                     .collect::<Result<Vec<_>, _>>()
             })

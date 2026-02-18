@@ -2,52 +2,52 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
-use crate::bitcoin_utils::ExternalOutputUTXOWire;
-use crate::bitcoin_utils::InputUTXOWire;
-use crate::bitcoin_utils::InternalOutputUTXO;
-use crate::bitcoin_utils::OutputUTXOWire;
-use crate::bitcoin_utils::TxUTXOsWire;
-use crate::epoch_store::EpochWindow;
-use crate::BitcoinSignature;
-use crate::Ciphertext;
-use crate::CommitteeSignatureWire;
-use crate::CommitteeStore;
-use crate::EncPubKey;
-use crate::EncryptedShare;
-use crate::GetGuardianInfoResponse;
-use crate::GuardianError;
-use crate::GuardianError::InvalidInputs;
-use crate::GuardianInfo;
-use crate::GuardianPubKey;
-use crate::GuardianResult;
-use crate::GuardianSignature;
-use crate::GuardianSigned;
-use crate::HashiCommittee;
-use crate::HashiCommitteeMember;
-use crate::HashiSigned;
-use crate::OperatorInitRequest;
-use crate::ProvisionerInitRequest;
-use crate::ProvisionerInitState;
-use crate::RateLimiter;
-use crate::SetupNewKeyRequest;
-use crate::SetupNewKeyResponse;
-use crate::ShareCommitment;
-use crate::ShareID;
-use crate::SignedStandardWithdrawalRequestWire;
-use crate::StandardWithdrawalRequest;
-use crate::StandardWithdrawalRequestWire;
-use crate::StandardWithdrawalResponse;
-use crate::WithdrawalConfig;
-use crate::WithdrawalState;
-use bitcoin::address::NetworkUnchecked;
-use bitcoin::hashes::Hash as _;
+use super::BitcoinSignature;
+use super::Ciphertext;
+use super::CommitteeSignatureWire;
+use super::CommitteeStore;
+use super::EncPubKey;
+use super::EncryptedShare;
+use super::GetGuardianInfoResponse;
+use super::GuardianError;
+use super::GuardianError::InvalidInputs;
+use super::GuardianInfo;
+use super::GuardianPubKey;
+use super::GuardianResult;
+use super::GuardianSignature;
+use super::GuardianSigned;
+use super::HashiCommittee;
+use super::HashiCommitteeMember;
+use super::HashiSigned;
+use super::OperatorInitRequest;
+use super::ProvisionerInitRequest;
+use super::ProvisionerInitState;
+use super::RateLimiter;
+use super::SetupNewKeyRequest;
+use super::SetupNewKeyResponse;
+use super::ShareCommitment;
+use super::ShareID;
+use super::SignedStandardWithdrawalRequestWire;
+use super::StandardWithdrawalRequest;
+use super::StandardWithdrawalRequestWire;
+use super::StandardWithdrawalResponse;
+use super::WithdrawalConfig;
+use super::WithdrawalState;
+use super::bitcoin_utils::ExternalOutputUTXOWire;
+use super::bitcoin_utils::InputUTXOWire;
+use super::bitcoin_utils::InternalOutputUTXO;
+use super::bitcoin_utils::OutputUTXOWire;
+use super::bitcoin_utils::TxUTXOsWire;
+use super::epoch_store::EpochWindow;
+use crate::proto as pb;
 use bitcoin::Address as BitcoinAddress;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::TapLeafHash;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
-use hashi_types::proto as pb;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::hashes::Hash as _;
 use hpke::Deserializable;
 use hpke::Serializable;
 use std::num::NonZeroU16;
@@ -404,13 +404,13 @@ fn pb_share_commitments_to_domain(
         .collect::<GuardianResult<Vec<_>>>()
 }
 
-fn pb_to_s3_bucket_info(info: pb::S3BucketInfo) -> GuardianResult<crate::S3BucketInfo> {
+fn pb_to_s3_bucket_info(info: pb::S3BucketInfo) -> GuardianResult<super::S3BucketInfo> {
     let bucket = info.bucket.ok_or_else(|| missing("bucket"))?;
     let region = info.region.ok_or_else(|| missing("region"))?;
-    Ok(crate::S3BucketInfo { bucket, region })
+    Ok(super::S3BucketInfo { bucket, region })
 }
 
-fn s3_bucket_info_to_pb(info: crate::S3BucketInfo) -> pb::S3BucketInfo {
+fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     pb::S3BucketInfo {
         bucket: Some(info.bucket),
         region: Some(info.region),
@@ -527,23 +527,23 @@ fn share_id_to_pb(id: ShareID) -> pb::GuardianShareId {
     }
 }
 
-fn pb_to_s3_config(cfg: pb::S3Config) -> GuardianResult<crate::S3Config> {
+fn pb_to_s3_config(cfg: pb::S3Config) -> GuardianResult<super::S3Config> {
     let access_key = cfg.access_key.ok_or_else(|| missing("access_key"))?;
     let secret_key = cfg.secret_key.ok_or_else(|| missing("secret_key"))?;
     let bucket_name = cfg.bucket_name.ok_or_else(|| missing("bucket_name"))?;
     let region = cfg.region.ok_or_else(|| missing("region"))?;
 
-    Ok(crate::S3Config {
+    Ok(super::S3Config {
         access_key: access_key.to_string(),
         secret_key: secret_key.to_string(),
-        bucket_info: crate::S3BucketInfo {
+        bucket_info: super::S3BucketInfo {
             bucket: bucket_name.to_string(),
             region: region.to_string(),
         },
     })
 }
 
-fn s3_config_to_pb(cfg: crate::S3Config) -> pb::S3Config {
+fn s3_config_to_pb(cfg: super::S3Config) -> pb::S3Config {
     pb::S3Config {
         access_key: Some(cfg.access_key),
         secret_key: Some(cfg.secret_key),
@@ -552,20 +552,20 @@ fn s3_config_to_pb(cfg: crate::S3Config) -> pb::S3Config {
     }
 }
 
-fn pb_to_network(n: i32) -> GuardianResult<crate::Network> {
+fn pb_to_network(n: i32) -> GuardianResult<super::Network> {
     match pb::Network::try_from(n) {
-        Ok(pb::Network::Mainnet) => Ok(crate::Network::Bitcoin),
-        Ok(pb::Network::Testnet) => Ok(crate::Network::Testnet),
-        Ok(pb::Network::Regtest) => Ok(crate::Network::Regtest),
+        Ok(pb::Network::Mainnet) => Ok(super::Network::Bitcoin),
+        Ok(pb::Network::Testnet) => Ok(super::Network::Testnet),
+        Ok(pb::Network::Regtest) => Ok(super::Network::Regtest),
         Err(_) => Err(InvalidInputs(format!("invalid network: enum value {n}"))),
     }
 }
 
-fn network_to_pb(n: crate::Network) -> GuardianResult<i32> {
+fn network_to_pb(n: super::Network) -> GuardianResult<i32> {
     match n {
-        crate::Network::Bitcoin => Ok(pb::Network::Mainnet as i32),
-        crate::Network::Testnet => Ok(pb::Network::Testnet as i32),
-        crate::Network::Regtest => Ok(pb::Network::Regtest as i32),
+        super::Network::Bitcoin => Ok(pb::Network::Mainnet as i32),
+        super::Network::Testnet => Ok(pb::Network::Testnet as i32),
+        super::Network::Regtest => Ok(pb::Network::Regtest as i32),
         _ => Err(InvalidInputs(format!("invalid network: enum value {n}"))),
     }
 }
@@ -759,7 +759,7 @@ fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiC
 
     let weight = m.weight.ok_or_else(|| missing("weight"))?;
 
-    let x = hashi_types::move_types::CommitteeMember {
+    let x = crate::move_types::CommitteeMember {
         validator_address,
         public_key: public_key.to_vec(),
         encryption_public_key: encryption_public_key.to_vec(),
@@ -771,7 +771,7 @@ fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiC
 }
 
 fn hashi_committee_member_to_pb(m: HashiCommitteeMember) -> pb::CommitteeMember {
-    let x = hashi_types::move_types::CommitteeMember::from(&m);
+    let x = crate::move_types::CommitteeMember::from(&m);
     pb::CommitteeMember {
         address: Some(x.validator_address.to_string()),
         public_key: Some(x.public_key.into()),
@@ -918,9 +918,9 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
 
 #[cfg(test)]
 mod tests {
+    use super::super::AddressValidation;
+    use super::super::StandardWithdrawalRequest;
     use super::*;
-    use crate::AddressValidation;
-    use crate::StandardWithdrawalRequest;
     use bitcoin::Network;
 
     #[test]

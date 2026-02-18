@@ -14,8 +14,8 @@ use std::str::FromStr;
 
 use bitcoin::Network;
 use clap::Parser;
-use hashi_btc::config::MonitorConfig;
-use hashi_btc::monitor::Monitor;
+use hashi::btc_monitor::config::MonitorConfig;
+use hashi::btc_monitor::monitor::Monitor;
 use kyoto::TrustedPeer;
 use tracing::error;
 use tracing::info;

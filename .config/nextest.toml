@@ -1,11 +1,11 @@
 # Nextest configuration for hashi
 # See https://nexte.st/docs/configuration/ for details
 
-# Integration tests in test-networks are heavy - they spin up Bitcoin regtest,
+# Integration tests in e2e-tests are heavy - they spin up Bitcoin regtest,
 # Sui localnet, and multiple Hashi nodes. Mark them as requiring all threads
 # so only one runs at a time.
 [[profile.default.overrides]]
-filter = 'package(test-networks)'
+filter = 'package(e2e-tests)'
 threads-required = 4
 
 # CI profile with more conservative settings

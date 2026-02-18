@@ -25,8 +25,21 @@ fastcrypto-tbls.workspace = true
 
 anyhow.workspace = true
 
+# Guardian crypto dependencies
+hpke = "0.12.0"
+rand.workspace = true
+rand_core.workspace = true
+k256 = "0.13"
+bitcoin.workspace = true
+blake2 = "0.10"
+ed25519-consensus = "2.1"
+miniscript = "13.0.0"
+serde_json.workspace = true
+tracing.workspace = true
+
 [dev-dependencies]
 ed25519-dalek.workspace = true
 test-strategy.workspace = true
 proptest.workspace = true
 rand.workspace = true
+tokio.workspace = true

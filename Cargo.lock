@@ -1921,6 +1921,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "e2e-tests"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64ct",
+ "bitcoin",
+ "bitcoincore-rpc",
+ "fastcrypto",
+ "fastcrypto-tbls",
+ "futures",
+ "hashi",
+ "hashi-screener",
+ "hashi-types",
+ "prometheus",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sui-crypto",
+ "sui-futures",
+ "sui-rpc",
+ "sui-sdk-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.14.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2557,8 +2587,11 @@ dependencies = [
  "backon",
  "base64ct",
  "bcs",
+ "bdk_chain",
+ "bdk_core",
  "bin-version",
  "bitcoin",
+ "bitcoincore-rpc",
  "blst",
  "bytes",
  "clap",
@@ -2567,10 +2600,9 @@ dependencies = [
  "fastcrypto-tbls",
  "fjall",
  "futures",
- "hashi-btc",
- "hashi-guardian-shared",
  "hashi-types",
  "hex",
+ "kyoto-cbf",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
@@ -2607,25 +2639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashi-btc"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "bdk_chain",
- "bdk_core",
- "bitcoin",
- "bitcoincore-rpc",
- "clap",
- "kyoto-cbf",
- "serde",
- "serde_derive",
- "sui-futures",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "hashi-cli"
 version = "0.1.0"
 dependencies = [
@@ -2652,48 +2665,23 @@ name = "hashi-guardian-enclave"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-credential-types",
  "aws-nitro-enclaves-nsm-api",
  "aws-sdk-s3",
  "aws-smithy-mocks",
  "bitcoin",
- "hashi-guardian-shared",
  "hashi-types",
  "hpke",
  "k256",
  "rand 0.8.5",
  "serde",
  "serde_bytes",
+ "serde_json",
  "tokio",
  "tonic",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "hashi-guardian-shared"
-version = "0.1.0"
-dependencies = [
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
- "aws-smithy-mocks",
- "bcs",
- "bitcoin",
- "blake2",
- "ed25519-consensus",
- "fastcrypto",
- "fastcrypto-tbls",
- "hashi-types",
- "hpke",
- "k256",
- "miniscript 13.0.0",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sui-sdk-types",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2727,22 +2715,32 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bcs",
+ "bitcoin",
+ "blake2",
  "bytes",
+ "ed25519-consensus",
  "ed25519-dalek",
  "fastcrypto",
  "fastcrypto-tbls",
+ "hpke",
+ "k256",
+ "miniscript 13.0.0",
  "proptest",
  "prost",
  "prost-types",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "serde",
  "serde_derive",
+ "serde_json",
  "sui-crypto",
  "sui-rpc",
  "sui-sdk-types",
  "test-strategy",
+ "tokio",
  "tonic",
  "tonic-prost",
+ "tracing",
 ]
 
 [[package]]
@@ -5367,37 +5365,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "test-networks"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "base64ct",
- "bitcoin",
- "bitcoincore-rpc",
- "fastcrypto",
- "fastcrypto-tbls",
- "futures",
- "hashi",
- "hashi-btc",
- "hashi-screener",
- "hashi-types",
- "prometheus",
- "rand 0.8.5",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "sui-crypto",
- "sui-futures",
- "sui-rpc",
- "sui-sdk-types",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

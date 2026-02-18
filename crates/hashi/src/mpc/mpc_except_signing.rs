@@ -349,28 +349,7 @@ impl MpcManager {
                         .ok_or_else(|| {
                             DkgError::ProtocolFailed("No nonce output for complained dealer".into())
                         })?;
-                let dealer_party_id = self.committee.index_of(&request.dealer).ok_or_else(|| {
-                    DkgError::InvalidMessage {
-                        sender: request.dealer,
-                        reason: "Dealer not in committee".into(),
-                    }
-                })? as u16;
-                let dealer_session_id = SessionId::nonce_dealer_session_id(
-                    &self.chain_id,
-                    self.dkg_config.epoch,
-                    *batch_index,
-                    &request.dealer,
-                );
-                let receiver = batch_avss::Receiver::new(
-                    self.dkg_config.nodes.clone(),
-                    self.party_id,
-                    dealer_party_id,
-                    self.dkg_config.threshold,
-                    dealer_session_id.to_vec(),
-                    self.encryption_key.clone(),
-                    self.batch_size_per_weight,
-                )
-                .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+                let receiver = self.create_nonce_receiver(request.dealer, *batch_index)?;
                 let complaint_response =
                     receiver.handle_complaint(message, &request.complaint, nonce_output)?;
                 ComplaintResponses::NonceGeneration(complaint_response)
@@ -1151,6 +1130,36 @@ impl MpcManager {
         }
     }
 
+    fn create_nonce_receiver(
+        &self,
+        dealer: Address,
+        batch_index: u32,
+    ) -> DkgResult<batch_avss::Receiver> {
+        let dealer_party_id =
+            self.committee
+                .index_of(&dealer)
+                .ok_or_else(|| DkgError::InvalidMessage {
+                    sender: dealer,
+                    reason: "Dealer not in committee".into(),
+                })? as u16;
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
+            &self.chain_id,
+            self.dkg_config.epoch,
+            batch_index,
+            &dealer,
+        );
+        batch_avss::Receiver::new(
+            self.dkg_config.nodes.clone(),
+            self.party_id,
+            dealer_party_id,
+            self.dkg_config.threshold,
+            dealer_session_id.to_vec(),
+            self.encryption_key.clone(),
+            self.batch_size_per_weight,
+        )
+        .map_err(|e| DkgError::CryptoError(e.to_string()))
+    }
+
     fn create_nonce_dealer_message(
         &self,
         batch_index: u32,
@@ -1194,29 +1203,7 @@ impl MpcManager {
                 panic!("try_sign_nonce_message called with non-nonce messages")
             }
         };
-        let dealer_party_id =
-            self.committee
-                .index_of(&dealer)
-                .ok_or_else(|| DkgError::InvalidMessage {
-                    sender: dealer,
-                    reason: "Dealer not in committee".into(),
-                })? as u16;
-        let dealer_session_id = SessionId::nonce_dealer_session_id(
-            &self.chain_id,
-            self.dkg_config.epoch,
-            batch_index,
-            &dealer,
-        );
-        let receiver = batch_avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
-            self.party_id,
-            dealer_party_id,
-            self.dkg_config.threshold,
-            dealer_session_id.to_vec(),
-            self.encryption_key.clone(),
-            self.batch_size_per_weight,
-        )
-        .map_err(|e| DkgError::CryptoError(e.to_string()))?;
+        let receiver = self.create_nonce_receiver(dealer, batch_index)?;
         let result = receiver.process_message(message)?;
         match result {
             batch_avss::ProcessedMessage::Valid(output) => {

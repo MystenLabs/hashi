@@ -6,6 +6,7 @@ use std::sync::RwLock;
 use anyhow::anyhow;
 use sui_futures::service::Service;
 
+pub mod btc_monitor;
 pub mod communication;
 pub mod config;
 pub mod constants;
@@ -41,7 +42,7 @@ pub struct Hashi {
     mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
     signing_manager: OnceLock<Arc<RwLock<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
-    btc_monitor: OnceLock<hashi_btc::monitor::MonitorClient>,
+    btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
@@ -145,7 +146,7 @@ impl Hashi {
             .unwrap() = manager;
     }
 
-    pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
+    pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
         self.btc_monitor.get().expect("BtcMonitor not initialized")
     }
 
@@ -222,7 +223,7 @@ impl Hashi {
     }
 
     fn initialize_btc_monitor(&self) -> anyhow::Result<Service> {
-        let monitor_config = hashi_btc::config::MonitorConfig::builder()
+        let monitor_config = crate::btc_monitor::config::MonitorConfig::builder()
             .network(self.config.bitcoin_network())
             .confirmation_threshold(self.config.bitcoin_confirmation_threshold())
             .start_height(self.config.bitcoin_start_height())
@@ -239,8 +240,8 @@ impl Hashi {
                     .join("btc-monitor"),
             )
             .build();
-        let (client, service) =
-            hashi_btc::monitor::Monitor::run(monitor_config).expect("Failed to start BtcMonitor");
+        let (client, service) = crate::btc_monitor::monitor::Monitor::run(monitor_config)
+            .expect("Failed to start BtcMonitor");
         self.btc_monitor
             .set(client)
             .map_err(|_| anyhow!("BtcMonitor already initialized"))?;
