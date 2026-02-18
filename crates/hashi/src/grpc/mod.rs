@@ -135,7 +135,7 @@ impl HttpService {
         self.inner.signing_manager()
     }
 
-    pub fn btc_monitor(&self) -> &hashi_btc::monitor::MonitorClient {
+    pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
         self.inner.btc_monitor()
     }
 

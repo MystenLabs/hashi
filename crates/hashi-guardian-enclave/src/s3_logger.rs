@@ -1,19 +1,19 @@
-use crate::S3BucketInfo;
-use crate::S3Config;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
+use hashi_types::guardian::S3BucketInfo;
+use hashi_types::guardian::S3Config;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::GuardianError::S3Error;
-use crate::GuardianResult;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
+use hashi_types::guardian::GuardianError::S3Error;
+use hashi_types::guardian::GuardianResult;
 use serde::Serialize;
 use tracing::info;
 
@@ -258,7 +258,7 @@ mod tests {
         let config = S3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
-            bucket_info: crate::S3BucketInfo {
+            bucket_info: hashi_types::guardian::S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
             },

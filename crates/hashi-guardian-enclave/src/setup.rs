@@ -1,10 +1,10 @@
 use crate::Enclave;
-use hashi_guardian_shared::crypto::commit_share;
-use hashi_guardian_shared::crypto::encrypt_share;
-use hashi_guardian_shared::crypto::split_secret;
-use hashi_guardian_shared::crypto::NUM_OF_SHARES;
-use hashi_guardian_shared::GuardianError::InvalidInputs;
-use hashi_guardian_shared::*;
+use hashi_types::guardian::crypto::commit_share;
+use hashi_types::guardian::crypto::encrypt_share;
+use hashi_types::guardian::crypto::split_secret;
+use hashi_types::guardian::crypto::NUM_OF_SHARES;
+use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::*;
 use k256::SecretKey;
 use std::sync::Arc;
 use tracing::info;
@@ -71,9 +71,9 @@ pub async fn setup_new_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_guardian_shared::commit_share;
-    use hashi_guardian_shared::decrypt_share;
-    use hashi_guardian_shared::NUM_OF_SHARES;
+    use hashi_types::guardian::commit_share;
+    use hashi_types::guardian::decrypt_share;
+    use hashi_types::guardian::NUM_OF_SHARES;
     use hpke::kem::X25519HkdfSha256;
     use hpke::Kem;
 

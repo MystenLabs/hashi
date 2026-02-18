@@ -1,7 +1,7 @@
 use crate::Enclave;
-use hashi_guardian_shared::GuardianError;
-use hashi_guardian_shared::GuardianResult;
-use hashi_guardian_shared::LogMessage;
+use hashi_types::guardian::GuardianError;
+use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::LogMessage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,14 +66,14 @@ impl HeartbeatWriter {
 mod tests {
     use super::*;
 
+    use crate::s3_logger::S3Logger;
     use crate::OperatorInitTestArgs;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_guardian_shared::s3_logger::S3Logger;
-    use hashi_guardian_shared::S3Config;
+    use hashi_types::guardian::S3Config;
 
     fn mk_s3_logger(client: Client) -> S3Logger {
         S3Logger::from_client_for_tests(
