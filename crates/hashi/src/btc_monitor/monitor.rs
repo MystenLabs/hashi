@@ -232,9 +232,12 @@ impl Monitor {
             // Can't confirm deposits if we don't yet know the tip of the chain.
             return;
         };
+        if self.pending_deposits.is_empty() {
+            return;
+        }
 
         info!(
-            "Reprocessing {} pending deposits",
+            "Processing {} pending deposits",
             self.pending_deposits.len()
         );
         for pending_deposit in std::mem::take(&mut self.pending_deposits) {

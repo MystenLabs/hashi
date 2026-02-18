@@ -31,6 +31,7 @@ use std::time::Duration;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
+use hashi_types::move_types::WithdrawalRequestedEvent;
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
@@ -40,6 +41,7 @@ use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
+use sui_sdk_types::StructTag;
 use sui_sdk_types::bcs::FromBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
@@ -365,6 +367,130 @@ impl SuiTxExecutor {
         }
 
         anyhow::bail!("DepositRequestedEvent not found in transaction events")
+    }
+
+    /// Execute a withdrawal request transaction.
+    ///
+    /// Creates a withdrawal request on-chain by:
+    /// 1. Selecting enough `btc::BTC` coins owned by the sender
+    /// 2. Merging selected coins into one primary coin
+    /// 3. Splitting the requested amount and converting it into `balance::Balance<BTC>`
+    /// 4. Splitting gas coin for withdrawal fee
+    /// 5. Calling `withdraw::request_withdrawal`
+    ///
+    /// Returns the withdrawal request ID on success.
+    pub async fn execute_create_withdrawal_request(
+        &mut self,
+        withdrawal_amount_sats: u64,
+        destination_bytes: Vec<u8>,
+        withdrawal_fee_sui: u64,
+    ) -> anyhow::Result<Address> {
+        let sender = self.sender();
+        let btc_type = format!("{}::btc::BTC", self.hashi_ids.package_id);
+        let btc_struct_tag: StructTag = btc_type.parse()?;
+
+        let btc_coins = self
+            .client
+            .select_coins(
+                &sender,
+                &(btc_struct_tag.clone().into()),
+                withdrawal_amount_sats,
+                &[],
+            )
+            .await?;
+        let first_coin = btc_coins
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No hBTC coin found for sender {sender}"))?;
+
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        let first_coin_ref: sui_sdk_types::ObjectReference =
+            (&first_coin.object_reference()).try_into()?;
+        let primary_btc_coin = builder.object(ObjectInput::owned(
+            *first_coin_ref.object_id(),
+            first_coin_ref.version(),
+            *first_coin_ref.digest(),
+        ));
+
+        let mut coin_inputs = Vec::new();
+        for coin in btc_coins.iter().skip(1) {
+            let coin_ref: sui_sdk_types::ObjectReference = (&coin.object_reference()).try_into()?;
+            coin_inputs.push(builder.object(ObjectInput::owned(
+                *coin_ref.object_id(),
+                coin_ref.version(),
+                *coin_ref.digest(),
+            )));
+        }
+        if !coin_inputs.is_empty() {
+            builder.merge_coins(primary_btc_coin, coin_inputs);
+        }
+
+        let amount_arg = builder.pure(&withdrawal_amount_sats);
+        let withdrawal_btc_coin = builder
+            .split_coins(primary_btc_coin, vec![amount_arg])
+            .into_iter()
+            .next()
+            .unwrap();
+        let btc_balance_arg = builder.move_call(
+            Function::new(
+                Address::TWO,
+                Identifier::from_static("coin"),
+                Identifier::from_static("into_balance"),
+            )
+            .with_type_args(vec![btc_struct_tag.into()]),
+            vec![withdrawal_btc_coin],
+        );
+
+        let fee_amount_arg = builder.pure(&withdrawal_fee_sui);
+        let gas_arg = builder.gas();
+        let fee_coin_arg = builder
+            .split_coins(gas_arg, vec![fee_amount_arg])
+            .into_iter()
+            .next()
+            .unwrap();
+        let destination_arg = builder.pure(&destination_bytes);
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("request_withdrawal"),
+            ),
+            vec![
+                hashi_arg,
+                clock_arg,
+                btc_balance_arg,
+                destination_arg,
+                fee_coin_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "Withdrawal request transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+
+        for event in response.transaction().events().events() {
+            if event.contents().name().contains("WithdrawalRequestedEvent") {
+                let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
+                return Ok(event_data.request_id);
+            }
+        }
+
+        anyhow::bail!("WithdrawalRequestedEvent not found in transaction events")
     }
 
     pub async fn execute_start_reconfig(&mut self) -> anyhow::Result<()> {

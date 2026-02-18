@@ -66,7 +66,7 @@ impl LeaderService {
             };
 
             if self.is_current_leader(checkpoint_height) {
-                info!("Checkpoint {checkpoint_height}: We are the leader node");
+                debug!("Checkpoint {checkpoint_height}: We are the leader node");
             } else {
                 trace!("We are not the leader node");
                 continue;
@@ -117,7 +117,7 @@ impl LeaderService {
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
 
-        info!("Processing {} deposit requests", deposit_requests.len());
+        debug!("Processing {} deposit requests", deposit_requests.len());
 
         // TODO: parallelize?
         for deposit_request in &deposit_requests {
@@ -399,12 +399,17 @@ impl LeaderService {
             .expect("No current committee members");
 
         // 1. Request signed withdrawal tx witnesses from committee members.
+        // MPC signing requires all threshold members to participate simultaneously
+        // via P2P, so we must fan out requests in parallel.
+        let futures: Vec<_> = members
+            .iter()
+            .map(|member| self.request_withdrawal_tx_signature(&pending.id, member))
+            .collect();
+        let results = futures::future::join_all(futures).await;
+
         let mut signatures_by_input = None;
-        for member in &members {
-            match self
-                .request_withdrawal_tx_signature(&pending.id, member)
-                .await
-            {
+        for (i, result) in results.into_iter().enumerate() {
+            match result {
                 Ok(signatures) => {
                     signatures_by_input = Some(signatures);
                     break;
@@ -412,7 +417,7 @@ impl LeaderService {
                 Err(e) => {
                     error!(
                         "Failed to get withdrawal tx signature from {}: {e}",
-                        member.validator_address()
+                        members[i].validator_address()
                     );
                 }
             }
