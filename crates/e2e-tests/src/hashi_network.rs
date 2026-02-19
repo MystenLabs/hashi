@@ -1,5 +1,4 @@
 use anyhow::Result;
-use fastcrypto::serde_helpers::ToFromByteArray;
 use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
@@ -360,144 +359,11 @@ impl Default for HashiNetworkBuilder {
     }
 }
 
-async fn register_onchain(mut client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
-    let ids = config.hashi_ids();
-    let private_key = config.operator_private_key()?;
-    let protocol_private_key = config.protocol_private_key().unwrap();
-    let protocol_public_key = protocol_private_key.public_key();
-    let sender = private_key.public_key().derive_address();
-    let validator_address = config.validator_address()?;
-    let price = client.get_reference_gas_price().await?;
-    let service_info = client
-        .clone()
-        .ledger_client()
-        .get_service_info(GetServiceInfoRequest::default())
-        .await?
-        .into_inner();
-    let current_epoch = service_info.epoch.unwrap_or(0);
-    let gas_objects = client
-        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
-        .await?;
-
-    let system_objects = client
-        .ledger_client()
-        .batch_get_objects(
-            BatchGetObjectsRequest::default()
-                .with_requests(vec![
-                    GetObjectRequest::new(&Address::from_static("0x5")),
-                    GetObjectRequest::new(&ids.hashi_object_id),
-                ])
-                .with_read_mask(FieldMask::from_str("*")),
-        )
-        .await?
-        .into_inner();
-    let sui_system = system_objects.objects[0].object();
-    let hashi_system = system_objects.objects[1].object();
-
-    let public_key_input = Input::Pure(protocol_public_key.as_ref().to_vec().to_bcs()?);
-    let proof_of_possession = Input::Pure(
-        protocol_private_key
-            .proof_of_possession(current_epoch, validator_address)
-            .signature()
-            .as_ref()
-            .to_bcs()?,
-    );
-    let https_address = Input::Pure(format!("https://{}", config.https_address()).to_bcs()?);
-    let tls_public_key = Input::Pure(config.tls_public_key()?.as_bytes().to_vec().to_bcs()?);
-    let encryption_public_key = Input::Pure(
-        config
-            .encryption_public_key()?
-            .as_element()
-            .to_byte_array()
-            .as_slice()
-            .to_bcs()?,
-    );
-    let validator_address_pure = Input::Pure(validator_address.to_bcs()?);
-
-    let pt = ProgrammableTransaction {
-        inputs: vec![
-            Input::Shared(SharedInput::new(
-                sui_system.object_id().parse()?,
-                sui_system.owner().version(),
-                false,
-            )),
-            Input::Shared(SharedInput::new(
-                hashi_system.object_id().parse()?,
-                hashi_system.owner().version(),
-                true,
-            )),
-            public_key_input,
-            proof_of_possession,
-            https_address,
-            tls_public_key,
-            encryption_public_key,
-            validator_address_pure,
-        ],
-        commands: vec![
-            sui_sdk_types::Command::MoveCall(MoveCall {
-                package: ids.package_id,
-                module: Identifier::from_static("validator"),
-                function: Identifier::from_static("register"),
-                type_arguments: vec![],
-                arguments: vec![
-                    Argument::Input(1),
-                    Argument::Input(0),
-                    Argument::Input(2),
-                    Argument::Input(3),
-                    Argument::Input(6),
-                ],
-            }),
-            sui_sdk_types::Command::MoveCall(MoveCall {
-                package: ids.package_id,
-                module: Identifier::from_static("validator"),
-                function: Identifier::from_static("update_https_address"),
-                type_arguments: vec![],
-                arguments: vec![Argument::Input(1), Argument::Input(7), Argument::Input(4)],
-            }),
-            sui_sdk_types::Command::MoveCall(MoveCall {
-                package: ids.package_id,
-                module: Identifier::from_static("validator"),
-                function: Identifier::from_static("update_tls_public_key"),
-                type_arguments: vec![],
-                arguments: vec![Argument::Input(1), Argument::Input(7), Argument::Input(5)],
-            }),
-        ],
-    };
-
-    let transaction = Transaction {
-        kind: TransactionKind::ProgrammableTransaction(pt),
-        sender,
-        gas_payment: GasPayment {
-            objects: gas_objects
-                .iter()
-                .map(|o| (&o.object_reference()).try_into())
-                .collect::<Result<_, _>>()?,
-            owner: sender,
-            price,
-            budget: 1_000_000_000,
-        },
-        expiration: TransactionExpiration::None,
-    };
-
-    let signature = private_key.sign_transaction(&transaction)?;
-
-    let response = client
-        .execute_transaction_and_wait_for_checkpoint(
-            ExecuteTransactionRequest::new(transaction.into())
-                .with_signatures(vec![signature.into()])
-                .with_read_mask(FieldMask::from_str("*")),
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-        .into_inner();
-
-    anyhow::ensure!(
-        response.transaction().effects().status().success(),
-        "register failed: {:?}",
-        response.transaction().effects().status().error_opt()
-    );
-
-    Ok(())
+async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+    let signer = config.operator_private_key()?;
+    let hashi_ids = config.hashi_ids();
+    let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    executor.execute_register_validator(config).await
 }
 
 pub async fn update_tls_public_key(

@@ -255,6 +255,31 @@ pub struct PublishOpts {
     pub yes: bool,
 }
 
+/// Options for the `register` subcommand.
+///
+/// Unlike other CLI commands this uses a validator config file (the same one
+/// used by `hashi server`) rather than [`CliGlobalOpts`], because registration
+/// requires fields like the protocol key and encryption key that only live in
+/// the validator config.
+#[derive(Args)]
+pub struct RegisterOpts {
+    /// Path to the validator config file (same as used by `hashi server`)
+    #[clap(long, short)]
+    pub config: std::path::PathBuf,
+
+    /// Sui RPC URL (overrides config file)
+    #[clap(long, env = "SUI_RPC_URL")]
+    pub sui_rpc_url: Option<String>,
+
+    /// Enable verbose output
+    #[clap(long, short)]
+    pub verbose: bool,
+
+    /// Skip confirmation prompts
+    #[clap(long, short = 'y')]
+    pub yes: bool,
+}
+
 /// CLI command variants (without Server)
 pub enum CliCommand {
     Proposal { action: ProposalCommands },
@@ -464,5 +489,48 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     std::fs::write(out_path, &json)?;
     print_success(&format!("Wrote {out_path}"));
 
+    Ok(())
+}
+
+/// Run the `register` command – register a validator on-chain.
+pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
+    init_tracing(opts.verbose);
+
+    // Load the validator config
+    let config = crate::config::Config::load(&opts.config)?;
+
+    // Resolve Sui RPC URL: CLI flag > config file
+    let sui_rpc_url = opts
+        .sui_rpc_url
+        .or_else(|| config.sui_rpc.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Sui RPC URL not provided (use --sui-rpc-url or set in config file)")
+        })?;
+
+    let validator_address = config.validator_address()?;
+    print_info(&format!("Validator address: {validator_address}"));
+    print_info(&format!("Sui RPC: {sui_rpc_url}"));
+
+    if !opts.yes {
+        print_info("This will register the validator on-chain (1 transaction).");
+        print_info("Use --yes / -y to skip this prompt.");
+        eprint!("Continue? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            print_warning("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let client = sui_rpc::Client::new(&sui_rpc_url)?;
+    let signer = config.operator_private_key()?;
+    let hashi_ids = config.hashi_ids();
+    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+
+    print_info("Registering validator ...");
+    executor.execute_register_validator(&config).await?;
+
+    print_success("Validator registered successfully");
     Ok(())
 }
