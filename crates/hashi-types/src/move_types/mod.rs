@@ -16,6 +16,19 @@ pub trait MoveType {
     const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
 }
 
+/// Validates that the event's StructTag matches the expected module/name for `T`
+/// and extracts the single type parameter.
+fn extract_type_param<T: MoveType>(event_type: &StructTag) -> Result<TypeTag, anyhow::Error> {
+    if event_type.module() == T::MODULE
+        && event_type.name() == T::NAME
+        && let [type_param] = event_type.type_params()
+    {
+        Ok(type_param.to_owned())
+    } else {
+        Err(anyhow::anyhow!("invalid {}", T::NAME))
+    }
+}
+
 /// Rust version of the Move hashi::hashi::Hashi type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Hashi {
@@ -430,18 +443,22 @@ impl HashiEvent {
         let event = match (event_type.module().as_str(), event_type.name().as_str()) {
             ValidatorRegistered::MODULE_NAME => ValidatorRegistered::from_bcs(bcs.value())?.into(),
             ValidatorUpdated::MODULE_NAME => ValidatorUpdated::from_bcs(bcs.value())?.into(),
-            VoteCastEvent::MODULE_NAME => VoteCastEvent::from_bcs(bcs.value())?.into(),
-            VoteRemovedEvent::MODULE_NAME => VoteRemovedEvent::from_bcs(bcs.value())?.into(),
+            VoteCastEvent::MODULE_NAME => VoteCastEvent::new(&event_type, bcs.value())?.into(),
+            VoteRemovedEvent::MODULE_NAME => {
+                VoteRemovedEvent::new(&event_type, bcs.value())?.into()
+            }
             ProposalCreatedEvent::MODULE_NAME => {
                 ProposalCreatedEvent::new(&event_type, bcs.value())?.into()
             }
             ProposalDeletedEvent::MODULE_NAME => {
-                ProposalDeletedEvent::from_bcs(bcs.value())?.into()
+                ProposalDeletedEvent::new(&event_type, bcs.value())?.into()
             }
             ProposalExecutedEvent::MODULE_NAME => {
-                ProposalExecutedEvent::from_bcs(bcs.value())?.into()
+                ProposalExecutedEvent::new(&event_type, bcs.value())?.into()
             }
-            QuorumReachedEvent::MODULE_NAME => QuorumReachedEvent::from_bcs(bcs.value())?.into(),
+            QuorumReachedEvent::MODULE_NAME => {
+                QuorumReachedEvent::new(&event_type, bcs.value())?.into()
+            }
             MintEvent::MODULE_NAME => MintEvent::new(&event_type, bcs.value())?.into(),
             BurnEvent::MODULE_NAME => BurnEvent::new(&event_type, bcs.value())?.into(),
             DepositRequestedEvent::MODULE_NAME => {
@@ -519,19 +536,13 @@ pub struct ProposalCreatedEvent {
 
 impl ProposalCreatedEvent {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        if event_type.module() == Self::MODULE
-            && event_type.name() == Self::NAME
-            && let [proposal_type] = event_type.type_params()
-        {
-            let (proposal_id, timestamp_ms): (Address, u64) = bcs::from_bytes(bcs)?;
-            Ok(Self {
-                proposal_id,
-                timestamp_ms,
-                proposal_type: proposal_type.to_owned(),
-            })
-        } else {
-            Err(anyhow::anyhow!("invalid ProposalCreatedEvent"))
-        }
+        let proposal_type = extract_type_param::<Self>(event_type)?;
+        let (proposal_id, timestamp_ms): (Address, u64) = bcs::from_bytes(bcs)?;
+        Ok(Self {
+            proposal_id,
+            timestamp_ms,
+            proposal_type,
+        })
     }
 }
 
@@ -546,10 +557,23 @@ impl From<ProposalCreatedEvent> for HashiEvent {
     }
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug)]
 pub struct VoteCastEvent {
     pub proposal_id: Address,
     pub voter: Address,
+    pub proposal_type: TypeTag,
+}
+
+impl VoteCastEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(event_type)?;
+        let (proposal_id, voter): (Address, Address) = bcs::from_bytes(bcs)?;
+        Ok(Self {
+            proposal_id,
+            voter,
+            proposal_type,
+        })
+    }
 }
 
 impl MoveType for VoteCastEvent {
@@ -563,10 +587,23 @@ impl From<VoteCastEvent> for HashiEvent {
     }
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug)]
 pub struct VoteRemovedEvent {
     pub proposal_id: Address,
     pub voter: Address,
+    pub proposal_type: TypeTag,
+}
+
+impl VoteRemovedEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(event_type)?;
+        let (proposal_id, voter): (Address, Address) = bcs::from_bytes(bcs)?;
+        Ok(Self {
+            proposal_id,
+            voter,
+            proposal_type,
+        })
+    }
 }
 
 impl MoveType for VoteRemovedEvent {
@@ -580,9 +617,21 @@ impl From<VoteRemovedEvent> for HashiEvent {
     }
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug)]
 pub struct ProposalDeletedEvent {
     pub proposal_id: Address,
+    pub proposal_type: TypeTag,
+}
+
+impl ProposalDeletedEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(event_type)?;
+        let proposal_id: Address = bcs::from_bytes(bcs)?;
+        Ok(Self {
+            proposal_id,
+            proposal_type,
+        })
+    }
 }
 
 impl MoveType for ProposalDeletedEvent {
@@ -596,9 +645,21 @@ impl From<ProposalDeletedEvent> for HashiEvent {
     }
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug)]
 pub struct ProposalExecutedEvent {
     pub proposal_id: Address,
+    pub proposal_type: TypeTag,
+}
+
+impl ProposalExecutedEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(event_type)?;
+        let proposal_id: Address = bcs::from_bytes(bcs)?;
+        Ok(Self {
+            proposal_id,
+            proposal_type,
+        })
+    }
 }
 
 impl MoveType for ProposalExecutedEvent {
@@ -612,9 +673,21 @@ impl From<ProposalExecutedEvent> for HashiEvent {
     }
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug)]
 pub struct QuorumReachedEvent {
     pub proposal_id: Address,
+    pub proposal_type: TypeTag,
+}
+
+impl QuorumReachedEvent {
+    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(event_type)?;
+        let proposal_id: Address = bcs::from_bytes(bcs)?;
+        Ok(Self {
+            proposal_id,
+            proposal_type,
+        })
+    }
 }
 
 impl MoveType for QuorumReachedEvent {
@@ -658,17 +731,11 @@ impl MoveType for MintEvent {
 
 impl MintEvent {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        if event_type.module() == Self::MODULE
-            && event_type.name() == Self::NAME
-            && let [coin_type] = event_type.type_params()
-        {
-            Ok(Self {
-                coin_type: coin_type.to_owned(),
-                amount: bcs::from_bytes(bcs)?,
-            })
-        } else {
-            Err(anyhow::anyhow!("invalid MintEvent"))
-        }
+        let coin_type = extract_type_param::<Self>(event_type)?;
+        Ok(Self {
+            coin_type,
+            amount: bcs::from_bytes(bcs)?,
+        })
     }
 }
 
@@ -691,17 +758,11 @@ impl MoveType for BurnEvent {
 
 impl BurnEvent {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        if event_type.module() == Self::MODULE
-            && event_type.name() == Self::NAME
-            && let [coin_type] = event_type.type_params()
-        {
-            Ok(Self {
-                coin_type: coin_type.to_owned(),
-                amount: bcs::from_bytes(bcs)?,
-            })
-        } else {
-            Err(anyhow::anyhow!("invalid BurnEvent"))
-        }
+        let coin_type = extract_type_param::<Self>(event_type)?;
+        Ok(Self {
+            coin_type,
+            amount: bcs::from_bytes(bcs)?,
+        })
     }
 }
 
