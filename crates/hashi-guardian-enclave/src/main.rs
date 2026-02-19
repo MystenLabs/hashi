@@ -32,9 +32,9 @@ mod withdraw;
 use crate::heartbeat::HeartbeatWriter;
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
-use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::epoch_store::ConsecutiveEpochStore;
+use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
@@ -684,7 +684,7 @@ pub fn mock_logger() -> S3Logger {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_guardian_shared::S3Config;
+    use hashi_types::guardian::S3Config;
 
     // For unit tests we only need PutObject to succeed, because `sign_and_log()` calls `S3Logger::write()`.
     // The `then_output` helper creates a "simple" rule that repeats indefinitely.
