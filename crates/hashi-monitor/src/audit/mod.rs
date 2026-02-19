@@ -25,7 +25,7 @@ use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::WithdrawalStateMachine;
 pub use batch::BatchAuditor;
 pub use continuous::ContinuousAuditor;
-use hashi_guardian_shared::WithdrawalID;
+use hashi_types::guardian::WithdrawalID;
 
 pub trait AuditWindow {
     fn in_window(&self, e: &WithdrawalEvent) -> bool;

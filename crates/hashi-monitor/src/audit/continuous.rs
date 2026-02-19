@@ -13,6 +13,7 @@ use crate::rpc::poll_guardian;
 use crate::rpc::poll_sui;
 
 // TODO: Move to config
+// TODO: Consider switching to a streaming API
 /// The frequency at which we poll sui, guardian and btc RPC
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
