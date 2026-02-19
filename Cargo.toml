@@ -33,7 +33,7 @@ axum = "0.8.4"
 tower = "0.5.2"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
 tokio = { version = "1.46.1", features = ["full"] }
-prometheus = "0.13.0"
+prometheus = "0.14"
 tracing = "0.1.41"
 
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -70,6 +70,6 @@ fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "8101
 fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "8101176" }
 
 # Sui monorepo deps
-bin-version = { git = "https://github.com/MystenLabs/sui.git" }
-prometheus-closure-metric = { git = "https://github.com/MystenLabs/sui.git" }
-sui-futures = { git = "https://github.com/MystenLabs/sui.git" }
+bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
+prometheus-closure-metric = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
+sui-futures = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
