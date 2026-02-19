@@ -219,7 +219,11 @@ impl TxOptions {
 #[derive(Args)]
 pub struct PublishOpts {
     /// Sui RPC endpoint URL
-    #[clap(long, env = "SUI_RPC_URL", default_value = "https://fullnode.mainnet.sui.io:443")]
+    #[clap(
+        long,
+        env = "SUI_RPC_URL",
+        default_value = "https://fullnode.mainnet.sui.io:443"
+    )]
     pub sui_rpc_url: String,
 
     /// Path to the Move package directory

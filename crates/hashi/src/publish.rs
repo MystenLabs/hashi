@@ -172,8 +172,6 @@ pub async fn publish_and_init(
         .object_id()
         .parse::<Address>()?;
 
-    println!("package: {package_id}");
-
     // ── Transaction 2: Init (register BTC + upgrade cap) ────────────────
     let mut builder = TransactionBuilder::new();
     builder.set_sender(sender);
