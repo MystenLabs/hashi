@@ -405,6 +405,7 @@ mod tests {
                 let mgr = mpc_mgr.read().unwrap();
                 mgr.committee.clone()
             };
+            let (refill_tx, _) = tokio::sync::watch::channel(0u32);
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
                 committee,
@@ -412,6 +413,9 @@ mod tests {
                 key_shares,
                 vk,
                 presignatures,
+                0,
+                hashi::constants::PRESIG_REFILL_THRESHOLD,
+                std::sync::Arc::new(refill_tx),
             );
             node.hashi().set_signing_manager(signing_manager);
         }
@@ -421,13 +425,14 @@ mod tests {
     /// Have all nodes call sign() concurrently, returning per-node results.
     async fn sign_on_all_nodes(
         nodes: &[HashiNodeHandle],
-        message: &'static [u8],
+        message: &[u8],
         epoch: u64,
+        sui_request_id: sui_sdk_types::Address,
     ) -> Vec<
         hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
     > {
         let beacon_value = S::rand(&mut rand::thread_rng());
-        let sui_request_id = sui_sdk_types::Address::ZERO;
+        let message = message.to_vec();
         let sign_futures: Vec<_> = nodes
             .iter()
             .map(|node| {
@@ -435,12 +440,13 @@ mod tests {
                 let onchain_state = node.hashi().onchain_state().clone();
                 let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
                 let beacon = beacon_value;
+                let msg = message.clone();
                 async move {
                     hashi::mpc::SigningManager::sign(
                         &signing_manager,
                         &p2p_channel,
                         sui_request_id,
-                        message,
+                        &msg,
                         &beacon,
                         None,
                         SIGNING_TIMEOUT,
@@ -506,7 +512,8 @@ mod tests {
         }
 
         let message: &[u8] = b"Hello, Hashi signing!";
-        let results = sign_on_all_nodes(nodes, message, epoch).await;
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(nodes, message, epoch, request_id).await;
         assert_all_signatures_match(results);
 
         Ok(())
@@ -968,5 +975,62 @@ mod tests {
         // n=7, t=3, f=2. Two nodes have wrong key shares.
         // Each node collects 7 sigs (2 bad), RS capacity (7-3)/2=2 → corrects 2.
         run_signing_test(7, &[0, 1]).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refill_presignature_pool() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let test_networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+
+        let signing_manager = nodes[0].hashi().signing_manager();
+        let pool_size = signing_manager.read().unwrap().initial_presig_count();
+        let refill_trigger_at =
+            pool_size - (pool_size as f64 * hashi::constants::PRESIG_REFILL_THRESHOLD) as usize;
+        // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
+        let num_signings = pool_size + 1;
+        // Wait for refill a few signs after the threshold, before exhaustion.
+        let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
+
+        for i in 0..num_signings {
+            let request_id = sui_sdk_types::Address::new([i as u8; 32]);
+            let results = sign_on_all_nodes(nodes, b"refill test", epoch, request_id).await;
+            assert_all_signatures_match(results);
+
+            // After crossing the refill threshold, wait for the refill to
+            // complete before we exhaust the pool.
+            if i == wait_at {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                while !signing_manager.read().unwrap().has_next_presignatures() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "Timed out waiting for presignature refill"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+
+        assert_eq!(signing_manager.read().unwrap().batch_index(), 1);
+        Ok(())
     }
 }

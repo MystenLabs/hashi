@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::communication::P2PChannel;
@@ -36,9 +37,15 @@ pub struct SigningManager {
     presignatures: Presignatures,
     /// Key: Sui address identifying the signing request
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
+    batch_index: u32,
+    initial_presig_count: usize,
+    refill_threshold: f64,
+    refill_tx: Arc<watch::Sender<u32>>,
+    next_presignatures: Option<Presignatures>,
 }
 
 impl SigningManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
         committee: Committee,
@@ -46,7 +53,11 @@ impl SigningManager {
         key_shares: avss::SharesForNode,
         verifying_key: G,
         presignatures: Presignatures,
+        batch_index: u32,
+        refill_threshold: f64,
+        refill_tx: Arc<watch::Sender<u32>>,
     ) -> Self {
+        let initial_presig_count = presignatures.len();
         Self {
             address,
             committee,
@@ -55,7 +66,28 @@ impl SigningManager {
             verifying_key,
             presignatures,
             partial_signing_outputs: HashMap::new(),
+            batch_index,
+            initial_presig_count,
+            refill_threshold,
+            refill_tx,
+            next_presignatures: None,
         }
+    }
+
+    pub fn set_next_presignatures(&mut self, presignatures: Presignatures) {
+        self.next_presignatures = Some(presignatures);
+    }
+
+    pub fn has_next_presignatures(&self) -> bool {
+        self.next_presignatures.is_some()
+    }
+
+    pub fn initial_presig_count(&self) -> usize {
+        self.initial_presig_count
+    }
+
+    pub fn batch_index(&self) -> u32 {
+        self.batch_index
     }
 
     pub fn epoch(&self) -> u64 {
@@ -92,15 +124,39 @@ impl SigningManager {
         let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
             let mut mgr = signing_manager.write().unwrap();
             let mgr = &mut *mgr;
-            let (public_nonce, partial_sigs) = generate_partial_signatures(
+            let (public_nonce, partial_sigs) = match generate_partial_signatures(
                 message,
                 &mut mgr.presignatures,
                 beacon_value,
                 &mgr.key_shares,
                 &mgr.verifying_key,
                 derivation_address,
-            )
-            .map_err(|e| SigningError::CryptoError(e.to_string()))?;
+            ) {
+                Ok(result) => result,
+                Err(FastCryptoError::OutOfPresigs) => {
+                    if let Some(next) = mgr.next_presignatures.take() {
+                        mgr.presignatures = next;
+                        mgr.batch_index += 1;
+                        mgr.initial_presig_count = mgr.presignatures.len();
+                        generate_partial_signatures(
+                            message,
+                            &mut mgr.presignatures,
+                            beacon_value,
+                            &mgr.key_shares,
+                            &mgr.verifying_key,
+                            derivation_address,
+                        )
+                        .map_err(|e| SigningError::CryptoError(e.to_string()))?
+                    } else {
+                        return Err(SigningError::PoolExhausted);
+                    }
+                }
+                Err(e) => return Err(SigningError::CryptoError(e.to_string())),
+            };
+            let refill_at = (mgr.initial_presig_count as f64 * mgr.refill_threshold) as usize;
+            if mgr.presignatures.len() <= refill_at {
+                let _ = mgr.refill_tx.send(mgr.batch_index + 1);
+            }
             mgr.partial_signing_outputs.insert(
                 sui_request_id,
                 PartialSigningOutput {
@@ -534,6 +590,9 @@ mod tests {
                 })
                 .collect();
 
+            let (refill_tx, _refill_rx) = watch::channel(0u32);
+            let refill_tx = Arc::new(refill_tx);
+
             let managers: Vec<_> = (0..n as usize)
                 .map(|i| {
                     let index = ShareIndex::new(i as u16 + 1).unwrap();
@@ -563,6 +622,9 @@ mod tests {
                         key_shares,
                         vk,
                         presignatures,
+                        0,
+                        crate::constants::PRESIG_REFILL_THRESHOLD,
+                        refill_tx.clone(),
                     );
                     Arc::new(RwLock::new(mgr))
                 })
