@@ -220,6 +220,30 @@ impl Monitor {
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
+        // Temp hack to get warning messages when a transaction would be rejected
+        // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
+        let txid = tx.compute_txid();
+        match self.bitcoind_rpc.test_mempool_accept(&[&tx]) {
+            Ok(results) => match results.first() {
+                Some(result) if !result.allowed => {
+                    warn!(
+                        "Bitcoin Core mempool would reject tx {txid}: {}",
+                        result.reject_reason.as_deref().unwrap_or("unknown reason")
+                    );
+                    std::process::exit(1);
+                }
+                Some(_) => {
+                    debug!("Bitcoin Core mempool would accept tx {txid}");
+                }
+                None => {
+                    warn!("Bitcoin Core testmempoolaccept returned no result for tx {txid}");
+                }
+            },
+            Err(e) => {
+                warn!("Failed to run testmempoolaccept for tx {txid}: {e}");
+            }
+        }
+
         let result = self.requester.broadcast_tx(kyoto::TxBroadcast {
             tx,
             broadcast_policy: kyoto::TxBroadcastPolicy::AllPeers,
