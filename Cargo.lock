@@ -2670,6 +2670,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashi-monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "clap",
+ "hashi-types",
+ "serde",
+ "serde_yaml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hashi-screener"
 version = "0.1.0"
 dependencies = [
