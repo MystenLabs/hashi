@@ -179,7 +179,7 @@ public fun cancel_withdrawal(
     assert!(request.requester_address() == ctx.sender(), EUnauthorizedCancellation);
 
     // Enforce cooldown
-    let cooldown = hashi::withdrawal_queue::cancellation_cooldown_ms();
+    let cooldown = hashi.config().withdrawal_cancellation_cooldown_ms();
     assert!(clock.timestamp_ms() >= request.timestamp_ms() + cooldown, ECooldownNotElapsed);
 
     request.emit_withdrawal_cancelled();

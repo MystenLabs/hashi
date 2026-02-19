@@ -4,8 +4,6 @@ use hashi::{btc::BTC, utxo::{Utxo, UtxoInfo}};
 use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
 
 const NUMBER_OF_RANDOM_BYTES: u16 = 32;
-// TODO: make this configurable ?
-const WITHDRAWAL_CANCELLATION_COOLDOWN_MS: u64 = 1000 * 60 * 60; // 1 hour
 
 public struct WithdrawalRequestQueue has store {
     // XXX bag or table?
@@ -219,10 +217,6 @@ public(package) fun request_id(self: &WithdrawalRequest): address {
 
 public(package) fun btc_amount(self: &WithdrawalRequest): u64 {
     self.info.btc_amount
-}
-
-public(package) fun cancellation_cooldown_ms(): u64 {
-    WITHDRAWAL_CANCELLATION_COOLDOWN_MS
 }
 
 public struct WithdrawalRequestedEvent has copy, drop {
