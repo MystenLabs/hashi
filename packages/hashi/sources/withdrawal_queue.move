@@ -4,6 +4,8 @@ use hashi::{btc::BTC, utxo::{Utxo, UtxoInfo}};
 use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
 
 const NUMBER_OF_RANDOM_BYTES: u16 = 32;
+// TODO: make this configurable ?
+const WITHDRAWAL_CANCELLATION_COOLDOWN_MS: u64 = 1000 * 60 * 60; // 1 hour
 
 public struct WithdrawalRequestQueue has store {
     // XXX bag or table?
@@ -195,6 +197,34 @@ public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
     });
 }
 
+public(package) fun emit_withdrawal_cancelled(self: &WithdrawalRequest) {
+    sui::event::emit(WithdrawalCancelledEvent {
+        request_id: self.info.id,
+        requester_address: self.info.requester_address,
+        btc_amount: self.info.btc_amount,
+    });
+}
+
+public(package) fun requester_address(self: &WithdrawalRequest): address {
+    self.info.requester_address
+}
+
+public(package) fun timestamp_ms(self: &WithdrawalRequest): u64 {
+    self.info.timestamp_ms
+}
+
+public(package) fun request_id(self: &WithdrawalRequest): address {
+    self.info.id
+}
+
+public(package) fun btc_amount(self: &WithdrawalRequest): u64 {
+    self.info.btc_amount
+}
+
+public(package) fun cancellation_cooldown_ms(): u64 {
+    WITHDRAWAL_CANCELLATION_COOLDOWN_MS
+}
+
 public struct WithdrawalRequestedEvent has copy, drop {
     request_id: address,
     btc_amount: u64,
@@ -216,4 +246,10 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
 public struct WithdrawalConfirmedEvent has copy, drop {
     pending_id: address,
     txid: address,
+}
+
+public struct WithdrawalCancelledEvent has copy, drop {
+    request_id: address,
+    requester_address: address,
+    btc_amount: u64,
 }

@@ -11,6 +11,11 @@ use hashi::{
 };
 use sui::{balance::Balance, clock::Clock, coin::Coin, random::Random, sui::SUI};
 
+#[error]
+const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
+#[error]
+const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
+
 public struct WithdrawalApproval has copy, drop, store {
     request_ids: vector<address>,
     selected_utxos: vector<UtxoId>,
@@ -156,6 +161,32 @@ entry fun confirm_withdrawal(
 
     withdrawal.emit_withdrawal_confirmed();
     withdrawal.destroy_pending_withdrawal();
+}
+
+// TODO: this introduces a race condition where the withdrawal can be cancelled while its being picked for processing
+// so we need to make sure that the withdrawal is not cancelled while its being picked for processing
+public fun cancel_withdrawal(
+    hashi: &mut Hashi,
+    request_id: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<BTC> {
+    hashi.config().assert_version_enabled();
+
+    let request = hashi.withdrawal_queue_mut().remove_request(request_id);
+
+    // Only the original requester can cancel
+    assert!(request.requester_address() == ctx.sender(), EUnauthorizedCancellation);
+
+    // Enforce cooldown
+    let cooldown = hashi::withdrawal_queue::cancellation_cooldown_ms();
+    assert!(clock.timestamp_ms() >= request.timestamp_ms() + cooldown, ECooldownNotElapsed);
+
+    request.emit_withdrawal_cancelled();
+
+    // Return BTC to the requester
+    let (_, btc) = hashi::withdrawal_queue::request_into_parts(request);
+    sui::coin::from_balance(btc, ctx)
 }
 
 public fun delete_expired_spent_utxo(hashi: &mut Hashi, txid: address, vout: u32) {
