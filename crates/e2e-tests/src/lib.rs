@@ -357,10 +357,9 @@ mod tests {
         )
     }
 
-    /// Initialize SigningManagers on all nodes with mock key shares and presignatures.
-    /// Nodes at indices in `corrupt_node_indices` receive wrong key shares.
-    /// Returns the verifying key.
-    fn init_signing_managers(
+    /// Override SigningManagers on all nodes with mock key shares and presignatures,
+    /// deliberately giving wrong key shares to the specified corrupt nodes.
+    fn corrupt_signing_managers(
         nodes: &[HashiNodeHandle],
         node_infos: &[NodeDkgInfo],
         cfg: &DkgConfig,
@@ -414,7 +413,7 @@ mod tests {
                 vk,
                 presignatures,
             );
-            node.hashi().init_signing_manager(signing_manager);
+            node.hashi().set_signing_manager(signing_manager);
         }
         vk
     }
@@ -500,9 +499,11 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
 
-        let (node_infos, cfg) = read_dkg_config(nodes);
-        init_signing_managers(nodes, &node_infos, &cfg, corrupt_node_indices);
         let epoch = nodes[0].hashi().onchain_state().epoch();
+        if !corrupt_node_indices.is_empty() {
+            let (node_infos, cfg) = read_dkg_config(nodes);
+            corrupt_signing_managers(nodes, &node_infos, &cfg, corrupt_node_indices);
+        }
 
         let message: &[u8] = b"Hello, Hashi signing!";
         let results = sign_on_all_nodes(nodes, message, epoch).await;
@@ -957,7 +958,6 @@ mod tests {
         Ok(())
     }
 
-    // TODO: Replace presigning simulation after presigning is completed.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_signing_happy_path() -> Result<()> {
         run_signing_test(4, &[]).await

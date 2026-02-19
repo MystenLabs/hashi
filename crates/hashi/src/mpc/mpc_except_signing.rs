@@ -90,7 +90,7 @@ pub struct MpcManager {
     /// The epoch from which to read previous messages during reconstruction.
     pub source_epoch: u64,
     previous_output: Option<DkgOutput>,
-    batch_size_per_weight: u16,
+    pub batch_size_per_weight: u16,
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
@@ -99,7 +99,9 @@ pub struct MpcManager {
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
     pub complaint_responses: HashMap<Address, ComplaintResponses>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
-    pub dealer_nonce_outputs: HashMap<Address, batch_avss::ReceiverOutput>,
+    /// Must be `BTreeMap` so that all nodes iterate outputs in
+    /// the same deterministic order when constructing `Presignatures`.
+    pub dealer_nonce_outputs: BTreeMap<Address, batch_avss::ReceiverOutput>,
 }
 
 impl MpcManager {
@@ -186,7 +188,7 @@ impl MpcManager {
             source_epoch,
             previous_output: None,
             batch_size_per_weight,
-            dealer_nonce_outputs: HashMap::new(),
+            dealer_nonce_outputs: BTreeMap::new(),
         };
         manager.load_stored_messages()?;
         Ok(manager)
@@ -465,15 +467,13 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> MpcResult<()> {
-        // Clear stale state from previous batch.
+    ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         {
             let mut mgr = mpc_manager.write().unwrap();
             mgr.dealer_nonce_outputs.clear();
-            mgr.dealer_messages
-                .retain(|_, v| !matches!(v, Messages::NonceGeneration { .. }));
-            mgr.complaints_to_process
-                .retain(|k, _| !matches!(k, ComplaintsToProcessKey::NonceGeneration(_)));
+            mgr.dealer_messages.clear();
+            mgr.dealer_outputs.clear();
+            mgr.complaints_to_process.clear();
             mgr.message_responses.clear();
             mgr.complaint_responses.clear();
         }
@@ -485,7 +485,20 @@ impl MpcManager {
                 e
             );
         }
-        Self::run_as_nonce_party(mpc_manager, p2p_channel, tob_channel).await
+        // Clear nonce outputs accumulated by the RPC handler during the dealer
+        // phase. The handler's `try_sign_nonce_message` stores outputs for
+        // whichever dealer messages arrived, which is non-deterministic across
+        // nodes. The party phase below re-derives outputs from certified on-chain
+        // certificates, ensuring all nodes use the same deterministic set.
+        {
+            let mut mgr = mpc_manager.write().unwrap();
+            mgr.dealer_nonce_outputs.clear();
+        }
+        Self::run_as_nonce_party(mpc_manager, p2p_channel, tob_channel).await?;
+        let mut mgr = mpc_manager.write().unwrap();
+        Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
+            .into_values()
+            .collect())
     }
 
     async fn run_as_dealer(

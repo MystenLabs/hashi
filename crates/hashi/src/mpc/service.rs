@@ -16,12 +16,14 @@ use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
 use crate::mpc::DkgOutput;
 use crate::mpc::MpcManager;
+use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
@@ -98,6 +100,10 @@ impl MpcService {
                 // Note that restart is already supported in `MpcManager`, so the latter is not strictly necessary despite more direct.
                 match self.recover_mpc_state().await {
                     Ok(output) => {
+                        let epoch = self.inner.onchain_state().epoch();
+                        if let Err(e) = self.prepare_signing(epoch, &output).await {
+                            error!("Failed to init signing after DKG recovery: {e}");
+                        }
                         let _ = self.key_ready_tx.send(Some(output.public_key));
                         break;
                     }
@@ -189,6 +195,61 @@ impl MpcService {
         Ok(output)
     }
 
+    async fn prepare_signing(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let committee = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {}", epoch))?
+            .clone();
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
+        let signer = self.inner.config.operator_private_key()?;
+        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
+        let batch_index = 0u32;
+        let mut tob_channel = SuiTobChannel::new(
+            self.inner.config.hashi_ids(),
+            onchain_state,
+            epoch,
+            Some(batch_index),
+            signer,
+            committee.clone(),
+        );
+        let nonce_outputs = MpcManager::run_nonce_generation(
+            &mpc_manager,
+            batch_index,
+            &p2p_channel,
+            &mut tob_channel,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
+        let (batch_size_per_weight, f) = {
+            let mgr = mpc_manager.read().unwrap();
+            (
+                mgr.batch_size_per_weight,
+                mgr.dkg_config.max_faulty as usize,
+            )
+        };
+        let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let address = self.inner.config.validator_address()?;
+        let signing_manager = SigningManager::new(
+            address,
+            committee,
+            output.threshold,
+            output.key_shares.clone(),
+            output.public_key,
+            presignatures,
+        );
+        self.inner.set_or_init_signing_manager(signing_manager);
+        Ok(())
+    }
+
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {
         if self.get_pending_epoch_change().is_some() {
             return;
@@ -264,10 +325,10 @@ impl MpcService {
         let _ = self.key_ready_tx.send(Some(output.public_key));
         loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
-                return;
+                break;
             }
             match self.submit_end_reconfig(target_epoch, &output).await {
-                Ok(()) => return,
+                Ok(()) => break,
                 Err(e) => {
                     error!(
                         "submit_end_reconfig for epoch {} failed: {e}, retrying...",
@@ -276,6 +337,9 @@ impl MpcService {
                     self.sleep_if_still_pending(target_epoch).await;
                 }
             }
+        }
+        if let Err(e) = self.prepare_signing(target_epoch, &output).await {
+            error!("Failed to init signing after key rotation to epoch {target_epoch}: {e}");
         }
     }
 

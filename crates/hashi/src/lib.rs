@@ -146,6 +146,15 @@ impl Hashi {
             .unwrap() = manager;
     }
 
+    pub fn set_or_init_signing_manager(&self, manager: mpc::SigningManager) {
+        match self.signing_manager.get() {
+            Some(lock) => *lock.write().unwrap() = manager,
+            None => {
+                let _ = self.signing_manager.set(Arc::new(RwLock::new(manager)));
+            }
+        }
+    }
+
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
         self.btc_monitor.get().expect("BtcMonitor not initialized")
     }
