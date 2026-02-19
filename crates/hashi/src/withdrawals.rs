@@ -123,6 +123,11 @@ impl Hashi {
             })
             .collect::<anyhow::Result<_>>()?;
 
+        // 1b. Screen each withdrawal request for AML/sanctions
+        for request in &requests {
+            self.screen_withdrawal(request).await?;
+        }
+
         // 2. Verify each selected UTXO exists and collect full UTXO data
         let selected_utxos: Vec<Utxo> = approval
             .selected_utxos
@@ -581,6 +586,59 @@ impl Hashi {
             outputs,
             txid,
         })
+    }
+
+    /// Run AML/Sanctions checks for a withdrawal request.
+    /// If no screener client is configured, checks are skipped.
+    pub(crate) async fn screen_withdrawal(
+        &self,
+        request: &WithdrawalRequest,
+    ) -> anyhow::Result<()> {
+        let Some(screener) = self.screener_client() else {
+            tracing::debug!("AML checks skipped: no screener configured");
+            return Ok(());
+        };
+
+        // Source: Sui tx digest (base58 string)
+        let source_tx_hash = request.sui_tx_digest.to_string();
+
+        // Destination: Bitcoin address (raw witness bytes -> bech32 string)
+        let destination_address = self.bitcoin_address_string_from_raw(&request.bitcoin_address)?;
+
+        let approved = screener
+            .approve_withdrawal(
+                &source_tx_hash,
+                &destination_address,
+                self.config.sui_chain_id(),
+                self.config.bitcoin_chain_id(),
+            )
+            .await
+            .map_err(|e| anyhow!("Screener service error: {e}"))?;
+
+        if !approved {
+            anyhow::bail!(
+                "AML checks failed for withdrawal request {:?} to {}",
+                request.id,
+                destination_address,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Convert raw witness program bytes to a human-readable Bitcoin address string.
+    fn bitcoin_address_string_from_raw(&self, address_bytes: &[u8]) -> anyhow::Result<String> {
+        let version = match address_bytes.len() {
+            32 => WitnessVersion::V1,
+            20 => WitnessVersion::V0,
+            len => anyhow::bail!("Unsupported bitcoin address length: {len}"),
+        };
+        let program = WitnessProgram::new(version, address_bytes)
+            .map_err(|e| anyhow!("Invalid witness program: {e}"))?;
+        let script = bitcoin::ScriptBuf::new_witness_program(&program);
+        let address = bitcoin::Address::from_script(&script, self.config.bitcoin_network())
+            .map_err(|e| anyhow!("Failed to convert script to address: {e}"))?;
+        Ok(address.to_string())
     }
 }
 

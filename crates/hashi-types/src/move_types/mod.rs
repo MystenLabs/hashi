@@ -4,6 +4,7 @@ use fastcrypto::traits::ToFromBytes;
 use std::collections::BTreeSet;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
+use sui_sdk_types::Digest;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::FromBcs;
@@ -223,6 +224,7 @@ pub struct WithdrawalRequestInfo {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub requester_address: Address,
+    pub sui_tx_digest: Digest,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
@@ -835,6 +837,7 @@ pub struct WithdrawalRequestedEvent {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub requester_address: Address,
+    pub sui_tx_digest: Digest,
 }
 
 impl MoveType for WithdrawalRequestedEvent {

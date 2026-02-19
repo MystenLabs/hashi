@@ -244,6 +244,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
                     timestamp_ms: withdrawal_requested_event.timestamp_ms,
                     requester_address: withdrawal_requested_event.requester_address,
+                    sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
                 };
                 state
                     .state_mut()

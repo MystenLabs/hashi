@@ -291,7 +291,13 @@ impl LeaderService {
     async fn process_withdrawal_request(&self, request: &WithdrawalRequest) {
         info!("Processing withdrawal request: {:?}", request.id);
 
-        // 1. Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
+        // 1. Run AML/Sanctions checks for the withdrawal request
+        if let Err(e) = self.inner.screen_withdrawal(request).await {
+            error!("Withdrawal request {:?} failed AML Checks: {e}", request.id);
+            return;
+        }
+
+        // 2. Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
         let approval = match self.inner.build_withdrawal_approval(request).await {
             Ok(approval) => approval,
             Err(e) => {
@@ -303,7 +309,7 @@ impl LeaderService {
             }
         };
 
-        // 2. Fan out to committee for BLS approval signatures
+        // 3. Fan out to committee for BLS approval signatures
         let members = self
             .inner
             .onchain_state()
@@ -321,7 +327,7 @@ impl LeaderService {
             }
         }
 
-        // 3. Aggregate BLS signatures and check quorum
+        // 4. Aggregate BLS signatures and check quorum
         let committee = self
             .inner
             .onchain_state()
@@ -356,7 +362,7 @@ impl LeaderService {
             }
         };
 
-        // 4. Commit on Sui via pick_withdrawal_for_processing
+        // 5. Commit on Sui via pick_withdrawal_for_processing
         if let Err(e) = self
             .submit_pick_withdrawal_for_processing(&approval, signed_approval.committee_signature())
             .await

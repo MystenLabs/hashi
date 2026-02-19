@@ -948,6 +948,7 @@ async fn scrape_withdrawal_requests(
                     bitcoin_address: info.bitcoin_address,
                     timestamp_ms: info.timestamp_ms,
                     requester_address: info.requester_address,
+                    sui_tx_digest: info.sui_tx_digest,
                 },
             )
         })
