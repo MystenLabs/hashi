@@ -1,26 +1,172 @@
-use std::collections::HashMap;
+use std::time::Duration;
 
-use hashi_guardian_shared::WithdrawalID;
-
+use crate::audit::AuditWindow;
+use crate::audit::AuditorCore;
+use crate::audit::log_findings;
 use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::UnixSeconds;
-use crate::state_machine::WithdrawalStateMachine;
+use crate::domain::WithdrawalEvent;
+use crate::domain::WithdrawalEventType;
+use crate::domain::now_unix_seconds;
+use crate::rpc::poll_guardian;
+use crate::rpc::poll_sui;
+
+// TODO: Move to config
+/// The frequency at which we poll sui, guardian and btc RPC
+const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// The frequency at which we do validation checks.
+const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// A continuous audit only requires a start time
+pub struct ContinuousAuditWindow {
+    pub user_start: UnixSeconds,
+    pub sui_start: UnixSeconds,
+    pub guardian_start: UnixSeconds,
+}
 
 /// A continuous auditor that runs indefinitely processing events as they arrive.
 /// Constructors accept a start time as input that acts as a starting point for the auditor.
 pub struct ContinuousAuditor {
-    pub cfg: Config,
-    pub cursors: Cursors,
-    pub pending: HashMap<WithdrawalID, WithdrawalStateMachine>,
+    pub inner: AuditorCore,
+    pub window: ContinuousAuditWindow,
+}
+
+impl AuditWindow for ContinuousAuditWindow {
+    fn in_window(&self, e: &WithdrawalEvent) -> bool {
+        e.timestamp >= self.user_start
+    }
+}
+
+impl ContinuousAuditWindow {
+    pub fn new(cfg: &Config, start: UnixSeconds) -> Self {
+        let e1_e2_delay_secs = cfg
+            .next_event_delay(WithdrawalEventType::E1HashiApproved)
+            .expect("should be Some");
+        let sui_start = start.saturating_sub(e1_e2_delay_secs); // guardian_e2@{start} might match sui_e1@{start-e1_e2_delay_secs}
+        let guardian_start = start.saturating_sub(cfg.clock_skew); // sui_e1@{start} might match guardian_e2@{start-skew}
+
+        Self {
+            user_start: start,
+            sui_start,
+            guardian_start,
+        }
+    }
 }
 
 impl ContinuousAuditor {
-    pub fn new(_cfg: Config, _start_time: UnixSeconds) -> Self {
-        todo!("set cursor appropriately given the start time")
+    pub fn new(cfg: Config, start: UnixSeconds) -> anyhow::Result<Self> {
+        let cur_time = now_unix_seconds();
+        anyhow::ensure!(
+            start <= cur_time,
+            "start is in the future: start={start} > cur_time={cur_time}"
+        );
+        let audit_window = ContinuousAuditWindow::new(&cfg, start);
+        let cursors = Cursors {
+            sui: audit_window.sui_start,
+            guardian: audit_window.guardian_start,
+        };
+
+        Ok(Self {
+            inner: AuditorCore::new(cfg, cursors),
+            window: audit_window,
+        })
     }
 
-    pub async fn run(&mut self) {
-        todo!("implement me")
+    pub fn ingest_batch(&mut self, events: Vec<WithdrawalEvent>) {
+        let errors = self.inner.ingest_batch(events);
+        log_findings("continuous", "ingest", &errors);
+    }
+
+    fn handle_poll_result(
+        &mut self,
+        is_sui: bool,
+        result: anyhow::Result<(Vec<WithdrawalEvent>, UnixSeconds)>,
+    ) -> anyhow::Result<()> {
+        match result {
+            Ok((events, new_cursor)) => {
+                self.ingest_batch(events);
+                if is_sui {
+                    self.inner.set_sui_cursor(new_cursor);
+                } else {
+                    self.inner.set_guardian_cursor(new_cursor);
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    // TODO: Poll continuously if we are lagging behind?
+    async fn tick_sui(&mut self) -> anyhow::Result<()> {
+        let cursor = self.inner.get_sui_cursor();
+        let result = poll_sui(&self.inner.cfg, cursor).await;
+        self.handle_poll_result(true, result)
+    }
+
+    // TODO: Poll continuously if we are lagging behind?
+    async fn tick_guardian(&mut self) -> anyhow::Result<()> {
+        let cursor = self.inner.get_guardian_cursor();
+        let result = poll_guardian(&self.inner.cfg, cursor).await;
+        self.handle_poll_result(false, result)
+    }
+
+    /// Throws an error if BTC RPC infra fails.
+    fn tick_btc(&mut self) -> anyhow::Result<()> {
+        let errors = self.inner.fetch_btc_info(&self.window)?;
+        log_findings("continuous", "btc", &errors);
+        Ok(())
+    }
+
+    fn tick_state_checks_and_gc(&mut self) {
+        let violations = self.inner.detect_violations(&self.window);
+        // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
+        log_findings("continuous", "violations", &violations);
+
+        // Garbage collect
+        self.inner.garbage_collect(&self.window);
+    }
+
+    pub async fn run(&mut self) -> anyhow::Result<()> {
+        let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
+        let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
+        let mut btc_ticker = tokio::time::interval(POLL_INTERVAL);
+        let mut state_checks_ticker = tokio::time::interval(STATE_TICK_INTERVAL);
+
+        sui_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        guardian_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Consume the immediate first tick and then run on a stable cadence.
+        sui_ticker.tick().await;
+        guardian_ticker.tick().await;
+        btc_ticker.tick().await;
+        state_checks_ticker.tick().await;
+
+        loop {
+            // TODO: Make it multi-threaded?
+            tokio::select! {
+                _ = sui_ticker.tick() => {
+                    if let Err(error) = self.tick_sui().await {
+                        tracing::warn!(source = "sui", ?error, "poll failed; continuing");
+                    }
+                }
+                _ = guardian_ticker.tick() => {
+                    if let Err(error) = self.tick_guardian().await {
+                        tracing::warn!(source = "guardian", ?error, "poll failed; continuing");
+                    }
+                }
+                _ = btc_ticker.tick() => {
+                    if let Err(error) = self.tick_btc() {
+                        tracing::warn!(source = "btc", ?error, "btc tick failed; continuing");
+                    }
+                }
+                _ = state_checks_ticker.tick() => {
+                    self.tick_state_checks_and_gc();
+                }
+            }
+        }
     }
 }

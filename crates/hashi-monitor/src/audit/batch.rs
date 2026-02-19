@@ -1,4 +1,6 @@
 use crate::audit::AuditWindow;
+use crate::audit::AuditorCore;
+use crate::audit::log_findings;
 use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::UnixSeconds;
@@ -8,11 +10,6 @@ use crate::domain::now_unix_seconds;
 use crate::errors::MonitorError;
 use crate::rpc::poll_guardian;
 use crate::rpc::poll_sui;
-use crate::state_machine::BtcFetchOutcome;
-use crate::state_machine::WithdrawalStateMachine;
-use hashi_guardian_shared::WithdrawalID;
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 
 const NUM_ITERATIONS_BEFORE_FAIL: u8 = 5;
 
@@ -73,12 +70,8 @@ impl AuditWindow for BatchAuditWindow {
 ///    some issue with RPC. This info is captured by the `verified_up_to` timestamp.
 /// 3) The current approach is fetch-then-check. An alternate streaming auditor can be implemented in the future if needed.
 pub struct BatchAuditor {
-    // immutable
-    pub cfg: Config,
+    pub inner: AuditorCore,
     pub audit_window: BatchAuditWindow,
-    // mutable
-    pub cursors: Cursors,
-    pub pending: HashMap<WithdrawalID, WithdrawalStateMachine>,
     pub findings: Vec<MonitorError>,
 }
 
@@ -100,57 +93,41 @@ impl BatchAuditor {
             guardian: audit_window.guardian_start,
         };
         Ok(Self {
-            cfg,
+            inner: AuditorCore::new(cfg, cursors),
             audit_window,
-            cursors,
-            pending: HashMap::new(),
             findings: Vec::new(),
         })
     }
 
-    pub fn ingest(&mut self, event: WithdrawalEvent) {
-        let wid = event.wid;
-        match self.pending.entry(wid) {
-            Entry::Occupied(mut entry) => {
-                if let Err(e) = entry.get_mut().add_event(event, &self.cfg) {
-                    self.findings.push(e);
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(WithdrawalStateMachine::new(event, &self.cfg));
-            }
-        }
-    }
-
     pub fn ingest_batch(&mut self, events: Vec<WithdrawalEvent>) {
-        for event in events {
-            self.ingest(event)
-        }
+        let errors = self.inner.ingest_batch(events);
+        log_findings("batch", "ingest", &errors);
+        self.findings.extend(errors);
     }
 
     async fn fetch_all_sui_guardian_events(&mut self) -> anyhow::Result<()> {
         let mut stalled_iterations = 0_u8;
 
-        while self.cursors.sui < self.audit_window.sui_end
-            || self.cursors.guardian < self.audit_window.guardian_end
+        while self.inner.get_sui_cursor() < self.audit_window.sui_end
+            || self.inner.get_guardian_cursor() < self.audit_window.guardian_end
         {
-            let prev_sui = self.cursors.sui;
-            let prev_guardian = self.cursors.guardian;
+            let prev_sui = self.inner.get_sui_cursor();
+            let prev_guardian = self.inner.get_guardian_cursor();
 
-            let should_poll_sui = self.cursors.sui < self.audit_window.sui_end;
-            let should_poll_guardian = self.cursors.guardian < self.audit_window.guardian_end;
+            let should_poll_sui = prev_sui < self.audit_window.sui_end;
+            let should_poll_guardian = prev_guardian < self.audit_window.guardian_end;
 
             let (sui_result, guardian_result) = tokio::join!(
                 async {
                     if should_poll_sui {
-                        Some(poll_sui(&self.cfg, self.cursors.sui).await)
+                        Some(poll_sui(&self.inner.cfg, prev_sui).await)
                     } else {
                         None
                     }
                 },
                 async {
                     if should_poll_guardian {
-                        Some(poll_guardian(&self.cfg, self.cursors.guardian).await)
+                        Some(poll_guardian(&self.inner.cfg, prev_guardian).await)
                     } else {
                         None
                     }
@@ -159,23 +136,25 @@ impl BatchAuditor {
 
             if let Some(result) = sui_result {
                 let (events, new_cursor) = result?;
-                self.cursors.sui = new_cursor;
+                self.inner.set_sui_cursor(new_cursor);
                 self.ingest_batch(events);
             }
 
             if let Some(result) = guardian_result {
                 let (events, new_cursor) = result?;
-                self.cursors.guardian = new_cursor;
+                self.inner.set_guardian_cursor(new_cursor);
                 self.ingest_batch(events);
             }
 
-            if prev_sui == self.cursors.sui && prev_guardian == self.cursors.guardian {
+            if prev_sui == self.inner.get_sui_cursor()
+                && prev_guardian == self.inner.get_guardian_cursor()
+            {
                 stalled_iterations = stalled_iterations.saturating_add(1);
                 if stalled_iterations >= NUM_ITERATIONS_BEFORE_FAIL {
                     tracing::warn!(
                         "batch polling cursors did not advance fully (sui={}, guardian={})",
-                        self.cursors.sui,
-                        self.cursors.guardian
+                        self.inner.get_sui_cursor(),
+                        self.inner.get_guardian_cursor()
                     );
                     return Ok(());
                 }
@@ -196,35 +175,35 @@ impl BatchAuditor {
             end = self.audit_window.user_end,
             sui_start = self.audit_window.sui_start,
             sui_target_end = self.audit_window.sui_end,
-            sui_cursor = self.cursors.sui,
+            sui_cursor = self.inner.get_sui_cursor(),
             guardian_start = self.audit_window.guardian_start,
             guardian_target_end = self.audit_window.guardian_end,
-            guardian_cursor = self.cursors.guardian,
+            guardian_cursor = self.inner.get_guardian_cursor(),
             "finished batch polling"
         );
 
         // Fetch all BTC info
-        for sm in self.pending.values_mut() {
-            if let BtcFetchOutcome::Confirmed(Some(e)) = sm.try_fetch_btc_tx(&self.cfg)? {
-                self.findings.push(e);
-            }
-        }
+        let btc_findings = self.inner.fetch_btc_info(&self.audit_window)?;
+        log_findings("batch", "btc", &btc_findings);
+        self.findings.extend(btc_findings);
 
-        // Gather all violations & also identify the earliest incomplete state machine (to signal when to start next)
-        let mut verified_up_to = self.cursors.min();
-        for sm in self.pending.values() {
-            if !sm.is_in_audit_window(&self.audit_window) {
+        // Gather all violations
+        let violations = self.inner.detect_violations(&self.audit_window);
+        log_findings("batch", "violations", &violations);
+        self.findings.extend(violations);
+
+        // Identify the earliest incomplete state machine (to signal when to start next)
+        let mut verified_up_to = self.inner.cursors.min();
+        for sm in self.inner.pending.values() {
+            if !sm.is_in_audit_window(&self.audit_window) || sm.is_valid() {
                 continue;
             }
-            self.findings.extend(sm.violations(&self.cursors));
-            if !sm.is_valid() {
-                // we are being a little conservative here; e.g., if e_hashi, e_guardian exist and e_btc doesn't, then
-                // earliest event time might correspond to e_hashi. but even using e_guardian suffices.
-                verified_up_to = verified_up_to.min(
-                    sm.earliest_event_time()
-                        .expect("incomplete state machines must have one timestamp"),
-                )
-            }
+            // we are being a little conservative here; e.g., if e_hashi, e_guardian exist and e_btc doesn't, then
+            // earliest event time might correspond to e_hashi. but even using e_guardian suffices.
+            verified_up_to = verified_up_to.min(
+                sm.earliest_event_time()
+                    .expect("incomplete state machines must have one timestamp"),
+            )
         }
 
         if self.findings.is_empty() {

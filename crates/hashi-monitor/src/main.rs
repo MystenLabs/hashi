@@ -55,21 +55,11 @@ async fn main() -> anyhow::Result<()> {
                 .run()
                 .await
                 .unwrap_or_else(|e| panic!("infra failure: {e:#}"));
-
-            if !auditor.findings.is_empty() {
-                let msg = auditor
-                    .findings
-                    .iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(anyhow::anyhow!("findings:\n{msg}"));
-            }
         }
         Command::Continuous { config, start } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg, start);
-            auditor.run().await;
+            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg, start)?;
+            auditor.run().await?;
         }
     }
 
