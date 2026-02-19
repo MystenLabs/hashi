@@ -292,7 +292,7 @@ impl LeaderService {
         info!("Processing withdrawal request: {:?}", request.id);
 
         // 1. Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
-        let approval = match self.inner.build_withdrawal_approval(request) {
+        let approval = match self.inner.build_withdrawal_approval(request).await {
             Ok(approval) => approval,
             Err(e) => {
                 error!(

@@ -1,4 +1,14 @@
 use anyhow::anyhow;
+use bdk_coin_select::Candidate;
+use bdk_coin_select::ChangePolicy;
+use bdk_coin_select::CoinSelector;
+use bdk_coin_select::DrainWeights;
+use bdk_coin_select::FeeRate;
+use bdk_coin_select::TR_DUST_RELAY_MIN_VALUE;
+use bdk_coin_select::Target;
+use bdk_coin_select::TargetFee;
+use bdk_coin_select::TargetOutputs;
+use bdk_coin_select::metrics::LowestFee;
 use bitcoin::Address as BitcoinAddress;
 use bitcoin::Amount;
 use bitcoin::TxOut;
@@ -26,6 +36,25 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default confirmation target for fee estimation (3 blocks ~ 30 minutes).
+const WITHDRAWAL_FEE_CONF_TARGET: u16 = 3;
+
+/// Fee rate tolerance multiplier for validation.
+const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
+
+/// Long-term fee rate (10 sat/vB). Used for the waste metric when evaluating
+/// whether to create a change output vs. paying a slightly higher fee.
+const LONG_TERM_FEE_RATE_SAT_PER_VB: f32 = 10.0;
+
+/// Maximum BnB iterations before falling back to greedy selection.
+const BNB_MAX_ROUNDS: usize = 1_000;
+
+pub struct UtxoSelection {
+    pub selected_utxos: Vec<Utxo>,
+    pub fee: u64,
+    pub change: Option<u64>,
+}
 
 /// The data that validators BLS-sign over to approve a withdrawal transaction.
 /// This represents the proposal that will eventually be passed to
@@ -150,8 +179,56 @@ impl Hashi {
             input_total >= output_total,
             "Inputs ({input_total}) < outputs ({output_total})"
         );
-        let _fee = input_total - output_total;
-        // TODO: check that the fee is reasonable (not too high, not too low)
+        let fee = input_total - output_total;
+
+        // 5a. Validate fee is reasonable
+        {
+            // Estimate transaction weight
+            let num_inputs = selected_utxos.len() as u64;
+            let input_weight = bdk_coin_select::TR_KEYSPEND_TXIN_WEIGHT * num_inputs;
+            let output_weight: u64 = approval
+                .outputs
+                .iter()
+                .map(|o| output_weight_for_address(&o.bitcoin_address))
+                .collect::<anyhow::Result<Vec<_>>>()?
+                .iter()
+                .sum();
+            let tx_weight =
+                bdk_coin_select::TX_FIXED_FIELD_WEIGHT + input_weight + output_weight + 2; // +2 for segwit marker/flag
+
+            // Fee must be at least the minimum relay fee (1 sat/vB)
+            let min_fee_rate = FeeRate::from_sat_per_vb(1.0);
+            let min_fee = min_fee_rate.implied_fee(tx_weight);
+            anyhow::ensure!(
+                fee >= min_fee,
+                "Fee {fee} sats is below minimum relay fee {min_fee} sats"
+            );
+
+            // Fee must not exceed FEE_RATE_TOLERANCE_MULTIPLIER x our own estimate
+            let kyoto_fee_rate = self
+                .btc_monitor()
+                .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
+                .await?;
+            let our_fee_rate =
+                FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
+            let our_estimated_fee = our_fee_rate.implied_fee(tx_weight);
+            let max_fee = our_estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
+            anyhow::ensure!(
+                fee <= max_fee,
+                "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
+                 ({FEE_RATE_TOLERANCE_MULTIPLIER}x our estimate of {our_estimated_fee} sats)"
+            );
+        }
+
+        // 5b. Validate change output is above dust threshold
+        if let Some(change_output) = non_request_outputs.first() {
+            anyhow::ensure!(
+                change_output.amount >= TR_DUST_RELAY_MIN_VALUE,
+                "Change output {} sats is below dust threshold {} sats",
+                change_output.amount,
+                TR_DUST_RELAY_MIN_VALUE
+            );
+        }
 
         // 6. Rebuild unsigned tx and verify txid matches
         let tx = self.build_unsigned_withdrawal_tx(&selected_utxos, &approval.outputs)?;
@@ -346,20 +423,77 @@ impl Hashi {
 
     // --- UTXO selection and tx crafting ---
 
-    pub fn select_utxos_for_withdrawal(&self, amount: u64) -> anyhow::Result<Vec<Utxo>> {
-        // This is a simple naive stub implementation
-        // TODO: implement a sophisticated version of utxo selection
+    /// Select UTXOs for a withdrawal using Branch-and-Bound with LowestFee metric,
+    /// falling back to greedy selection if BnB finds no solution.
+    pub fn select_utxos_for_withdrawal(
+        &self,
+        withdrawal_amount: u64,
+        recipient_address: &[u8],
+        fee_rate: FeeRate,
+    ) -> anyhow::Result<UtxoSelection> {
         let active_utxos = self.onchain_state().active_utxos();
-        let mut selected = Vec::new();
-        let mut total = 0u64;
-        for utxo in &active_utxos {
-            selected.push(utxo.clone());
-            total += utxo.amount;
-            if total >= amount {
-                return Ok(selected);
-            }
+        anyhow::ensure!(!active_utxos.is_empty(), "No active UTXOs available");
+
+        let recipient_output_weight = output_weight_for_address(recipient_address)?;
+        let long_term_fee_rate = FeeRate::from_sat_per_vb(LONG_TERM_FEE_RATE_SAT_PER_VB);
+
+        // Map each UTXO to a bdk_coin_select Candidate (P2TR key-path spend)
+        let candidates: Vec<Candidate> = active_utxos
+            .iter()
+            .map(|utxo| Candidate::new_tr_keyspend(utxo.amount))
+            .collect();
+
+        let mut cs = CoinSelector::new(&candidates);
+
+        let target = Target {
+            fee: TargetFee::from_feerate(fee_rate),
+            outputs: TargetOutputs {
+                value_sum: withdrawal_amount,
+                weight_sum: recipient_output_weight,
+                n_outputs: 1,
+            },
+        };
+
+        let change_policy = ChangePolicy::min_value_and_waste(
+            DrainWeights::TR_KEYSPEND,
+            TR_DUST_RELAY_MIN_VALUE,
+            fee_rate,
+            long_term_fee_rate,
+        );
+
+        // Try BnB first (optimal), fall back to greedy
+        let metric = LowestFee {
+            target,
+            long_term_feerate: long_term_fee_rate,
+            change_policy,
+        };
+        if cs.run_bnb(metric, BNB_MAX_ROUNDS).is_err() {
+            cs.sort_candidates_by_descending_value_pwu();
+            cs.select_until_target_met(target).map_err(|e| {
+                let total: u64 = active_utxos.iter().map(|u| u.amount).sum();
+                anyhow::anyhow!(
+                    "UTXO selection failed ({e}): need {withdrawal_amount} sats + fees, \
+                     pool has {total} sats in {} UTXOs",
+                    active_utxos.len()
+                )
+            })?;
         }
-        anyhow::bail!("Insufficient UTXOs: need {amount} sats, only have {total} sats available");
+
+        let drain = cs.drain(target, change_policy);
+        let selected_utxos: Vec<Utxo> = cs.apply_selection(&active_utxos).cloned().collect();
+        let selected_value: u64 = selected_utxos.iter().map(|u| u.amount).sum();
+        let fee = selected_value - withdrawal_amount - drain.value;
+        let change = if drain.is_some() {
+            Some(drain.value)
+        } else {
+            None
+        };
+
+        Ok(UtxoSelection {
+            selected_utxos,
+            fee,
+            change,
+        })
     }
 
     /// Build an unsigned Bitcoin transaction for a withdrawal. This is used both
@@ -398,37 +532,46 @@ impl Hashi {
         Ok(bitcoin_utils::construct_tx(inputs, tx_outputs))
     }
 
-    /// Build a withdrawal approval: select UTXOs, compute outputs (withdrawal
-    /// destination + change to hashi root pubkey), build the unsigned BTC tx,
-    /// and return a `WithdrawalApproval` containing the txid.
-    pub fn build_withdrawal_approval(
+    /// Build a withdrawal approval: select UTXOs with fee awareness, compute
+    /// outputs (withdrawal destination + optional change), build the unsigned
+    /// BTC tx, and return a `WithdrawalApproval` containing the txid.
+    pub async fn build_withdrawal_approval(
         &self,
         request: &WithdrawalRequest,
     ) -> anyhow::Result<WithdrawalApproval> {
-        // TODO: account for BTC transaction fees when selecting UTXOs
-        let selected_utxos = self.select_utxos_for_withdrawal(request.btc_amount)?;
-        let input_total: u64 = selected_utxos.iter().map(|u| u.amount).sum();
+        // Fetch current fee rate from the Bitcoin node
+        let kyoto_fee_rate = self
+            .btc_monitor()
+            .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
+            .await?;
+        // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
+        let fee_rate = FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
+
+        let selection = self.select_utxos_for_withdrawal(
+            request.btc_amount,
+            &request.bitcoin_address,
+            fee_rate,
+        )?;
 
         let mut outputs = vec![OutputUtxo {
             amount: request.btc_amount,
             bitcoin_address: request.bitcoin_address.clone(),
         }];
 
-        // Change output back to hashi root pubkey (no derivation)
-        let change = input_total.saturating_sub(request.btc_amount);
-        if change > 0 {
+        // Add change output back to hashi root pubkey if selection produced change
+        if let Some(change_amount) = selection.change {
             let hashi_pubkey = self.get_hashi_pubkey();
             let change_address = self.get_deposit_address(&hashi_pubkey, None);
             outputs.push(OutputUtxo {
-                amount: change,
+                amount: change_amount,
                 bitcoin_address: witness_program_from_address(&change_address)?,
             });
         }
 
         let request_ids = vec![request.id];
-        let utxo_ids: Vec<UtxoId> = selected_utxos.iter().map(|u| u.id).collect();
+        let utxo_ids: Vec<UtxoId> = selection.selected_utxos.iter().map(|u| u.id).collect();
 
-        let tx = self.build_unsigned_withdrawal_tx(&selected_utxos, &outputs)?;
+        let tx = self.build_unsigned_withdrawal_tx(&selection.selected_utxos, &outputs)?;
         let txid_bytes: [u8; 32] = tx.compute_txid().to_byte_array();
         let txid = Address::new(txid_bytes);
 
@@ -448,6 +591,16 @@ fn witness_program_from_address(address: &BitcoinAddress) -> anyhow::Result<Vec<
         [0x00, 0x14, rest @ ..] if rest.len() == 20 => Ok(rest.to_vec()),
         [0x51, 0x20, rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
         _ => anyhow::bail!("Unsupported script pubkey for withdrawal output: {script}"),
+    }
+}
+
+fn output_weight_for_address(bitcoin_address: &[u8]) -> anyhow::Result<u64> {
+    match bitcoin_address.len() {
+        // P2TR: TXOUT_BASE_WEIGHT(36) + TR_SPK_WEIGHT(136) = 172 WU
+        32 => Ok(bdk_coin_select::TXOUT_BASE_WEIGHT + bdk_coin_select::TR_SPK_WEIGHT),
+        // P2WPKH: (8 + 1 + 1 + 1 + 20) * 4 = 124 WU
+        20 => Ok((8 + 1 + 1 + 1 + 20) * 4),
+        len => anyhow::bail!("Unsupported bitcoin address length: {len}"),
     }
 }
 

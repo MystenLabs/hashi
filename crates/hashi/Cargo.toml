@@ -18,6 +18,7 @@ bitcoin.workspace = true
 bitcoincore-rpc.workspace = true
 bdk_chain = "0.23.1"
 bdk_core = "0.6.1"
+bdk_coin_select.workspace = true
 kyoto-cbf = "0.13.2"
 
 # Dependencies for the protobuf definitions
