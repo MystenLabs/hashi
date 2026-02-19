@@ -51,6 +51,12 @@ enum Commands {
         #[clap(subcommand)]
         action: hashi::cli::ConfigCommands,
     },
+
+    /// Build, publish, and initialise the Hashi Move package
+    Publish {
+        #[clap(flatten)]
+        publish_opts: hashi::cli::PublishOpts,
+    },
 }
 
 #[tokio::main]
@@ -68,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Config { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Config { action }).await
         }
+        Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
     }
 }
 

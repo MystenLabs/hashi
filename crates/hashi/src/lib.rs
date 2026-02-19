@@ -18,6 +18,7 @@ pub mod leader;
 pub mod metrics;
 pub mod mpc;
 pub mod onchain;
+pub mod publish;
 pub mod storage;
 pub mod sui_tx_executor;
 pub mod tls;

@@ -211,6 +211,46 @@ impl TxOptions {
     }
 }
 
+/// Options for the `publish` subcommand.
+///
+/// Unlike other CLI commands this does *not* use [`CliGlobalOpts`] because
+/// `package_id` and `hashi_object_id` do not exist yet – they are the
+/// *output* of the publish workflow.
+#[derive(Args)]
+pub struct PublishOpts {
+    /// Sui RPC endpoint URL
+    #[clap(long, env = "SUI_RPC_URL", default_value = "https://fullnode.mainnet.sui.io:443")]
+    pub sui_rpc_url: String,
+
+    /// Path to the Move package directory
+    #[clap(long, short = 'p', default_value = "packages/hashi")]
+    pub package_path: std::path::PathBuf,
+
+    /// Path to the `sui` CLI binary
+    #[clap(long, env = "SUI_BINARY", default_value = "sui")]
+    pub sui_binary: std::path::PathBuf,
+
+    /// Path to the keypair file for signing transactions
+    #[clap(long, short = 'k', env = "HASHI_KEYPAIR")]
+    pub keypair: std::path::PathBuf,
+
+    /// Network environment for the Move build (e.g. `testnet`, `mainnet`)
+    #[clap(long, short = 'e')]
+    pub environment: Option<String>,
+
+    /// Optional path to a sui `client.yaml` for dependency resolution
+    #[clap(long)]
+    pub sui_client_config: Option<std::path::PathBuf>,
+
+    /// Enable verbose output
+    #[clap(long, short)]
+    pub verbose: bool,
+
+    /// Skip confirmation prompts
+    #[clap(long, short = 'y')]
+    pub yes: bool,
+}
+
 /// CLI command variants (without Server)
 pub enum CliCommand {
     Proposal { action: ProposalCommands },
@@ -365,4 +405,60 @@ pub fn print_info(msg: &str) {
 /// Print a warning message
 pub fn print_warning(msg: &str) {
     println!("{} {}", "⚠".yellow().bold(), msg);
+}
+
+/// Run the `publish` command – build, publish, and initialise the Hashi package.
+pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
+    init_tracing(opts.verbose);
+
+    // Load signer
+    let signer = crate::config::load_ed25519_private_key_from_path(&opts.keypair)?;
+    let sender = signer.public_key().derive_address();
+    print_info(&format!("Sender address: {sender}"));
+
+    // Build
+    print_info(&format!(
+        "Building package at {} ...",
+        opts.package_path.display()
+    ));
+    let params = crate::publish::BuildParams {
+        sui_binary: &opts.sui_binary,
+        package_path: &opts.package_path,
+        client_config: opts.sui_client_config.as_deref(),
+        environment: opts.environment.as_deref(),
+    };
+    let compiled = crate::publish::build_package(&params)?;
+    print_success(&format!(
+        "Package built ({} module(s))",
+        compiled.modules.len()
+    ));
+
+    if !opts.yes {
+        print_info("This will publish the package and run initialization (2 transactions).");
+        print_info("Use --yes / -y to skip this prompt.");
+        eprint!("Continue? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            print_warning("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Connect to RPC
+    let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
+
+    // Publish + init
+    print_info("Publishing and initializing ...");
+    let ids = crate::publish::publish_and_init(&mut client, &signer, compiled).await?;
+    print_success(&format!("package_id:      {}", ids.package_id));
+    print_success(&format!("hashi_object_id: {}", ids.hashi_object_id));
+
+    // Write ids to hashi_ids.json
+    let json = serde_json::to_string_pretty(&ids)?;
+    let out_path = "hashi_ids.json";
+    std::fs::write(out_path, &json)?;
+    print_success(&format!("Wrote {out_path}"));
+
+    Ok(())
 }
