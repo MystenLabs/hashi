@@ -599,15 +599,8 @@ impl Hashi {
             return Ok(());
         };
 
-        // Source: Sui tx digest (raw 32 bytes -> base58 string)
-        let digest_bytes: [u8; 32] = request.sui_tx_digest.as_slice().try_into().map_err(|_| {
-            anyhow!(
-                "Invalid sui_tx_digest length for withdrawal request {:?}: expected 32, got {}",
-                request.id,
-                request.sui_tx_digest.len()
-            )
-        })?;
-        let source_tx_hash = sui_sdk_types::Digest::new(digest_bytes).to_string();
+        // Source: Sui tx digest (base58 string)
+        let source_tx_hash = request.sui_tx_digest.to_string();
 
         // Destination: Bitcoin address (raw witness bytes -> bech32 string)
         let destination_address = self.bitcoin_address_string_from_raw(&request.bitcoin_address)?;
