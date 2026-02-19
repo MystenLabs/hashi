@@ -12,8 +12,13 @@ Audits the cross-system withdrawal flow:
 - **Successor existence**: For every source event, the configured successor delay bound must hold.
 
 ### Two modes
-1. **Batch**: One-time audit over a time range `[start, end]`.
-2. **Continuous**: Intended long-running monitor that will poll for new events.
+1. **Batch**: One-time audit over a guardian time range `[start, end]`.
+2. **Continuous**: Intended long-running monitor over guardian timeline.
+
+### Timeline semantics
+- User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
+- Sui events are still polled in a relaxed range to validate E2 predecessor constraints.
+- Orphan E1 findings are currently still reported when E1 falls in the user window.
 
 ## Usage
 

@@ -2679,6 +2679,7 @@ dependencies = [
  "hashi-types",
  "serde",
  "serde_yaml",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

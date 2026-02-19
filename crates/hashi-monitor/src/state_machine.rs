@@ -5,6 +5,7 @@ use hashi_types::guardian::WithdrawalID;
 use std::collections::BTreeSet;
 
 use crate::OutputUTXO;
+use crate::audit::AuditWindow;
 use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::UnixSeconds;
@@ -21,6 +22,13 @@ use crate::errors::MonitorError::*;
 /// `violations(cursors)` checks if there are any violations given current cursors
 ///
 /// Invariant: `expected_events` should not contain an event type that exists in `seen_events`.
+///
+/// Six different states that a withdrawal can be in
+/// - Window: Out, In
+/// - Status:
+///     - Valid: is_valid() == true,
+///     - Invalid: |violations()| > 0,
+///     - Pending: neither valid nor invalid.
 pub struct WithdrawalStateMachine {
     /// the set of events we have seen until now related to this withdrawal
     seen_events: Vec<WithdrawalEvent>,
@@ -85,8 +93,28 @@ impl WithdrawalStateMachine {
             .any(|(event, _)| *event == event_type)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.seen_events.is_empty()
+    }
+
+    /// Is the withdrawal valid? Put differently, has it passed all the checks?
+    ///
+    /// Note: Callers must ensure is_in_audit_window() is true before calling this function.
+    /// More precisely, we can always tell if a withdrawal is valid but not if it is invalid, e.g., an (Out, Pending) can transition to (In, Valid) / (Out, Valid).
+    /// This means that (Out, Pending/Invalid) withdrawals may never get garbage collected.
+    /// But such cases are likely few as they only get created for a short lookback or lookahead period.
     pub fn is_valid(&self) -> bool {
-        self.expected_events.is_empty() && !self.seen_events.is_empty()
+        !self.is_empty() && self.expected_events.is_empty()
+    }
+
+    // TODO: If we fully move to strict guardian-led audits, this can be relaxed to only include
+    // withdrawals with guardian E2 in the user window.
+    pub fn is_in_audit_window(&self, window: &impl AuditWindow) -> bool {
+        self.seen_events.iter().any(|e| window.in_window(e))
+    }
+
+    pub fn earliest_event_time(&self) -> Option<UnixSeconds> {
+        self.seen_events.iter().map(|e| e.timestamp).min()
     }
 
     /// `add_event` adds an event e and checks the following. Let e's neighbors be [e.predecessor(), e.successor()].
@@ -215,6 +243,7 @@ impl WithdrawalStateMachine {
 
     /// Check for violations given per-source cursors.
     /// Only reports a missing event if its deadline has passed relative to the relevant cursor.
+    /// Callers must ensure is_in_audit_window() is true before calling this function.
     pub fn violations(&self, cursors: &Cursors) -> Vec<MonitorError> {
         let mut out = Vec::new();
         for (event_type, deadline) in &self.expected_events {
@@ -256,6 +285,17 @@ mod tests {
     use crate::config::GuardianConfig;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
+
+    struct TestWindow {
+        start: UnixSeconds,
+        end: UnixSeconds,
+    }
+
+    impl AuditWindow for TestWindow {
+        fn in_window(&self, e: &WithdrawalEvent) -> bool {
+            e.timestamp >= self.start && e.timestamp <= self.end
+        }
+    }
 
     fn cfg() -> Config {
         Config {
@@ -423,5 +463,47 @@ mod tests {
                 cursor: 200,
             }
         );
+    }
+
+    #[test]
+    fn backfill_e1_outside_window_e2_inside_is_still_valid() {
+        let cfg = cfg();
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 31, 90, 1),
+            &cfg,
+        );
+        let window = TestWindow {
+            start: 100,
+            end: 200,
+        };
+
+        sm.add_event(
+            event(WithdrawalEventType::E2GuardianApproved, 31, 100, 1),
+            &cfg,
+        )
+        .expect("e2 is valid even with e1 out-of-window");
+        assert!(sm.is_in_audit_window(&window));
+
+        let findings = sm.violations(&Cursors {
+            sui: 1_000,
+            guardian: 1_000,
+        });
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn e1_inside_window_without_e2_is_in_scope() {
+        let cfg = cfg();
+        let sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 88, 120, 2),
+            &cfg,
+        );
+        let window = TestWindow {
+            start: 100,
+            end: 200,
+        };
+
+        assert!(sm.is_in_audit_window(&window));
     }
 }

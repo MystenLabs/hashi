@@ -109,4 +109,8 @@ impl Cursors {
             }
         }
     }
+
+    pub fn min(&self) -> UnixSeconds {
+        self.sui.min(self.guardian)
+    }
 }
