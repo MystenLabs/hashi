@@ -210,6 +210,7 @@ pub struct WithdrawalRequestInfo {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub requester_address: Address,
+    pub sui_tx_digest: Vec<u8>,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
@@ -774,6 +775,7 @@ pub struct WithdrawalRequestedEvent {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub requester_address: Address,
+    pub sui_tx_digest: Vec<u8>,
 }
 
 impl MoveType for WithdrawalRequestedEvent {

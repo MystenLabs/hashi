@@ -398,6 +398,7 @@ pub struct WithdrawalRequest {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub requester_address: Address,
+    pub sui_tx_digest: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
