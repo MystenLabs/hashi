@@ -108,6 +108,8 @@ impl MpcService {
                     Ok(output) => {
                         let epoch = self.inner.onchain_state().epoch();
                         if let Err(e) = self.prepare_signing(epoch, &output).await {
+                            // TODO: Node has valid key but no presignatures, can't sign.
+                            // Recovery requires presig state sync with peers.
                             error!("Failed to init signing after DKG recovery: {e}");
                         }
                         let _ = self.key_ready_tx.send(Some(output.public_key));
@@ -150,11 +152,8 @@ impl MpcService {
                 Ok(()) = self.refill_rx.changed() => {
                     let next_batch = *self.refill_rx.borrow();
                     if let Err(e) = self.refill_presignatures(next_batch).await {
-                        // TODO: A failed refill can also cause missed signing requests,
-                        // desynchronizing this node's presignature index from peers.
-                        // Even with remaining presignatures, the node uses wrong nonces
-                        // and signature aggregation fails.
-                        // Recovery requires same mechanism as restart recovery.
+                        // TODO: Failed refill can desynchronize this node's presignature
+                        // index from peers. Recovery requires presig state sync with peers.
                         error!("Presignature refill failed: {e}");
                     }
                 }
@@ -177,6 +176,8 @@ impl MpcService {
             .pending_epoch_change()
     }
 
+    // TODO: After restart, this node's presignature state is out of sync with
+    // peers who kept running. Recovery requires presig state sync with peers.
     async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -385,6 +386,8 @@ impl MpcService {
             }
         }
         if let Err(e) = self.prepare_signing(target_epoch, &output).await {
+            // TODO: Node has valid key but no presignatures, can't sign.
+            // Recovery requires presig state sync with peers.
             error!("Failed to init signing after key rotation to epoch {target_epoch}: {e}");
         }
     }
