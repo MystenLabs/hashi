@@ -271,6 +271,15 @@ pub struct RegisterOpts {
     #[clap(long, env = "SUI_RPC_URL")]
     pub sui_rpc_url: Option<String>,
 
+    /// Optional operator address to set during registration
+    #[clap(long)]
+    pub operator_address: Option<String>,
+
+    /// Print the unsigned transaction as base64 instead of executing it.
+    /// Useful for signing with a hardware wallet. No private key is required.
+    #[clap(long)]
+    pub print_only: bool,
+
     /// Enable verbose output
     #[clap(long, short)]
     pub verbose: bool,
@@ -494,6 +503,8 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
 
 /// Run the `register` command – register a validator on-chain.
 pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
+    use sui_sdk_types::bcs::ToBcs;
+
     init_tracing(opts.verbose);
 
     // Load the validator config
@@ -507,9 +518,35 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
             anyhow::anyhow!("Sui RPC URL not provided (use --sui-rpc-url or set in config file)")
         })?;
 
+    // Parse optional operator address
+    let operator_address = opts
+        .operator_address
+        .map(|s| s.parse::<sui_sdk_types::Address>())
+        .transpose()?;
+
     let validator_address = config.validator_address()?;
     print_info(&format!("Validator address: {validator_address}"));
     print_info(&format!("Sui RPC: {sui_rpc_url}"));
+
+    if opts.print_only {
+        // Build the transaction and print as base64 without executing.
+        // No private key is required for this path.
+        let mut client = sui_rpc::Client::new(&sui_rpc_url)?;
+        let hashi_ids = config.hashi_ids();
+
+        print_info("Building registration transaction ...");
+        let transaction = crate::sui_tx_executor::build_register_validator_tx(
+            &mut client,
+            &hashi_ids,
+            &config,
+            operator_address,
+        )
+        .await?;
+
+        let tx_base64 = transaction.to_bcs_base64()?;
+        println!("{tx_base64}");
+        return Ok(());
+    }
 
     if !opts.yes {
         print_info("This will register the validator on-chain (1 transaction).");
@@ -529,7 +566,9 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
 
     print_info("Registering validator ...");
-    executor.execute_register_validator(&config).await?;
+    executor
+        .execute_register_validator(&config, operator_address)
+        .await?;
 
     print_success("Validator registered successfully");
     Ok(())
