@@ -540,6 +540,10 @@ mod tests {
     struct SigningTestSetup {
         managers: Vec<Arc<RwLock<SigningManager>>>,
         verifying_key: G,
+        refill_rx: watch::Receiver<u32>,
+        n: u16,
+        f: u16,
+        t: u16,
     }
 
     impl SigningTestSetup {
@@ -590,7 +594,7 @@ mod tests {
                 })
                 .collect();
 
-            let (refill_tx, _refill_rx) = watch::channel(0u32);
+            let (refill_tx, refill_rx) = watch::channel(0u32);
             let refill_tx = Arc::new(refill_tx);
 
             let managers: Vec<_> = (0..n as usize)
@@ -633,6 +637,10 @@ mod tests {
             Self {
                 managers,
                 verifying_key: vk,
+                refill_rx,
+                n,
+                f,
+                t,
             }
         }
 
@@ -690,6 +698,77 @@ mod tests {
                 .map(|(i, m)| (test_address(i), m.clone()))
                 .collect();
             MockSigningP2PChannel { managers }
+        }
+
+        /// Exhaust all presignatures on all managers.
+        fn exhaust_pool(&self) {
+            let pool_size = self.managers[0].read().unwrap().initial_presig_count();
+            let beacon = S::zero();
+            for i in 0..pool_size {
+                let req_id = Address::new([i as u8; 32]);
+                self.prepare_all(b"exhaust", &beacon, req_id, None);
+            }
+        }
+
+        /// Build fresh presignatures and set as next_presignatures on all managers.
+        fn set_next_presignatures_on_all(&self) {
+            let batch_size_per_weight: u16 = 10;
+            let mut rng = StdRng::seed_from_u64(99);
+            let nonces_for_dealer: Vec<_> = (0..self.n)
+                .map(|_| {
+                    let nonces: Vec<S> = (0..batch_size_per_weight)
+                        .map(|_| S::rand(&mut rng))
+                        .collect();
+                    let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                    let nonce_shares: Vec<Vec<S>> = nonces
+                        .iter()
+                        .map(|&nonce| {
+                            mock_shares(&mut rng, nonce, self.t, self.n)
+                                .iter()
+                                .map(|e| e.value)
+                                .collect()
+                        })
+                        .collect();
+                    (public_keys, nonce_shares)
+                })
+                .collect();
+            for (i, mgr_lock) in self.managers.iter().enumerate() {
+                let index = ShareIndex::new(i as u16 + 1).unwrap();
+                let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
+                    .map(|j| batch_avss::ReceiverOutput {
+                        my_shares: batch_avss::SharesForNode {
+                            shares: vec![batch_avss::ShareBatch {
+                                index,
+                                batch: (0..batch_size_per_weight as usize)
+                                    .map(|l| nonces_for_dealer[j].1[l][i])
+                                    .collect(),
+                                blinding_share: S::zero(),
+                            }],
+                        },
+                        public_keys: nonces_for_dealer[j].0.clone(),
+                    })
+                    .collect();
+                let presignatures =
+                    Presignatures::new(outputs, batch_size_per_weight, self.f as usize).unwrap();
+                mgr_lock
+                    .write()
+                    .unwrap()
+                    .set_next_presignatures(presignatures);
+            }
+        }
+
+        /// Manually swap peers (skip manager at `caller_index`) to next_presignatures.
+        /// Needed because prepare_all calls generate_partial_signatures directly
+        /// (not sign()), so it doesn't have the OutOfPresigs swap logic.
+        fn swap_peers_to_next_batch(&self, caller_index: usize) {
+            for (i, mgr_lock) in self.managers.iter().enumerate() {
+                if i == caller_index {
+                    continue;
+                }
+                let mut mgr = mgr_lock.write().unwrap();
+                let next = mgr.next_presignatures.take().unwrap();
+                mgr.presignatures = next;
+            }
         }
     }
 
@@ -1049,5 +1128,87 @@ mod tests {
             "expected TooManyErrors, got: {:?}",
             result.err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_sign_pool_exhausted_with_next_batch() {
+        // Exhaust batch 0, set next_presignatures, verify sign() swaps to batch 1.
+        let setup = SigningTestSetup::new(4);
+        setup.exhaust_pool();
+        setup.set_next_presignatures_on_all();
+        setup.swap_peers_to_next_batch(0);
+
+        let req_id = Address::new([0xFF; 32]);
+        setup.prepare_all(b"swap", &S::zero(), req_id, Some(0));
+        let p2p = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            b"swap",
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, b"swap", &sig);
+        let mgr = setup.managers[0].read().unwrap();
+        assert_eq!(mgr.batch_index(), 1);
+        assert!(!mgr.has_next_presignatures());
+    }
+
+    #[tokio::test]
+    async fn test_sign_pool_exhausted_no_next_batch() {
+        // Exhaust pool without setting next_presignatures → PoolExhausted.
+        let setup = SigningTestSetup::new(4);
+        setup.exhaust_pool();
+
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"fail",
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+    }
+
+    #[test]
+    fn test_refill_threshold_triggers_signal() {
+        // Consuming past 50% threshold sends refill signal via watch channel.
+        let setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
+        let refill_at = (pool_size as f64 * crate::constants::PRESIG_REFILL_THRESHOLD) as usize;
+        let beacon = S::zero();
+
+        // Consume presignatures on manager 0 until we cross the threshold.
+        for _ in 0..(pool_size - refill_at) {
+            let mut mgr = setup.managers[0].write().unwrap();
+            let mgr = &mut *mgr;
+            let _ = generate_partial_signatures(
+                b"msg",
+                &mut mgr.presignatures,
+                &beacon,
+                &mgr.key_shares,
+                &mgr.verifying_key,
+                None,
+            )
+            .unwrap();
+            // Simulate the threshold check that sign() does.
+            let threshold = (mgr.initial_presig_count as f64 * mgr.refill_threshold) as usize;
+            if mgr.presignatures.len() <= threshold {
+                let _ = mgr.refill_tx.send(mgr.batch_index + 1);
+            }
+        }
+
+        assert!(setup.refill_rx.has_changed().unwrap());
+        assert_eq!(*setup.refill_rx.borrow(), 1);
     }
 }
