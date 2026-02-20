@@ -1,4 +1,5 @@
 use clap::Parser;
+use clap::Subcommand;
 use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config;
@@ -10,21 +11,79 @@ bin_version::bin_version!();
 #[clap(rename_all = "kebab-case")]
 #[clap(name = env!("CARGO_BIN_NAME"))]
 #[clap(version = VERSION)]
+#[clap(styles = hashi::cli::STYLES)]
 struct Args {
-    #[clap(long)]
-    pub config: Option<std::path::PathBuf>,
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the Hashi validator server
+    Server {
+        #[clap(long)]
+        config: Option<std::path::PathBuf>,
+    },
+
+    /// Proposal management commands
+    Proposal {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::ProposalCommands,
+    },
+
+    /// Committee information commands
+    Committee {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::CommitteeCommands,
+    },
+
+    /// CLI configuration management
+    Config {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::ConfigCommands,
+    },
+
+    /// Build, publish, and initialise the Hashi Move package
+    Publish {
+        #[clap(flatten)]
+        publish_opts: hashi::cli::PublishOpts,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    match args.command {
+        Commands::Server { config } => run_server(config).await,
+        Commands::Proposal { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Proposal { action }).await
+        }
+        Commands::Committee { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Committee { action }).await
+        }
+        Commands::Config { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Config { action }).await
+        }
+        Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
+    }
+}
+
+async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     init_tracing_subscriber();
 
     tracing::info!("welcome to hashi");
 
-    let args = Args::parse();
-
-    let config = args
-        .config
+    let config = config_path
         .map(|path| Config::load(&path))
         .transpose()
         .unwrap()

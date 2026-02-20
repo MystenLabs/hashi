@@ -13,7 +13,7 @@ tracing-subscriber.workspace = true
 prometheus.workspace = true
 axum.workspace = true
 sui-http.workspace = true
-lru = "0.12"
+lru = "0.16"
 reqwest.workspace = true
 
 sui-futures.workspace = true

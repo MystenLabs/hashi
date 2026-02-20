@@ -54,8 +54,6 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -468,6 +466,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+        // Clear stale state from previous batch.
         {
             let mut mgr = mpc_manager.write().unwrap();
             mgr.dealer_nonce_outputs.clear();
@@ -510,7 +509,7 @@ impl MpcManager {
         let dealer_data = {
             let mgr = Arc::clone(mpc_manager);
             spawn_blocking(move || {
-                let mut rng = StdRng::from_entropy();
+                let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
                 mgr.prepare_dealer_flow(&mut rng)
             })
@@ -688,7 +687,7 @@ impl MpcManager {
             let mgr = Arc::clone(mpc_manager);
             let previous = previous.clone();
             spawn_blocking(move || {
-                let mut rng = StdRng::from_entropy();
+                let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
                 mgr.prepare_rotation_dealer_flow(&previous, &mut rng)
             })
@@ -891,7 +890,7 @@ impl MpcManager {
         let dealer_data = {
             let mgr = Arc::clone(mpc_manager);
             spawn_blocking(move || {
-                let mut rng = StdRng::from_entropy();
+                let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
                 mgr.prepare_nonce_dealer_flow(batch_index, &mut rng)
             })

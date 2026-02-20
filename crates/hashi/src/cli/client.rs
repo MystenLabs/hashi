@@ -6,14 +6,14 @@
 //! Uses `OnchainState` from the hashi crate for reading on-chain data,
 //! and `SuiTxExecutor` for transaction execution when a keypair is configured.
 
+use crate::config::HashiIds;
+use crate::onchain::OnchainState;
+use crate::onchain::types::MemberInfo;
+use crate::onchain::types::Proposal;
+use crate::sui_tx_executor::SUI_CLOCK_OBJECT_ID;
+use crate::sui_tx_executor::SuiTxExecutor;
 use anyhow::Context;
 use anyhow::Result;
-use hashi::config::HashiIds;
-use hashi::onchain::OnchainState;
-use hashi::onchain::types::MemberInfo;
-use hashi::onchain::types::Proposal;
-use hashi::sui_tx_executor::SUI_CLOCK_OBJECT_ID;
-use hashi::sui_tx_executor::SuiTxExecutor;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
@@ -23,7 +23,7 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 
-use crate::config::Config;
+use super::config::CliConfig;
 
 /// Parameters for creating different types of proposals
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ impl HashiClient {
     ///
     /// This scrapes the current on-chain state and optionally sets up
     /// transaction execution if a keypair is configured.
-    pub async fn new(config: &Config) -> Result<Self> {
+    pub async fn new(config: &CliConfig) -> Result<Self> {
         config.validate()?;
 
         let hashi_ids = HashiIds {
@@ -332,9 +332,9 @@ impl HashiClient {
 /// Returns an error if the proposal type is `Unknown`.
 pub fn get_proposal_type_arg(
     package_id: Address,
-    proposal_type: &hashi::onchain::types::ProposalType,
+    proposal_type: &crate::onchain::types::ProposalType,
 ) -> Result<TypeTag> {
-    use hashi::onchain::types::ProposalType;
+    use crate::onchain::types::ProposalType;
 
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),

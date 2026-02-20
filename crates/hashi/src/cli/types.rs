@@ -1,12 +1,12 @@
 //! Type re-exports and display helpers for the CLI
 //!
-//! This module re-exports types from `hashi::onchain::types` and provides
+//! This module re-exports types from `crate::onchain::types` and provides
 //! display formatting utilities for CLI output.
 
 // Re-export onchain types used by the CLI
-pub use hashi::onchain::types::Proposal;
+pub use crate::onchain::types::Proposal;
 
-use hashi::onchain::types::ProposalType;
+use crate::onchain::types::ProposalType;
 use sui_sdk_types::Address;
 
 /// Display formatting helpers
