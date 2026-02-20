@@ -251,11 +251,18 @@ pub enum CertificateV1 {
 impl CertificateV1 {
     pub fn new(
         protocol_type: hashi_types::move_types::ProtocolType,
+        batch_index: Option<u32>,
         cert: DealerCertificate,
     ) -> Self {
         match protocol_type {
             hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
             hashi_types::move_types::ProtocolType::KeyRotation => CertificateV1::Rotation(cert),
+            hashi_types::move_types::ProtocolType::NonceGeneration => {
+                CertificateV1::NonceGeneration {
+                    batch_index: batch_index.expect("batch_index required for NonceGeneration"),
+                    cert,
+                }
+            }
         }
     }
 

@@ -153,7 +153,10 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let protocol_type = onchain_state.fetch_certs(epoch).await?.map(|(pt, _)| pt);
+        let protocol_type = onchain_state
+            .fetch_certs(epoch, None)
+            .await?
+            .map(|(pt, _)| pt);
         match protocol_type {
             Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
                 self.setup_key_rotation(epoch)?;
@@ -176,6 +179,7 @@ impl MpcService {
             self.inner.config.hashi_ids(),
             onchain_state,
             epoch,
+            None,
             signer,
             committee,
         );
@@ -306,9 +310,10 @@ impl MpcService {
             .get(&source_epoch)
             .ok_or_else(|| anyhow::anyhow!("No committee for source epoch {source_epoch}"))?
             .clone();
-        let previous_certs = fetch_certificates(&onchain_state, source_epoch, &source_committee)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
+        let previous_certs =
+            fetch_certificates(&onchain_state, source_epoch, None, &source_committee)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
         let signer = self.inner.config.operator_private_key()?;
@@ -317,6 +322,7 @@ impl MpcService {
             self.inner.config.hashi_ids(),
             onchain_state,
             target_epoch,
+            None,
             signer,
             target_committee,
         );

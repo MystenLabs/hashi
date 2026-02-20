@@ -48,6 +48,7 @@ pub struct SuiTobChannel {
     hashi_ids: HashiIds,
     onchain_state: OnchainState,
     epoch: u64,
+    batch_index: Option<u32>,
     signer: Ed25519PrivateKey,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
@@ -61,6 +62,7 @@ impl SuiTobChannel {
         hashi_ids: HashiIds,
         onchain_state: OnchainState,
         epoch: u64,
+        batch_index: Option<u32>,
         signer: Ed25519PrivateKey,
         committee: Committee,
     ) -> Self {
@@ -68,6 +70,7 @@ impl SuiTobChannel {
             hashi_ids,
             onchain_state,
             epoch,
+            batch_index,
             signer,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
@@ -88,11 +91,12 @@ impl SuiTobChannel {
 pub async fn fetch_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
+    batch_index: Option<u32>,
     committee: &Committee,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
     let threshold = certificate_threshold(committee.total_weight());
     let Some((protocol_type, raw_certs)) = onchain_state
-        .fetch_certs(epoch)
+        .fetch_certs(epoch, batch_index)
         .await
         .map_err(|e| TobError::RpcError(e.to_string()))?
     else {
@@ -102,7 +106,7 @@ pub async fn fetch_certificates(
     for (dealer, cert) in raw_certs {
         let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch, committee, threshold)
             .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
-        let cert = CertificateV1::new(protocol_type, inner_cert);
+        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert);
         certificates.push((dealer, cert));
     }
     Ok(certificates)
@@ -112,9 +116,14 @@ pub async fn fetch_certificates(
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = fetch_certificates(&self.onchain_state, self.epoch, &self.committee)
-            .await
-            .map_err(ChannelError::from)?;
+        let existing = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            &self.committee,
+        )
+        .await
+        .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
         }
@@ -132,9 +141,14 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = fetch_certificates(&self.onchain_state, self.epoch, &self.committee)
-                .await
-                .map_err(ChannelError::from)?;
+            let all_certs = fetch_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                &self.committee,
+            )
+            .await
+            .map_err(ChannelError::from)?;
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
                     self.seen_dealers.insert(dealer);
