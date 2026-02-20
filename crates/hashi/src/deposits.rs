@@ -8,6 +8,7 @@ use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
+use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
 
 impl Hashi {
@@ -143,7 +144,16 @@ impl Hashi {
         hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> bitcoin::Address {
-        let pubkey = if let Some(path) = derivation_path {
+        let pubkey = self.deposit_pubkey(hashi_pubkey, derivation_path);
+        self.bitcoin_address_from_pubkey(&pubkey)
+    }
+
+    pub(crate) fn deposit_pubkey(
+        &self,
+        hashi_pubkey: &XOnlyPublicKey,
+        derivation_path: Option<&sui_sdk_types::Address>,
+    ) -> XOnlyPublicKey {
+        if let Some(path) = derivation_path {
             let verifying_key = self
                 .signing_verifying_key()
                 .expect("MPC public key not available yet");
@@ -154,18 +164,11 @@ impl Hashi {
             XOnlyPublicKey::from_slice(&derived.to_byte_array()).expect("valid 32-byte x-only key")
         } else {
             *hashi_pubkey
-        };
-        self.bitcoin_address_from_pubkey(&pubkey)
+        }
     }
 
-    fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
-        // TODO: https://linear.app/mysten-labs/issue/IOP-219/handle-taproot-tweaking-properly
-        // let network = self.config.bitcoin_network();
-        // let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        // bitcoin::Address::p2tr(&secp, *pubkey, None, network)
-        let network = self.config.bitcoin_network();
-        let tweaked = bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(*pubkey);
-        bitcoin::Address::p2tr_tweaked(tweaked, network)
+    pub(crate) fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
+        bitcoin_utils::single_key_taproot_script_path_address(pubkey, self.config.bitcoin_network())
     }
 
     fn bitcoin_address_from_script_pubkey(

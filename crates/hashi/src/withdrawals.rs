@@ -18,6 +18,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::sighash::TapSighashType;
+use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::traits::ToFromBytes;
@@ -395,28 +396,44 @@ impl Hashi {
         inputs: &[Utxo],
     ) -> anyhow::Result<Vec<[u8; 32]>> {
         let hashi_pubkey = self.get_hashi_pubkey();
-        let prevouts = inputs
+        let spend_inputs = inputs
             .iter()
             .map(|input| {
-                let address =
-                    self.get_deposit_address(&hashi_pubkey, input.derivation_path.as_ref());
-                TxOut {
-                    value: Amount::from_sat(input.amount),
-                    script_pubkey: address.script_pubkey(),
-                }
+                let pubkey = self.deposit_pubkey(&hashi_pubkey, input.derivation_path.as_ref());
+                let address = self.bitcoin_address_from_pubkey(&pubkey);
+                let (_, _, leaf_hash) =
+                    bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+                (
+                    TxOut {
+                        value: Amount::from_sat(input.amount),
+                        script_pubkey: address.script_pubkey(),
+                    },
+                    leaf_hash,
+                )
             })
             .collect::<Vec<_>>();
+        let prevouts = spend_inputs
+            .iter()
+            .map(|(txout, _)| txout.clone())
+            .collect::<Vec<_>>();
+        let leaf_hashes = spend_inputs
+            .iter()
+            .map(|(_, leaf_hash)| *leaf_hash)
+            .collect::<Vec<TapLeafHash>>();
 
         (0..inputs.len())
             .map(|input_index| {
                 let mut sighasher = SighashCache::new(unsigned_tx);
                 let sighash = sighasher
-                    .taproot_key_spend_signature_hash(
+                    .taproot_script_spend_signature_hash(
                         input_index,
                         &Prevouts::All(&prevouts),
+                        leaf_hashes[input_index],
                         TapSighashType::Default,
                     )
-                    .map_err(|e| anyhow!("Failed to construct taproot key spend sighash: {e}"))?;
+                    .map_err(|e| {
+                        anyhow!("Failed to construct taproot script spend sighash: {e}")
+                    })?;
                 Ok(*sighash.as_byte_array())
             })
             .collect()

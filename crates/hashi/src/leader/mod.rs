@@ -16,6 +16,7 @@ use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
+use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignWithdrawalApprovalRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
@@ -521,10 +522,29 @@ impl LeaderService {
             tx.input.len(),
             signatures.len()
         );
+        anyhow::ensure!(
+            tx.input.len() == pending.inputs.len(),
+            "Input count mismatch: tx has {} inputs, pending has {}",
+            tx.input.len(),
+            pending.inputs.len()
+        );
 
-        for (input, signature) in tx.input.iter_mut().zip(signatures) {
+        let hashi_pubkey = self.inner.get_hashi_pubkey();
+        for ((input, pending_input), signature) in tx
+            .input
+            .iter_mut()
+            .zip(pending.inputs.iter())
+            .zip(signatures)
+        {
+            let pubkey = self
+                .inner
+                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref());
+            let (script, control_block, _) =
+                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
             let mut witness = bitcoin::Witness::new();
             witness.push(signature.to_byte_array());
+            witness.push(script.to_bytes());
+            witness.push(control_block.serialize());
             input.witness = witness;
         }
 
