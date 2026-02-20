@@ -1,8 +1,6 @@
 // TODO: consolidate this file and deposit_flow.rs
 use anyhow::Result;
 use anyhow::anyhow;
-use bitcoin::Txid;
-use bitcoincore_rpc::RpcApi;
 use futures::StreamExt;
 use hashi_types::move_types::WithdrawalConfirmedEvent;
 use std::time::Duration;
@@ -13,8 +11,6 @@ use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 use sui_sdk_types::bcs::FromBcs;
 use tracing::debug;
 use tracing::info;
-
-use crate::BitcoinNodeHandle;
 
 pub async fn wait_for_withdrawal_confirmation(
     sui_client: &mut sui_rpc::Client,
@@ -99,76 +95,6 @@ pub fn extract_witness_program(address: &bitcoin::Address) -> Result<Vec<u8>> {
     }
 }
 
-/// Wait for a withdrawal transaction to be mined and pay the destination.
-pub async fn wait_for_btc_confirmation(
-    bitcoin_node: &BitcoinNodeHandle,
-    txid: &Txid,
-    destination: &bitcoin::Address,
-    amount: bitcoin::Amount,
-    timeout: Duration,
-) -> Result<()> {
-    info!(
-        "Waiting for withdrawal tx {} paying {} to {}...",
-        txid, amount, destination
-    );
-    let start = std::time::Instant::now();
-    loop {
-        bitcoin_node.generate_blocks(1)?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let tx = match bitcoin_node.rpc_client().get_raw_transaction(txid, None) {
-            Ok(tx) => tx,
-            Err(e) => {
-                if start.elapsed() >= timeout {
-                    return Err(anyhow!(
-                        "Withdrawal tx {} not found after {:?}: {}",
-                        txid,
-                        timeout,
-                        e
-                    ));
-                }
-                debug!("Withdrawal tx {} not indexed yet: {}", txid, e);
-                continue;
-            }
-        };
-
-        let pays_destination = tx.output.iter().any(|output| {
-            output.value == amount && output.script_pubkey == destination.script_pubkey()
-        });
-        if !pays_destination {
-            return Err(anyhow!(
-                "Withdrawal tx {} does not pay {} to destination {}",
-                txid,
-                amount,
-                destination
-            ));
-        }
-
-        let received = bitcoin_node
-            .rpc_client()
-            .get_received_by_address(destination, Some(1))?;
-        if received >= amount {
-            info!(
-                "Withdrawal tx {} confirmed with {} at {}",
-                txid, received, destination
-            );
-            return Ok(());
-        }
-
-        if start.elapsed() >= timeout {
-            return Err(anyhow!(
-                "BTC amount {} from tx {} not confirmed at {} after {:?}",
-                amount,
-                txid,
-                destination,
-                timeout
-            ));
-        }
-
-        debug!("Destination not funded yet, waiting...");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +105,9 @@ mod tests {
     use crate::deposit_flow::wait_for_deposit_confirmation;
     use anyhow::Context;
     use bitcoin::Amount;
+    use bitcoin::Txid;
     use bitcoin::hashes::Hash;
+    use bitcoincore_rpc::RpcApi;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
     use fastcrypto_tbls::threshold_schnorr::G;
@@ -191,11 +119,6 @@ mod tests {
     use hashi::sui_tx_executor::SuiTxExecutor;
     use rand::SeedableRng;
     use std::collections::HashMap;
-    use sui_sdk_types::Address;
-
-    fn address_to_txid(addr: &Address) -> Txid {
-        Txid::from_byte_array(addr.as_bytes().try_into().unwrap())
-    }
 
     fn deterministic_presignatures(
         committee: &hashi_types::committee::Committee,
@@ -319,6 +242,78 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn address_to_txid(addr: &sui_sdk_types::Address) -> Txid {
+        Txid::from_byte_array(addr.as_bytes().try_into().unwrap())
+    }
+
+    async fn wait_for_withdrawal_tx_success(
+        bitcoin_node: &crate::BitcoinNodeHandle,
+        txid: &Txid,
+        destination: &bitcoin::Address,
+        amount: Amount,
+        timeout: Duration,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+
+        loop {
+            if bitcoin_node.rpc_client().get_mempool_entry(txid).is_ok() {
+                info!("Withdrawal tx {} is in mempool", txid);
+                break;
+            }
+            if start.elapsed() >= timeout {
+                return Err(anyhow!(
+                    "Withdrawal tx {} was not seen in mempool within {:?}",
+                    txid,
+                    timeout
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        loop {
+            let mined_blocks = bitcoin_node.generate_blocks(1)?;
+            let block_hash = mined_blocks
+                .last()
+                .copied()
+                .ok_or_else(|| anyhow!("Expected at least one mined block"))?;
+            let block = bitcoin_node.rpc_client().get_block(&block_hash)?;
+
+            if !block.txdata.iter().any(|tx| tx.compute_txid() == *txid) {
+                if start.elapsed() >= timeout {
+                    return Err(anyhow!(
+                        "Withdrawal tx {} did not confirm within {:?}",
+                        txid,
+                        timeout
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+
+            let tx = bitcoin_node
+                .rpc_client()
+                .get_raw_transaction(txid, Some(&block_hash))?;
+            let pays_destination = tx.output.iter().any(|output| {
+                output.value == amount && output.script_pubkey == destination.script_pubkey()
+            });
+            if !pays_destination {
+                return Err(anyhow!(
+                    "Withdrawal tx {} is confirmed but does not pay {} to {}",
+                    txid,
+                    amount,
+                    destination
+                ));
+            }
+
+            info!(
+                "Withdrawal tx {} confirmed in block {} with expected output",
+                txid,
+                block_hash
+            );
+            return Ok(());
+        }
     }
 
     #[tokio::test]
@@ -470,11 +465,11 @@ mod tests {
         // ================================================================
         // Step 7: Verify BTC arrived on Bitcoin
         // ================================================================
-        let btc_txid = address_to_txid(&confirmed_event.txid);
-        info!("Observed withdrawal Bitcoin txid in event: {}", btc_txid);
-        wait_for_btc_confirmation(
+        let withdrawal_txid = address_to_txid(&confirmed_event.txid);
+        info!("Observed withdrawal Bitcoin txid in event: {}", withdrawal_txid);
+        wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
-            &btc_txid,
+            &withdrawal_txid,
             &btc_destination,
             Amount::from_sat(withdrawal_amount_sats),
             Duration::from_secs(30),
