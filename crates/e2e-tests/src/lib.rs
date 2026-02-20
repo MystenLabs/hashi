@@ -16,11 +16,10 @@ use std::process::Command;
 use anyhow::Result;
 
 pub mod bitcoin_node;
-pub mod deposit_flow;
+pub mod e2e_flow;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
-pub mod withdrawal_flow;
 
 pub use bitcoin_node::BitcoinNodeBuilder;
 pub use bitcoin_node::BitcoinNodeHandle;
