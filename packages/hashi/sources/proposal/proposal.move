@@ -75,7 +75,7 @@ public(package) fun execute<T: store>(hashi: &mut Hashi, proposal_id: ID, clock:
 
     hashi.config().assert_version_enabled();
 
-    proposal_events::emit_proposal_executed_event(proposal.id.to_inner());
+    proposal_events::emit_proposal_executed_event<T>(proposal.id.to_inner());
     proposal.delete()
 }
 
@@ -89,9 +89,9 @@ public fun vote<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx
 
     proposal.votes.push_back(ctx.sender());
 
-    proposal_events::emit_vote_cast_event(proposal_id, ctx.sender());
+    proposal_events::emit_vote_cast_event<T>(proposal_id, ctx.sender());
     if (proposal.quorum_reached(hashi)) {
-        proposal_events::emit_quorum_reached_event(proposal_id);
+        proposal_events::emit_quorum_reached_event<T>(proposal_id);
     }
 }
 
@@ -102,7 +102,7 @@ public fun remove_vote<T: store>(hashi: &mut Hashi, proposal_id: ID, ctx: &mut T
     let index = proposal.votes.find_index!(|v| v == &ctx.sender()).destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
-    proposal_events::emit_vote_removed_event(
+    proposal_events::emit_vote_removed_event<T>(
         proposal.id.to_inner(),
         ctx.sender(),
     );

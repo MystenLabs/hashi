@@ -28,6 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
 use sui_crypto::SuiSigner;
@@ -50,12 +51,14 @@ use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
+use crate::withdrawals::WithdrawalApproval;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 /// Well-known Sui Clock object address (0x6)
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
+const SUI_RANDOM_OBJECT_ID: Address = Address::from_static("0x8");
 
 /// A reusable executor for submitting Sui transactions.
 ///
@@ -489,6 +492,138 @@ impl SuiTxExecutor {
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
                 "Certificate submission failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::pick_withdrawal_for_processing` to commit to a withdrawal on-chain.
+    ///
+    /// The Move function expects:
+    /// - `hashi: &mut Hashi`
+    /// - `requests: vector<address>` — withdrawal request IDs
+    /// - `selected_utxos: vector<vector<u8>>` — BCS-encoded `UtxoId`s
+    /// - `outputs: vector<vector<u8>>` — BCS-encoded `OutputUtxo`s
+    /// - `txid: address` — bitcoin transaction ID
+    /// - `clock: &Clock`
+    /// - `r: &Random`
+    pub async fn execute_pick_withdrawal_for_processing(
+        &mut self,
+        approval: &WithdrawalApproval,
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+
+        let requests_arg = builder.pure(&approval.request_ids);
+
+        let selected_utxos_bcs: Vec<Vec<u8>> = approval
+            .selected_utxos
+            .iter()
+            .map(|utxo_id| bcs::to_bytes(utxo_id).unwrap())
+            .collect();
+        let selected_utxos_arg = builder.pure(&selected_utxos_bcs);
+
+        let outputs_bcs: Vec<Vec<u8>> = approval
+            .outputs
+            .iter()
+            .map(|output| bcs::to_bytes(output).unwrap())
+            .collect();
+        let outputs_arg = builder.pure(&outputs_bcs);
+
+        let txid_arg = builder.pure(&approval.txid);
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+        let random_arg = builder.object(
+            ObjectInput::new(SUI_RANDOM_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("pick_withdrawal_for_processing"),
+            ),
+            vec![
+                hashi_arg,
+                requests_arg,
+                selected_utxos_arg,
+                outputs_arg,
+                txid_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+                clock_arg,
+                random_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "pick_withdrawal_for_processing failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::confirm_withdrawal` to finalize a withdrawal on-chain.
+    ///
+    /// The Move function expects:
+    /// - `hashi: &mut Hashi`
+    /// - `withdrawal_id: address`
+    pub async fn execute_confirm_withdrawal(
+        &mut self,
+        withdrawal_id: &Address,
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("confirm_withdrawal"),
+            ),
+            vec![
+                hashi_arg,
+                withdrawal_id_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "confirm_withdrawal failed: {:?}",
                 response.transaction().effects().status()
             );
         }

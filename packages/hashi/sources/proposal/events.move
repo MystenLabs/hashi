@@ -10,25 +10,25 @@ public struct ProposalCreatedEvent<phantom T> has copy, drop {
     timestamp_ms: u64,
 }
 
-public struct VoteCastEvent has copy, drop {
+public struct VoteCastEvent<phantom T> has copy, drop {
     proposal_id: ID,
     voter: address,
 }
 
-public struct VoteRemovedEvent has copy, drop {
+public struct VoteRemovedEvent<phantom T> has copy, drop {
     proposal_id: ID,
     voter: address,
 }
 
-public struct ProposalDeletedEvent has copy, drop {
+public struct ProposalDeletedEvent<phantom T> has copy, drop {
     proposal_id: ID,
 }
 
-public struct ProposalExecutedEvent has copy, drop {
+public struct ProposalExecutedEvent<phantom T> has copy, drop {
     proposal_id: ID,
 }
 
-public struct QuorumReachedEvent has copy, drop {
+public struct QuorumReachedEvent<phantom T> has copy, drop {
     proposal_id: ID,
 }
 
@@ -44,41 +44,40 @@ public(package) fun emit_proposal_created_event<T>(proposal_id: ID, timestamp_ms
     });
 }
 
-public(package) fun emit_vote_cast_event(proposal_id: ID, voter: address) {
-    event::emit(VoteCastEvent {
+public(package) fun emit_vote_cast_event<T>(proposal_id: ID, voter: address) {
+    event::emit(VoteCastEvent<T> {
         proposal_id,
         voter,
     });
 }
 
-public(package) fun emit_vote_removed_event(proposal_id: ID, voter: address) {
-    event::emit(VoteRemovedEvent {
+public(package) fun emit_vote_removed_event<T>(proposal_id: ID, voter: address) {
+    event::emit(VoteRemovedEvent<T> {
         proposal_id,
         voter,
     });
 }
 
-public(package) fun emit_quorum_reached_event(proposal_id: ID) {
-    event::emit(QuorumReachedEvent {
+public(package) fun emit_quorum_reached_event<T>(proposal_id: ID) {
+    event::emit(QuorumReachedEvent<T> {
         proposal_id,
     });
 }
 
-public(package) fun emit_proposal_deleted_event(proposal_id: ID) {
-    event::emit(ProposalDeletedEvent {
+public(package) fun emit_proposal_deleted_event<T>(proposal_id: ID) {
+    event::emit(ProposalDeletedEvent<T> {
         proposal_id,
     });
 }
 
-// TODO: add any relevant proposal data to the event
-public(package) fun emit_proposal_executed_event(proposal_id: ID) {
-    event::emit(ProposalExecutedEvent {
+public(package) fun emit_proposal_executed_event<T>(proposal_id: ID) {
+    event::emit(ProposalExecutedEvent<T> {
         proposal_id,
     });
 }
 
 #[test_only]
-public fun proposal_id(quorum_reached_event: &QuorumReachedEvent): ID {
+public fun proposal_id<T>(quorum_reached_event: &QuorumReachedEvent<T>): ID {
     quorum_reached_event.proposal_id
 }
 

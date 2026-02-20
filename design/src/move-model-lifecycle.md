@@ -86,11 +86,16 @@ flowchart TD
         subgraph ProcessPhase["2. Processing Phase"]
             UTXO_POOL["UtxoPool<br/>"]
             BURN["Treasury.burn()"]
-            PW["PendingWithdrawal<br/>{ request, picked_utxos }"]
+            PW["PendingWithdrawal<br/>{ request, picked_utxos,<br/>witness_signatures }"]
             PWQ["WithdrawalQueue<br/>.pending_withdrawals"]
         end
 
-        subgraph ConfirmPhase["3. Confirmation Phase"]
+        subgraph SignPhase["3. Signature Storage Phase"]
+            SUBMIT_SIGS["submit_withdrawal_signatures()<br/>Store witness sigs on-chain"]
+            PW_SIGNED["PendingWithdrawal<br/>(with witness_signatures)"]
+        end
+
+        subgraph ConfirmPhase["4. Confirmation Phase"]
             CERTIFIED2["CertifiedMessage&lt;Confirmation&gt;"]
             DEL["Delete PendingWithdrawal"]
             RECORD["Record withdrawn UTXOs<br/>(replay prevention)"]
@@ -119,9 +124,11 @@ flowchart TD
     BURN -->|"Balance&lt;BTC&gt; burned"| PW
     PW --> PWQ
     PWQ -.->|"Observe pending<br/>withdrawals queue"| MPC
-    MPC -->|"Committee signs<br/>Bitcoin transaction"| BTC_TX
+    MPC -->|"Schnorr signatures<br/>per input"| SUBMIT_SIGS
+    SUBMIT_SIGS -->|"witness_signatures<br/>stored on-chain"| PW_SIGNED
+    PW_SIGNED -->|"Reconstruct & broadcast<br/>signed BTC tx"| BTC_TX
     BTC_TX --> BTC_UTXO
-    BTC_UTXO -.->|"Observe confirmation*"| SIGN2
+    BTC_UTXO -.->|"Observe confirmation<br/>(N confirmations)"| SIGN2
     SIGN2 --> CERT2
     CERT2 -->|"confirm_withdraw()"| CERTIFIED2
     CERTIFIED2 --> DEL
@@ -134,36 +141,38 @@ flowchart TD
     style BTC_UTXO fill:#f7931a,color:#fff
     style CERT2 fill:#E91E8A,color:#fff
     style CERTIFIED2 fill:#00d4aa,color:#000
+    style PW_SIGNED fill:#00d4aa,color:#000
 ```
 
-> **\* Note:** The exact Bitcoin conditions that must be met before the committee agrees to execute `confirm_withdraw()` on-chain are still TBD (e.g., number of confirmations, specific validation checks).
+> **Note:** The Bitcoin confirmation threshold (e.g., 6 confirmations) is configurable via `bitcoin_confirmation_threshold`. Witness signatures are stored on-chain so that any leader can reconstruct and re-broadcast the signed Bitcoin transaction without MPC re-signing (e.g., after leader rotation or mempool eviction).
 
 ### Withdrawal Flow Summary
 
-| Step | Action                                   | Model Transformation                                            |
-| ---- | ---------------------------------------- | --------------------------------------------------------------- |
-| 1    | User requests withdrawal                 | `Balance<BTC>` → `WithdrawRequest` → `WithdrawalQueue.requests` |
-| 2    | Committee votes & selects UTXOs          | Quorum votes, reads `UtxoPool` (off-chain) to select UTXOs      |
-| 3    | Leader processes request                 | `Balance<BTC>` burned, `PendingWithdrawal` created              |
-| 4    | MPC protocol signs Bitcoin transaction   | Committee collectively signs via MPC using selected UTXOs       |
-| 5    | BTC transferred to destination           | Bitcoin UTXO created at user's address                          |
-| 6    | Committee signs confirmation certificate | `CommitteeSignature` created                                    |
-| 7    | Leader confirms withdrawal               | `CertifiedMessage` verified, `PendingWithdrawal` deleted        |
-| 8    | Record withdrawn UTXOs                   | Spent UTXOs recorded for replay prevention                      |
+| Step | Action                                       | Model Transformation                                             |
+| ---- | -------------------------------------------- | ---------------------------------------------------------------- |
+| 1    | User requests withdrawal                     | `Balance<BTC>` → `WithdrawRequest` → `WithdrawalQueue.requests`  |
+| 2    | Committee votes & selects UTXOs              | Quorum votes, reads `UtxoPool` (off-chain) to select UTXOs       |
+| 3    | Leader processes request                     | `Balance<BTC>` burned, `PendingWithdrawal` created               |
+| 4    | MPC protocol signs Bitcoin transaction       | Committee collectively signs via MPC using selected UTXOs        |
+| 5    | Leader stores witness signatures on-chain    | `submit_withdrawal_signatures()` → `PendingWithdrawal` updated   |
+| 6    | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from on-chain data, broadcast to Bitcoin |
+| 7    | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed              |
+| 8    | Leader confirms withdrawal                   | `CertifiedMessage` verified, `PendingWithdrawal` deleted         |
+| 9    | Record withdrawn UTXOs                       | Spent UTXOs recorded for replay prevention                       |
 
 ---
 
 ## Key Models Reference
 
-| Model                 | Location                              | Description                                          |
-| --------------------- | ------------------------------------- | ---------------------------------------------------- |
-| `Balance<BTC>`        | User wallet                           | Wrapped BTC token on Sui                             |
-| `DepositRequest`      | `DepositRequestQueue`                 | Pending deposit awaiting committee confirmation      |
-| `Utxo`                | `UtxoPool`                            | On-chain representation of a Bitcoin UTXO            |
-| `WithdrawRequest`     | `WithdrawalQueue.requests`            | User's withdrawal request with destination           |
-| `PendingWithdrawal`   | `WithdrawalQueue.pending_withdrawals` | Withdrawal being processed, stores picked UTXOs      |
-| `Bitcoin UTXO`        | Bitcoin Network                       | Actual unspent transaction output on Bitcoin         |
-| `Committee`           | `CommitteeSet`                        | BLS signing committee of Sui validators for an epoch |
-| `CommitteeMember`     | `Committee.members`                   | Validator with public_key and voting weight          |
-| `CommitteeSignature`  | Transaction input                     | Aggregated BLS signature with signers bitmap         |
-| `CertifiedMessage<T>` | Verified on-chain                     | Message proven to have committee quorum support      |
+| Model                 | Location                              | Description                                                            |
+| --------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| `Balance<BTC>`        | User wallet                           | Wrapped BTC token on Sui                                               |
+| `DepositRequest`      | `DepositRequestQueue`                 | Pending deposit awaiting committee confirmation                        |
+| `Utxo`                | `UtxoPool`                            | On-chain representation of a Bitcoin UTXO                              |
+| `WithdrawRequest`     | `WithdrawalQueue.requests`            | User's withdrawal request with destination                             |
+| `PendingWithdrawal`   | `WithdrawalQueue.pending_withdrawals` | Withdrawal being processed, stores picked UTXOs and witness signatures |
+| `Bitcoin UTXO`        | Bitcoin Network                       | Actual unspent transaction output on Bitcoin                           |
+| `Committee`           | `CommitteeSet`                        | BLS signing committee of Sui validators for an epoch                   |
+| `CommitteeMember`     | `Committee.members`                   | Validator with public_key and voting weight                            |
+| `CommitteeSignature`  | Transaction input                     | Aggregated BLS signature with signers bitmap                           |
+| `CertifiedMessage<T>` | Verified on-chain                     | Message proven to have committee quorum support                        |

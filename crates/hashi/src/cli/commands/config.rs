@@ -4,16 +4,16 @@ use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 
-use crate::client::HashiClient;
-use crate::config::Config;
-use crate::print_info;
-use crate::print_success;
-use crate::print_warning;
-use crate::types::display;
+use crate::cli::client::HashiClient;
+use crate::cli::config::CliConfig;
+use crate::cli::print_info;
+use crate::cli::print_success;
+use crate::cli::print_warning;
+use crate::cli::types::display;
 
 /// Generate a configuration template file
 pub fn generate_template(output: &Path) -> Result<()> {
-    let template = Config::generate_template();
+    let template = CliConfig::generate_template();
 
     if output.exists() {
         print_warning(&format!(
@@ -44,7 +44,7 @@ pub fn generate_template(output: &Path) -> Result<()> {
 }
 
 /// Show the current effective configuration
-pub fn show_config(config: &Config) -> Result<()> {
+pub fn show_config(config: &CliConfig) -> Result<()> {
     println!("\n{}", "Current Configuration:".bold());
     println!("{}", "━".repeat(50).dimmed());
 
@@ -102,7 +102,7 @@ pub fn show_config(config: &Config) -> Result<()> {
 }
 
 /// Show on-chain configuration values
-pub async fn show_onchain_config(config: &Config) -> Result<()> {
+pub async fn show_onchain_config(config: &CliConfig) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     print_info("Fetching on-chain configuration...");

@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use sui_futures::service::Service;
 
 pub mod btc_monitor;
+pub mod cli;
 pub mod communication;
 pub mod config;
 pub mod constants;
@@ -17,9 +18,11 @@ pub mod leader;
 pub mod metrics;
 pub mod mpc;
 pub mod onchain;
+pub mod publish;
 pub mod storage;
 pub mod sui_tx_executor;
 pub mod tls;
+pub mod withdrawals;
 
 /// The allowed delta for weight reduction in basis points (800 means 8%).
 /// This matches Sui's `random_beacon_reduction_allowed_delta` configuration.
