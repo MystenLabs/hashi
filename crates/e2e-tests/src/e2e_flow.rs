@@ -1,26 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use anyhow::Context;
     use anyhow::Result;
     use anyhow::anyhow;
     use bitcoin::Amount;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash;
     use bitcoincore_rpc::RpcApi;
-    use fastcrypto::groups::GroupElement;
-    use fastcrypto::groups::Scalar;
-    use fastcrypto_tbls::threshold_schnorr::G;
-    use fastcrypto_tbls::threshold_schnorr::S;
-    use fastcrypto_tbls::threshold_schnorr::avss;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss;
-    use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
-    use fastcrypto_tbls::types::ShareIndex;
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::move_types::DepositConfirmedEvent;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
-    use rand::SeedableRng;
-    use std::collections::HashMap;
     use std::time::Duration;
     use sui_rpc::field::FieldMask;
     use sui_rpc::field::FieldMaskUtil;
@@ -33,7 +22,6 @@ mod tests {
     use tracing::debug;
     use tracing::info;
 
-    use crate::HashiNodeHandle;
     use crate::TestNetworks;
     use crate::TestNetworksBuilder;
 
@@ -61,7 +49,6 @@ mod tests {
         networks.hashi_network.nodes()[0]
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
-        initialize_signing_managers(networks.hashi_network.nodes())?;
         info!("MPC key ready");
 
         Ok(networks)
@@ -323,130 +310,6 @@ mod tests {
                 "Unsupported script pubkey for withdrawal: {script}"
             )),
         }
-    }
-
-    fn deterministic_presignatures(
-        committee: &hashi_types::committee::Committee,
-        epoch: u64,
-        share_indices: &[ShareIndex],
-        batch_size_per_weight: u16,
-        max_faulty: usize,
-    ) -> Result<Presignatures> {
-        let outputs: Vec<batch_avss::ReceiverOutput> = committee
-            .members()
-            .iter()
-            .map(|member| {
-                let mut seed = [0u8; 32];
-                seed.copy_from_slice(member.validator_address().as_bytes());
-                for (i, b) in epoch.to_le_bytes().iter().enumerate() {
-                    seed[i] ^= *b;
-                }
-                let mut rng = rand::rngs::StdRng::from_seed(seed);
-                let nonces: Vec<S> = (0..batch_size_per_weight)
-                    .map(|_| S::rand(&mut rng))
-                    .collect();
-                let public_keys: Vec<G> =
-                    nonces.iter().map(|nonce| G::generator() * *nonce).collect();
-                let my_shares = batch_avss::SharesForNode {
-                    shares: share_indices
-                        .iter()
-                        .map(|&index| batch_avss::ShareBatch {
-                            index,
-                            batch: nonces.clone(),
-                            blinding_share: S::zero(),
-                        })
-                        .collect(),
-                };
-                batch_avss::ReceiverOutput {
-                    my_shares,
-                    public_keys,
-                }
-            })
-            .collect();
-
-        Presignatures::new(outputs, batch_size_per_weight, max_faulty)
-            .map_err(|e| anyhow!("Failed to build presignatures: {e}"))
-    }
-
-    fn initialize_signing_managers(nodes: &[HashiNodeHandle]) -> Result<()> {
-        let batch_size_per_weight: u16 = 10;
-
-        for node in nodes {
-            let mpc_manager = node
-                .hashi()
-                .mpc_manager()
-                .context("MpcManager not initialized")?;
-            let mgr = mpc_manager.read().unwrap();
-
-            let threshold = mgr.dkg_config.threshold;
-            let mut dealer_weight_sum = 0u32;
-            let mut outputs_by_party = HashMap::new();
-
-            for member in mgr.committee.members() {
-                let dealer = member.validator_address();
-                let Some(output) = mgr
-                    .dealer_outputs
-                    .get(&hashi::mpc::DealerOutputsKey::Dkg(dealer))
-                else {
-                    continue;
-                };
-
-                let dealer_party_id =
-                    mgr.committee
-                        .index_of(&dealer)
-                        .context("dealer must be in committee")? as u16;
-                let weight = mgr
-                    .dkg_config
-                    .nodes
-                    .weight_of(dealer_party_id)
-                    .map_err(|_| anyhow!("Missing reduced weight for dealer {dealer}"))?;
-                dealer_weight_sum += weight as u32;
-                outputs_by_party.insert(dealer_party_id, output.clone());
-
-                if dealer_weight_sum >= threshold as u32 {
-                    break;
-                }
-            }
-
-            anyhow::ensure!(
-                dealer_weight_sum >= threshold as u32,
-                "Insufficient certified dealer weight to reconstruct DKG output"
-            );
-
-            let combined = avss::ReceiverOutput::complete_dkg(
-                threshold,
-                &mgr.dkg_config.nodes,
-                outputs_by_party,
-            )
-            .context("Failed to reconstruct DKG output for signing manager")?;
-
-            let share_indices: Vec<ShareIndex> = combined
-                .my_shares
-                .shares
-                .iter()
-                .map(|share| share.index)
-                .collect();
-            let presignatures = deterministic_presignatures(
-                &mgr.committee,
-                mgr.dkg_config.epoch,
-                &share_indices,
-                batch_size_per_weight,
-                mgr.dkg_config.max_faulty as usize,
-            )?;
-
-            let signing_manager = hashi::mpc::SigningManager::new(
-                mgr.address,
-                mgr.committee.clone(),
-                threshold,
-                combined.my_shares,
-                combined.vk,
-                presignatures,
-            );
-            drop(mgr);
-            node.hashi().init_signing_manager(signing_manager);
-        }
-
-        Ok(())
     }
 
     async fn wait_for_withdrawal_tx_success(
