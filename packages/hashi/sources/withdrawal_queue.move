@@ -23,6 +23,7 @@ public struct WithdrawalRequestInfo has drop, store {
     bitcoin_address: vector<u8>, // 32 or 20 bytes?
     timestamp_ms: u64,
     requester_address: address,
+    sui_tx_digest: vector<u8>,
 }
 
 public struct PendingWithdrawal has store {
@@ -66,6 +67,7 @@ public(package) fun withdrawal_request(
             bitcoin_address,
             timestamp_ms: clock.timestamp_ms(),
             requester_address: ctx.sender(),
+            sui_tx_digest: *ctx.digest(),
         },
         btc,
     }
@@ -173,6 +175,7 @@ public(package) fun emit_withdrawal_requested(self: &WithdrawalRequest) {
         bitcoin_address: self.info.bitcoin_address,
         timestamp_ms: self.info.timestamp_ms,
         requester_address: self.info.requester_address,
+        sui_tx_digest: self.info.sui_tx_digest,
     });
 }
 
@@ -201,6 +204,7 @@ public struct WithdrawalRequestedEvent has copy, drop {
     bitcoin_address: vector<u8>,
     timestamp_ms: u64,
     requester_address: address,
+    sui_tx_digest: vector<u8>,
 }
 
 public struct WithdrawalPickedForProcessingEvent has copy, drop {
