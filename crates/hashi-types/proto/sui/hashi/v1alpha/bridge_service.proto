@@ -112,8 +112,8 @@ message SignWithdrawalTransactionRequest {
 }
 
 message SignWithdrawalTransactionResponse {
-  // Partial MPC Schnorr signature data.
-  optional bytes partial_signature = 1;
+  // One aggregated MPC Schnorr signature per transaction input.
+  repeated bytes signatures_by_input = 1;
 }
 
 message SignWithdrawalConfirmationRequest {

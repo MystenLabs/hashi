@@ -98,9 +98,9 @@ pub struct SignWithdrawalTransactionRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionResponse {
-    /// Partial MPC Schnorr signature data.
-    #[prost(bytes = "bytes", optional, tag = "1")]
-    pub partial_signature: ::core::option::Option<::prost::bytes::Bytes>,
+    /// One aggregated MPC Schnorr signature per transaction input.
+    #[prost(bytes = "bytes", repeated, tag = "1")]
+    pub signatures_by_input: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalConfirmationRequest {

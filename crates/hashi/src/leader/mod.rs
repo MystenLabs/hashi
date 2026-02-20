@@ -7,9 +7,9 @@ use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::WithdrawalApproval;
-use crate::withdrawals::WithdrawalInputSignature;
-use bitcoin::hashes::Hash;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
+use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
@@ -407,30 +407,22 @@ impl LeaderService {
             .collect();
         let results = futures::future::join_all(futures).await;
 
-        let mut signatures_by_input = None;
-        for (i, result) in results.into_iter().enumerate() {
-            match result {
-                Ok(signatures) => {
-                    signatures_by_input = Some(signatures);
-                    break;
-                }
-                Err(e) => {
+        let mut results = results.into_iter();
+        let signatures_by_input = loop {
+            match results.next() {
+                Some(Ok(signatures)) => break signatures,
+                Some(Err(_)) => continue,
+                None => {
                     error!(
-                        "Failed to get withdrawal tx signature from {}: {e}",
-                        members[i].validator_address()
+                        "No aggregated signatures collected for {:?}; skipping broadcast",
+                        pending.id
                     );
+                    return;
                 }
             }
-        }
+        };
 
         // 2. Build signed tx, then broadcast.
-        let Some(signatures_by_input) = signatures_by_input else {
-            error!(
-                "No withdrawal tx signatures collected for {:?}; skipping broadcast",
-                pending.id
-            );
-            return;
-        };
 
         let tx = match self.build_broadcastable_withdrawal_tx(pending, &signatures_by_input) {
             Ok(tx) => tx,
@@ -526,38 +518,30 @@ impl LeaderService {
     fn build_broadcastable_withdrawal_tx(
         &self,
         pending: &PendingWithdrawal,
-        signatures_by_input: &[WithdrawalInputSignature],
+        signatures: &[SchnorrSignature],
     ) -> anyhow::Result<bitcoin::Transaction> {
+        info!(
+            "Building broadcastable withdrawal tx for pending withdrawal id {} with {} signatures",
+            pending.id,
+            signatures.len()
+        );
         let mut tx = self
             .inner
             .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
-        let txid = Address::new(*tx.compute_txid().as_byte_array());
-        anyhow::ensure!(
-            txid == pending.txid,
-            "Pending txid mismatch: pending has {:?}, rebuilt tx has {:?}",
-            pending.txid,
-            txid
-        );
 
         anyhow::ensure!(
-            signatures_by_input.len() == tx.input.len(),
-            "Input signature count mismatch: tx has {}, signatures has {}",
+            tx.input.len() == signatures.len(),
+            "Signature count mismatch: {} inputs but {} signatures",
             tx.input.len(),
-            signatures_by_input.len()
+            signatures.len()
         );
 
-        for (input, input_signature) in tx.input.iter_mut().zip(signatures_by_input) {
-            let signature_bytes = &input_signature.hashi_signature;
-            anyhow::ensure!(
-                signature_bytes.len() == 64 || signature_bytes.len() == 65,
-                "Invalid Schnorr signature length: {}",
-                signature_bytes.len()
-            );
-
+        for (input, signature) in tx.input.iter_mut().zip(signatures) {
             let mut witness = bitcoin::Witness::new();
-            witness.push(signature_bytes);
+            witness.push(signature.to_byte_array());
             input.witness = witness;
         }
+
         Ok(tx)
     }
 
@@ -618,7 +602,7 @@ impl LeaderService {
         &self,
         pending_withdrawal_id: &Address,
         member: &CommitteeMember,
-    ) -> anyhow::Result<Vec<WithdrawalInputSignature>> {
+    ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
         trace!(
             "Requesting withdrawal tx signature from {}",
@@ -654,12 +638,19 @@ impl LeaderService {
             validator_address
         );
 
-        let partial_signature = response.into_inner().partial_signature.ok_or_else(|| {
-            anyhow::anyhow!("No partial_signature in response from {validator_address}")
-        })?;
-
-        bcs::from_bytes(&partial_signature)
-            .map_err(|e| anyhow::anyhow!("Invalid signature payload from {validator_address}: {e}"))
+        response
+            .into_inner()
+            .signatures_by_input
+            .iter()
+            .map(|sig_bytes| {
+                let bytes: [u8; 64] = sig_bytes.as_ref().try_into().map_err(|_| {
+                    anyhow::anyhow!("Invalid Schnorr signature length from {validator_address}")
+                })?;
+                SchnorrSignature::from_byte_array(&bytes).map_err(|e| {
+                    anyhow::anyhow!("Invalid Schnorr signature from {validator_address}: {e}")
+                })
+            })
+            .collect()
     }
 
     async fn request_withdrawal_confirmation_signature(
