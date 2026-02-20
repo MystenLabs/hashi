@@ -27,6 +27,7 @@ pub struct Hashi {
     pub utxo_pool: UtxoPool,
     pub proposals: Proposals,
     pub tob_id: Address,
+    pub num_consumed_presigs: u64,
 }
 
 #[derive(Debug)]

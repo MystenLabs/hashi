@@ -21,8 +21,11 @@ public struct Hashi has key {
     withdrawal_queue: WithdrawalRequestQueue,
     utxo_pool: UtxoPool,
     proposals: Bag,
-    /// TOB certificates by epoch (epoch -> EpochCertsV1)
+    /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     tob: Bag,
+    /// Number of presignatures consumed in the current epoch.
+    /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
+    num_consumed_presigs: u64,
 }
 
 #[allow(unused_function)]
@@ -37,6 +40,7 @@ fun init(ctx: &mut TxContext) {
         utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: bag::new(ctx),
         tob: bag::new(ctx),
+        num_consumed_presigs: 0,
     };
 
     sui::transfer::share_object(hashi);
@@ -150,6 +154,18 @@ public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
     &mut self.tob
 }
 
+public(package) fun num_consumed_presigs(self: &Hashi): u64 {
+    self.num_consumed_presigs
+}
+
+public(package) fun add_num_consumed_presigs(self: &mut Hashi, count: u64) {
+    self.num_consumed_presigs = self.num_consumed_presigs + count;
+}
+
+public(package) fun reset_num_consumed_presigs(self: &mut Hashi) {
+    self.num_consumed_presigs = 0;
+}
+
 public(package) fun epoch_certs_and_committee(
     self: &mut Hashi,
     key: hashi::tob::TobKey,
@@ -188,5 +204,6 @@ public fun create_for_testing(
         utxo_pool,
         proposals,
         tob,
+        num_consumed_presigs: 0,
     }
 }

@@ -41,8 +41,10 @@ pub struct Hashi {
     pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
     pub proposals: Bag,
-    /// TOB certificates by epoch (epoch -> EpochCertsV1)
+    /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
+    /// Number of presignatures consumed in the current epoch.
+    pub num_consumed_presigs: u64,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
