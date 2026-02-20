@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use axum::http;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use sui_sdk_types::Address;
+use sui_sdk_types::Digest;
 use sui_sdk_types::TypeTag;
 
 use crate::grpc::Client;
@@ -398,6 +399,7 @@ pub struct WithdrawalRequest {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub requester_address: Address,
+    pub sui_tx_digest: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]

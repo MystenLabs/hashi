@@ -4,12 +4,21 @@ package sui.hashi.v1alpha;
 
 import "google/protobuf/timestamp.proto";
 import "sui/hashi/v1alpha/signature.proto";
+import "sui/hashi/v1alpha/utxo.proto";
 
 service BridgeService {
   // Query the service for general information about its current state.
   rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
   // Sign a deposit confirmation, confirming that bitcoin has been deposited into hashi
   rpc SignDepositConfirmation(SignDepositConfirmationRequest) returns (SignDepositConfirmationResponse);
+  // Sign approval for a proposed withdrawal transaction, confirming that the
+  // validator agrees the bitcoin transaction is valid and should be processed.
+  rpc SignWithdrawalApproval(SignWithdrawalApprovalRequest) returns (SignWithdrawalApprovalResponse);
+  // Sign a bitcoin withdrawal transaction. The validator checks that a matching
+  // PendingWithdrawal exists on-chain, then produces a partial signature.
+  rpc SignWithdrawalTransaction(SignWithdrawalTransactionRequest) returns (SignWithdrawalTransactionResponse);
+  // Sign committee approval to confirm a processed withdrawal on-chain.
+  rpc SignWithdrawalConfirmation(SignWithdrawalConfirmationRequest) returns (SignWithdrawalConfirmationResponse);
 }
 
 message GetServiceInfoRequest {}
@@ -67,5 +76,51 @@ message SignDepositConfirmationRequest {
 }
 
 message SignDepositConfirmationResponse {
+  MemberSignature member_signature = 1;
+}
+
+// Maps to crate::withdrawals::WithdrawalApproval
+message SignWithdrawalApprovalRequest {
+  // Withdrawal request ids (each 32 bytes).
+  repeated bytes request_ids = 1;
+
+  // Selected UTXO ids to spend.
+  repeated UtxoId selected_utxos = 2;
+
+  // Transaction outputs (withdrawal destination + change).
+  repeated WithdrawalOutput outputs = 3;
+
+  // Bitcoin transaction id of the unsigned transaction (32 bytes).
+  bytes txid = 4;
+}
+
+message WithdrawalOutput {
+  // Amount in satoshis.
+  uint64 amount = 1;
+
+  // Bitcoin address (raw bytes).
+  bytes bitcoin_address = 2;
+}
+
+message SignWithdrawalApprovalResponse {
+  MemberSignature member_signature = 1;
+}
+
+message SignWithdrawalTransactionRequest {
+  // The id of the PendingWithdrawal on Sui (32 bytes).
+  bytes pending_withdrawal_id = 1;
+}
+
+message SignWithdrawalTransactionResponse {
+  // Partial MPC Schnorr signature data.
+  optional bytes partial_signature = 1;
+}
+
+message SignWithdrawalConfirmationRequest {
+  // Pending withdrawal id on Sui.
+  bytes pending_withdrawal_id = 1;
+}
+
+message SignWithdrawalConfirmationResponse {
   MemberSignature member_signature = 1;
 }

@@ -7,16 +7,16 @@ use sui_sdk_types::Address;
 use tabled::Table;
 use tabled::Tabled;
 
-use crate::TxOptions;
-use crate::client::CreateProposalParams;
-use crate::client::HashiClient;
-use crate::client::SimulationResult;
-use crate::client::get_proposal_type_arg;
-use crate::config::Config;
-use crate::print_info;
-use crate::print_warning;
-use crate::types::Proposal;
-use crate::types::display;
+use crate::cli::TxOptions;
+use crate::cli::client::CreateProposalParams;
+use crate::cli::client::HashiClient;
+use crate::cli::client::SimulationResult;
+use crate::cli::client::get_proposal_type_arg;
+use crate::cli::config::CliConfig;
+use crate::cli::print_info;
+use crate::cli::print_warning;
+use crate::cli::types::Proposal;
+use crate::cli::types::display;
 
 /// Print metadata if present
 fn print_metadata(metadata: &[(String, String)]) {
@@ -87,7 +87,7 @@ async fn execute_or_simulate(
 
 /// List all active proposals
 pub async fn list_proposals(
-    config: &Config,
+    config: &CliConfig,
     type_filter: Option<String>,
     detailed: bool,
 ) -> Result<()> {
@@ -170,7 +170,7 @@ pub async fn list_proposals(
 }
 
 /// View details of a specific proposal
-pub async fn view_proposal(config: &Config, proposal_id: &str) -> Result<()> {
+pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
@@ -189,7 +189,7 @@ pub async fn view_proposal(config: &Config, proposal_id: &str) -> Result<()> {
 }
 
 /// Vote on a proposal
-pub async fn vote(config: &Config, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
@@ -226,7 +226,7 @@ pub async fn vote(config: &Config, proposal_id: &str, tx_opts: &TxOptions) -> Re
 }
 
 /// Remove vote from a proposal
-pub async fn remove_vote(config: &Config, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
@@ -264,7 +264,7 @@ pub async fn remove_vote(config: &Config, proposal_id: &str, tx_opts: &TxOptions
 
 /// Create an upgrade proposal
 pub async fn create_upgrade_proposal(
-    config: &Config,
+    config: &CliConfig,
     digest: &str,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
@@ -293,7 +293,7 @@ pub async fn create_upgrade_proposal(
 
 /// Create an update deposit fee proposal
 pub async fn create_update_deposit_fee_proposal(
-    config: &Config,
+    config: &CliConfig,
     fee: u64,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
@@ -319,7 +319,7 @@ pub async fn create_update_deposit_fee_proposal(
 
 /// Create an enable version proposal
 pub async fn create_enable_version_proposal(
-    config: &Config,
+    config: &CliConfig,
     version: u64,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
@@ -345,7 +345,7 @@ pub async fn create_enable_version_proposal(
 
 /// Create a disable version proposal
 pub async fn create_disable_version_proposal(
-    config: &Config,
+    config: &CliConfig,
     version: u64,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,

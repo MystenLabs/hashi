@@ -3,9 +3,9 @@
 //! Configuration can be loaded from a TOML file and/or environment variables.
 //! CLI arguments take precedence over config file values.
 
+use crate::config::load_ed25519_private_key_from_path;
 use anyhow::Context;
 use anyhow::Result;
-use hashi::config::load_ed25519_private_key_from_path;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
@@ -14,7 +14,7 @@ use sui_sdk_types::Address;
 
 /// CLI Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
+pub struct CliConfig {
     /// Sui RPC endpoint URL
     #[serde(default = "default_sui_rpc_url")]
     pub sui_rpc_url: String,
@@ -36,7 +36,7 @@ fn default_sui_rpc_url() -> String {
     "https://fullnode.mainnet.sui.io:443".to_string()
 }
 
-impl Default for Config {
+impl Default for CliConfig {
     fn default() -> Self {
         Self {
             sui_rpc_url: default_sui_rpc_url(),
@@ -48,7 +48,7 @@ impl Default for Config {
     }
 }
 
-impl Config {
+impl CliConfig {
     /// Load configuration from file and CLI overrides
     pub fn load(
         config_path: Option<&Path>,

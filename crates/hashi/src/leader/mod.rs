@@ -3,14 +3,23 @@ mod garbage_collection;
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::PendingWithdrawal;
+use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::WithdrawalApproval;
+use crate::withdrawals::WithdrawalInputSignature;
+use bitcoin::hashes::Hash;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
+use hashi_types::committee::certificate_threshold;
 use hashi_types::proto::SignDepositConfirmationRequest;
-use hashi_types::proto::SignDepositConfirmationResponse;
+use hashi_types::proto::SignWithdrawalApprovalRequest;
+use hashi_types::proto::SignWithdrawalConfirmationRequest;
+use hashi_types::proto::SignWithdrawalTransactionRequest;
 use std::sync::Arc;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
@@ -64,6 +73,8 @@ impl LeaderService {
             }
 
             self.process_deposit_requests(checkpoint_timestamp_ms).await;
+            self.process_withdrawal_requests().await;
+            self.process_pending_withdrawals().await;
             self.check_delete_proposals(checkpoint_timestamp_ms).await;
             self.check_delete_spent_utxos().await;
         }
@@ -202,7 +213,11 @@ impl LeaderService {
             validator_address
         );
 
-        into_member_signature(response.into_inner())
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
             .inspect_err(|e| {
                 error!(
                     "Failed to parse member signature from response from {}: {e}",
@@ -238,7 +253,7 @@ impl LeaderService {
         // Check for quorum
         // TODO: better way to check for quorom than hardcoding
         let weight = signature_aggregator.weight();
-        let required_weight = 6667;
+        let required_weight = certificate_threshold(committee.total_weight());
         if weight < required_weight {
             anyhow::bail!(
                 "Aggregate weight of signatures {weight} is less than required weight {required_weight}"
@@ -254,6 +269,480 @@ impl LeaderService {
         info!(
             "Successfully submitted deposit confirmation for request: {:?}",
             deposit_request.id
+        );
+        Ok(())
+    }
+
+    // ========================================================================
+    // Withdrawal processing
+    // ========================================================================
+
+    async fn process_withdrawal_requests(&self) {
+        let mut withdrawal_requests = self.inner.onchain_state().withdrawal_requests();
+        withdrawal_requests.sort_by_key(|r| r.timestamp_ms);
+
+        // TODO: process multiple at a time.
+        // For now we only process one to avoid a race condition on utxo selection
+        if let Some(request) = withdrawal_requests.first() {
+            self.process_withdrawal_request(request).await;
+        }
+    }
+
+    async fn process_withdrawal_request(&self, request: &WithdrawalRequest) {
+        info!("Processing withdrawal request: {:?}", request.id);
+
+        // 1. Run AML/Sanctions checks for the withdrawal request
+        if let Err(e) = self.inner.screen_withdrawal(request).await {
+            error!("Withdrawal request {:?} failed AML Checks: {e}", request.id);
+            return;
+        }
+
+        // 2. Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
+        let approval = match self.inner.build_withdrawal_approval(request).await {
+            Ok(approval) => approval,
+            Err(e) => {
+                error!(
+                    "Failed to build withdrawal approval for request {:?}: {e}",
+                    request.id
+                );
+                return;
+            }
+        };
+
+        // 3. Fan out to committee for BLS approval signatures
+        let members = self
+            .inner
+            .onchain_state()
+            .current_committee_members()
+            .expect("No current committee members");
+
+        let proto_request = approval.to_proto();
+        let mut signatures: Vec<MemberSignature> = Vec::new();
+        for member in &members {
+            if let Some(signature) = self
+                .request_withdrawal_approval_signature(proto_request.clone(), member)
+                .await
+            {
+                signatures.push(signature);
+            }
+        }
+
+        // 4. Aggregate BLS signatures and check quorum
+        let committee = self
+            .inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+
+        let mut signature_aggregator = BlsSignatureAggregator::new(&committee, approval.clone());
+        for signature in signatures {
+            if let Err(e) = signature_aggregator.add_signature(signature) {
+                error!("Failed to add withdrawal approval signature: {e}");
+            }
+        }
+
+        let weight = signature_aggregator.weight();
+        let required_weight = certificate_threshold(committee.total_weight());
+        if weight < required_weight {
+            error!(
+                "Insufficient withdrawal approval signatures for request {:?}: weight {weight} < {required_weight}",
+                request.id
+            );
+            return;
+        }
+
+        let signed_approval = match signature_aggregator.finish() {
+            Ok(signed_approval) => signed_approval,
+            Err(e) => {
+                error!(
+                    "Failed to build withdrawal approval certificate for request {:?}: {e}",
+                    request.id
+                );
+                return;
+            }
+        };
+
+        // 5. Commit on Sui via pick_withdrawal_for_processing
+        if let Err(e) = self
+            .submit_pick_withdrawal_for_processing(&approval, signed_approval.committee_signature())
+            .await
+        {
+            error!(
+                "Failed to submit pick_withdrawal_for_processing for request {:?}: {e}",
+                request.id
+            );
+        }
+    }
+
+    // ========================================================================
+    // Pending withdrawal processing (MPC signing, broadcast, confirm)
+    // ========================================================================
+
+    async fn process_pending_withdrawals(&self) {
+        let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
+        pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
+
+        // TODO: process multiple at a time.
+        // For now we only process one to avoid a race condition on utxo selection
+        if let Some(pending) = pending_withdrawals.first() {
+            self.process_pending_withdrawal(pending).await;
+        }
+    }
+
+    async fn process_pending_withdrawal(&self, pending: &PendingWithdrawal) {
+        info!("Processing pending withdrawal: {:?}", pending.id);
+
+        let members = self
+            .inner
+            .onchain_state()
+            .current_committee_members()
+            .expect("No current committee members");
+
+        // 1. Request signed withdrawal tx witnesses from committee members.
+        let mut signatures_by_input = None;
+        for member in &members {
+            match self
+                .request_withdrawal_tx_signature(&pending.id, member)
+                .await
+            {
+                Ok(signatures) => {
+                    signatures_by_input = Some(signatures);
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to get withdrawal tx signature from {}: {e}",
+                        member.validator_address()
+                    );
+                }
+            }
+        }
+
+        // 2. Build signed tx, then broadcast.
+        let Some(signatures_by_input) = signatures_by_input else {
+            error!(
+                "No withdrawal tx signatures collected for {:?}; skipping broadcast",
+                pending.id
+            );
+            return;
+        };
+
+        let tx = match self.build_broadcastable_withdrawal_tx(pending, &signatures_by_input) {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(
+                    "Failed to build signed withdrawal tx for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        let txid = tx.compute_txid();
+        if let Err(e) = self.inner.btc_monitor().broadcast_transaction(tx).await {
+            error!(
+                "Failed to broadcast withdrawal bitcoin tx for {:?} (txid {}): {e}",
+                pending.id, txid
+            );
+            return;
+        }
+
+        info!(
+            "Broadcasted withdrawal bitcoin tx for {:?} (txid {})",
+            pending.id, txid
+        );
+
+        let confirmation_signature = match self
+            .collect_withdrawal_confirmation_signature(pending.id, &members)
+            .await
+        {
+            Ok(signature) => signature,
+            Err(e) => {
+                error!(
+                    "Failed to gather withdrawal confirmation cert for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        // 3. Confirm withdrawal on Sui
+        if let Err(e) = self
+            .submit_confirm_withdrawal(&pending.id, &confirmation_signature)
+            .await
+        {
+            error!("Failed to confirm withdrawal {:?}: {e}", pending.id);
+        }
+    }
+
+    async fn collect_withdrawal_confirmation_signature(
+        &self,
+        pending_id: Address,
+        members: &[CommitteeMember],
+    ) -> anyhow::Result<CommitteeSignature> {
+        let mut signatures: Vec<MemberSignature> = Vec::new();
+        for member in members {
+            if let Some(signature) = self
+                .request_withdrawal_confirmation_signature(pending_id, member)
+                .await
+            {
+                signatures.push(signature);
+            }
+        }
+
+        let committee = self
+            .inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+        let confirmation = crate::withdrawals::WithdrawalConfirmation {
+            withdrawal_id: pending_id,
+        };
+        let mut signature_aggregator = BlsSignatureAggregator::new(&committee, confirmation);
+        for signature in signatures {
+            if let Err(e) = signature_aggregator.add_signature(signature) {
+                error!("Failed to add withdrawal confirmation signature: {e}");
+            }
+        }
+
+        // TODO: better way to check for quorum than hardcoding
+        let weight = signature_aggregator.weight();
+        let required_weight = certificate_threshold(committee.total_weight());
+        if weight < required_weight {
+            anyhow::bail!(
+                "Insufficient withdrawal confirmation signatures for pending {:?}: weight {weight} < {required_weight}",
+                pending_id
+            );
+        }
+
+        Ok(signature_aggregator.finish()?.into_parts().0)
+    }
+
+    fn build_broadcastable_withdrawal_tx(
+        &self,
+        pending: &PendingWithdrawal,
+        signatures_by_input: &[WithdrawalInputSignature],
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        let mut tx = self
+            .inner
+            .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
+        let txid = Address::new(*tx.compute_txid().as_byte_array());
+        anyhow::ensure!(
+            txid == pending.txid,
+            "Pending txid mismatch: pending has {:?}, rebuilt tx has {:?}",
+            pending.txid,
+            txid
+        );
+
+        anyhow::ensure!(
+            signatures_by_input.len() == tx.input.len(),
+            "Input signature count mismatch: tx has {}, signatures has {}",
+            tx.input.len(),
+            signatures_by_input.len()
+        );
+
+        for (input, input_signature) in tx.input.iter_mut().zip(signatures_by_input) {
+            let signature_bytes = &input_signature.hashi_signature;
+            anyhow::ensure!(
+                signature_bytes.len() == 64 || signature_bytes.len() == 65,
+                "Invalid Schnorr signature length: {}",
+                signature_bytes.len()
+            );
+
+            let mut witness = bitcoin::Witness::new();
+            witness.push(signature_bytes);
+            input.witness = witness;
+        }
+        Ok(tx)
+    }
+
+    async fn request_withdrawal_approval_signature(
+        &self,
+        proto_request: SignWithdrawalApprovalRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!(
+            "Requesting withdrawal approval signature from {}",
+            validator_address
+        );
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_withdrawal_approval(proto_request.clone())
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to get withdrawal approval signature from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()?;
+
+        trace!(
+            "Retrieved withdrawal approval signature from {}",
+            validator_address
+        );
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse member signature from withdrawal approval response from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()
+    }
+
+    async fn request_withdrawal_tx_signature(
+        &self,
+        pending_withdrawal_id: &Address,
+        member: &CommitteeMember,
+    ) -> anyhow::Result<Vec<WithdrawalInputSignature>> {
+        let validator_address = member.validator_address();
+        trace!(
+            "Requesting withdrawal tx signature from {}",
+            validator_address
+        );
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                )
+            })?;
+
+        let proto_request = SignWithdrawalTransactionRequest {
+            pending_withdrawal_id: pending_withdrawal_id.as_bytes().to_vec().into(),
+        };
+
+        let response = rpc_client
+            .sign_withdrawal_transaction(proto_request)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to get withdrawal tx signature from {validator_address}: {e}"
+                )
+            })?;
+
+        trace!(
+            "Retrieved withdrawal tx signature from {}",
+            validator_address
+        );
+
+        let partial_signature = response.into_inner().partial_signature.ok_or_else(|| {
+            anyhow::anyhow!("No partial_signature in response from {validator_address}")
+        })?;
+
+        bcs::from_bytes(&partial_signature)
+            .map_err(|e| anyhow::anyhow!("Invalid signature payload from {validator_address}: {e}"))
+    }
+
+    async fn request_withdrawal_confirmation_signature(
+        &self,
+        pending_withdrawal_id: Address,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!(
+            "Requesting withdrawal confirmation signature from {}",
+            validator_address
+        );
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_withdrawal_confirmation(SignWithdrawalConfirmationRequest {
+                pending_withdrawal_id: pending_withdrawal_id.as_bytes().to_vec().into(),
+            })
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to get withdrawal confirmation signature from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()?;
+
+        trace!(
+            "Retrieved withdrawal confirmation signature from {}",
+            validator_address
+        );
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse member signature from withdrawal confirmation response from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()
+    }
+
+    async fn submit_pick_withdrawal_for_processing(
+        &self,
+        approval: &WithdrawalApproval,
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        info!(
+            "Submitting pick_withdrawal_for_processing for txid {:?}",
+            approval.txid
+        );
+
+        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+        executor
+            .execute_pick_withdrawal_for_processing(approval, cert)
+            .await
+    }
+
+    async fn submit_confirm_withdrawal(
+        &self,
+        pending_withdrawal_id: &Address,
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        info!("Confirming withdrawal {:?}", pending_withdrawal_id);
+
+        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+        executor
+            .execute_confirm_withdrawal(pending_withdrawal_id, cert)
+            .await?;
+
+        info!(
+            "Successfully confirmed withdrawal {:?}",
+            pending_withdrawal_id
         );
         Ok(())
     }
@@ -275,12 +764,9 @@ impl DepositRequest {
     }
 }
 
-fn into_member_signature(
-    response: SignDepositConfirmationResponse,
+fn parse_member_signature(
+    member_signature: hashi_types::proto::MemberSignature,
 ) -> anyhow::Result<MemberSignature> {
-    let member_signature = response.member_signature.ok_or(anyhow::anyhow!(
-        "No member_signature in SignDepositConfirmationResponse"
-    ))?;
     let epoch = member_signature
         .epoch
         .ok_or(anyhow::anyhow!("No epoch in MemberSignature"))?;
@@ -297,4 +783,33 @@ fn into_member_signature(
             .as_bytes(),
     )?;
     Ok(MemberSignature::new(epoch, address, signature))
+}
+
+impl WithdrawalApproval {
+    fn to_proto(&self) -> SignWithdrawalApprovalRequest {
+        SignWithdrawalApprovalRequest {
+            request_ids: self
+                .request_ids
+                .iter()
+                .map(|id| id.as_bytes().to_vec().into())
+                .collect(),
+            selected_utxos: self
+                .selected_utxos
+                .iter()
+                .map(|utxo_id| hashi_types::proto::UtxoId {
+                    txid: Some(utxo_id.txid.as_bytes().to_vec().into()),
+                    vout: Some(utxo_id.vout),
+                })
+                .collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|output| hashi_types::proto::WithdrawalOutput {
+                    amount: output.amount,
+                    bitcoin_address: output.bitcoin_address.clone().into(),
+                })
+                .collect(),
+            txid: self.txid.as_bytes().to_vec().into(),
+        }
+    }
 }

@@ -261,6 +261,15 @@ impl OnchainState {
             .collect()
     }
 
+    pub fn withdrawal_request(&self, id: &Address) -> Option<types::WithdrawalRequest> {
+        self.state()
+            .hashi()
+            .withdrawal_queue
+            .requests()
+            .get(id)
+            .cloned()
+    }
+
     pub fn pending_withdrawals(&self) -> Vec<types::PendingWithdrawal> {
         self.state()
             .hashi()
@@ -281,6 +290,34 @@ impl OnchainState {
             .collect()
     }
 
+    pub fn active_utxos(&self) -> Vec<types::Utxo> {
+        self.state()
+            .hashi()
+            .utxo_pool
+            .active_utxos()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn pending_withdrawal(&self, id: &Address) -> Option<types::PendingWithdrawal> {
+        self.state()
+            .hashi()
+            .withdrawal_queue
+            .pending_withdrawals()
+            .get(id)
+            .cloned()
+    }
+
+    pub fn active_utxo(&self, id: &types::UtxoId) -> Option<types::Utxo> {
+        self.state()
+            .hashi()
+            .utxo_pool
+            .active_utxos()
+            .get(id)
+            .cloned()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,
@@ -291,6 +328,18 @@ impl OnchainState {
             .committees
             .client(validator)
             .map(|c| c.bridge_service_client())
+    }
+
+    pub fn mpc_service_client(
+        &self,
+        validator: &Address,
+    ) -> Option<hashi_types::proto::mpc_service_client::MpcServiceClient<tonic_rustls::Channel>>
+    {
+        self.state()
+            .hashi()
+            .committees
+            .client(validator)
+            .map(|c| c.mpc_service_client())
     }
 
     /// Fetches the EpochCertsV1 for the given epoch from on-chain.
@@ -899,6 +948,7 @@ async fn scrape_withdrawal_requests(
                     bitcoin_address: info.bitcoin_address,
                     timestamp_ms: info.timestamp_ms,
                     requester_address: info.requester_address,
+                    sui_tx_digest: info.sui_tx_digest,
                 },
             )
         })
