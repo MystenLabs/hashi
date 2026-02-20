@@ -401,25 +401,11 @@ impl LeaderService {
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
         // via P2P, so we must fan out requests in parallel.
-        let futures: Vec<_> = members
-            .iter()
-            .map(|member| self.request_withdrawal_tx_signature(&pending.id, member))
-            .collect();
-        let results = futures::future::join_all(futures).await;
-
-        let mut results = results.into_iter();
-        let signatures_by_input = loop {
-            match results.next() {
-                Some(Ok(signatures)) => break signatures,
-                Some(Err(_)) => continue,
-                None => {
-                    error!(
-                        "No aggregated signatures collected for {:?}; skipping broadcast",
-                        pending.id
-                    );
-                    return;
-                }
-            }
+        let Some(signatures_by_input) = self
+            .collect_withdrawal_tx_signatures(&pending.id, &members)
+            .await
+        else {
+            return;
         };
 
         // 2. Build signed tx, then broadcast.
@@ -651,6 +637,33 @@ impl LeaderService {
                 })
             })
             .collect()
+    }
+
+    async fn collect_withdrawal_tx_signatures(
+        &self,
+        pending_withdrawal_id: &Address,
+        members: &[CommitteeMember],
+    ) -> Option<Vec<SchnorrSignature>> {
+        let futures: Vec<_> = members
+            .iter()
+            .map(|member| self.request_withdrawal_tx_signature(pending_withdrawal_id, member))
+            .collect();
+        let results = futures::future::join_all(futures).await;
+
+        let mut results = results.into_iter();
+        loop {
+            match results.next() {
+                Some(Ok(signatures)) => return Some(signatures),
+                Some(Err(_)) => continue,
+                None => {
+                    error!(
+                        "Could not get mpc signatures for {:?}; stopping processing",
+                        pending_withdrawal_id
+                    );
+                    return None;
+                }
+            }
+        }
     }
 
     async fn request_withdrawal_confirmation_signature(

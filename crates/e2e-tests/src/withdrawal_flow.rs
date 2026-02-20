@@ -309,8 +309,7 @@ mod tests {
 
             info!(
                 "Withdrawal tx {} confirmed in block {} with expected output",
-                txid,
-                block_hash
+                txid, block_hash
             );
             return Ok(());
         }
@@ -466,7 +465,10 @@ mod tests {
         // Step 7: Verify BTC arrived on Bitcoin
         // ================================================================
         let withdrawal_txid = address_to_txid(&confirmed_event.txid);
-        info!("Observed withdrawal Bitcoin txid in event: {}", withdrawal_txid);
+        info!(
+            "Observed withdrawal Bitcoin txid in event: {}",
+            withdrawal_txid
+        );
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
             &withdrawal_txid,

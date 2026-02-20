@@ -144,12 +144,9 @@ impl Hashi {
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> bitcoin::Address {
         let pubkey = if let Some(path) = derivation_path {
-            let verifying_key = self.signing_verifying_key().or_else(|| {
-                self.mpc_handle()
-                    .expect("MpcHandle not initialized")
-                    .public_key()
-            })
-            .expect("MPC public key not available yet");
+            let verifying_key = self
+                .signing_verifying_key()
+                .expect("MPC public key not available yet");
             let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
                 &verifying_key,
                 &path.into_inner(),
@@ -162,6 +159,7 @@ impl Hashi {
     }
 
     fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
+        // TODO: https://linear.app/mysten-labs/issue/IOP-219/handle-taproot-tweaking-properly
         // let network = self.config.bitcoin_network();
         // let secp = bitcoin::secp256k1::Secp256k1::verification_only();
         // bitcoin::Address::p2tr(&secp, *pubkey, None, network)
