@@ -155,9 +155,12 @@ impl Hashi {
     }
 
     fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
+        // let network = self.config.bitcoin_network();
+        // let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        // bitcoin::Address::p2tr(&secp, *pubkey, None, network)
         let network = self.config.bitcoin_network();
-        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        bitcoin::Address::p2tr(&secp, *pubkey, None, network)
+        let tweaked = bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(*pubkey);
+        bitcoin::Address::p2tr_tweaked(tweaked, network)
     }
 
     fn bitcoin_address_from_script_pubkey(
