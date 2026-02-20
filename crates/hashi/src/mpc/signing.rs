@@ -39,7 +39,7 @@ pub struct SigningManager {
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     batch_index: u32,
     initial_presig_count: usize,
-    refill_threshold: f64,
+    refill_divisor: usize,
     refill_tx: Arc<watch::Sender<u32>>,
     next_presignatures: Option<Presignatures>,
 }
@@ -54,7 +54,7 @@ impl SigningManager {
         verifying_key: G,
         presignatures: Presignatures,
         batch_index: u32,
-        refill_threshold: f64,
+        refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
     ) -> Self {
         let initial_presig_count = presignatures.len();
@@ -68,7 +68,7 @@ impl SigningManager {
             partial_signing_outputs: HashMap::new(),
             batch_index,
             initial_presig_count,
-            refill_threshold,
+            refill_divisor,
             refill_tx,
             next_presignatures: None,
         }
@@ -153,7 +153,7 @@ impl SigningManager {
                 }
                 Err(e) => return Err(SigningError::CryptoError(e.to_string())),
             };
-            let refill_at = (mgr.initial_presig_count as f64 * mgr.refill_threshold) as usize;
+            let refill_at = mgr.initial_presig_count / mgr.refill_divisor;
             if mgr.presignatures.len() <= refill_at {
                 let _ = mgr.refill_tx.send(mgr.batch_index + 1);
             }
@@ -627,7 +627,7 @@ mod tests {
                         vk,
                         presignatures,
                         0,
-                        crate::constants::PRESIG_REFILL_THRESHOLD,
+                        crate::constants::PRESIG_REFILL_DIVISOR,
                         refill_tx.clone(),
                     );
                     Arc::new(RwLock::new(mgr))
@@ -1185,7 +1185,7 @@ mod tests {
         // Consuming past 50% threshold sends refill signal via watch channel.
         let setup = SigningTestSetup::new(4);
         let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
-        let refill_at = (pool_size as f64 * crate::constants::PRESIG_REFILL_THRESHOLD) as usize;
+        let refill_at = pool_size / crate::constants::PRESIG_REFILL_DIVISOR;
         let beacon = S::zero();
 
         // Consume presignatures on manager 0 until we cross the threshold.
@@ -1202,7 +1202,7 @@ mod tests {
             )
             .unwrap();
             // Simulate the threshold check that sign() does.
-            let threshold = (mgr.initial_presig_count as f64 * mgr.refill_threshold) as usize;
+            let threshold = mgr.initial_presig_count / mgr.refill_divisor;
             if mgr.presignatures.len() <= threshold {
                 let _ = mgr.refill_tx.send(mgr.batch_index + 1);
             }

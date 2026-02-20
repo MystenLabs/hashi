@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
-use crate::constants::PRESIG_REFILL_THRESHOLD;
+use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::mpc::DkgOutput;
 use crate::mpc::MpcManager;
 use crate::mpc::SigningManager;
@@ -276,7 +276,7 @@ impl MpcService {
             output.public_key,
             presignatures,
             0,
-            PRESIG_REFILL_THRESHOLD,
+            PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
         self.inner.set_or_init_signing_manager(signing_manager);

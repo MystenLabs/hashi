@@ -414,7 +414,7 @@ mod tests {
                 vk,
                 presignatures,
                 0,
-                hashi::constants::PRESIG_REFILL_THRESHOLD,
+                hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
             );
             node.hashi().set_signing_manager(signing_manager);
@@ -1004,8 +1004,7 @@ mod tests {
 
         let signing_manager = nodes[0].hashi().signing_manager();
         let pool_size = signing_manager.read().unwrap().initial_presig_count();
-        let refill_trigger_at =
-            pool_size - (pool_size as f64 * hashi::constants::PRESIG_REFILL_THRESHOLD) as usize;
+        let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
         let num_signings = pool_size + 1;
         // Wait for refill a few signs after the threshold, before exhaustion.
