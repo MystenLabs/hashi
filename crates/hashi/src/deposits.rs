@@ -144,10 +144,17 @@ impl Hashi {
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> bitcoin::Address {
         let pubkey = if let Some(path) = derivation_path {
-            hashi_types::guardian::bitcoin_utils::get_derived_pubkey(
-                hashi_pubkey,
+            let verifying_key = self.signing_verifying_key().or_else(|| {
+                self.mpc_handle()
+                    .expect("MpcHandle not initialized")
+                    .public_key()
+            })
+            .expect("MPC public key not available yet");
+            let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+                &verifying_key,
                 &path.into_inner(),
-            )
+            );
+            XOnlyPublicKey::from_slice(&derived.to_byte_array()).expect("valid 32-byte x-only key")
         } else {
             *hashi_pubkey
         };

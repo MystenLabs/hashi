@@ -94,6 +94,10 @@ impl SigningManager {
         self.committee.epoch()
     }
 
+    pub fn verifying_key(&self) -> G {
+        self.verifying_key
+    }
+
     pub fn handle_get_partial_signatures_request(
         &self,
         request: &GetPartialSignaturesRequest,
