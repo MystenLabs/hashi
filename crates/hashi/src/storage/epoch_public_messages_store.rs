@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use sui_sdk_types::Address;
 
 use crate::db::Database;
@@ -80,5 +81,25 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
                     .collect()
             })
             .map_err(|e| anyhow::anyhow!("failed to list rotation messages: {e}"))
+    }
+
+    fn store_nonce_message(
+        &mut self,
+        batch_index: u32,
+        dealer: &Address,
+        message: &batch_avss::Message,
+    ) -> anyhow::Result<()> {
+        self.db
+            .store_nonce_message(self.epoch, batch_index, dealer, message)
+            .map_err(|e| anyhow::anyhow!("failed to store nonce message: {e}"))
+    }
+
+    fn list_nonce_messages(
+        &self,
+        batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+        self.db
+            .list_nonce_messages(self.epoch, batch_index)
+            .map_err(|e| anyhow::anyhow!("failed to list nonce messages: {e}"))
     }
 }

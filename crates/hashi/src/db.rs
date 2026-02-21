@@ -3,12 +3,15 @@ use std::path::Path;
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
 use fjall::Result;
 use sui_sdk_types::Address;
 
 use hashi_types::committee::EncryptionPrivateKey;
+
+use serde::de::DeserializeOwned;
 
 use crate::mpc::types::RotationMessages;
 
@@ -34,11 +37,18 @@ pub struct Database {
     // key: (big endian u64 epoch) + (32-byte validator address)
     // value: BCS-serialized RotationMessages (BTreeMap<ShareIndex, avss::Message>)
     rotation_messages: Keyspace,
+
+    // Column Family used to store nonce messages for presignature generation.
+    //
+    // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
+    // value: BCS-serialized batch_avss::Message
+    nonce_messages: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
+const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 
 impl Database {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
@@ -51,11 +61,13 @@ impl Database {
             db.keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let rotation_messages =
             db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
+        let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         Ok(Self {
             db,
             encryption_keys,
             dealer_messages,
             rotation_messages,
+            nonce_messages,
         })
     }
 
@@ -155,27 +167,7 @@ impl Database {
     }
 
     pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
-        let prefix = epoch.to_be_bytes();
-        let mut results = Vec::new();
-        for guard in self.dealer_messages.prefix(prefix) {
-            let (key, value) = guard.into_inner()?;
-            // Key format: [epoch (8 bytes) | address (32 bytes)]
-            let address_bytes: [u8; 32] = key[8..].try_into().map_err(|_| {
-                fjall::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid key length",
-                ))
-            })?;
-            let address = Address::new(address_bytes);
-            let message: avss::Message = bcs::from_bytes(&value).map_err(|_| {
-                fjall::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid message",
-                ))
-            })?;
-            results.push((address, message));
-        }
-        Ok(results)
+        list_messages_by_prefix(&self.dealer_messages, &epoch.to_be_bytes())
     }
 
     pub fn store_rotation_messages(
@@ -214,28 +206,73 @@ impl Database {
         &self,
         epoch: u64,
     ) -> Result<Vec<(Address, RotationMessages)>> {
-        let prefix = epoch.to_be_bytes();
-        let mut results = Vec::new();
-        for guard in self.rotation_messages.prefix(prefix) {
-            let (key, value) = guard.into_inner()?;
-            // Key format: [epoch (8 bytes) | address (32 bytes)]
-            let address_bytes: [u8; 32] = key[8..].try_into().map_err(|_| {
-                fjall::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid key length",
-                ))
-            })?;
-            let address = Address::new(address_bytes);
-            let messages: RotationMessages = bcs::from_bytes(&value).map_err(|_| {
-                fjall::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid rotation messages",
-                ))
-            })?;
-            results.push((address, messages));
-        }
-        Ok(results)
+        list_messages_by_prefix(&self.rotation_messages, &epoch.to_be_bytes())
     }
+
+    pub fn store_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        message: &batch_avss::Message,
+    ) -> Result<()> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        let value = bcs::to_bytes(message).unwrap();
+        self.nonce_messages.insert(key, value)?;
+        clean_up_old_epochs(&self.nonce_messages, epoch)
+    }
+
+    pub fn list_nonce_messages(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> Result<Vec<(Address, batch_avss::Message)>> {
+        let prefix = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        list_messages_by_prefix(&self.nonce_messages, &prefix)
+    }
+}
+
+/// List all `(Address, T)` pairs from a keyspace where keys match the given prefix.
+/// Keys are expected to end with a 32-byte address suffix.
+fn list_messages_by_prefix<T: DeserializeOwned>(
+    keyspace: &Keyspace,
+    prefix: &[u8],
+) -> Result<Vec<(Address, T)>> {
+    let addr_len = 32;
+    let mut results = Vec::new();
+    for guard in keyspace.prefix(prefix) {
+        let (key, value) = guard.into_inner()?;
+        let addr_start = key.len().checked_sub(addr_len).ok_or_else(|| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "key too short for address",
+            ))
+        })?;
+        let address_bytes: [u8; 32] = key[addr_start..].try_into().map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid key length",
+            ))
+        })?;
+        let address = Address::new(address_bytes);
+        let message: T = bcs::from_bytes(&value).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid message data",
+            ))
+        })?;
+        results.push((address, message));
+    }
+    Ok(results)
 }
 
 /// Delete entries from keyspace where key starts with epoch (big-endian u64) < cutoff.
@@ -267,6 +304,7 @@ mod tests {
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
     use fastcrypto_tbls::threshold_schnorr::avss;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
     use sui_sdk_types::Address;
@@ -300,6 +338,20 @@ mod tests {
         )
         .unwrap();
         dealer.create_message(&mut rand::thread_rng())
+    }
+
+    fn create_test_nonce_message() -> batch_avss::Message {
+        let nodes = create_test_nodes(5);
+        let dealer = batch_avss::Dealer::new(
+            nodes,
+            0, // party_id
+            3, // threshold
+            1, // max_faulty
+            b"test-nonce-session".to_vec(),
+            10, // batch_size_per_weight
+        )
+        .unwrap();
+        dealer.create_message(&mut rand::thread_rng()).unwrap()
     }
 
     #[test]
@@ -619,5 +671,135 @@ mod tests {
         // List non-existent epoch - should return empty
         let result = db.list_all_rotation_messages(99).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_nonce_messages() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let message1 = create_test_nonce_message();
+        let message2 = create_test_nonce_message();
+
+        // Initially empty
+        let result = db.list_nonce_messages(1, 0).unwrap();
+        assert!(result.is_empty());
+
+        // Store and list
+        db.store_nonce_message(1, 0, &dealer1, &message1).unwrap();
+        let result = db.list_nonce_messages(1, 0).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, dealer1);
+        assert_eq!(
+            bcs::to_bytes(&result[0].1).unwrap(),
+            bcs::to_bytes(&message1).unwrap()
+        );
+
+        // Same epoch+batch, different dealer
+        db.store_nonce_message(1, 0, &dealer2, &message2).unwrap();
+        let result = db.list_nonce_messages(1, 0).unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Different batch_index - should be empty
+        let result = db.list_nonce_messages(1, 1).unwrap();
+        assert!(result.is_empty());
+
+        // Different epoch - should be empty
+        let result = db.list_nonce_messages(2, 0).unwrap();
+        assert!(result.is_empty());
+
+        // Verify persistence across reopen
+        drop(db);
+        let db = Database::open(tmpdir.path()).unwrap();
+        let result = db.list_nonce_messages(1, 0).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_nonce_messages_different_batches() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let message1 = create_test_nonce_message();
+        let message2 = create_test_nonce_message();
+
+        // Store in batch 0 and batch 1 of same epoch
+        db.store_nonce_message(1, 0, &dealer, &message1).unwrap();
+        db.store_nonce_message(1, 1, &dealer, &message2).unwrap();
+
+        // Each batch returns only its own messages
+        let batch0 = db.list_nonce_messages(1, 0).unwrap();
+        assert_eq!(batch0.len(), 1);
+        assert_eq!(
+            bcs::to_bytes(&batch0[0].1).unwrap(),
+            bcs::to_bytes(&message1).unwrap()
+        );
+
+        let batch1 = db.list_nonce_messages(1, 1).unwrap();
+        assert_eq!(batch1.len(), 1);
+        assert_eq!(
+            bcs::to_bytes(&batch1[0].1).unwrap(),
+            bcs::to_bytes(&message2).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_nonce_messages_auto_cleanup() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let message = create_test_nonce_message();
+
+        // Store in epoch 5
+        db.store_nonce_message(5, 0, &dealer, &message).unwrap();
+        assert_eq!(db.list_nonce_messages(5, 0).unwrap().len(), 1);
+
+        // Store in epoch 6 - cleanup for epochs < 5, epoch 5 remains
+        db.store_nonce_message(6, 0, &dealer, &message).unwrap();
+        assert_eq!(db.list_nonce_messages(5, 0).unwrap().len(), 1);
+        assert_eq!(db.list_nonce_messages(6, 0).unwrap().len(), 1);
+
+        // Store in epoch 7 - cleanup for epochs < 6, epoch 5 is deleted
+        db.store_nonce_message(7, 0, &dealer, &message).unwrap();
+        assert!(
+            db.list_nonce_messages(5, 0).unwrap().is_empty(),
+            "epoch 5 should be cleaned up"
+        );
+        assert_eq!(
+            db.list_nonce_messages(6, 0).unwrap().len(),
+            1,
+            "epoch 6 should remain"
+        );
+        assert_eq!(
+            db.list_nonce_messages(7, 0).unwrap().len(),
+            1,
+            "epoch 7 should remain"
+        );
+    }
+
+    #[test]
+    fn test_nonce_messages_overwrite() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let message1 = create_test_nonce_message();
+        let message2 = create_test_nonce_message();
+
+        // Store and overwrite same key
+        db.store_nonce_message(1, 0, &dealer, &message1).unwrap();
+        db.store_nonce_message(1, 0, &dealer, &message2).unwrap();
+
+        // Should have exactly one entry (overwritten)
+        let result = db.list_nonce_messages(1, 0).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            bcs::to_bytes(&result[0].1).unwrap(),
+            bcs::to_bytes(&message2).unwrap()
+        );
     }
 }

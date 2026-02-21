@@ -2721,6 +2721,22 @@ mod tests {
         fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             Ok(vec![])
         }
+
+        fn store_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
+            _message: &batch_avss::Message,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn list_nonce_messages(
+            &self,
+            _batch_index: u32,
+        ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+            Ok(vec![])
+        }
     }
 
     fn receive_dealer_messages(
@@ -3695,6 +3711,22 @@ mod tests {
                 .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
                 .collect())
         }
+
+        fn store_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
+            _message: &batch_avss::Message,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn list_nonce_messages(
+            &self,
+            _batch_index: u32,
+        ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+            Ok(vec![])
+        }
     }
 
     struct FailingPublicMessagesStore;
@@ -3737,6 +3769,22 @@ mod tests {
         }
 
         fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+            Ok(vec![])
+        }
+
+        fn store_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
+            _message: &batch_avss::Message,
+        ) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("Storage failure"))
+        }
+
+        fn list_nonce_messages(
+            &self,
+            _batch_index: u32,
+        ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
             Ok(vec![])
         }
     }
@@ -7016,6 +7064,22 @@ mod tests {
                 .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
                 .collect())
         }
+
+        fn store_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
+            _message: &batch_avss::Message,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn list_nonce_messages(
+            &self,
+            _batch_index: u32,
+        ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+            Ok(vec![])
+        }
     }
 
     /// A P2P channel that tracks retrieve_message calls.
@@ -8614,6 +8678,25 @@ mod tests {
 
         fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
             self.inner.lock().unwrap().list_all_rotation_messages()
+        }
+
+        fn store_nonce_message(
+            &mut self,
+            batch_index: u32,
+            dealer: &Address,
+            message: &batch_avss::Message,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .lock()
+                .unwrap()
+                .store_nonce_message(batch_index, dealer, message)
+        }
+
+        fn list_nonce_messages(
+            &self,
+            batch_index: u32,
+        ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+            self.inner.lock().unwrap().list_nonce_messages(batch_index)
         }
     }
 

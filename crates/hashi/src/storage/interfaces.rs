@@ -1,5 +1,6 @@
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use sui_sdk_types::Address;
 
 pub use crate::mpc::types::Messages;
@@ -41,4 +42,17 @@ pub trait PublicMessagesStore: Send + Sync {
 
     /// List all stored rotation messages for the current epoch.
     fn list_all_rotation_messages(&self) -> Result<Vec<(Address, Messages)>>;
+
+    /// Store a dealer's nonce message for presignature generation.
+    ///
+    /// Old messages (for epochs < current_epoch - 1) are automatically cleaned up.
+    fn store_nonce_message(
+        &mut self,
+        batch_index: u32,
+        dealer: &Address,
+        message: &batch_avss::Message,
+    ) -> Result<()>;
+
+    /// List all nonce messages for the current epoch and given batch.
+    fn list_nonce_messages(&self, batch_index: u32) -> Result<Vec<(Address, batch_avss::Message)>>;
 }
