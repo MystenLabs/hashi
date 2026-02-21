@@ -1,6 +1,6 @@
 # hashi-guardian-enclave
 
-Guardian enclave service that emits immutable S3 logs for monitor/audit workflows.
+Guardian enclave service that emits immutable S3 logs for audit/state-restart workflows.
 
 ## S3 log key format
 
@@ -14,7 +14,7 @@ Where:
 
 - `session_id` is the enclave signing pubkey bytes encoded as lowercase hex.
 - `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `setup-new-key-success`, `pi-success-share-{share_id}`, `pi-enclave-fully-initialized`).
-- `counter` is a zero-padded decimal sequence number (heartbeat only).
+- `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `status` is `success` or `failure`.
 - `rand8` is a random 8-hex suffix to avoid key collisions.
 
@@ -28,4 +28,4 @@ Where:
 
 - `init/{session_id}-...` keeps init logs session-addressable.
 - `heartbeat/...` and `withdraw/...` date partitions support efficient hour-based polling.
-- Prefixes (`init`, `heartbeat`, `withdraw`) allow independent lifecycle policies.
+- Prefixes (`init`, `heartbeat`, `withdraw`) allow independent S3 deletion policies.

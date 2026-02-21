@@ -543,7 +543,6 @@ impl Enclave {
     ///
     /// Init messages are expected to be logged in the following order.
     /// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
-    /// This is enforced in the monitor.
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
         let suffix = match &msg {
             InitLogMessage::OIAttestationUnsigned { .. } => "oi-attestation-unsigned".to_string(),
