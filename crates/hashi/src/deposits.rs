@@ -1,5 +1,6 @@
 use crate::Hashi;
 use crate::onchain::types::DepositRequest;
+use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
 use bitcoin::ScriptBuf;
@@ -126,7 +127,7 @@ impl Hashi {
     ) -> anyhow::Result<()> {
         let hashi_pubkey = self.get_hashi_pubkey();
         let expected_address =
-            self.get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref());
+            self.get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())?;
 
         if deposit_address != expected_address {
             bail!(
@@ -143,27 +144,29 @@ impl Hashi {
         &self,
         hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
-    ) -> bitcoin::Address {
-        let pubkey = self.deposit_pubkey(hashi_pubkey, derivation_path);
-        self.bitcoin_address_from_pubkey(&pubkey)
+    ) -> anyhow::Result<bitcoin::Address> {
+        let pubkey = self.deposit_pubkey(hashi_pubkey, derivation_path)?;
+        Ok(self.bitcoin_address_from_pubkey(&pubkey))
     }
 
     pub(crate) fn deposit_pubkey(
         &self,
         hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
-    ) -> XOnlyPublicKey {
+    ) -> anyhow::Result<XOnlyPublicKey> {
         if let Some(path) = derivation_path {
             let verifying_key = self
                 .signing_verifying_key()
-                .expect("MPC public key not available yet");
+                .context("MPC public key not available yet")?;
             let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
                 &verifying_key,
                 &path.into_inner(),
             );
-            XOnlyPublicKey::from_slice(&derived.to_byte_array()).expect("valid 32-byte x-only key")
+            let pubkey = XOnlyPublicKey::from_slice(&derived.to_byte_array())
+                .context("valid 32-byte x-only key")?;
+            Ok(pubkey)
         } else {
-            *hashi_pubkey
+            Ok(*hashi_pubkey)
         }
     }
 

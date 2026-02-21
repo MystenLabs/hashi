@@ -58,8 +58,6 @@ impl BitcoinNodeHandle {
             .arg("-rpcallowip=127.0.0.1")
             .arg("-fallbackfee=0.0001")
             .arg("-acceptnonstdtxn=1")
-            .arg("-minrelaytxfee=0") // Allow zero-fee transactions in regtest
-            .arg("-blockmintxfee=0") // Allow mining zero-fee transactions in regtest
             .arg("-blockfilterindex=1") // Enable compact block filters (BIP-158)
             .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
             .arg("-txindex=1") // Enable transaction index for RPC queries

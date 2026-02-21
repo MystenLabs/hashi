@@ -166,7 +166,7 @@ impl Hashi {
         if let Some(change_output) = non_request_outputs.first() {
             let hashi_pubkey = self.get_hashi_pubkey();
             let expected_address =
-                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None))?;
+                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
             anyhow::ensure!(
                 change_output.bitcoin_address == expected_address,
                 "Change output does not go to hashi root pubkey"
@@ -399,19 +399,19 @@ impl Hashi {
         let spend_inputs = inputs
             .iter()
             .map(|input| {
-                let pubkey = self.deposit_pubkey(&hashi_pubkey, input.derivation_path.as_ref());
+                let pubkey = self.deposit_pubkey(&hashi_pubkey, input.derivation_path.as_ref())?;
                 let address = self.bitcoin_address_from_pubkey(&pubkey);
                 let (_, _, leaf_hash) =
                     bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
-                (
+                Ok((
                     TxOut {
                         value: Amount::from_sat(input.amount),
                         script_pubkey: address.script_pubkey(),
                     },
                     leaf_hash,
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let prevouts = spend_inputs
             .iter()
             .map(|(txout, _)| txout.clone())
@@ -579,7 +579,7 @@ impl Hashi {
         // Add change output back to hashi root pubkey if selection produced change
         if let Some(change_amount) = selection.change {
             let hashi_pubkey = self.get_hashi_pubkey();
-            let change_address = self.get_deposit_address(&hashi_pubkey, None);
+            let change_address = self.get_deposit_address(&hashi_pubkey, None)?;
             outputs.push(OutputUtxo {
                 amount: change_amount,
                 bitcoin_address: witness_program_from_address(&change_address)?,

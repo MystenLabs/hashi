@@ -46,6 +46,7 @@ use sui_sdk_types::bcs::FromBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
+use sui_transaction_builder::intent::CoinWithBalance;
 
 use crate::Hashi;
 use crate::config::Config;
@@ -385,22 +386,8 @@ impl SuiTxExecutor {
         destination_bytes: Vec<u8>,
         withdrawal_fee_sui: u64,
     ) -> anyhow::Result<Address> {
-        let sender = self.sender();
         let btc_type = format!("{}::btc::BTC", self.hashi_ids.package_id);
         let btc_struct_tag: StructTag = btc_type.parse()?;
-
-        let btc_coins = self
-            .client
-            .select_coins(
-                &sender,
-                &(btc_struct_tag.clone().into()),
-                withdrawal_amount_sats,
-                &[],
-            )
-            .await?;
-        let first_coin = btc_coins
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No hBTC coin found for sender {sender}"))?;
 
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -414,33 +401,10 @@ impl SuiTxExecutor {
                 .with_mutable(false),
         );
 
-        let first_coin_ref: sui_sdk_types::ObjectReference =
-            (&first_coin.object_reference()).try_into()?;
-        let primary_btc_coin = builder.object(ObjectInput::owned(
-            *first_coin_ref.object_id(),
-            first_coin_ref.version(),
-            *first_coin_ref.digest(),
-        ));
-
-        let mut coin_inputs = Vec::new();
-        for coin in btc_coins.iter().skip(1) {
-            let coin_ref: sui_sdk_types::ObjectReference = (&coin.object_reference()).try_into()?;
-            coin_inputs.push(builder.object(ObjectInput::owned(
-                *coin_ref.object_id(),
-                coin_ref.version(),
-                *coin_ref.digest(),
-            )));
-        }
-        if !coin_inputs.is_empty() {
-            builder.merge_coins(primary_btc_coin, coin_inputs);
-        }
-
-        let amount_arg = builder.pure(&withdrawal_amount_sats);
-        let withdrawal_btc_coin = builder
-            .split_coins(primary_btc_coin, vec![amount_arg])
-            .into_iter()
-            .next()
-            .unwrap();
+        let withdrawal_btc_coin = builder.intent(
+            CoinWithBalance::new(btc_struct_tag.clone(), withdrawal_amount_sats)
+                .with_use_gas_coin(false),
+        );
         let btc_balance_arg = builder.move_call(
             Function::new(
                 Address::TWO,
@@ -451,13 +415,7 @@ impl SuiTxExecutor {
             vec![withdrawal_btc_coin],
         );
 
-        let fee_amount_arg = builder.pure(&withdrawal_fee_sui);
-        let gas_arg = builder.gas();
-        let fee_coin_arg = builder
-            .split_coins(gas_arg, vec![fee_amount_arg])
-            .into_iter()
-            .next()
-            .unwrap();
+        let fee_coin_arg = builder.intent(CoinWithBalance::sui(withdrawal_fee_sui));
         let destination_arg = builder.pure(&destination_bytes);
 
         builder.move_call(

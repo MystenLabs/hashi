@@ -239,11 +239,10 @@ impl Monitor {
         match self.bitcoind_rpc.test_mempool_accept(&[&tx]) {
             Ok(results) => match results.first() {
                 Some(result) if !result.allowed => {
-                    warn!(
-                        "Bitcoin Core mempool would reject tx {txid}: {}",
+                    error!(
+                        "Bitcoin Core mempool will reject tx {txid}: {}",
                         result.reject_reason.as_deref().unwrap_or("unknown reason")
                     );
-                    std::process::exit(1);
                 }
                 Some(_) => {
                     debug!("Bitcoin Core mempool would accept tx {txid}");

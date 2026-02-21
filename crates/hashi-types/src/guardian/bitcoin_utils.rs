@@ -456,6 +456,7 @@ pub fn compute_taproot_descriptor(
     }
 }
 
+// Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
 pub fn nums_internal_key() -> BitcoinPubkey {
     BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
         .expect("valid nums key")

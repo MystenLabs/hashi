@@ -28,6 +28,7 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
@@ -538,7 +539,7 @@ impl LeaderService {
         {
             let pubkey = self
                 .inner
-                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref());
+                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
             let (script, control_block, _) =
                 bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
             let mut witness = bitcoin::Witness::new();
@@ -674,7 +675,9 @@ impl LeaderService {
         loop {
             match results.next() {
                 Some(Ok(signatures)) => return Some(signatures),
-                Some(Err(_)) => continue,
+                Some(Err(e)) => {
+                    warn!("Could not get signatures from a node: {e}");
+                }
                 None => {
                     error!(
                         "Could not get mpc signatures for {:?}; stopping processing",
