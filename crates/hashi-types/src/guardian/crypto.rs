@@ -2,6 +2,7 @@ use super::GuardianError::InvalidInputs;
 use super::GuardianResult;
 use super::GuardianSigned;
 use super::SigningIntent;
+use super::UnixMillis;
 use super::bitcoin_utils::BTC_LIB;
 use ed25519_consensus::SigningKey;
 use ed25519_consensus::VerificationKey;
@@ -276,7 +277,7 @@ pub fn decrypt_share(
 impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
-    pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: u64) -> Self {
+    pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
         let tuple = (T::INTENT, &data, timestamp_ms);
         let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
         let signature = signing_key.sign(&signing_payload);

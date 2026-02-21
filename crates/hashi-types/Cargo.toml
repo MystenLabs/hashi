@@ -36,6 +36,7 @@ ed25519-consensus = "2.1"
 miniscript = "13.0.0"
 serde_json.workspace = true
 tracing.workspace = true
+time = "0.3"
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

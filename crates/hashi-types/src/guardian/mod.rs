@@ -4,12 +4,17 @@ pub mod epoch_store;
 pub mod errors;
 pub mod proto_conversions;
 pub mod test_utils;
+pub mod time_utils;
 
 mod enclave_state;
+pub mod s3_utils;
 
 pub use enclave_state::CommitteeStore;
 pub use enclave_state::RateLimiter;
 pub use enclave_state::WithdrawalState;
+pub use time_utils::UnixMillis;
+pub use time_utils::now_timestamp_ms;
+pub use time_utils::unix_millis_to_seconds;
 
 use self::bitcoin_utils::InputUTXO;
 use self::bitcoin_utils::OutputUTXO;
@@ -40,8 +45,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 // ---------------------------------
 //          Constants
@@ -54,10 +57,11 @@ pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(5 * 60);
 pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(5 * 60);
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
 
-/// S3 sub-prefixes (directories) used for log streams within a session.
-pub const S3_PREFIX_INIT: &str = "init";
-pub const S3_PREFIX_WITHDRAW: &str = "withdraw";
-pub const S3_PREFIX_HEARTBEAT: &str = "heartbeat";
+/// S3 sub-prefixes used for guardian log streams.
+/// See `crates/hashi-guardian-enclave/README.md` for canonical key layout.
+pub const S3_DIR_INIT: &str = "init";
+pub const S3_DIR_WITHDRAW: &str = "withdraw";
+pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 
 // ---------------------------------
 //          Intents
@@ -84,19 +88,6 @@ pub trait SigningIntent {
 }
 
 // ---------------------------------
-//          Time
-// ---------------------------------
-
-/// Milliseconds since Unix epoch.
-/// Panics if the system clock is before `UNIX_EPOCH`.
-pub fn now_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system_time cannot be before Unix epoch")
-        .as_millis() as u64
-}
-
-// ---------------------------------
 //          Envelopes
 // ---------------------------------
 
@@ -105,7 +96,7 @@ pub fn now_timestamp_ms() -> u64 {
 pub struct Timestamped<T> {
     pub data: T,
     /// Milliseconds since Unix epoch.
-    pub timestamp_ms: u64,
+    pub timestamp_ms: UnixMillis,
 }
 
 /// Guardian-signed wrapper - adds timestamp and signature to any data
@@ -114,7 +105,7 @@ pub struct Timestamped<T> {
 pub struct GuardianSigned<T> {
     pub data: T,
     /// Milliseconds since Unix epoch.
-    pub timestamp_ms: u64,
+    pub timestamp_ms: UnixMillis,
     pub signature: GuardianSignature,
 }
 
@@ -488,6 +479,24 @@ impl StandardWithdrawalRequest {
 
     pub fn utxos(&self) -> &TxUTXOs {
         &self.utxos
+    }
+}
+
+impl LogMessageEnvelope {
+    pub fn timestamp_ms(&self) -> UnixMillis {
+        match self {
+            LogMessageEnvelope::Signed(d) => d.timestamp_ms,
+            LogMessageEnvelope::Timestamped(d) => d.timestamp_ms,
+        }
+    }
+}
+
+impl WithdrawalLogMessage {
+    pub fn wid(&self) -> WithdrawalID {
+        match self {
+            WithdrawalLogMessage::Success { request_data, .. } => request_data.wid,
+            WithdrawalLogMessage::Failure { request_data, .. } => request_data.wid,
+        }
     }
 }
 

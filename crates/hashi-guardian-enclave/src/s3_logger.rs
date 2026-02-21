@@ -3,6 +3,7 @@ use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
+use hashi_types::guardian::S3_DIR_INIT;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -12,8 +13,10 @@ use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
+use hashi_types::guardian::s3_utils::S3Directory;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::UnixMillis;
 use serde::Serialize;
 use tracing::info;
 
@@ -84,17 +87,29 @@ impl S3Logger {
     // S3 Write
     // ========================================================================
 
-    /// Write a value to S3 under `{dir}/{session_id}/{seq:020}.json`.
-    ///
-    /// Throws: S3Error if write fails
-    pub async fn write_at_seq<T: Serialize>(
+    /// Write an init value to S3 under `init/{session_id}-{suffix}.json`.
+    pub async fn write_init_with_suffix<T: Serialize>(
         &self,
-        dir: &str,
-        seq: u64,
+        suffix: &str,
         value: &T,
         object_lock_duration: Duration,
     ) -> GuardianResult<()> {
-        let key = format!("{}/{}/{:020}.json", dir, self.session_id, seq);
+        let key = format!("{}/{}-{}.json", S3_DIR_INIT, self.session_id, suffix);
+        self.write_at_key(&key, value, object_lock_duration).await
+    }
+
+    /// Write values to S3 under
+    /// `{prefix}/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{suffix}.json`.
+    pub async fn write_hour_partitioned_with_suffix<T: Serialize>(
+        &self,
+        prefix: &str,
+        timestamp_ms: UnixMillis,
+        suffix: &str,
+        value: &T,
+        object_lock_duration: Duration,
+    ) -> GuardianResult<()> {
+        let dir = S3Directory::new(prefix, timestamp_ms);
+        let key = format!("{}/{}-{}.json", dir, self.session_id, suffix);
         self.write_at_key(&key, value, object_lock_duration).await
     }
 
@@ -268,7 +283,7 @@ mod tests {
         let config = S3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
-            bucket_info: hashi_types::guardian::S3BucketInfo {
+            bucket_info: S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
             },
@@ -286,9 +301,7 @@ mod tests {
         let put_ok = mock!(Client::put_object)
             .match_requests(|req| {
                 req.bucket() == Some("bucket")
-                    && req
-                        .key()
-                        .is_some_and(|k| k.starts_with("init/session/") && k.ends_with(".json"))
+                    && req.key() == Some("init/session-oi-attestation-unsigned.json")
                     && req.content_type() == Some("application/json")
                     && req.object_lock_mode() == Some(&ObjectLockMode::Compliance)
                     && req.object_lock_retain_until_date().is_some()
@@ -299,7 +312,11 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write_at_seq("init", 0, &TestPayload { a: 1 }, object_lock_duration)
+            .write_init_with_suffix(
+                "oi-attestation-unsigned",
+                &TestPayload { a: 1 },
+                object_lock_duration,
+            )
             .await
             .unwrap();
         assert_eq!(put_ok.num_calls(), 1);
@@ -323,7 +340,11 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write_at_seq("init", 0, &TestPayload { a: 1 }, object_lock_duration)
+            .write_init_with_suffix(
+                "oi-attestation-unsigned",
+                &TestPayload { a: 1 },
+                object_lock_duration,
+            )
             .await
             .unwrap();
         assert_eq!(put_flaky.num_calls(), 3);

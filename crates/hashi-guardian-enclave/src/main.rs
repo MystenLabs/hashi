@@ -11,8 +11,6 @@ use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -72,12 +70,6 @@ pub struct EnclaveState {
     hashi_committees: RwLock<Option<ArcCommitteeStore>>,
     /// Withdrawal-related state.
     withdraw_state: Mutex<Option<WithdrawalState>>,
-    /// Sequence number for ordered init log writes.
-    /// We use a separate sequence number for init & withdraw because listeners have different expectations:
-    /// init log stream can't have holes (as we panic upon error) whereas withdraw log stream can.
-    init_log_seq: AtomicU64,
-    /// Sequence number for ordered withdrawal log writes.
-    withdraw_log_seq: AtomicU64,
 }
 
 /// Scratchpad used only during initialization.
@@ -456,8 +448,6 @@ impl Enclave {
             state: EnclaveState {
                 hashi_committees: RwLock::new(None),
                 withdraw_state: Mutex::new(None),
-                init_log_seq: AtomicU64::new(0),
-                withdraw_log_seq: AtomicU64::new(0),
             },
             scratchpad: Scratchpad::default(),
         }
@@ -545,17 +535,26 @@ impl Enclave {
     // ========================================================================
 
     /// A unique session ID for the current enclave session.
-    /// Logs are organized as follows: SessionId/xyz.json
     pub fn s3_session_id(&self) -> String {
         self.signing_pubkey().as_bytes().to_lower_hex_string()
     }
 
-    /// Log an init message at an ordered key.
+    /// Log an init message at a deterministic semantic key.
     ///
     /// Init messages are expected to be logged in the following order.
     /// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
     /// This is enforced in the monitor.
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
+        let suffix = match &msg {
+            InitLogMessage::OIAttestationUnsigned { .. } => "oi-attestation-unsigned".to_string(),
+            InitLogMessage::OIGuardianInfo(_) => "oi-guardian-info".to_string(),
+            InitLogMessage::SetupNewKeySuccess { .. } => "setup-new-key-success".to_string(),
+            InitLogMessage::PISuccess { share_id, .. } => {
+                format!("pi-success-share-{}", share_id.get())
+            }
+            InitLogMessage::PIEnclaveFullyInitialized => "pi-enclave-fully-initialized".to_string(),
+        };
+
         let env = match msg {
             OIAttestationUnsigned { .. } => LogMessageEnvelope::Timestamped(Timestamped {
                 data: LogMessage::Init(Box::new(msg)),
@@ -564,23 +563,27 @@ impl Enclave {
             _ => LogMessageEnvelope::Signed(self.sign(LogMessage::Init(Box::new(msg)))),
         };
 
-        let seq = self.state.init_log_seq.fetch_add(1, Ordering::Relaxed);
-
         self.config
             .s3_logger()?
-            .write_at_seq(S3_PREFIX_INIT, seq, &env, S3_OBJECT_LOCK_DURATION_INIT)
+            .write_init_with_suffix(&suffix, &env, S3_OBJECT_LOCK_DURATION_INIT)
             .await
     }
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
+        let status = match &msg {
+            WithdrawalLogMessage::Success { .. } => "success",
+            WithdrawalLogMessage::Failure { .. } => "failure",
+        };
+        let wid = msg.wid();
         let env = LogMessageEnvelope::Signed(self.sign(LogMessage::Withdrawal(Box::new(msg))));
-        let seq = self.state.withdraw_log_seq.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!("wid{}-{}-{:08x}", wid, status, rand::random::<u32>());
 
         self.config
             .s3_logger()?
-            .write_at_seq(
-                S3_PREFIX_WITHDRAW,
-                seq,
+            .write_hour_partitioned_with_suffix(
+                S3_DIR_WITHDRAW,
+                env.timestamp_ms(),
+                &suffix,
                 &env,
                 S3_OBJECT_LOCK_DURATION_WITHDRAW,
             )
@@ -590,12 +593,14 @@ impl Enclave {
     /// Throws: InvalidInputs (if logger is not init) or S3Error.
     pub async fn log_heartbeat_at_seq(&self, seq: u64) -> GuardianResult<()> {
         let env = LogMessageEnvelope::Signed(self.sign(LogMessage::Heartbeat));
+        let suffix = format!("{:020}", seq);
 
         self.config
             .s3_logger()?
-            .write_at_seq(
-                S3_PREFIX_HEARTBEAT,
-                seq,
+            .write_hour_partitioned_with_suffix(
+                S3_DIR_HEARTBEAT,
+                env.timestamp_ms(),
+                &suffix,
                 &env,
                 S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             )
