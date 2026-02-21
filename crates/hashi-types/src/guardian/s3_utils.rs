@@ -9,7 +9,7 @@ type Day = u8;
 type Hour = u8;
 
 /// An S3 directory: prefix/YYYY/MM/DD/HH.
-/// All logs emitted within an hour are stored in the same directory, e.g., logs emitted between 12-1 PM are in the <prefix>/12 directory.
+/// All logs emitted within an hour are stored in the same directory, e.g., logs emitted between 12-1 PM are in the `<prefix>`/12 directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct S3Directory {
     prefix: String,
