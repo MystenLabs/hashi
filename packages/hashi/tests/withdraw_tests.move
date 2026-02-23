@@ -6,7 +6,7 @@
 module hashi::withdraw_tests;
 
 use hashi::{btc::BTC, test_utils, withdrawal_queue};
-use sui::{clock, coin::Coin};
+use sui::clock;
 
 // ======== Test Addresses ========
 const VOTER1: address = @0x1;
@@ -44,13 +44,13 @@ fun test_cancel_withdrawal() {
     clock.set_for_testing(one_hour_ms);
 
     // Cancel the withdrawal
-    let coin: Coin<BTC> = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, ctx);
+    let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, ctx);
 
-    // Verify the returned coin has the correct amount
-    assert!(coin.value() == 10_000);
+    // Verify the returned balance has the correct amount
+    assert!(btc.value() == 10_000);
 
     // Clean up
-    coin.burn_for_testing();
+    btc.destroy_for_testing();
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
@@ -71,8 +71,8 @@ fun test_cancel_withdrawal_unauthorized() {
 
     // Attempt cancellation from a different sender — should fail
     let other_ctx = &mut test_utils::new_tx_context(OTHER_USER, 0);
-    let coin = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, other_ctx);
-    coin.burn_for_testing();
+    let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, other_ctx);
+    btc.destroy_for_testing();
 
     // Clean up (shouldn't be reached due to expected failure)
     clock.destroy_for_testing();
@@ -90,8 +90,8 @@ fun test_cancel_withdrawal_cooldown_not_elapsed() {
     let request_id = setup_withdrawal_request(&mut hashi, &clock, 10_000, ctx);
 
     // Do NOT advance clock — cooldown has not elapsed
-    let coin = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, ctx);
-    coin.burn_for_testing();
+    let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, ctx);
+    btc.destroy_for_testing();
 
     // Clean up (shouldn't be reached due to expected failure)
     clock.destroy_for_testing();

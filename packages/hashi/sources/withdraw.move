@@ -163,14 +163,12 @@ entry fun confirm_withdrawal(
     withdrawal.destroy_pending_withdrawal();
 }
 
-// TODO: this introduces a race condition where the withdrawal can be cancelled while its being picked for processing
-// so we need to make sure that the withdrawal is not cancelled while its being picked for processing
 public fun cancel_withdrawal(
     hashi: &mut Hashi,
     request_id: address,
     clock: &Clock,
     ctx: &mut TxContext,
-): Coin<BTC> {
+): Balance<BTC> {
     hashi.config().assert_version_enabled();
 
     let request = hashi.withdrawal_queue_mut().remove_request(request_id);
@@ -186,7 +184,7 @@ public fun cancel_withdrawal(
 
     // Return BTC to the requester
     let (_, btc) = hashi::withdrawal_queue::request_into_parts(request);
-    sui::coin::from_balance(btc, ctx)
+    btc
 }
 
 public fun delete_expired_spent_utxo(hashi: &mut Hashi, txid: address, vout: u32) {
