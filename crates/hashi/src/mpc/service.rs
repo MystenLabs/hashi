@@ -14,6 +14,7 @@ use tracing::warn;
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
+use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::mpc::DkgOutput;
 use crate::mpc::MpcManager;
 use crate::mpc::SigningManager;
@@ -70,14 +71,19 @@ impl MpcHandle {
 pub struct MpcService {
     inner: Arc<Hashi>,
     key_ready_tx: watch::Sender<Option<G>>,
+    refill_tx: Arc<watch::Sender<u32>>,
+    refill_rx: watch::Receiver<u32>,
 }
 
 impl MpcService {
     pub fn new(hashi: Arc<Hashi>) -> (Self, MpcHandle) {
         let (key_ready_tx, key_ready_rx) = watch::channel(None);
+        let (refill_tx, refill_rx) = watch::channel(0u32);
         let service = Self {
             inner: hashi,
             key_ready_tx,
+            refill_tx: Arc::new(refill_tx),
+            refill_rx,
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -91,7 +97,7 @@ impl MpcService {
         })
     }
 
-    async fn run(self) {
+    async fn run(mut self) {
         if let Some(epoch) = self.get_pending_epoch_change() {
             self.handle_reconfig(epoch).await;
         } else if self.inner.is_in_current_committee() {
@@ -102,6 +108,8 @@ impl MpcService {
                     Ok(output) => {
                         let epoch = self.inner.onchain_state().epoch();
                         if let Err(e) = self.prepare_signing(epoch, &output).await {
+                            // TODO: Node has valid key but no presignatures, can't sign.
+                            // Recovery requires presig state sync with peers.
                             error!("Failed to init signing after DKG recovery: {e}");
                         }
                         let _ = self.key_ready_tx.send(Some(output.public_key));
@@ -123,19 +131,31 @@ impl MpcService {
                 self.handle_reconfig(epoch).await;
                 continue;
             }
-            match notifications.recv().await {
-                Ok(notification) => match notification {
-                    Notification::StartReconfig(epoch) => {
-                        self.handle_reconfig(epoch).await;
+            tokio::select! {
+                notification = notifications.recv() => {
+                    match notification {
+                        Ok(notification) => match notification {
+                            Notification::StartReconfig(epoch) => {
+                                self.handle_reconfig(epoch).await;
+                            }
+                            Notification::SuiEpochChanged(sui_epoch) => {
+                                self.try_submit_start_reconfig(sui_epoch).await;
+                            }
+                            _ => {}
+                        },
+                        Err(e) => {
+                            error!("MPC notification recv error: {e:?}, resubscribing");
+                            notifications = self.inner.onchain_state().subscribe();
+                        }
                     }
-                    Notification::SuiEpochChanged(sui_epoch) => {
-                        self.try_submit_start_reconfig(sui_epoch).await;
+                }
+                Ok(()) = self.refill_rx.changed() => {
+                    let next_batch = *self.refill_rx.borrow();
+                    if let Err(e) = self.refill_presignatures(next_batch).await {
+                        // TODO: Failed refill can desynchronize this node's presignature
+                        // index from peers. Recovery requires presig state sync with peers.
+                        error!("Presignature refill failed: {e}");
                     }
-                    _ => {}
-                },
-                Err(e) => {
-                    error!("MPC notification recv error: {e:?}, resubscribing");
-                    notifications = self.inner.onchain_state().subscribe();
                 }
             }
         }
@@ -156,6 +176,8 @@ impl MpcService {
             .pending_epoch_change()
     }
 
+    // TODO: After restart, this node's presignature state is out of sync with
+    // peers who kept running. Recovery requires presig state sync with peers.
     async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -195,7 +217,11 @@ impl MpcService {
         Ok(output)
     }
 
-    async fn prepare_signing(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {
+    async fn generate_presignatures(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> anyhow::Result<(Committee, Presignatures)> {
         let onchain_state = self.inner.onchain_state().clone();
         let committee = onchain_state
             .state()
@@ -211,7 +237,6 @@ impl MpcService {
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
-        let batch_index = 0u32;
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -237,6 +262,11 @@ impl MpcService {
         };
         let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        Ok((committee, presignatures))
+    }
+
+    async fn prepare_signing(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {
+        let (committee, presignatures) = self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
         let signing_manager = SigningManager::new(
             address,
@@ -245,8 +275,25 @@ impl MpcService {
             output.key_shares.clone(),
             output.public_key,
             presignatures,
+            0,
+            PRESIG_REFILL_DIVISOR,
+            self.refill_tx.clone(),
         );
         self.inner.set_or_init_signing_manager(signing_manager);
+        Ok(())
+    }
+
+    async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
+        let epoch = self.inner.onchain_state().epoch();
+        let (_, presignatures) = self.generate_presignatures(epoch, batch_index).await?;
+        if self.inner.onchain_state().epoch() != epoch {
+            return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
+        }
+        let signing_manager = self.inner.signing_manager();
+        signing_manager
+            .write()
+            .unwrap()
+            .set_next_batch(presignatures);
         Ok(())
     }
 
@@ -339,6 +386,8 @@ impl MpcService {
             }
         }
         if let Err(e) = self.prepare_signing(target_epoch, &output).await {
+            // TODO: Node has valid key but no presignatures, can't sign.
+            // Recovery requires presig state sync with peers.
             error!("Failed to init signing after key rotation to epoch {target_epoch}: {e}");
         }
     }

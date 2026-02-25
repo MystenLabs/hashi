@@ -172,6 +172,7 @@ fn signing_error_to_status(err: SigningError) -> Status {
         SigningError::TooManyInvalidSignatures { .. } => {
             Status::failed_precondition(err.to_string())
         }
+        SigningError::PoolExhausted => Status::resource_exhausted(err.to_string()),
     }
 }
 

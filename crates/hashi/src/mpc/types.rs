@@ -461,6 +461,9 @@ pub enum SigningError {
         "Too many invalid partial signatures to recover: collected {collected}, threshold {threshold}"
     )]
     TooManyInvalidSignatures { collected: usize, threshold: u16 },
+
+    #[error("Presignature pool exhausted, new batch not yet available")]
+    PoolExhausted,
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;
