@@ -432,7 +432,6 @@ mod tests {
         hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
     > {
         let beacon_value = S::rand(&mut rand::thread_rng());
-        let message = message.to_vec();
         let sign_futures: Vec<_> = nodes
             .iter()
             .map(|node| {
@@ -440,13 +439,13 @@ mod tests {
                 let onchain_state = node.hashi().onchain_state().clone();
                 let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
                 let beacon = beacon_value;
-                let msg = message.clone();
+                let message = message.to_vec();
                 async move {
                     hashi::mpc::SigningManager::sign(
                         &signing_manager,
                         &p2p_channel,
                         sui_request_id,
-                        &msg,
+                        &message,
                         &beacon,
                         None,
                         SIGNING_TIMEOUT,
@@ -1019,7 +1018,7 @@ mod tests {
             // complete before we exhaust the pool.
             if i == wait_at {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-                while !signing_manager.read().unwrap().has_next_presignatures() {
+                while !signing_manager.read().unwrap().has_next_batch() {
                     assert!(
                         tokio::time::Instant::now() < deadline,
                         "Timed out waiting for presignature refill"

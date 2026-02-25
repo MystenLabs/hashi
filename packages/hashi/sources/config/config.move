@@ -26,6 +26,7 @@ const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
 const WITHDRAWAL_FEE_KEY: vector<u8> = b"withdrawal_fee";
 const WITHDRAWAL_MINIMUM_KEY: vector<u8> = b"withdrawal_minimum";
 const PAUSED_KEY: vector<u8> = b"paused";
+const WITHDRAWAL_CANCELLATION_COOLDOWN_KEY: vector<u8> = b"withdrawal_cancellation_cooldown_ms";
 
 public struct Config has store {
     config: VecMap<String, Value>,
@@ -88,6 +89,14 @@ public(package) fun set_paused(self: &mut Config, paused: bool) {
     self.upsert(PAUSED_KEY, config_value::new_bool(paused))
 }
 
+public(package) fun withdrawal_cancellation_cooldown_ms(self: &Config): u64 {
+    self.get(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY).as_u64()
+}
+
+public(package) fun set_withdrawal_cancellation_cooldown_ms(self: &mut Config, cooldown_ms: u64) {
+    self.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(cooldown_ms))
+}
+
 public(package) fun disable_version(self: &mut Config, version: u64) {
     // Can not disable current version (anti package bricking)
     assert!(version != PACKAGE_VERSION, EDisableCurrentVersion);
@@ -140,6 +149,7 @@ public(package) fun create(): Config {
     config.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_FEE_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(0));
+    config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
 
     config
 }

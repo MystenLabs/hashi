@@ -198,6 +198,30 @@ public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
     });
 }
 
+public(package) fun emit_withdrawal_cancelled(self: &WithdrawalRequest) {
+    sui::event::emit(WithdrawalCancelledEvent {
+        request_id: self.info.id,
+        requester_address: self.info.requester_address,
+        btc_amount: self.info.btc_amount,
+    });
+}
+
+public(package) fun requester_address(self: &WithdrawalRequest): address {
+    self.info.requester_address
+}
+
+public(package) fun timestamp_ms(self: &WithdrawalRequest): u64 {
+    self.info.timestamp_ms
+}
+
+public(package) fun request_id(self: &WithdrawalRequest): address {
+    self.info.id
+}
+
+public(package) fun btc_amount(self: &WithdrawalRequest): u64 {
+    self.info.btc_amount
+}
+
 public struct WithdrawalRequestedEvent has copy, drop {
     request_id: address,
     btc_amount: u64,
@@ -220,4 +244,10 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
 public struct WithdrawalConfirmedEvent has copy, drop {
     pending_id: address,
     txid: address,
+}
+
+public struct WithdrawalCancelledEvent has copy, drop {
+    request_id: address,
+    requester_address: address,
+    btc_amount: u64,
 }

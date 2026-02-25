@@ -11,6 +11,11 @@ use hashi::{
 };
 use sui::{balance::Balance, clock::Clock, coin::Coin, random::Random, sui::SUI};
 
+#[error]
+const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
+#[error]
+const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
+
 public struct WithdrawalApproval has copy, drop, store {
     request_ids: vector<address>,
     selected_utxos: vector<UtxoId>,
@@ -158,6 +163,30 @@ entry fun confirm_withdrawal(
 
     withdrawal.emit_withdrawal_confirmed();
     withdrawal.destroy_pending_withdrawal();
+}
+
+public fun cancel_withdrawal(
+    hashi: &mut Hashi,
+    request_id: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Balance<BTC> {
+    hashi.config().assert_version_enabled();
+
+    let request = hashi.withdrawal_queue_mut().remove_request(request_id);
+
+    // Only the original requester can cancel
+    assert!(request.requester_address() == ctx.sender(), EUnauthorizedCancellation);
+
+    // Enforce cooldown
+    let cooldown = hashi.config().withdrawal_cancellation_cooldown_ms();
+    assert!(clock.timestamp_ms() >= request.timestamp_ms() + cooldown, ECooldownNotElapsed);
+
+    request.emit_withdrawal_cancelled();
+
+    // Return BTC to the requester
+    let (_, btc) = hashi::withdrawal_queue::request_into_parts(request);
+    btc
 }
 
 public fun delete_expired_spent_utxo(hashi: &mut Hashi, txid: address, vout: u32) {

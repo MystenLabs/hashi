@@ -293,7 +293,7 @@ impl MpcService {
         signing_manager
             .write()
             .unwrap()
-            .set_next_presignatures(presignatures);
+            .set_next_batch(presignatures);
         Ok(())
     }
 

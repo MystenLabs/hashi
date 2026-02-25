@@ -41,7 +41,7 @@ pub struct SigningManager {
     initial_presig_count: usize,
     refill_divisor: usize,
     refill_tx: Arc<watch::Sender<u32>>,
-    next_presignatures: Option<Presignatures>,
+    next_batch: Option<Presignatures>,
 }
 
 impl SigningManager {
@@ -70,16 +70,16 @@ impl SigningManager {
             initial_presig_count,
             refill_divisor,
             refill_tx,
-            next_presignatures: None,
+            next_batch: None,
         }
     }
 
-    pub fn set_next_presignatures(&mut self, presignatures: Presignatures) {
-        self.next_presignatures = Some(presignatures);
+    pub fn set_next_batch(&mut self, presignatures: Presignatures) {
+        self.next_batch = Some(presignatures);
     }
 
-    pub fn has_next_presignatures(&self) -> bool {
-        self.next_presignatures.is_some()
+    pub fn has_next_batch(&self) -> bool {
+        self.next_batch.is_some()
     }
 
     pub fn initial_presig_count(&self) -> usize {
@@ -134,7 +134,7 @@ impl SigningManager {
             ) {
                 Ok(result) => result,
                 Err(FastCryptoError::OutOfPresigs) => {
-                    if let Some(next) = mgr.next_presignatures.take() {
+                    if let Some(next) = mgr.next_batch.take() {
                         mgr.presignatures = next;
                         mgr.batch_index += 1;
                         mgr.initial_presig_count = mgr.presignatures.len();
@@ -710,8 +710,8 @@ mod tests {
             }
         }
 
-        /// Build fresh presignatures and set as next_presignatures on all managers.
-        fn set_next_presignatures_on_all(&self) {
+        /// Build fresh presignatures and set as next_batch on all managers.
+        fn set_next_batch_on_all(&self) {
             let batch_size_per_weight: u16 = 10;
             let mut rng = StdRng::seed_from_u64(99);
             let nonces_for_dealer: Vec<_> = (0..self.n)
@@ -750,14 +750,11 @@ mod tests {
                     .collect();
                 let presignatures =
                     Presignatures::new(outputs, batch_size_per_weight, self.f as usize).unwrap();
-                mgr_lock
-                    .write()
-                    .unwrap()
-                    .set_next_presignatures(presignatures);
+                mgr_lock.write().unwrap().set_next_batch(presignatures);
             }
         }
 
-        /// Manually swap peers (skip manager at `caller_index`) to next_presignatures.
+        /// Manually swap peers (skip manager at `caller_index`) to next_batch.
         /// Needed because prepare_all calls generate_partial_signatures directly
         /// (not sign()), so it doesn't have the OutOfPresigs swap logic.
         fn swap_peers_to_next_batch(&self, caller_index: usize) {
@@ -766,7 +763,7 @@ mod tests {
                     continue;
                 }
                 let mut mgr = mgr_lock.write().unwrap();
-                let next = mgr.next_presignatures.take().unwrap();
+                let next = mgr.next_batch.take().unwrap();
                 mgr.presignatures = next;
             }
         }
@@ -1132,10 +1129,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_sign_pool_exhausted_with_next_batch() {
-        // Exhaust batch 0, set next_presignatures, verify sign() swaps to batch 1.
+        // Exhaust batch 0, set next_batch, verify sign() swaps to batch 1.
         let setup = SigningTestSetup::new(4);
         setup.exhaust_pool();
-        setup.set_next_presignatures_on_all();
+        setup.set_next_batch_on_all();
         setup.swap_peers_to_next_batch(0);
 
         let req_id = Address::new([0xFF; 32]);
@@ -1156,12 +1153,12 @@ mod tests {
         verify_schnorr(&setup.verifying_key, b"swap", &sig);
         let mgr = setup.managers[0].read().unwrap();
         assert_eq!(mgr.batch_index(), 1);
-        assert!(!mgr.has_next_presignatures());
+        assert!(!mgr.has_next_batch());
     }
 
     #[tokio::test]
     async fn test_sign_pool_exhausted_no_next_batch() {
-        // Exhaust pool without setting next_presignatures → PoolExhausted.
+        // Exhaust pool without setting next_batch → PoolExhausted.
         let setup = SigningTestSetup::new(4);
         setup.exhaust_pool();
 

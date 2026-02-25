@@ -47,6 +47,10 @@ public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContex
     self.treasury_cap<T>().mint(amount, ctx)
 }
 
+public(package) fun mint_balance<T>(self: &mut Treasury, amount: u64): Balance<T> {
+    self.treasury_cap<T>().mint_balance(amount)
+}
+
 public(package) fun deposit_fee<T>(self: &mut Treasury, fee: Coin<T>) {
     let key = Key<Coin<T>> {};
     if (self.objects.contains(key)) {
