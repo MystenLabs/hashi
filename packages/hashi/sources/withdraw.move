@@ -36,7 +36,7 @@ public struct WithdrawalConfirmation has copy, drop, store {
 public fun request_withdrawal(
     hashi: &mut Hashi,
     clock: &Clock,
-    btc: Balance<BTC>,
+    btc_withdrawal: sui::funds_accumulator::Withdrawal<Balance<BTC>>,
     bitcoin_address: vector<u8>,
     fee: Coin<SUI>,
     ctx: &mut TxContext,
@@ -47,6 +47,8 @@ public fun request_withdrawal(
     // Check that the fee is sufficient
     assert!(hashi.config().withdrawal_fee() == fee.value());
     hashi.treasury_mut().deposit_fee(fee);
+
+    let btc = sui::balance::redeem_funds(btc_withdrawal);
 
     // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());

@@ -48,6 +48,7 @@ public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContex
 }
 
 public(package) fun mint_balance<T>(self: &mut Treasury, amount: u64): Balance<T> {
+    sui::event::emit(MintEvent<T> { amount });
     self.treasury_cap<T>().mint_balance(amount)
 }
 

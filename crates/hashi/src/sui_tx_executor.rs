@@ -28,6 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bcs::to_bytes;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
@@ -37,16 +38,25 @@ use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::Argument as RpcArgument;
+use sui_rpc::proto::sui::rpc::v2::Command as RpcCommand;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
+use sui_rpc::proto::sui::rpc::v2::FundsWithdrawal as RpcFundsWithdrawal;
+use sui_rpc::proto::sui::rpc::v2::Input as RpcInput;
+use sui_rpc::proto::sui::rpc::v2::MoveCall as RpcMoveCall;
+use sui_rpc::proto::sui::rpc::v2::SimulateTransactionRequest;
+use sui_rpc::proto::sui::rpc::v2::SimulateTransactionResponse;
+use sui_rpc::proto::sui::rpc::v2::SplitCoins as RpcSplitCoins;
+use sui_rpc::proto::sui::rpc::v2::argument::ArgumentKind as RpcArgumentKind;
+use sui_rpc::proto::sui::rpc::v2::funds_withdrawal::Source as RpcFundsWithdrawalSource;
+use sui_rpc::proto::sui::rpc::v2::input::InputKind as RpcInputKind;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
-use sui_sdk_types::StructTag;
 use sui_sdk_types::bcs::FromBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
-use sui_transaction_builder::intent::CoinWithBalance;
 
 use crate::Hashi;
 use crate::config::Config;
@@ -373,11 +383,9 @@ impl SuiTxExecutor {
     /// Execute a withdrawal request transaction.
     ///
     /// Creates a withdrawal request on-chain by:
-    /// 1. Selecting enough `btc::BTC` coins owned by the sender
-    /// 2. Merging selected coins into one primary coin
-    /// 3. Splitting the requested amount and converting it into `balance::Balance<BTC>`
-    /// 4. Splitting gas coin for withdrawal fee
-    /// 5. Calling `withdraw::request_withdrawal`
+    /// 1. Reserving BTC from the sender's funds accumulator
+    /// 2. Splitting gas coin for withdrawal fee
+    /// 3. Calling `withdraw::request_withdrawal`
     ///
     /// Returns the withdrawal request ID on success.
     pub async fn execute_create_withdrawal_request(
@@ -387,53 +395,137 @@ impl SuiTxExecutor {
         withdrawal_fee_sui: u64,
     ) -> anyhow::Result<Address> {
         let btc_type = format!("{}::btc::BTC", self.hashi_ids.package_id);
-        let btc_struct_tag: StructTag = btc_type.parse()?;
+        let sender = self.sender();
 
-        let mut builder = TransactionBuilder::new();
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
+        let destination_arg_bcs = to_bytes(&destination_bytes)?;
+        let withdrawal_fee_bcs = to_bytes(&withdrawal_fee_sui)?;
+
+        let mut request = SimulateTransactionRequest::default()
+            .with_read_mask(FieldMask::from_paths([
+                SimulateTransactionResponse::path_builder()
+                    .transaction()
+                    .transaction()
+                    .finish(),
+                SimulateTransactionResponse::path_builder()
+                    .transaction()
+                    .effects()
+                    .finish(),
+            ]))
+            .with_do_gas_selection(true);
+        request.transaction_mut().set_sender(sender);
+
+        let inputs = vec![
+            RpcInput::default()
+                .with_kind(RpcInputKind::Shared)
+                .with_object_id(self.hashi_ids.hashi_object_id)
                 .with_mutable(true),
-        );
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
+            RpcInput::default()
+                .with_kind(RpcInputKind::Shared)
+                .with_object_id(SUI_CLOCK_OBJECT_ID)
                 .with_mutable(false),
+            RpcInput::default()
+                .with_kind(RpcInputKind::FundsWithdrawal)
+                .with_funds_withdrawal(
+                    RpcFundsWithdrawal::default()
+                        .with_amount(withdrawal_amount_sats)
+                        .with_coin_type(btc_type)
+                        .with_source(RpcFundsWithdrawalSource::Sender),
+                ),
+            RpcInput::default()
+                .with_kind(RpcInputKind::Pure)
+                .with_pure(destination_arg_bcs),
+            RpcInput::default()
+                .with_kind(RpcInputKind::Pure)
+                .with_pure(withdrawal_fee_bcs),
+        ];
+
+        let arg_gas = RpcArgument::default().with_kind(RpcArgumentKind::Gas);
+        let arg_input = |index| {
+            RpcArgument::default()
+                .with_kind(RpcArgumentKind::Input)
+                .with_input(index)
+        };
+        let arg_result = |result, subresult| {
+            RpcArgument::default()
+                .with_kind(RpcArgumentKind::Result)
+                .with_result(result)
+                .with_subresult(subresult)
+        };
+
+        let split_fee_command = RpcCommand::default().with_split_coins(
+            RpcSplitCoins::default()
+                .with_coin(arg_gas)
+                .with_amounts(vec![arg_input(4)]),
         );
 
-        let withdrawal_btc_coin = builder.intent(
-            CoinWithBalance::new(btc_struct_tag.clone(), withdrawal_amount_sats)
-                .with_use_gas_coin(false),
+        let request_withdrawal_command = RpcCommand::default().with_move_call(
+            RpcMoveCall::default()
+                .with_package(self.hashi_ids.package_id)
+                .with_module("withdraw")
+                .with_function("request_withdrawal")
+                .with_type_arguments(vec![])
+                .with_arguments(vec![
+                    arg_input(0),
+                    arg_input(1),
+                    arg_input(2),
+                    arg_input(3),
+                    arg_result(0, 0),
+                ]),
         );
-        let btc_balance_arg = builder.move_call(
-            Function::new(
-                Address::TWO,
-                Identifier::from_static("coin"),
-                Identifier::from_static("into_balance"),
+
+        {
+            let tx = request.transaction_mut();
+            tx.kind_mut()
+                .programmable_transaction_mut()
+                .set_inputs(inputs);
+            tx.kind_mut()
+                .programmable_transaction_mut()
+                .set_commands(vec![split_fee_command, request_withdrawal_command]);
+        }
+
+        let simulation = self
+            .client
+            .execution_client()
+            .simulate_transaction(request)
+            .await?;
+
+        if !simulation
+            .get_ref()
+            .transaction()
+            .effects()
+            .status()
+            .success()
+        {
+            anyhow::bail!(
+                "Withdrawal request transaction failed during simulation: {}",
+                simulation
+                    .get_ref()
+                    .transaction()
+                    .effects()
+                    .status()
+                    .error()
+                    .description()
+            );
+        }
+
+        let transaction = simulation
+            .get_ref()
+            .transaction()
+            .transaction()
+            .bcs()
+            .deserialize()?;
+        let signature = self.signer.sign_transaction(&transaction)?;
+        let response = self
+            .client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(transaction.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("*")),
+                self.timeout,
             )
-            .with_type_args(vec![btc_struct_tag.into()]),
-            vec![withdrawal_btc_coin],
-        );
+            .await?
+            .into_inner();
 
-        let fee_coin_arg = builder.intent(CoinWithBalance::sui(withdrawal_fee_sui));
-        let destination_arg = builder.pure(&destination_bytes);
-
-        builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("withdraw"),
-                Identifier::from_static("request_withdrawal"),
-            ),
-            vec![
-                hashi_arg,
-                clock_arg,
-                btc_balance_arg,
-                destination_arg,
-                fee_coin_arg,
-            ],
-        );
-
-        let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
                 "Withdrawal request transaction failed: {:?}",
