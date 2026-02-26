@@ -172,6 +172,41 @@ fun create_test_committee_member(validator_address: address, weight: u64): Commi
     )
 }
 
+// ======== Certificate Signing Helpers ========
+
+/// Signs a message and returns (aggregated_signature, signers_bitmap) for a committee
+/// where all members share the same BLS key (the standard test setup).
+/// Signs with all `n_signers` members (indices 0..n_signers-1).
+public fun sign_with_committee(
+    message_bytes: &vector<u8>,
+    n_signers: u64,
+): (vector<u8>, vector<u8>) {
+    let sk = bls_sk_for_testing();
+
+    // Sign once, then aggregate n_signers copies
+    let single_sig = bls_min_pk_sign(message_bytes, &sk);
+    let mut sigs = vector[];
+    n_signers.do!(|_| sigs.push_back(single_sig));
+    let aggregated_sig = bls_aggregate_sigs(&sigs);
+
+    // Build bitmap: set bits for indices 0..n_signers-1
+    // Bits are MSB-first: index 0 = bit 7 of byte 0, index 1 = bit 6, etc.
+    let n_bytes = n_signers.divide_and_round_up(8);
+    let mut bitmap = vector[];
+    n_bytes.do!(|byte_idx| {
+        let mut byte_val = 0u8;
+        (8u8).do!(|bit_idx| {
+            let member_idx = (byte_idx * 8) + (bit_idx as u64);
+            if (member_idx < n_signers) {
+                byte_val = byte_val | (1 << (7 - bit_idx));
+            };
+        });
+        bitmap.push_back(byte_val);
+    });
+
+    (aggregated_sig, bitmap)
+}
+
 // ======== Proposal Creation Helpers ========
 
 /// Creates a deposit fee update proposal and returns its ID
