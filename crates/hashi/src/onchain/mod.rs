@@ -951,7 +951,7 @@ async fn scrape_withdrawal_requests(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(withdrawal_request)
         })
-        .map_ok(|move_types::WithdrawalRequest { info, .. }| {
+        .map_ok(|move_types::WithdrawalRequest { info, approved, .. }| {
             (
                 info.id,
                 types::WithdrawalRequest {
@@ -961,6 +961,7 @@ async fn scrape_withdrawal_requests(
                     timestamp_ms: info.timestamp_ms,
                     requester_address: info.requester_address,
                     sui_tx_digest: info.sui_tx_digest,
+                    approved,
                 },
             )
         })
@@ -1000,6 +1001,7 @@ async fn scrape_pending_withdrawals(
                  outputs,
                  timestamp_ms,
                  randomness,
+                 ..
              }| {
                 let request_ids = requests.into_iter().map(|r| r.id).collect();
                 let inputs = inputs.into_iter().map(convert_move_utxo).collect();

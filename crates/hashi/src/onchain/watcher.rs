@@ -245,6 +245,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     timestamp_ms: withdrawal_requested_event.timestamp_ms,
                     requester_address: withdrawal_requested_event.requester_address,
                     sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
+                    approved: false,
                 };
                 state
                     .state_mut()
@@ -252,6 +253,17 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .withdrawal_queue
                     .requests
                     .insert(withdrawal_request.id, withdrawal_request);
+            }
+            HashiEvent::WithdrawalApprovedEvent(event) => {
+                if let Some(request) = state
+                    .state_mut()
+                    .hashi
+                    .withdrawal_queue
+                    .requests
+                    .get_mut(&event.request_id)
+                {
+                    request.approved = true;
+                }
             }
             HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
                 let mut state = state.state_mut();
@@ -291,6 +303,10 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .withdrawal_queue
                     .pending_withdrawals
                     .insert(pending.id, pending);
+            }
+            HashiEvent::WithdrawalSignedEvent(_event) => {
+                // Signatures are stored on-chain; the watcher doesn't need to
+                // track them locally since the leader reads them when needed.
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
                 state
