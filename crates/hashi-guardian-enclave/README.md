@@ -12,7 +12,7 @@ Canonical key layout:
 
 Where:
 
-- `session_id` is the enclave signing pubkey bytes encoded as lowercase hex.
+- `session_id` is the enclave ephemeral signing pubkey bytes encoded as lowercase hex.
 - `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `setup-new-key-success`, `pi-success-share-{share_id}`, `pi-enclave-fully-initialized`).
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `status` is `success` or `failure`.
