@@ -24,7 +24,7 @@ use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::guardian::bitcoin_utils;
-use hashi_types::proto::MemberSignature;
+use hashi_types::committee::MemberSignature;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
@@ -57,9 +57,15 @@ pub struct UtxoSelection {
     pub change: Option<u64>,
 }
 
-/// The data that validators BLS-sign over to approve a withdrawal transaction.
-/// This represents the proposal that will eventually be passed to
-/// `pick_withdrawal_for_processing` on-chain.
+/// The data that validators BLS-sign over to approve withdrawal requests.
+/// This is the lightweight step 1 certificate — just approving request IDs.
+#[derive(Clone, Debug, serde_derive::Serialize)]
+pub struct RequestApproval {
+    pub request_ids: Vec<Address>,
+}
+
+/// The data that validators BLS-sign over to commit to a withdrawal transaction.
+/// This is the step 2 certificate with UTXO selection and tx construction.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalApproval {
     pub request_ids: Vec<Address>,
@@ -68,18 +74,50 @@ pub struct WithdrawalApproval {
     pub txid: Address,
 }
 
+/// The data that validators BLS-sign over to store witness signatures on-chain.
+/// This is the step 3 certificate.
+#[derive(Clone, Debug, serde_derive::Serialize)]
+pub struct WithdrawalSignedMessage {
+    pub withdrawal_id: Address,
+    pub request_ids: Vec<Address>,
+    pub signatures: Vec<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalConfirmation {
     pub withdrawal_id: Address,
 }
 
 impl Hashi {
-    // --- First endpoint: approval ---
+    // --- Step 1: Request approval (lightweight) ---
+
+    pub fn validate_and_sign_request_approval(
+        &self,
+        approval: &RequestApproval,
+    ) -> anyhow::Result<MemberSignature> {
+        anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
+
+        // Verify each request_id exists and is not yet approved
+        for id in &approval.request_ids {
+            let request = self
+                .onchain_state()
+                .withdrawal_request(id)
+                .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
+            anyhow::ensure!(
+                !request.approved,
+                "Withdrawal request {id} is already approved"
+            );
+        }
+
+        self.sign_message(&approval)
+    }
+
+    // --- Step 2: Construction approval (with UTXO selection) ---
 
     pub async fn validate_and_sign_withdrawal_approval(
         &self,
         approval: &WithdrawalApproval,
-    ) -> anyhow::Result<MemberSignature> {
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         self.validate_withdrawal_approval(approval).await?;
         self.sign_withdrawal_approval(approval)
     }
@@ -108,14 +146,20 @@ impl Hashi {
             "Duplicate UTXO IDs"
         );
 
-        // 1. Verify each request_id exists and collect the requests
+        // 1. Verify each request_id exists and is approved
         let requests: Vec<WithdrawalRequest> = approval
             .request_ids
             .iter()
             .map(|id| {
-                self.onchain_state()
+                let request = self
+                    .onchain_state()
                     .withdrawal_request(id)
-                    .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))
+                    .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
+                anyhow::ensure!(
+                    request.approved,
+                    "Withdrawal request {id} has not been approved"
+                );
+                Ok(request)
             })
             .collect::<anyhow::Result<_>>()?;
 
@@ -247,37 +291,14 @@ impl Hashi {
     fn sign_withdrawal_approval(
         &self,
         approval: &WithdrawalApproval,
-    ) -> anyhow::Result<MemberSignature> {
-        let epoch = self.onchain_state().epoch();
-        let validator_address = self
-            .config
-            .validator_address()
-            .map_err(|e| anyhow!("No validator address configured: {e}"))?;
-        let private_key = self
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow!("No protocol private key configured"))?;
-        let public_key_bytes = private_key.public_key().as_bytes().to_vec().into();
-
-        let signature_bytes = private_key
-            .sign(epoch, validator_address, approval)
-            .signature()
-            .as_bytes()
-            .to_vec()
-            .into();
-
-        Ok(MemberSignature {
-            epoch: Some(epoch),
-            address: Some(validator_address.to_string()),
-            public_key: Some(public_key_bytes),
-            signature: Some(signature_bytes),
-        })
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        self.sign_message_proto(approval)
     }
 
     pub fn sign_withdrawal_confirmation(
         &self,
         pending_withdrawal_id: &Address,
-    ) -> anyhow::Result<MemberSignature> {
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let pending = self
             .onchain_state()
             .pending_withdrawal(pending_withdrawal_id)
@@ -288,6 +309,57 @@ impl Hashi {
             withdrawal_id: pending.id,
         };
 
+        self.sign_message_proto(&confirmation)
+    }
+
+    // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
+
+    pub fn sign_withdrawal_signed_message(
+        &self,
+        message: &WithdrawalSignedMessage,
+    ) -> anyhow::Result<MemberSignature> {
+        // Verify the pending withdrawal exists
+        let _pending = self
+            .onchain_state()
+            .pending_withdrawal(&message.withdrawal_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "PendingWithdrawal {} not found on-chain",
+                    message.withdrawal_id
+                )
+            })?;
+
+        self.sign_message(message)
+    }
+
+    // --- Generic BLS signing helper ---
+
+    fn sign_message<T: serde::Serialize>(
+        &self,
+        message: &T,
+    ) -> anyhow::Result<MemberSignature> {
+        let epoch = self.onchain_state().epoch();
+        let validator_address = self
+            .config
+            .validator_address()
+            .map_err(|e| anyhow!("No validator address configured: {e}"))?;
+        let private_key = self
+            .config
+            .protocol_private_key()
+            .ok_or_else(|| anyhow!("No protocol private key configured"))?;
+        let signature = private_key
+            .sign(epoch, validator_address, message)
+            .signature()
+            .clone();
+
+        Ok(MemberSignature::new(epoch, validator_address, signature))
+    }
+
+    /// Proto-format BLS signing helper for gRPC responses.
+    fn sign_message_proto<T: serde::Serialize>(
+        &self,
+        message: &T,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let epoch = self.onchain_state().epoch();
         let validator_address = self
             .config
@@ -299,13 +371,13 @@ impl Hashi {
             .ok_or_else(|| anyhow!("No protocol private key configured"))?;
         let public_key_bytes = private_key.public_key().as_bytes().to_vec().into();
         let signature_bytes = private_key
-            .sign(epoch, validator_address, &confirmation)
+            .sign(epoch, validator_address, message)
             .signature()
             .as_bytes()
             .to_vec()
             .into();
 
-        Ok(MemberSignature {
+        Ok(hashi_types::proto::MemberSignature {
             epoch: Some(epoch),
             address: Some(validator_address.to_string()),
             public_key: Some(public_key_bytes),
@@ -313,7 +385,7 @@ impl Hashi {
         })
     }
 
-    // --- Second endpoint: BTC tx signing ---
+    // --- MPC BTC tx signing ---
 
     pub async fn validate_and_sign_withdrawal_tx(
         &self,

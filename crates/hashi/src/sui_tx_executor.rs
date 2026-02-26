@@ -674,7 +674,51 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Execute `withdraw::pick_withdrawal_for_processing` to commit to a withdrawal on-chain.
+    /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
+    pub async fn execute_approve_request(
+        &mut self,
+        request_ids: &[Address],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let request_ids_vec = request_ids.to_vec();
+        let requests_arg = builder.pure(&request_ids_vec);
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("approve_request"),
+            ),
+            vec![
+                hashi_arg,
+                requests_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "approve_request failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::construct_withdrawal` to commit to a withdrawal on-chain.
     ///
     /// The Move function expects:
     /// - `hashi: &mut Hashi`
@@ -682,9 +726,10 @@ impl SuiTxExecutor {
     /// - `selected_utxos: vector<vector<u8>>` — BCS-encoded `UtxoId`s
     /// - `outputs: vector<vector<u8>>` — BCS-encoded `OutputUtxo`s
     /// - `txid: address` — bitcoin transaction ID
+    /// - `epoch, signers_bitmap, signature` — committee certificate
     /// - `clock: &Clock`
     /// - `r: &Random`
-    pub async fn execute_pick_withdrawal_for_processing(
+    pub async fn execute_construct_withdrawal(
         &mut self,
         approval: &WithdrawalApproval,
         cert: &CommitteeSignature,
@@ -715,8 +760,8 @@ impl SuiTxExecutor {
 
         let txid_arg = builder.pure(&approval.txid);
         let epoch_arg = builder.pure(&cert.epoch());
-        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
         let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
 
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
@@ -733,7 +778,7 @@ impl SuiTxExecutor {
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("pick_withdrawal_for_processing"),
+                Identifier::from_static("construct_withdrawal"),
             ),
             vec![
                 hashi_arg,
@@ -742,8 +787,8 @@ impl SuiTxExecutor {
                 outputs_arg,
                 txid_arg,
                 epoch_arg,
-                signature_arg,
                 signers_bitmap_arg,
+                signature_arg,
                 clock_arg,
                 random_arg,
             ],
@@ -752,7 +797,58 @@ impl SuiTxExecutor {
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "pick_withdrawal_for_processing failed: {:?}",
+                "construct_withdrawal failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::sign_withdrawal` to store witness signatures on-chain.
+    pub async fn execute_sign_withdrawal(
+        &mut self,
+        withdrawal_id: &Address,
+        request_ids: &[Address],
+        signatures: &[Vec<u8>],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let request_ids_vec = request_ids.to_vec();
+        let request_ids_arg = builder.pure(&request_ids_vec);
+        let signatures_vec = signatures.to_vec();
+        let signatures_arg = builder.pure(&signatures_vec);
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("sign_withdrawal"),
+            ),
+            vec![
+                hashi_arg,
+                withdrawal_id_arg,
+                request_ids_arg,
+                signatures_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "sign_withdrawal failed: {:?}",
                 response.transaction().effects().status()
             );
         }
