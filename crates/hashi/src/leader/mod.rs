@@ -7,10 +7,8 @@ use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::RequestApproval;
-use crate::withdrawals::WithdrawalApproval;
-use crate::withdrawals::WithdrawalInputSignature;
-use crate::withdrawals::WithdrawalSignedMessage;
-use bitcoin::hashes::Hash;
+use crate::withdrawals::WithdrawalTxConstruction;
+use crate::withdrawals::WithdrawalTxSigning;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
@@ -22,9 +20,11 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::SignDepositConfirmationRequest;
-use hashi_types::proto::SignWithdrawalApprovalRequest;
+use hashi_types::proto::SignRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
+use hashi_types::proto::SignWithdrawalTxConstructionRequest;
+use hashi_types::proto::SignWithdrawalTxSigningRequest;
 use std::sync::Arc;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
@@ -307,14 +307,21 @@ impl LeaderService {
             request_ids: request_ids.clone(),
         };
 
-        // TODO: Fan out to committee via a new gRPC endpoint for request approval.
-        // For now, the leader validates and signs locally.
+        // Fan out to committee for BLS signatures
+        let members = self
+            .inner
+            .onchain_state()
+            .current_committee_members()
+            .expect("No current committee members");
+
+        let proto_request = approval.to_proto();
         let mut signatures: Vec<MemberSignature> = Vec::new();
-        match self.inner.validate_and_sign_request_approval(&approval) {
-            Ok(sig) => signatures.push(sig),
-            Err(e) => {
-                error!("Failed to sign request approval: {e}");
-                return;
+        for member in &members {
+            if let Some(signature) = self
+                .request_request_approval_signature(proto_request.clone(), member)
+                .await
+            {
+                signatures.push(signature);
             }
         }
 
@@ -387,7 +394,7 @@ impl LeaderService {
         }
 
         // 2. Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
-        let approval = match self.inner.build_withdrawal_approval(request).await {
+        let approval = match self.inner.build_withdrawal_tx_construction(request).await {
             Ok(approval) => approval,
             Err(e) => {
                 error!(
@@ -409,7 +416,7 @@ impl LeaderService {
         let mut signatures: Vec<MemberSignature> = Vec::new();
         for member in &members {
             if let Some(signature) = self
-                .request_withdrawal_approval_signature(proto_request.clone(), member)
+                .request_withdrawal_tx_construction_signature(proto_request.clone(), member)
                 .await
             {
                 signatures.push(signature);
@@ -486,63 +493,45 @@ impl LeaderService {
             .current_committee_members()
             .expect("No current committee members");
 
-        // 1. Request MPC-signed withdrawal tx witnesses from committee members.
-        let mut signatures_by_input = None;
-        for member in &members {
-            match self
-                .request_withdrawal_tx_signature(&pending.id, member)
-                .await
-            {
-                Ok(signatures) => {
-                    signatures_by_input = Some(signatures);
-                    break;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to get withdrawal tx signature from {}: {e}",
-                        member.validator_address()
-                    );
-                }
-            }
-        }
-
-        let Some(signatures_by_input) = signatures_by_input else {
-            error!(
-                "No withdrawal tx signatures collected for {:?}; skipping",
-                pending.id
-            );
+        // 1. Request signed withdrawal tx witnesses from committee members.
+        // MPC signing requires all threshold members to participate simultaneously
+        // via P2P, so we must fan out requests in parallel.
+        let Some(signatures_by_input) = self
+            .collect_withdrawal_tx_signatures(&pending.id, &members)
+            .await
+        else {
             return;
         };
 
         // 2. Extract raw signature bytes for on-chain storage
         let witness_signatures: Vec<Vec<u8>> = signatures_by_input
             .iter()
-            .map(|s| s.hashi_signature.clone())
+            .map(|s| s.to_byte_array().to_vec())
             .collect();
 
-        // 3. Build the WithdrawalSignedMessage and get BLS certificate
-        let signed_message = WithdrawalSignedMessage {
+        // 3. Build the WithdrawalTxSigning and get BLS certificate via fan-out
+        let signed_message = WithdrawalTxSigning {
             withdrawal_id: pending.id,
             request_ids: pending.request_ids.clone(),
             signatures: witness_signatures.clone(),
         };
+
+        let proto_request = signed_message.to_proto();
+        let mut bls_signatures: Vec<MemberSignature> = Vec::new();
+        for member in &members {
+            if let Some(signature) = self
+                .request_withdrawal_tx_signing_signature(proto_request.clone(), member)
+                .await
+            {
+                bls_signatures.push(signature);
+            }
+        }
 
         let committee = self
             .inner
             .onchain_state()
             .current_committee()
             .expect("No current committee");
-
-        // TODO: Fan out to committee via a new gRPC endpoint for sign message.
-        // For now, the leader validates and signs locally.
-        let mut bls_signatures: Vec<MemberSignature> = Vec::new();
-        match self.inner.sign_withdrawal_signed_message(&signed_message) {
-            Ok(sig) => bls_signatures.push(sig),
-            Err(e) => {
-                error!("Failed to sign withdrawal signed message: {e}");
-                return;
-            }
-        }
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
         for sig in bls_signatures {
@@ -584,6 +573,60 @@ impl LeaderService {
         {
             error!(
                 "Failed to submit sign_withdrawal for {:?}: {e}",
+                pending.id
+            );
+            return;
+        }
+
+        // 5. Build and broadcast the signed BTC transaction
+        let broadcastable_tx = match self
+            .build_broadcastable_withdrawal_tx(pending, &signatures_by_input)
+        {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(
+                    "Failed to build broadcastable withdrawal tx for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .inner
+            .btc_monitor()
+            .broadcast_transaction(broadcastable_tx)
+            .await
+        {
+            error!(
+                "Failed to broadcast withdrawal tx for {:?}: {e}",
+                pending.id
+            );
+            return;
+        }
+        info!("Broadcast withdrawal tx for {:?}", pending.id);
+
+        // 6. Collect BLS signatures for withdrawal confirmation and submit on-chain
+        let confirmation_cert = match self
+            .collect_withdrawal_confirmation_signature(pending.id, &members)
+            .await
+        {
+            Ok(cert) => cert,
+            Err(e) => {
+                error!(
+                    "Failed to collect withdrawal confirmation signatures for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .submit_confirm_withdrawal(&pending.id, &confirmation_cert)
+            .await
+        {
+            error!(
+                "Failed to submit confirm_withdrawal for {:?}: {e}",
                 pending.id
             );
         }
@@ -697,9 +740,9 @@ impl LeaderService {
         Ok(tx)
     }
 
-    async fn request_withdrawal_approval_signature(
+    async fn request_withdrawal_tx_construction_signature(
         &self,
-        proto_request: SignWithdrawalApprovalRequest,
+        proto_request: SignWithdrawalTxConstructionRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
@@ -721,7 +764,7 @@ impl LeaderService {
             })?;
 
         let response = rpc_client
-            .sign_withdrawal_approval(proto_request.clone())
+            .sign_withdrawal_tx_construction(proto_request.clone())
             .await
             .inspect_err(|e| {
                 error!(
@@ -744,6 +787,112 @@ impl LeaderService {
             .inspect_err(|e| {
                 error!(
                     "Failed to parse member signature from withdrawal approval response from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()
+    }
+
+    async fn request_request_approval_signature(
+        &self,
+        proto_request: SignRequestApprovalRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!(
+            "Requesting request approval signature from {}",
+            validator_address
+        );
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_request_approval(proto_request.clone())
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to get request approval signature from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()?;
+
+        trace!(
+            "Retrieved request approval signature from {}",
+            validator_address
+        );
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse member signature from request approval response from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()
+    }
+
+    async fn request_withdrawal_tx_signing_signature(
+        &self,
+        proto_request: SignWithdrawalTxSigningRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!(
+            "Requesting withdrawal tx signing signature from {}",
+            validator_address
+        );
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_withdrawal_tx_signing(proto_request.clone())
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to get withdrawal tx signing signature from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()?;
+
+        trace!(
+            "Retrieved withdrawal tx signing signature from {}",
+            validator_address
+        );
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse member signature from withdrawal tx signing response from {}: {e}",
                     validator_address
                 );
             })
@@ -902,7 +1051,7 @@ impl LeaderService {
 
     async fn submit_construct_withdrawal(
         &self,
-        approval: &WithdrawalApproval,
+        approval: &WithdrawalTxConstruction,
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         info!(
@@ -986,9 +1135,21 @@ fn parse_member_signature(
     Ok(MemberSignature::new(epoch, address, signature))
 }
 
-impl WithdrawalApproval {
-    fn to_proto(&self) -> SignWithdrawalApprovalRequest {
-        SignWithdrawalApprovalRequest {
+impl RequestApproval {
+    fn to_proto(&self) -> SignRequestApprovalRequest {
+        SignRequestApprovalRequest {
+            request_ids: self
+                .request_ids
+                .iter()
+                .map(|id| id.as_bytes().to_vec().into())
+                .collect(),
+        }
+    }
+}
+
+impl WithdrawalTxConstruction {
+    fn to_proto(&self) -> SignWithdrawalTxConstructionRequest {
+        SignWithdrawalTxConstructionRequest {
             request_ids: self
                 .request_ids
                 .iter()
@@ -1011,6 +1172,24 @@ impl WithdrawalApproval {
                 })
                 .collect(),
             txid: self.txid.as_bytes().to_vec().into(),
+        }
+    }
+}
+
+impl WithdrawalTxSigning {
+    fn to_proto(&self) -> SignWithdrawalTxSigningRequest {
+        SignWithdrawalTxSigningRequest {
+            withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),
+            request_ids: self
+                .request_ids
+                .iter()
+                .map(|id| id.as_bytes().to_vec().into())
+                .collect(),
+            signatures: self
+                .signatures
+                .iter()
+                .map(|sig| sig.clone().into())
+                .collect(),
         }
     }
 }

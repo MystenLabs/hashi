@@ -57,7 +57,7 @@ use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
-use crate::withdrawals::WithdrawalApproval;
+use crate::withdrawals::WithdrawalTxConstruction;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -677,7 +677,7 @@ impl SuiTxExecutor {
     /// - `r: &Random`
     pub async fn execute_construct_withdrawal(
         &mut self,
-        approval: &WithdrawalApproval,
+        approval: &WithdrawalTxConstruction,
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
