@@ -67,7 +67,7 @@ pub struct RequestApproval {
 /// The data that validators BLS-sign over to commit to a withdrawal transaction.
 /// This is the step 2 certificate with UTXO selection and tx construction.
 #[derive(Clone, Debug, serde_derive::Serialize)]
-pub struct WithdrawalApproval {
+pub struct WithdrawalTxConstruction {
     pub request_ids: Vec<Address>,
     pub selected_utxos: Vec<UtxoId>,
     pub outputs: Vec<OutputUtxo>,
@@ -77,7 +77,7 @@ pub struct WithdrawalApproval {
 /// The data that validators BLS-sign over to store witness signatures on-chain.
 /// This is the step 3 certificate.
 #[derive(Clone, Debug, serde_derive::Serialize)]
-pub struct WithdrawalSignedMessage {
+pub struct WithdrawalTxSigning {
     pub withdrawal_id: Address,
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
@@ -94,7 +94,7 @@ impl Hashi {
     pub fn validate_and_sign_request_approval(
         &self,
         approval: &RequestApproval,
-    ) -> anyhow::Result<MemberSignature> {
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
 
         // Verify each request_id exists and is not yet approved
@@ -109,22 +109,22 @@ impl Hashi {
             );
         }
 
-        self.sign_message(&approval)
+        self.sign_message_proto(&approval)
     }
 
     // --- Step 2: Construction approval (with UTXO selection) ---
 
-    pub async fn validate_and_sign_withdrawal_approval(
+    pub async fn validate_and_sign_withdrawal_tx_construction(
         &self,
-        approval: &WithdrawalApproval,
+        approval: &WithdrawalTxConstruction,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        self.validate_withdrawal_approval(approval).await?;
-        self.sign_withdrawal_approval(approval)
+        self.validate_withdrawal_tx_construction(approval).await?;
+        self.sign_withdrawal_tx_construction(approval)
     }
 
-    pub async fn validate_withdrawal_approval(
+    pub async fn validate_withdrawal_tx_construction(
         &self,
-        approval: &WithdrawalApproval,
+        approval: &WithdrawalTxConstruction,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
         anyhow::ensure!(!approval.selected_utxos.is_empty(), "No selected UTXOs");
@@ -288,9 +288,9 @@ impl Hashi {
         Ok(())
     }
 
-    fn sign_withdrawal_approval(
+    fn sign_withdrawal_tx_construction(
         &self,
-        approval: &WithdrawalApproval,
+        approval: &WithdrawalTxConstruction,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         self.sign_message_proto(approval)
     }
@@ -314,10 +314,10 @@ impl Hashi {
 
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
-    pub fn sign_withdrawal_signed_message(
+    pub fn validate_and_sign_withdrawal_tx_signing(
         &self,
-        message: &WithdrawalSignedMessage,
-    ) -> anyhow::Result<MemberSignature> {
+        message: &WithdrawalTxSigning,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         // Verify the pending withdrawal exists
         let _pending = self
             .onchain_state()
@@ -329,7 +329,7 @@ impl Hashi {
                 )
             })?;
 
-        self.sign_message(message)
+        self.sign_message_proto(message)
     }
 
     // --- Generic BLS signing helper ---
@@ -588,7 +588,7 @@ impl Hashi {
 
     /// Build an unsigned Bitcoin transaction for a withdrawal. This is used both
     /// by the leader when initially crafting the tx, and by validators when
-    /// verifying that a proposed `WithdrawalApproval` produces the expected txid.
+    /// verifying that a proposed `WithdrawalTxConstruction` produces the expected txid.
     pub fn build_unsigned_withdrawal_tx(
         &self,
         selected_utxos: &[Utxo],
@@ -624,11 +624,11 @@ impl Hashi {
 
     /// Build a withdrawal approval: select UTXOs with fee awareness, compute
     /// outputs (withdrawal destination + optional change), build the unsigned
-    /// BTC tx, and return a `WithdrawalApproval` containing the txid.
-    pub async fn build_withdrawal_approval(
+    /// BTC tx, and return a `WithdrawalTxConstruction` containing the txid.
+    pub async fn build_withdrawal_tx_construction(
         &self,
         request: &WithdrawalRequest,
-    ) -> anyhow::Result<WithdrawalApproval> {
+    ) -> anyhow::Result<WithdrawalTxConstruction> {
         // Fetch current fee rate from the Bitcoin node
         let kyoto_fee_rate = self
             .btc_monitor()
@@ -665,7 +665,7 @@ impl Hashi {
         let txid_bytes: [u8; 32] = tx.compute_txid().to_byte_array();
         let txid = Address::new(txid_bytes);
 
-        Ok(WithdrawalApproval {
+        Ok(WithdrawalTxConstruction {
             request_ids,
             selected_utxos: utxo_ids,
             outputs,
