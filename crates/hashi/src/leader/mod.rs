@@ -7,15 +7,16 @@ use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::WithdrawalApproval;
-use crate::withdrawals::WithdrawalInputSignature;
-use bitcoin::hashes::Hash;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
+use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
+use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignWithdrawalApprovalRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
@@ -27,6 +28,7 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
@@ -66,7 +68,7 @@ impl LeaderService {
             };
 
             if self.is_current_leader(checkpoint_height) {
-                info!("Checkpoint {checkpoint_height}: We are the leader node");
+                debug!("Checkpoint {checkpoint_height}: We are the leader node");
             } else {
                 trace!("We are not the leader node");
                 continue;
@@ -117,7 +119,7 @@ impl LeaderService {
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
 
-        info!("Processing {} deposit requests", deposit_requests.len());
+        debug!("Processing {} deposit requests", deposit_requests.len());
 
         // TODO: parallelize?
         for deposit_request in &deposit_requests {
@@ -399,33 +401,16 @@ impl LeaderService {
             .expect("No current committee members");
 
         // 1. Request signed withdrawal tx witnesses from committee members.
-        let mut signatures_by_input = None;
-        for member in &members {
-            match self
-                .request_withdrawal_tx_signature(&pending.id, member)
-                .await
-            {
-                Ok(signatures) => {
-                    signatures_by_input = Some(signatures);
-                    break;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to get withdrawal tx signature from {}: {e}",
-                        member.validator_address()
-                    );
-                }
-            }
-        }
-
-        // 2. Build signed tx, then broadcast.
-        let Some(signatures_by_input) = signatures_by_input else {
-            error!(
-                "No withdrawal tx signatures collected for {:?}; skipping broadcast",
-                pending.id
-            );
+        // MPC signing requires all threshold members to participate simultaneously
+        // via P2P, so we must fan out requests in parallel.
+        let Some(signatures_by_input) = self
+            .collect_withdrawal_tx_signatures(&pending.id, &members)
+            .await
+        else {
             return;
         };
+
+        // 2. Build signed tx, then broadcast.
 
         let tx = match self.build_broadcastable_withdrawal_tx(pending, &signatures_by_input) {
             Ok(tx) => tx,
@@ -521,38 +506,49 @@ impl LeaderService {
     fn build_broadcastable_withdrawal_tx(
         &self,
         pending: &PendingWithdrawal,
-        signatures_by_input: &[WithdrawalInputSignature],
+        signatures: &[SchnorrSignature],
     ) -> anyhow::Result<bitcoin::Transaction> {
+        info!(
+            "Building broadcastable withdrawal tx for pending withdrawal id {} with {} signatures",
+            pending.id,
+            signatures.len()
+        );
         let mut tx = self
             .inner
             .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
-        let txid = Address::new(*tx.compute_txid().as_byte_array());
-        anyhow::ensure!(
-            txid == pending.txid,
-            "Pending txid mismatch: pending has {:?}, rebuilt tx has {:?}",
-            pending.txid,
-            txid
-        );
 
         anyhow::ensure!(
-            signatures_by_input.len() == tx.input.len(),
-            "Input signature count mismatch: tx has {}, signatures has {}",
+            tx.input.len() == signatures.len(),
+            "Signature count mismatch: {} inputs but {} signatures",
             tx.input.len(),
-            signatures_by_input.len()
+            signatures.len()
+        );
+        anyhow::ensure!(
+            tx.input.len() == pending.inputs.len(),
+            "Input count mismatch: tx has {} inputs, pending has {}",
+            tx.input.len(),
+            pending.inputs.len()
         );
 
-        for (input, input_signature) in tx.input.iter_mut().zip(signatures_by_input) {
-            let signature_bytes = &input_signature.hashi_signature;
-            anyhow::ensure!(
-                signature_bytes.len() == 64 || signature_bytes.len() == 65,
-                "Invalid Schnorr signature length: {}",
-                signature_bytes.len()
-            );
-
+        let hashi_pubkey = self.inner.get_hashi_pubkey();
+        for ((input, pending_input), signature) in tx
+            .input
+            .iter_mut()
+            .zip(pending.inputs.iter())
+            .zip(signatures)
+        {
+            let pubkey = self
+                .inner
+                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
+            let (script, control_block, _) =
+                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
             let mut witness = bitcoin::Witness::new();
-            witness.push(signature_bytes);
+            witness.push(signature.to_byte_array());
+            witness.push(script.to_bytes());
+            witness.push(control_block.serialize());
             input.witness = witness;
         }
+
         Ok(tx)
     }
 
@@ -613,7 +609,7 @@ impl LeaderService {
         &self,
         pending_withdrawal_id: &Address,
         member: &CommitteeMember,
-    ) -> anyhow::Result<Vec<WithdrawalInputSignature>> {
+    ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
         trace!(
             "Requesting withdrawal tx signature from {}",
@@ -649,12 +645,48 @@ impl LeaderService {
             validator_address
         );
 
-        let partial_signature = response.into_inner().partial_signature.ok_or_else(|| {
-            anyhow::anyhow!("No partial_signature in response from {validator_address}")
-        })?;
+        response
+            .into_inner()
+            .signatures_by_input
+            .iter()
+            .map(|sig_bytes| {
+                let bytes: [u8; 64] = sig_bytes.as_ref().try_into().map_err(|_| {
+                    anyhow::anyhow!("Invalid Schnorr signature length from {validator_address}")
+                })?;
+                SchnorrSignature::from_byte_array(&bytes).map_err(|e| {
+                    anyhow::anyhow!("Invalid Schnorr signature from {validator_address}: {e}")
+                })
+            })
+            .collect()
+    }
 
-        bcs::from_bytes(&partial_signature)
-            .map_err(|e| anyhow::anyhow!("Invalid signature payload from {validator_address}: {e}"))
+    async fn collect_withdrawal_tx_signatures(
+        &self,
+        pending_withdrawal_id: &Address,
+        members: &[CommitteeMember],
+    ) -> Option<Vec<SchnorrSignature>> {
+        let futures: Vec<_> = members
+            .iter()
+            .map(|member| self.request_withdrawal_tx_signature(pending_withdrawal_id, member))
+            .collect();
+        let results = futures::future::join_all(futures).await;
+
+        let mut results = results.into_iter();
+        loop {
+            match results.next() {
+                Some(Ok(signatures)) => return Some(signatures),
+                Some(Err(e)) => {
+                    warn!("Could not get signatures from a node: {e}");
+                }
+                None => {
+                    error!(
+                        "Could not get mpc signatures for {:?}; stopping processing",
+                        pending_withdrawal_id
+                    );
+                    return None;
+                }
+            }
+        }
     }
 
     async fn request_withdrawal_confirmation_signature(

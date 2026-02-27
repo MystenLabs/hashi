@@ -16,8 +16,12 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::*;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
+use bitcoin::taproot::ControlBlock;
+use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
+use bitcoin::taproot::TaprootBuilder;
+use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::transaction::Version;
 use bitcoin::*;
 use fastcrypto::serde_helpers::ToFromByteArray;
@@ -437,10 +441,7 @@ pub fn compute_taproot_descriptor(
 ) -> Tr<BitcoinPubkey> {
     let derived_hashi_pubkey = get_derived_pubkey(hashi_master_pubkey, hashi_derivation_path);
 
-    // Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
-    let internal =
-        BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
-            .expect("valid nums key");
+    let internal = nums_internal_key();
 
     // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
     // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
@@ -453,6 +454,48 @@ pub fn compute_taproot_descriptor(
         Descriptor::Tr(tr) => tr,
         _ => panic!("unexpected descriptor"),
     }
+}
+
+// Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
+pub fn nums_internal_key() -> BitcoinPubkey {
+    BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
+        .expect("valid nums key")
+}
+
+pub fn single_key_taproot_script_path_address(
+    pubkey: &BitcoinPubkey,
+    network: Network,
+) -> BitcoinAddress {
+    let (spend_info, _) = single_key_taproot_script_path_spend_info(pubkey);
+    BitcoinAddress::p2tr_tweaked(spend_info.output_key(), network)
+}
+
+pub fn single_key_taproot_script_path_spend_artifacts(
+    pubkey: &BitcoinPubkey,
+) -> (ScriptBuf, ControlBlock, TapLeafHash) {
+    let (spend_info, tapscript) = single_key_taproot_script_path_spend_info(pubkey);
+    let leaf_version = LeafVersion::TapScript;
+    let control_block = spend_info
+        .control_block(&(tapscript.clone(), leaf_version))
+        .expect("control block exists for tapscript leaf");
+    let leaf_hash = TapLeafHash::from_script(&tapscript, leaf_version);
+    (tapscript, control_block, leaf_hash)
+}
+
+fn single_key_taproot_script_path_spend_info(
+    pubkey: &BitcoinPubkey,
+) -> (TaprootSpendInfo, ScriptBuf) {
+    let nums_internal_key = nums_internal_key();
+    let tapscript = script::Builder::new()
+        .push_x_only_key(pubkey)
+        .push_opcode(opcodes::all::OP_CHECKSIG)
+        .into_script();
+    let spend_info = TaprootBuilder::new()
+        .add_leaf(0, tapscript.clone())
+        .expect("valid single-leaf tapscript tree")
+        .finalize(&*BTC_LIB, nums_internal_key)
+        .expect("valid taproot spend info");
+    (spend_info, tapscript)
 }
 
 /// Computes both the address and leaf script for a given derivation path and network.

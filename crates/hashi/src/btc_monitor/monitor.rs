@@ -13,6 +13,9 @@ use tracing::warn;
 
 use super::config::MonitorConfig;
 
+/// 1 sat/vB expressed as sat/kwu.
+const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
+
 /// Monitor loop that tracks the state of the Bitcoin chain.
 ///
 /// Client provides functions for querying for specific transactions,
@@ -205,12 +208,22 @@ impl Monitor {
             .bitcoind_rpc
             .estimate_smart_fee(conf_target, None)
             .map_err(anyhow::Error::from)
-            .and_then(|res| {
-                let amount = res
-                    .fee_rate
-                    .ok_or_else(|| anyhow::anyhow!("Node could not estimate fee rate"))?;
-                // Convert from BTC/kvB to sat/kwu (1 kvB = 4 kwu).
-                Ok(FeeRate::from_sat_per_kwu(amount.to_sat() / 4))
+            .map(|res| {
+                let sat_per_kwu = match res.fee_rate {
+                    Some(amount) => {
+                        // Convert from BTC/kvB to sat/kwu (1 kvB = 4 kwu).
+                        amount.to_sat() / 4
+                    }
+                    None => {
+                        warn!(
+                            conf_target,
+                            fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
+                            "Node could not estimate fee rate; falling back to minimum relay fee"
+                        );
+                        FALLBACK_FEE_RATE_SAT_PER_KWU
+                    }
+                };
+                FeeRate::from_sat_per_kwu(sat_per_kwu)
             });
         let _ = result_tx.send(result);
     }
@@ -220,6 +233,29 @@ impl Monitor {
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
+        // Temp hack to get warning messages when a transaction would be rejected
+        // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
+        let txid = tx.compute_txid();
+        match self.bitcoind_rpc.test_mempool_accept(&[&tx]) {
+            Ok(results) => match results.first() {
+                Some(result) if !result.allowed => {
+                    error!(
+                        "Bitcoin Core mempool will reject tx {txid}: {}",
+                        result.reject_reason.as_deref().unwrap_or("unknown reason")
+                    );
+                }
+                Some(_) => {
+                    debug!("Bitcoin Core mempool would accept tx {txid}");
+                }
+                None => {
+                    warn!("Bitcoin Core testmempoolaccept returned no result for tx {txid}");
+                }
+            },
+            Err(e) => {
+                warn!("Failed to run testmempoolaccept for tx {txid}: {e}");
+            }
+        }
+
         let result = self.requester.broadcast_tx(kyoto::TxBroadcast {
             tx,
             broadcast_policy: kyoto::TxBroadcastPolicy::AllPeers,
@@ -232,9 +268,12 @@ impl Monitor {
             // Can't confirm deposits if we don't yet know the tip of the chain.
             return;
         };
+        if self.pending_deposits.is_empty() {
+            return;
+        }
 
         info!(
-            "Reprocessing {} pending deposits",
+            "Processing {} pending deposits",
             self.pending_deposits.len()
         );
         for pending_deposit in std::mem::take(&mut self.pending_deposits) {

@@ -1,5 +1,6 @@
 use crate::Hashi;
 use crate::onchain::types::DepositRequest;
+use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
 use bitcoin::ScriptBuf;
@@ -8,6 +9,7 @@ use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
+use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
 
 impl Hashi {
@@ -125,7 +127,7 @@ impl Hashi {
     ) -> anyhow::Result<()> {
         let hashi_pubkey = self.get_hashi_pubkey();
         let expected_address =
-            self.get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref());
+            self.get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())?;
 
         if deposit_address != expected_address {
             bail!(
@@ -142,22 +144,34 @@ impl Hashi {
         &self,
         hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
-    ) -> bitcoin::Address {
-        let pubkey = if let Some(path) = derivation_path {
-            hashi_types::guardian::bitcoin_utils::get_derived_pubkey(
-                hashi_pubkey,
-                &path.into_inner(),
-            )
-        } else {
-            *hashi_pubkey
-        };
-        self.bitcoin_address_from_pubkey(&pubkey)
+    ) -> anyhow::Result<bitcoin::Address> {
+        let pubkey = self.deposit_pubkey(hashi_pubkey, derivation_path)?;
+        Ok(self.bitcoin_address_from_pubkey(&pubkey))
     }
 
-    fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
-        let network = self.config.bitcoin_network();
-        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        bitcoin::Address::p2tr(&secp, *pubkey, None, network)
+    pub(crate) fn deposit_pubkey(
+        &self,
+        hashi_pubkey: &XOnlyPublicKey,
+        derivation_path: Option<&sui_sdk_types::Address>,
+    ) -> anyhow::Result<XOnlyPublicKey> {
+        if let Some(path) = derivation_path {
+            let verifying_key = self
+                .signing_verifying_key()
+                .context("MPC public key not available yet")?;
+            let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+                &verifying_key,
+                &path.into_inner(),
+            );
+            let pubkey = XOnlyPublicKey::from_slice(&derived.to_byte_array())
+                .context("valid 32-byte x-only key")?;
+            Ok(pubkey)
+        } else {
+            Ok(*hashi_pubkey)
+        }
+    }
+
+    pub(crate) fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
+        bitcoin_utils::single_key_taproot_script_path_address(pubkey, self.config.bitcoin_network())
     }
 
     fn bitcoin_address_from_script_pubkey(

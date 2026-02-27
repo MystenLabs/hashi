@@ -18,8 +18,9 @@ use bitcoin::hashes::Hash;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::sighash::TapSighashType;
+use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::GroupElement;
-use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::guardian::bitcoin_utils;
@@ -70,11 +71,6 @@ pub struct WithdrawalApproval {
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalConfirmation {
     pub withdrawal_id: Address,
-}
-
-#[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct WithdrawalInputSignature {
-    pub hashi_signature: Vec<u8>,
 }
 
 impl Hashi {
@@ -170,7 +166,7 @@ impl Hashi {
         if let Some(change_output) = non_request_outputs.first() {
             let hashi_pubkey = self.get_hashi_pubkey();
             let expected_address =
-                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None))?;
+                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
             anyhow::ensure!(
                 change_output.bitcoin_address == expected_address,
                 "Change output does not go to hashi root pubkey"
@@ -322,7 +318,7 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         pending_withdrawal_id: &Address,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let (pending, unsigned_tx) = self
             .validate_withdrawal_signing(pending_withdrawal_id)
             .await?;
@@ -356,12 +352,12 @@ impl Hashi {
         Ok((pending.clone(), tx))
     }
 
-    /// Produce a partial MPC Schnorr signature for an unsigned withdrawal transaction.
+    /// Produce MPC Schnorr signatures for an unsigned withdrawal transaction.
     async fn mpc_sign_withdrawal_tx(
         &self,
         pending: &crate::onchain::types::PendingWithdrawal,
         unsigned_tx: &bitcoin::Transaction,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
         let p2p_channel = RpcP2PChannel::new(onchain_state, epoch);
@@ -371,13 +367,17 @@ impl Hashi {
         let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
         for (input_index, message) in signing_messages.iter().enumerate() {
             let request_id = withdrawal_signing_request_id(&pending.id, input_index as u32);
+            let derivation_address = pending
+                .inputs
+                .get(input_index)
+                .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
             let signature = SigningManager::sign(
                 &signing_manager,
                 &p2p_channel,
                 request_id,
                 message,
                 &beacon,
-                None,
+                derivation_address.as_ref(),
                 WITHDRAWAL_SIGNING_TIMEOUT,
             )
             .await
@@ -385,12 +385,9 @@ impl Hashi {
                 anyhow!("Failed to sign withdrawal transaction input {input_index}: {e}")
             })?;
 
-            signatures_by_input.push(WithdrawalInputSignature {
-                hashi_signature: signature.to_byte_array().to_vec(),
-            });
+            signatures_by_input.push(signature);
         }
-        bcs::to_bytes(&signatures_by_input)
-            .map_err(|e| anyhow!("Failed to serialize partial signature: {e}"))
+        Ok(signatures_by_input)
     }
 
     pub(crate) fn withdrawal_signing_messages(
@@ -399,28 +396,44 @@ impl Hashi {
         inputs: &[Utxo],
     ) -> anyhow::Result<Vec<[u8; 32]>> {
         let hashi_pubkey = self.get_hashi_pubkey();
-        let prevouts = inputs
+        let spend_inputs = inputs
             .iter()
             .map(|input| {
-                let address =
-                    self.get_deposit_address(&hashi_pubkey, input.derivation_path.as_ref());
-                TxOut {
-                    value: Amount::from_sat(input.amount),
-                    script_pubkey: address.script_pubkey(),
-                }
+                let pubkey = self.deposit_pubkey(&hashi_pubkey, input.derivation_path.as_ref())?;
+                let address = self.bitcoin_address_from_pubkey(&pubkey);
+                let (_, _, leaf_hash) =
+                    bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+                Ok((
+                    TxOut {
+                        value: Amount::from_sat(input.amount),
+                        script_pubkey: address.script_pubkey(),
+                    },
+                    leaf_hash,
+                ))
             })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let prevouts = spend_inputs
+            .iter()
+            .map(|(txout, _)| txout.clone())
             .collect::<Vec<_>>();
+        let leaf_hashes = spend_inputs
+            .iter()
+            .map(|(_, leaf_hash)| *leaf_hash)
+            .collect::<Vec<TapLeafHash>>();
 
         (0..inputs.len())
             .map(|input_index| {
                 let mut sighasher = SighashCache::new(unsigned_tx);
                 let sighash = sighasher
-                    .taproot_key_spend_signature_hash(
+                    .taproot_script_spend_signature_hash(
                         input_index,
                         &Prevouts::All(&prevouts),
+                        leaf_hashes[input_index],
                         TapSighashType::Default,
                     )
-                    .map_err(|e| anyhow!("Failed to construct taproot key spend sighash: {e}"))?;
+                    .map_err(|e| {
+                        anyhow!("Failed to construct taproot script spend sighash: {e}")
+                    })?;
                 Ok(*sighash.as_byte_array())
             })
             .collect()
@@ -566,7 +579,7 @@ impl Hashi {
         // Add change output back to hashi root pubkey if selection produced change
         if let Some(change_amount) = selection.change {
             let hashi_pubkey = self.get_hashi_pubkey();
-            let change_address = self.get_deposit_address(&hashi_pubkey, None);
+            let change_address = self.get_deposit_address(&hashi_pubkey, None)?;
             outputs.push(OutputUtxo {
                 amount: change_amount,
                 bitcoin_address: witness_program_from_address(&change_address)?,

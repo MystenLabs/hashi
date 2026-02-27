@@ -1,4 +1,5 @@
 use anyhow::Context;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -77,13 +78,21 @@ impl BridgeService for HttpService {
             .map_err(|e| {
             Status::invalid_argument(format!("invalid pending_withdrawal_id: {e}"))
         })?;
-        let partial_signature = self
+        tracing::info!("sign_withdrawal_transaction called for {pending_withdrawal_id}");
+        let signatures = self
             .inner
             .validate_and_sign_withdrawal_tx(&pending_withdrawal_id)
             .await
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!("sign_withdrawal_transaction failed: {e}");
+                Status::failed_precondition(e.to_string())
+            })?;
+        tracing::info!("sign_withdrawal_transaction succeeded for {pending_withdrawal_id}");
         Ok(Response::new(SignWithdrawalTransactionResponse {
-            partial_signature: Some(partial_signature.into()),
+            signatures_by_input: signatures
+                .iter()
+                .map(|sig| sig.to_byte_array().to_vec().into())
+                .collect(),
         }))
     }
 
