@@ -57,6 +57,12 @@ enum Commands {
         #[clap(flatten)]
         publish_opts: hashi::cli::PublishOpts,
     },
+
+    /// Register a validator on-chain
+    Register {
+        #[clap(flatten)]
+        register_opts: hashi::cli::RegisterOpts,
+    },
 }
 
 #[tokio::main]
@@ -75,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Config { action }).await
         }
         Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
+        Commands::Register { register_opts } => hashi::cli::run_register(register_opts).await,
     }
 }
 
