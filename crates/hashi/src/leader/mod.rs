@@ -474,6 +474,7 @@ impl LeaderService {
 
     async fn process_unsigned_pending_withdrawals(&self) {
         let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
+        pending_withdrawals.retain(|p| p.signatures.is_none());
         pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
 
         // TODO: process multiple at a time.
@@ -631,15 +632,96 @@ impl LeaderService {
     // ========================================================================
 
     async fn process_signed_pending_withdrawals(&self) {
-        // For now, look at all pending withdrawals. In a future pass we can
-        // filter to only those whose on-chain signatures field is Some, but
-        // the leader orchestrates signing → broadcast → confirm in sequence,
-        // so the broadcast step checks locally.
         let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
+        pending_withdrawals.retain(|p| p.signatures.is_some());
         pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
 
-        // TODO: filter to only signed pending withdrawals
-        // For now this is a no-op since process_unsigned handles the full flow
+        for pending in &pending_withdrawals {
+            self.broadcast_and_confirm_withdrawal(pending).await;
+        }
+    }
+
+    async fn broadcast_and_confirm_withdrawal(&self, pending: &PendingWithdrawal) {
+        let raw_signatures = pending.signatures.as_ref().expect("checked by caller");
+
+        let signatures: Vec<SchnorrSignature> = match raw_signatures
+            .iter()
+            .map(|bytes| {
+                let arr: &[u8; 64] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Signature not 64 bytes"))?;
+                SchnorrSignature::from_byte_array(arr)
+                    .map_err(|e| anyhow::anyhow!("Invalid Schnorr signature: {e}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+        {
+            Ok(sigs) => sigs,
+            Err(e) => {
+                error!(
+                    "Failed to parse signatures for pending withdrawal {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        let broadcastable_tx = match self.build_broadcastable_withdrawal_tx(pending, &signatures) {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(
+                    "Failed to build broadcastable withdrawal tx for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .inner
+            .btc_monitor()
+            .broadcast_transaction(broadcastable_tx)
+            .await
+        {
+            error!(
+                "Failed to broadcast withdrawal tx for {:?}: {e}",
+                pending.id
+            );
+            return;
+        }
+        info!("Broadcast withdrawal tx for {:?}", pending.id);
+
+        let members = match self.inner.onchain_state().current_committee_members() {
+            Some(m) => m,
+            None => {
+                error!("No current committee members for confirmation");
+                return;
+            }
+        };
+
+        let confirmation_cert = match self
+            .collect_withdrawal_confirmation_signature(pending.id, &members)
+            .await
+        {
+            Ok(cert) => cert,
+            Err(e) => {
+                error!(
+                    "Failed to collect withdrawal confirmation signatures for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .submit_confirm_withdrawal(&pending.id, &confirmation_cert)
+            .await
+        {
+            error!(
+                "Failed to submit confirm_withdrawal for {:?}: {e}",
+                pending.id
+            );
+        }
     }
 
     async fn collect_withdrawal_confirmation_signature(

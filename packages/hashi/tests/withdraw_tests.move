@@ -168,6 +168,7 @@ fun test_approve_request_bad_signature() {
 }
 
 #[test]
+#[expected_failure(abort_code = hashi::withdraw::ERequestAlreadyApproved)]
 fun test_approve_then_cancel() {
     let epoch = 0u64;
     let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
@@ -184,13 +185,12 @@ fun test_approve_then_cancel() {
     let (signature, signers_bitmap) = test_utils::sign_with_committee(&message_bytes, 3);
     hashi::withdraw::approve_request(&mut hashi, request_ids, epoch, signature, signers_bitmap);
 
-    // Cancel should still work (remove_request doesn't check approved)
+    // Cancelling an approved request should fail
     let one_hour_ms = 1000 * 60 * 60;
     clock.set_for_testing(one_hour_ms);
     let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, id1, &clock, ctx);
-    assert!(btc.value() == 10_000);
-
     btc.destroy_for_testing();
+
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }

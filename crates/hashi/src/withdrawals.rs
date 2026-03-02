@@ -317,8 +317,7 @@ impl Hashi {
         &self,
         message: &WithdrawalTxSigning,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        // Verify the pending withdrawal exists
-        let _pending = self
+        let pending = self
             .onchain_state()
             .pending_withdrawal(&message.withdrawal_id)
             .ok_or_else(|| {
@@ -327,6 +326,26 @@ impl Hashi {
                     message.withdrawal_id
                 )
             })?;
+
+        anyhow::ensure!(
+            pending.signatures.is_none(),
+            "PendingWithdrawal {} is already signed",
+            message.withdrawal_id
+        );
+
+        anyhow::ensure!(
+            message.request_ids == pending.request_ids,
+            "Request IDs mismatch for PendingWithdrawal {}",
+            message.withdrawal_id
+        );
+
+        anyhow::ensure!(
+            message.signatures.len() == pending.inputs.len(),
+            "Signature count ({}) does not match input count ({}) for PendingWithdrawal {}",
+            message.signatures.len(),
+            pending.inputs.len(),
+            message.withdrawal_id
+        );
 
         self.sign_message_proto(message)
     }

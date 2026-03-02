@@ -297,6 +297,7 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                         .collect(),
                     timestamp_ms: event.timestamp_ms,
                     randomness: event.randomness.clone(),
+                    signatures: None,
                 };
                 state
                     .hashi

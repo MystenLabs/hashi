@@ -15,6 +15,8 @@ use sui::{clock::Clock, coin::{Self, Coin}, random::Random, sui::SUI};
 const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
 #[error]
 const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
+#[error]
+const ERequestAlreadyApproved: vector<u8> = b"Request has already been approved";
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
@@ -129,6 +131,7 @@ entry fun approve_request(
     });
 }
 
+// TODO: Check withdrawal outputs against request_ids
 entry fun construct_withdrawal(
     hashi: &mut Hashi,
     request_ids: vector<address>,
@@ -136,8 +139,8 @@ entry fun construct_withdrawal(
     outputs: vector<vector<u8>>,
     txid: address,
     epoch: u64,
-    signers_bitmap: vector<u8>,
     signature: vector<u8>,
+    signers_bitmap: vector<u8>,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -268,6 +271,8 @@ public fun cancel_withdrawal(
     ctx: &mut TxContext,
 ): Coin<BTC> {
     hashi.config().assert_version_enabled();
+
+    assert!(!hashi.withdrawal_queue().is_request_approved(request_id), ERequestAlreadyApproved);
 
     let request = hashi.withdrawal_queue_mut().remove_request(request_id);
 

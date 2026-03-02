@@ -672,7 +672,7 @@ impl SuiTxExecutor {
     /// - `selected_utxos: vector<vector<u8>>` — BCS-encoded `UtxoId`s
     /// - `outputs: vector<vector<u8>>` — BCS-encoded `OutputUtxo`s
     /// - `txid: address` — bitcoin transaction ID
-    /// - `epoch, signers_bitmap, signature` — committee certificate
+    /// - `epoch, signature, signers_bitmap` — committee certificate
     /// - `clock: &Clock`
     /// - `r: &Random`
     pub async fn execute_construct_withdrawal(
@@ -733,8 +733,8 @@ impl SuiTxExecutor {
                 outputs_arg,
                 txid_arg,
                 epoch_arg,
-                signers_bitmap_arg,
                 signature_arg,
+                signers_bitmap_arg,
                 clock_arg,
                 random_arg,
             ],

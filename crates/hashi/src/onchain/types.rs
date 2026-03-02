@@ -412,6 +412,7 @@ pub struct PendingWithdrawal {
     pub outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
+    pub signatures: Option<Vec<Vec<u8>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]

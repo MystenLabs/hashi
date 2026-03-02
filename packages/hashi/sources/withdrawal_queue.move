@@ -125,6 +125,11 @@ public(package) fun approve_request(self: &mut WithdrawalRequestQueue, request_i
     request.approved = true;
 }
 
+public(package) fun is_request_approved(self: &WithdrawalRequestQueue, request_id: address): bool {
+    let request: &WithdrawalRequest = self.requests.borrow(request_id);
+    request.approved
+}
+
 public(package) fun remove_request(
     self: &mut WithdrawalRequestQueue,
     id: address,

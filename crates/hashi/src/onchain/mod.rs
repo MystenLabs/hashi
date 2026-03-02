@@ -1001,6 +1001,7 @@ async fn scrape_pending_withdrawals(
                  outputs,
                  timestamp_ms,
                  randomness,
+                 signatures,
                  ..
              }| {
                 let request_ids = requests.into_iter().map(|r| r.id).collect();
@@ -1022,6 +1023,7 @@ async fn scrape_pending_withdrawals(
                         outputs,
                         timestamp_ms,
                         randomness,
+                        signatures,
                     },
                 )
             },
