@@ -341,9 +341,7 @@ impl LeaderService {
         let weight = aggregator.weight();
         let required_weight = certificate_threshold(committee.total_weight());
         if weight < required_weight {
-            error!(
-                "Insufficient request approval signatures: weight {weight} < {required_weight}"
-            );
+            error!("Insufficient request approval signatures: weight {weight} < {required_weight}");
             return;
         }
 
@@ -571,26 +569,22 @@ impl LeaderService {
             )
             .await
         {
-            error!(
-                "Failed to submit sign_withdrawal for {:?}: {e}",
-                pending.id
-            );
+            error!("Failed to submit sign_withdrawal for {:?}: {e}", pending.id);
             return;
         }
 
         // 5. Build and broadcast the signed BTC transaction
-        let broadcastable_tx = match self
-            .build_broadcastable_withdrawal_tx(pending, &signatures_by_input)
-        {
-            Ok(tx) => tx,
-            Err(e) => {
-                error!(
-                    "Failed to build broadcastable withdrawal tx for {:?}: {e}",
-                    pending.id
-                );
-                return;
-            }
-        };
+        let broadcastable_tx =
+            match self.build_broadcastable_withdrawal_tx(pending, &signatures_by_input) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    error!(
+                        "Failed to build broadcastable withdrawal tx for {:?}: {e}",
+                        pending.id
+                    );
+                    return;
+                }
+            };
 
         if let Err(e) = self
             .inner
@@ -1043,7 +1037,10 @@ impl LeaderService {
         request_ids: &[Address],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
-        info!("Submitting approve_request for {} requests", request_ids.len());
+        info!(
+            "Submitting approve_request for {} requests",
+            request_ids.len()
+        );
 
         let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
         executor.execute_approve_request(request_ids, cert).await

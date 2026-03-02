@@ -23,8 +23,8 @@ use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
-use hashi_types::guardian::bitcoin_utils;
 use hashi_types::committee::MemberSignature;
+use hashi_types::guardian::bitcoin_utils;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
@@ -334,10 +334,7 @@ impl Hashi {
 
     // --- Generic BLS signing helper ---
 
-    fn sign_message<T: serde::Serialize>(
-        &self,
-        message: &T,
-    ) -> anyhow::Result<MemberSignature> {
+    fn sign_message<T: serde::Serialize>(&self, message: &T) -> anyhow::Result<MemberSignature> {
         let epoch = self.onchain_state().epoch();
         let validator_address = self
             .config

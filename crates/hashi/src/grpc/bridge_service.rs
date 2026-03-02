@@ -189,9 +189,7 @@ fn parse_deposit_request(
     })
 }
 
-fn parse_request_approval(
-    request: &SignRequestApprovalRequest,
-) -> anyhow::Result<RequestApproval> {
+fn parse_request_approval(request: &SignRequestApprovalRequest) -> anyhow::Result<RequestApproval> {
     let request_ids: Vec<Address> = request
         .request_ids
         .iter()
