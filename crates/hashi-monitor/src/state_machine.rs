@@ -1,19 +1,18 @@
 //! Withdrawal state machine for tracking event flow.
 
-use bitcoin::Txid;
-use hashi_types::guardian::WithdrawalID;
-use std::collections::BTreeSet;
-
 use crate::OutputUTXO;
 use crate::audit::AuditWindow;
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::UnixSeconds;
 use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use crate::errors::MonitorError;
 use crate::errors::MonitorError::*;
+use bitcoin::Txid;
+use hashi_types::guardian::WithdrawalID;
+use hashi_types::guardian::time_utils::UnixSeconds;
+use std::collections::BTreeSet;
 
 /// A record of all the events tracking a single withdrawal.
 ///
@@ -213,7 +212,7 @@ impl WithdrawalStateMachine {
         let wid = self.wid;
         let cur_time = now_unix_seconds();
 
-        match crate::rpc::lookup_btc_confirmation(cfg, btc_txid) {
+        match crate::rpc::btc::lookup_btc_confirmation(cfg, btc_txid) {
             Ok(Some((block_time, utxos))) => {
                 self.btc_checked_at = Some(cur_time);
 

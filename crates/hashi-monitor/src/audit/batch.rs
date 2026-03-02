@@ -3,13 +3,11 @@ use crate::audit::AuditorCore;
 use crate::audit::log_findings;
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::UnixSeconds;
+use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
-use crate::errors::MonitorError;
-use crate::rpc::poll_guardian;
-use crate::rpc::poll_sui;
+use hashi_types::guardian::time_utils::UnixSeconds;
 
 const NUM_ITERATIONS_BEFORE_FAIL: u8 = 5;
 
@@ -74,7 +72,7 @@ impl AuditWindow for BatchAuditWindow {
 pub struct BatchAuditor {
     pub inner: AuditorCore,
     pub audit_window: BatchAuditWindow,
-    pub findings: Vec<MonitorError>,
+    pub violation_found: bool,
 }
 
 impl BatchAuditor {
@@ -97,60 +95,49 @@ impl BatchAuditor {
         Ok(Self {
             inner: AuditorCore::new(cfg, cursors),
             audit_window,
-            findings: Vec::new(),
+            violation_found: false,
         })
     }
 
     pub fn ingest_batch(&mut self, events: Vec<WithdrawalEvent>) {
         let errors = self.inner.ingest_batch(events);
         log_findings("batch", "ingest", &errors);
-        self.findings.extend(errors);
+        if !errors.is_empty() {
+            self.violation_found = true;
+        }
     }
 
     async fn fetch_all_sui_guardian_events(&mut self) -> anyhow::Result<()> {
         let mut stalled_iterations = 0_u8;
 
-        while self.inner.get_sui_cursor() < self.audit_window.sui_end
-            || self.inner.get_guardian_cursor() < self.audit_window.guardian_end
-        {
-            let prev_sui = self.inner.get_sui_cursor();
-            let prev_guardian = self.inner.get_guardian_cursor();
+        loop {
+            let sui_cursor = self.inner.get_sui_cursor();
+            let guardian_cursor = self.inner.get_guardian_cursor();
 
-            let should_poll_sui = prev_sui < self.audit_window.sui_end;
-            let should_poll_guardian = prev_guardian < self.audit_window.guardian_end;
+            let should_poll_sui = sui_cursor < self.audit_window.sui_end;
+            let should_poll_guardian = guardian_cursor < self.audit_window.guardian_end;
 
-            let (sui_result, guardian_result) = tokio::join!(
-                async {
-                    if should_poll_sui {
-                        Some(poll_sui(&self.inner.cfg, prev_sui).await)
-                    } else {
-                        None
-                    }
-                },
-                async {
-                    if should_poll_guardian {
-                        Some(poll_guardian(&self.inner.cfg, prev_guardian).await)
-                    } else {
-                        None
-                    }
-                }
-            );
-
-            if let Some(result) = sui_result {
-                let (events, new_cursor) = result?;
-                self.inner.set_sui_cursor(new_cursor);
-                self.ingest_batch(events);
+            if !should_poll_sui && !should_poll_guardian {
+                break;
             }
 
-            if let Some(result) = guardian_result {
-                let (events, new_cursor) = result?;
-                self.inner.set_guardian_cursor(new_cursor);
-                self.ingest_batch(events);
-            }
-
-            if prev_sui == self.inner.get_sui_cursor()
-                && prev_guardian == self.inner.get_guardian_cursor()
+            let mut sui_cursor_moved = false;
+            if should_poll_sui
+                && let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui().await?
             {
+                self.ingest_batch(events);
+                sui_cursor_moved = true;
+            }
+
+            let mut guardian_cursor_moved = false;
+            if should_poll_guardian
+                && let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await?
+            {
+                self.ingest_batch(events);
+                guardian_cursor_moved = true;
+            }
+
+            if !sui_cursor_moved && !guardian_cursor_moved {
                 stalled_iterations = stalled_iterations.saturating_add(1);
                 if stalled_iterations >= NUM_ITERATIONS_BEFORE_FAIL {
                     tracing::warn!(
@@ -169,7 +156,7 @@ impl BatchAuditor {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        self.findings.clear();
+        self.violation_found = false;
         self.fetch_all_sui_guardian_events().await?;
 
         tracing::info!(
@@ -187,12 +174,16 @@ impl BatchAuditor {
         // Fetch all BTC info
         let btc_findings = self.inner.fetch_btc_info(&self.audit_window)?;
         log_findings("batch", "btc", &btc_findings);
-        self.findings.extend(btc_findings);
+        if !btc_findings.is_empty() {
+            self.violation_found = true;
+        }
 
         // Gather all violations
         let violations = self.inner.detect_violations(&self.audit_window);
         log_findings("batch", "violations", &violations);
-        self.findings.extend(violations);
+        if !violations.is_empty() {
+            self.violation_found = true;
+        }
 
         // Identify the earliest incomplete guardian-anchored state machine (to signal when to start next)
         let mut verified_up_to = self.inner.get_guardian_cursor();
@@ -212,10 +203,10 @@ impl BatchAuditor {
             }
         }
 
-        if self.findings.is_empty() {
+        if !self.violation_found {
             tracing::info!("audit passed. run next audit at {verified_up_to}");
         } else {
-            tracing::warn!(count = self.findings.len(), "audit produced findings");
+            tracing::warn!("audit produced findings: see logs");
         }
 
         Ok(())

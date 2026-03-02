@@ -3,6 +3,8 @@ use std::time::UNIX_EPOCH;
 
 pub type UnixMillis = u64;
 
+pub type UnixSeconds = u64;
+
 pub const MILLIS_PER_SECOND: UnixMillis = 1000;
 
 /// Milliseconds since Unix epoch.
@@ -14,7 +16,7 @@ pub fn now_timestamp_ms() -> UnixMillis {
         .as_millis() as UnixMillis
 }
 
-pub fn unix_millis_to_seconds(ms: UnixMillis) -> u64 {
+pub fn unix_millis_to_seconds(ms: UnixMillis) -> UnixSeconds {
     ms / MILLIS_PER_SECOND
 }
 

@@ -10,7 +10,7 @@
 //!     - Currently we also report orphan E1 findings when they fall in the user window.
 
 use crate::domain::Cursors;
-use crate::domain::UnixSeconds;
+use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use std::collections::HashMap;
@@ -21,11 +21,13 @@ pub mod continuous;
 
 use crate::config::Config;
 use crate::errors::MonitorError;
+use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::WithdrawalStateMachine;
 pub use batch::BatchAuditor;
 pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
+use hashi_types::guardian::time_utils::UnixSeconds;
 
 pub trait AuditWindow {
     fn in_window(&self, e: &WithdrawalEvent) -> bool;
@@ -48,15 +50,18 @@ pub struct AuditorCore {
     cfg: Config,
     // mutable
     pending: HashMap<WithdrawalID, WithdrawalStateMachine>,
-    cursors: Cursors,
+    guardian_poller: GuardianWithdrawalsPoller,
+    // placeholder until we implement sui rpc
+    sui_cursor: UnixSeconds,
 }
 
 impl AuditorCore {
     pub fn new(cfg: Config, cursors: Cursors) -> Self {
         Self {
-            cfg,
+            cfg: cfg.clone(),
             pending: HashMap::new(),
-            cursors,
+            guardian_poller: GuardianWithdrawalsPoller::new(cfg.guardian, cursors.guardian),
+            sui_cursor: cursors.sui,
         }
     }
 
@@ -116,7 +121,7 @@ impl AuditorCore {
             }
 
             // Gather all violations so far
-            let violations = sm.violations(&self.cursors);
+            let violations = sm.violations(&self.get_cursors());
             if !violations.is_empty() {
                 errors.extend(violations);
             }
@@ -141,16 +146,28 @@ impl AuditorCore {
         }
     }
 
-    pub fn get_sui_cursor(&self) -> UnixSeconds {
-        self.cursors.sui
+    /// Polls one hour worth of guardian events
+    /// TODO: Provide an option to poll more aggressively if we are lagging behind
+    pub async fn poll_guardian(&mut self) -> anyhow::Result<PollOutcome> {
+        self.guardian_poller.poll_one_hour().await
     }
-    pub fn get_guardian_cursor(&self) -> UnixSeconds {
-        self.cursors.guardian
+
+    pub async fn poll_sui(&mut self) -> anyhow::Result<PollOutcome> {
+        // TODO: Implement me
+        Ok(PollOutcome::CursorUnmoved)
     }
-    pub fn set_sui_cursor(&mut self, sui: UnixSeconds) {
-        self.cursors.sui = sui;
+
+    fn get_cursors(&self) -> Cursors {
+        Cursors {
+            sui: self.get_sui_cursor(),
+            guardian: self.get_guardian_cursor(),
+        }
     }
-    pub fn set_guardian_cursor(&mut self, guardian: UnixSeconds) {
-        self.cursors.guardian = guardian;
+    fn get_sui_cursor(&self) -> UnixSeconds {
+        self.sui_cursor
+    }
+
+    fn get_guardian_cursor(&self) -> UnixSeconds {
+        self.guardian_poller.cursor_seconds()
     }
 }

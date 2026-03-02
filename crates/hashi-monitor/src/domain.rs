@@ -15,13 +15,11 @@ use std::collections::BTreeSet;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::OutputUTXO;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
+use hashi_types::guardian::time_utils::UnixSeconds;
 use serde::Deserialize;
-
-use crate::OutputUTXO;
-
-pub type UnixSeconds = u64;
 
 pub fn now_unix_seconds() -> UnixSeconds {
     SystemTime::now()
@@ -113,4 +111,10 @@ impl Cursors {
     pub fn min(&self) -> UnixSeconds {
         self.sui.min(self.guardian)
     }
+}
+
+/// Outcome of a Guardian or Sui poll
+pub enum PollOutcome {
+    CursorAdvanced(Vec<WithdrawalEvent>),
+    CursorUnmoved,
 }

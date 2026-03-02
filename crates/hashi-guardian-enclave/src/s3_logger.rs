@@ -14,6 +14,7 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3Directory;
+use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::UnixMillis;
@@ -108,7 +109,7 @@ impl S3Logger {
         value: &T,
         object_lock_duration: Duration,
     ) -> GuardianResult<()> {
-        let dir = S3Directory::new(prefix, timestamp_ms);
+        let dir = S3Directory::new(prefix, unix_millis_to_seconds(timestamp_ms));
         let key = format!("{}/{}-{}.json", dir, self.session_id, suffix);
         self.write_at_key(&key, value, object_lock_duration).await
     }

@@ -1,6 +1,6 @@
-use crate::domain::UnixSeconds;
 use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
+use hashi_types::guardian::time_utils::UnixSeconds;
 use std::fmt;
 
 /// Findings emitted by the monitor.
