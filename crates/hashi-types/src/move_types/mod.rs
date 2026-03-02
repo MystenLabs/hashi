@@ -43,8 +43,6 @@ pub struct Hashi {
     pub proposals: Bag,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
-    /// Number of presignatures consumed in the current epoch.
-    pub num_consumed_presigs: u64,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
@@ -209,6 +207,7 @@ pub struct DepositRequestQueue {
 pub struct WithdrawalRequestQueue {
     pub requests: Bag,
     pub pending_withdrawals: Bag,
+    pub num_consumed_presigs: u64,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.

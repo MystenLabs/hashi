@@ -47,7 +47,7 @@ entry fun end_reconfig(
     let sig = committee::new_committee_signature(next_epoch, signature, signers_bitmap);
     let threshold = threshold::certificate_threshold(next_committee.total_weight() as u16) as u64;
     let _cert = next_committee.verify_certificate(message, sig, threshold);
-    self.reset_num_consumed_presigs();
+    self.withdrawal_queue_mut().reset_num_consumed_presigs();
     let epoch = self.committee_set_mut().end_reconfig(ctx);
     sui::event::emit(EndReconfigEvent { epoch });
 }

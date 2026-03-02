@@ -536,7 +536,6 @@ async fn scrape_hashi(
         utxo_pool,
         proposals,
         tob,
-        num_consumed_presigs,
     } = response.get_ref().object().contents().deserialize()?;
 
     let (
@@ -578,7 +577,6 @@ async fn scrape_hashi(
             utxo_pool,
             proposals,
             tob_id: tob.id,
-            num_consumed_presigs,
         },
     ))
 }

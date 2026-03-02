@@ -10,6 +10,9 @@ public struct WithdrawalRequestQueue has store {
     requests: Bag,
     // XXX do we need a separate bag or can we just use the same bag?
     pending_withdrawals: Bag, //vector<PendingWithdrawal>,
+    /// Number of presignatures consumed in the current epoch.
+    /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
+    num_consumed_presigs: u64,
 }
 
 public struct WithdrawalRequest has store {
@@ -141,7 +144,20 @@ public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
     WithdrawalRequestQueue {
         requests: sui::bag::new(ctx),
         pending_withdrawals: sui::bag::new(ctx),
+        num_consumed_presigs: 0,
     }
+}
+
+public(package) fun num_consumed_presigs(self: &WithdrawalRequestQueue): u64 {
+    self.num_consumed_presigs
+}
+
+public(package) fun increment_num_consumed_presigs(self: &mut WithdrawalRequestQueue, count: u64) {
+    self.num_consumed_presigs = self.num_consumed_presigs + count;
+}
+
+public(package) fun reset_num_consumed_presigs(self: &mut WithdrawalRequestQueue) {
+    self.num_consumed_presigs = 0;
 }
 
 public(package) fun request_into_parts(
