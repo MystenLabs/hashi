@@ -9,7 +9,7 @@ use hashi::{
     utxo::UtxoId,
     withdrawal_queue::{OutputUtxo, withdrawal_request}
 };
-use sui::{balance::Balance, clock::Clock, coin::Coin, random::Random, sui::SUI};
+use sui::{clock::Clock, coin::{Self, Coin}, random::Random, sui::SUI};
 
 #[error]
 const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
@@ -36,7 +36,7 @@ public struct WithdrawalConfirmation has copy, drop, store {
 public fun request_withdrawal(
     hashi: &mut Hashi,
     clock: &Clock,
-    btc_withdrawal: sui::funds_accumulator::Withdrawal<Balance<BTC>>,
+    btc: Coin<BTC>,
     bitcoin_address: vector<u8>,
     fee: Coin<SUI>,
     ctx: &mut TxContext,
@@ -48,12 +48,10 @@ public fun request_withdrawal(
     assert!(hashi.config().withdrawal_fee() == fee.value());
     hashi.treasury_mut().deposit_fee(fee);
 
-    let btc = sui::balance::redeem_funds(btc_withdrawal);
-
     // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());
 
-    let request = withdrawal_request(btc, bitcoin_address, clock, ctx);
+    let request = withdrawal_request(btc.into_balance(), bitcoin_address, clock, ctx);
     request.emit_withdrawal_requested();
     hashi.withdrawal_queue_mut().insert_request(request);
 }
@@ -170,7 +168,7 @@ public fun cancel_withdrawal(
     request_id: address,
     clock: &Clock,
     ctx: &mut TxContext,
-): Balance<BTC> {
+): Coin<BTC> {
     hashi.config().assert_version_enabled();
 
     let request = hashi.withdrawal_queue_mut().remove_request(request_id);
@@ -186,7 +184,7 @@ public fun cancel_withdrawal(
 
     // Return BTC to the requester
     let (_, btc) = hashi::withdrawal_queue::request_into_parts(request);
-    btc
+    coin::from_balance(btc, ctx)
 }
 
 public fun delete_expired_spent_utxo(hashi: &mut Hashi, txid: address, vout: u32) {

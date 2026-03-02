@@ -50,7 +50,7 @@ fun test_cancel_withdrawal() {
     assert!(btc.value() == 10_000);
 
     // Clean up
-    btc.destroy_for_testing();
+    btc.burn_for_testing();
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
@@ -72,7 +72,7 @@ fun test_cancel_withdrawal_unauthorized() {
     // Attempt cancellation from a different sender — should fail
     let other_ctx = &mut test_utils::new_tx_context(OTHER_USER, 0);
     let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, other_ctx);
-    btc.destroy_for_testing();
+    btc.burn_for_testing();
 
     // Clean up (shouldn't be reached due to expected failure)
     clock.destroy_for_testing();
@@ -91,7 +91,7 @@ fun test_cancel_withdrawal_cooldown_not_elapsed() {
 
     // Do NOT advance clock — cooldown has not elapsed
     let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, request_id, &clock, ctx);
-    btc.destroy_for_testing();
+    btc.burn_for_testing();
 
     // Clean up (shouldn't be reached due to expected failure)
     clock.destroy_for_testing();
