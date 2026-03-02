@@ -23,7 +23,6 @@ use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
-use hashi_types::committee::MemberSignature;
 use hashi_types::guardian::bitcoin_utils;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -333,24 +332,6 @@ impl Hashi {
     }
 
     // --- Generic BLS signing helper ---
-
-    fn sign_message<T: serde::Serialize>(&self, message: &T) -> anyhow::Result<MemberSignature> {
-        let epoch = self.onchain_state().epoch();
-        let validator_address = self
-            .config
-            .validator_address()
-            .map_err(|e| anyhow!("No validator address configured: {e}"))?;
-        let private_key = self
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow!("No protocol private key configured"))?;
-        let signature = private_key
-            .sign(epoch, validator_address, message)
-            .signature()
-            .clone();
-
-        Ok(MemberSignature::new(epoch, validator_address, signature))
-    }
 
     /// Proto-format BLS signing helper for gRPC responses.
     fn sign_message_proto<T: serde::Serialize>(
