@@ -291,7 +291,7 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign approval for a batch of unapproved withdrawal requests.
+        /// Step 1: Sign approval for a batch of unapproved withdrawal requests.
         pub async fn sign_request_approval(
             &mut self,
             request: impl tonic::IntoRequest<super::SignRequestApprovalRequest>,
@@ -321,8 +321,8 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign approval for a proposed withdrawal transaction construction, confirming that the
-        /// validator agrees the bitcoin transaction is valid.
+        /// Step 2: Sign approval for a proposed withdrawal transaction construction,
+        /// confirming that the validator agrees the bitcoin transaction is valid.
         pub async fn sign_withdrawal_tx_construction(
             &mut self,
             request: impl tonic::IntoRequest<super::SignWithdrawalTxConstructionRequest>,
@@ -352,8 +352,7 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign a bitcoin withdrawal transaction. The validator checks that a matching
-        /// PendingWithdrawal exists on-chain, then produces a partial signature.
+        /// Step 2b: Sign a bitcoin withdrawal transaction (MPC Schnorr).
         pub async fn sign_withdrawal_transaction(
             &mut self,
             request: impl tonic::IntoRequest<super::SignWithdrawalTransactionRequest>,
@@ -383,7 +382,7 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign the BLS certificate over the witness signatures for on-chain storage.
+        /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
         pub async fn sign_withdrawal_tx_signing(
             &mut self,
             request: impl tonic::IntoRequest<super::SignWithdrawalTxSigningRequest>,
@@ -413,7 +412,7 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign committee approval to confirm a processed withdrawal on-chain.
+        /// Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
         pub async fn sign_withdrawal_confirmation(
             &mut self,
             request: impl tonic::IntoRequest<super::SignWithdrawalConfirmationRequest>,
@@ -474,7 +473,7 @@ pub mod bridge_service_server {
             tonic::Response<super::SignDepositConfirmationResponse>,
             tonic::Status,
         >;
-        /// Sign approval for a batch of unapproved withdrawal requests.
+        /// Step 1: Sign approval for a batch of unapproved withdrawal requests.
         async fn sign_request_approval(
             &self,
             request: tonic::Request<super::SignRequestApprovalRequest>,
@@ -482,7 +481,8 @@ pub mod bridge_service_server {
             tonic::Response<super::SignRequestApprovalResponse>,
             tonic::Status,
         >;
-        /// Sign approval for a proposed withdrawal transaction construction.
+        /// Step 2: Sign approval for a proposed withdrawal transaction construction,
+        /// confirming that the validator agrees the bitcoin transaction is valid.
         async fn sign_withdrawal_tx_construction(
             &self,
             request: tonic::Request<super::SignWithdrawalTxConstructionRequest>,
@@ -490,8 +490,7 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalTxConstructionResponse>,
             tonic::Status,
         >;
-        /// Sign a bitcoin withdrawal transaction. The validator checks that a matching
-        /// PendingWithdrawal exists on-chain, then produces a partial signature.
+        /// Step 2b: Sign a bitcoin withdrawal transaction (MPC Schnorr).
         async fn sign_withdrawal_transaction(
             &self,
             request: tonic::Request<super::SignWithdrawalTransactionRequest>,
@@ -499,7 +498,7 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalTransactionResponse>,
             tonic::Status,
         >;
-        /// Sign the BLS certificate over the witness signatures for on-chain storage.
+        /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
         async fn sign_withdrawal_tx_signing(
             &self,
             request: tonic::Request<super::SignWithdrawalTxSigningRequest>,
@@ -507,7 +506,7 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalTxSigningResponse>,
             tonic::Status,
         >;
-        /// Sign committee approval to confirm a processed withdrawal on-chain.
+        /// Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
         async fn sign_withdrawal_confirmation(
             &self,
             request: tonic::Request<super::SignWithdrawalConfirmationRequest>,
@@ -707,10 +706,7 @@ pub mod bridge_service_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as BridgeService>::sign_request_approval(
-                                        &inner,
-                                        request,
-                                    )
+                                <T as BridgeService>::sign_request_approval(&inner, request)
                                     .await
                             };
                             Box::pin(fut)
@@ -743,8 +739,9 @@ pub mod bridge_service_server {
                     struct SignWithdrawalTxConstructionSvc<T: BridgeService>(pub Arc<T>);
                     impl<
                         T: BridgeService,
-                    > tonic::server::UnaryService<super::SignWithdrawalTxConstructionRequest>
-                    for SignWithdrawalTxConstructionSvc<T> {
+                    > tonic::server::UnaryService<
+                        super::SignWithdrawalTxConstructionRequest,
+                    > for SignWithdrawalTxConstructionSvc<T> {
                         type Response = super::SignWithdrawalTxConstructionResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
@@ -752,7 +749,9 @@ pub mod bridge_service_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::SignWithdrawalTxConstructionRequest>,
+                            request: tonic::Request<
+                                super::SignWithdrawalTxConstructionRequest,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
