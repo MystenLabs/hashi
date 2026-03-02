@@ -189,7 +189,7 @@ fun test_approve_then_cancel() {
     let one_hour_ms = 1000 * 60 * 60;
     clock.set_for_testing(one_hour_ms);
     let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, id1, &clock, ctx);
-    btc.destroy_for_testing();
+    btc.burn_for_testing();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);

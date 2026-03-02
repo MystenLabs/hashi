@@ -20,7 +20,9 @@ use bitcoin::sighash::SighashCache;
 use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::GroupElement;
+use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::guardian::bitcoin_utils;
@@ -346,6 +348,35 @@ impl Hashi {
             pending.inputs.len(),
             message.withdrawal_id
         );
+
+        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
+        let signing_messages = self.withdrawal_signing_messages(&tx, &pending.inputs)?;
+        let hashi_pubkey = self.get_hashi_pubkey();
+
+        for (i, (sig_bytes, sighash)) in message
+            .signatures
+            .iter()
+            .zip(signing_messages.iter())
+            .enumerate()
+        {
+            let arr: &[u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+                anyhow!(
+                    "Signature {i} is not 64 bytes for PendingWithdrawal {}",
+                    message.withdrawal_id
+                )
+            })?;
+            let sig = SchnorrSignature::from_byte_array(arr)
+                .map_err(|e| anyhow!("Invalid Schnorr signature at input {i}: {e}"))?;
+
+            let input_pubkey =
+                self.deposit_pubkey(&hashi_pubkey, pending.inputs[i].derivation_path.as_ref())?;
+            let schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert pubkey for input {i}: {e}"))?;
+
+            schnorr_pk
+                .verify(sighash, &sig)
+                .map_err(|e| anyhow!("Signature verification failed for input {i}: {e}"))?;
+        }
 
         self.sign_message_proto(message)
     }
