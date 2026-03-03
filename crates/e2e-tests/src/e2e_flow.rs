@@ -518,14 +518,16 @@ mod tests {
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
 
         // First withdrawal
-        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
-        withdraw_and_confirm(
-            &mut networks,
-            &hashi,
-            user_key.clone(),
-            withdrawal_amount_sats,
-        )
-        .await?;
+        {
+            let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+            withdraw_and_confirm(
+                &mut networks,
+                &hashi,
+                user_key.clone(),
+                withdrawal_amount_sats,
+            )
+            .await?;
+        }
 
         // Second deposit
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
