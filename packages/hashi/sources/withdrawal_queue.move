@@ -101,7 +101,45 @@ public(package) fun new_pending_withdrawal(
     assert!(input_amount >= output_amount);
     let _fee = input_amount - output_amount;
 
-    // TODO Check that all requests have a corresponding output and that the amount is X - required BTC fee
+    // Outputs must be either one-per-request, or one-per-request plus a single
+    // change output.
+    let request_count = requests.length();
+    let output_count = outputs.length();
+    assert!(output_count == request_count || output_count == request_count + 1);
+
+    // Track which outputs have already been matched so one output cannot
+    // satisfy multiple requests with the same amount/address.
+    let mut used_outputs = vector::empty<bool>();
+    let mut output_init_index = 0;
+    while (output_init_index < output_count) {
+        used_outputs.push_back(false);
+        output_init_index = output_init_index + 1;
+    };
+
+    // Each approved request must appear in outputs with the same amount and destination.
+    let mut request_index = 0;
+    while (request_index < request_count) {
+        let request = requests.borrow(request_index);
+        let mut has_match = false;
+
+        let mut output_index = 0;
+        while (output_index < output_count && !has_match) {
+            if (!*used_outputs.borrow(output_index)) {
+                let output = outputs.borrow(output_index);
+                if (
+                    request.btc_amount == output.amount
+                    && request.bitcoin_address == output.bitcoin_address
+                ) {
+                    has_match = true;
+                    *used_outputs.borrow_mut(output_index) = true;
+                };
+            };
+            output_index = output_index + 1;
+        };
+
+        assert!(has_match);
+        request_index = request_index + 1;
+    };
 
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(NUMBER_OF_RANDOM_BYTES);

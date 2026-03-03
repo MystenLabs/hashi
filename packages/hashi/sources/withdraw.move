@@ -124,7 +124,6 @@ entry fun approve_request(
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
 }
 
-// TODO: Check withdrawal outputs against request_ids
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
