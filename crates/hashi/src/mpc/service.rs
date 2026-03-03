@@ -107,10 +107,13 @@ impl MpcService {
                 match self.recover_mpc_state().await {
                     Ok(output) => {
                         let epoch = self.inner.onchain_state().epoch();
-                        if let Err(e) = self.prepare_signing(epoch, &output).await {
-                            // TODO: Node has valid key but no presignatures, can't sign.
-                            // Recovery requires presig state sync with peers.
-                            error!("Failed to init signing after DKG recovery: {e}");
+                        if let Err(e) = self.recover_presigning_state(&output) {
+                            error!(
+                                "Presigning recovery from DB failed: {e}, falling back to fresh nonce generation"
+                            );
+                            if let Err(e) = self.prepare_signing(epoch, &output).await {
+                                error!("Failed to init signing after DKG recovery: {e}");
+                            }
                         }
                         let _ = self.key_ready_tx.send(Some(output.public_key));
                         break;
@@ -176,8 +179,6 @@ impl MpcService {
             .pending_epoch_change()
     }
 
-    // TODO: After restart, this node's presignature state is out of sync with
-    // peers who kept running. Recovery requires presig state sync with peers.
     async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -280,6 +281,75 @@ impl MpcService {
             self.refill_tx.clone(),
         );
         self.inner.set_or_init_signing_manager(signing_manager);
+        Ok(())
+    }
+
+    fn recover_presigning_state(&self, output: &DkgOutput) -> anyhow::Result<()> {
+        let state = self.inner.onchain_state().state();
+        let hashi = state.hashi();
+        let num_consumed = hashi.withdrawal_queue.num_consumed_presigs();
+        let epoch = hashi.committees.epoch();
+        let committee = hashi
+            .committees
+            .committees()
+            .get(&epoch)
+            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
+            .clone();
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
+        let (batch_size_per_weight, f) = {
+            let mgr = mpc_manager.read().unwrap();
+            (
+                mgr.batch_size_per_weight,
+                mgr.dkg_config.max_faulty as usize,
+            )
+        };
+        // Reconstruct batch 0 to determine the actual batch size.
+        let batch_0_outputs = mpc_manager.read().unwrap().reconstruct_presignatures(0)?;
+        if batch_0_outputs.is_empty() {
+            return Err(anyhow::anyhow!("No persisted nonce messages for batch 0"));
+        }
+        let batch_0_presigs = Presignatures::new(batch_0_outputs, batch_size_per_weight, f)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let batch_size = batch_0_presigs.len();
+        let batch_index = (num_consumed / batch_size as u64) as u32;
+        let index_in_batch = (num_consumed % batch_size as u64) as usize;
+        let presignatures = if batch_index == 0 {
+            batch_0_presigs
+        } else {
+            let nonce_outputs = mpc_manager
+                .read()
+                .unwrap()
+                .reconstruct_presignatures(batch_index)?;
+            if nonce_outputs.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No persisted nonce messages for batch {batch_index}"
+                ));
+            }
+            Presignatures::new(nonce_outputs, batch_size_per_weight, f)
+                .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?
+        };
+        let address = self.inner.config.validator_address()?;
+        let mut signing_manager = SigningManager::new(
+            address,
+            committee,
+            output.threshold,
+            output.key_shares.clone(),
+            output.public_key,
+            presignatures,
+            batch_index,
+            PRESIG_REFILL_DIVISOR,
+            self.refill_tx.clone(),
+        );
+        signing_manager.skip_consumed_presigs(index_in_batch);
+        self.inner.set_or_init_signing_manager(signing_manager);
+        info!(
+            "Recovered presigning state: batch_index={batch_index}, \
+             skipped {index_in_batch}/{batch_size} presignatures \
+             (num_consumed_presigs={num_consumed})"
+        );
         Ok(())
     }
 

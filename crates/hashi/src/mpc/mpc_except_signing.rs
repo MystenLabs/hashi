@@ -500,6 +500,31 @@ impl MpcManager {
             .collect())
     }
 
+    pub fn reconstruct_presignatures(
+        &self,
+        batch_index: u32,
+    ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+        let messages = self
+            .public_messages_store
+            .list_nonce_messages(batch_index)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        let mut outputs = BTreeMap::new();
+        for (dealer, message) in messages {
+            let receiver = self.create_nonce_receiver(dealer, batch_index)?;
+            match receiver.process_message(&message)? {
+                batch_avss::ProcessedMessage::Valid(output) => {
+                    outputs.insert(dealer, output);
+                }
+                batch_avss::ProcessedMessage::Complaint(_) => {
+                    return Err(MpcError::ProtocolFailed(format!(
+                        "Unexpected complaint during reconstruction for dealer {dealer:?}"
+                    )));
+                }
+            }
+        }
+        Ok(outputs.into_values().collect())
+    }
+
     async fn run_as_dealer(
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
@@ -1097,8 +1122,17 @@ impl MpcManager {
     }
 
     fn store_nonce_message(&mut self, dealer: Address, messages: &Messages) {
-        // TODO: Persist nonce messages to DB for restart recovery.
         self.dealer_messages.insert(dealer, messages.clone());
+        if let Messages::NonceGeneration {
+            batch_index,
+            message,
+        } = messages
+            && let Err(e) =
+                self.public_messages_store
+                    .store_nonce_message(*batch_index, &dealer, message)
+        {
+            tracing::error!("Failed to persist nonce message for dealer {dealer:?}: {e}");
+        }
     }
 
     fn try_sign_dkg_message(

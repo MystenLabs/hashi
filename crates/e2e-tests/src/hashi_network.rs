@@ -102,7 +102,7 @@ impl HashiNodeHandle {
     }
 
     async fn shutdown(&mut self) {
-        let Some((service, _hashi)) = self.service.take() else {
+        let Some((service, hashi)) = self.service.take() else {
             tracing::warn!("Hashi node not running, cannot shutdown");
             return;
         };
@@ -110,6 +110,10 @@ impl HashiNodeHandle {
         if let Err(e) = result {
             tracing::warn!("Hashi shutdown error: {e}");
         }
+        // Explicitly close the database to release the file lock.
+        // After shutdown, orphaned background tasks may still hold Arc<Hashi>,
+        // preventing the fjall database from being dropped naturally.
+        hashi.db.close();
     }
 
     pub async fn restart(&mut self) -> Result<()> {
@@ -237,6 +241,7 @@ pub struct HashiNetworkBuilder {
     pub num_nodes: usize,
     /// `None` means all `num_nodes` are active (default).
     pub num_initially_active_nodes: Option<usize>,
+    pub test_batch_size_per_weight: Option<u16>,
 }
 
 impl HashiNetworkBuilder {
@@ -244,6 +249,7 @@ impl HashiNetworkBuilder {
         Self {
             num_nodes: 1,
             num_initially_active_nodes: None,
+            test_batch_size_per_weight: None,
         }
     }
 
@@ -254,6 +260,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_initially_active(mut self, initially_active: usize) -> Self {
         self.num_initially_active_nodes = Some(initially_active);
+        self
+    }
+
+    pub fn with_batch_size_per_weight(mut self, batch_size_per_weight: u16) -> Self {
+        self.test_batch_size_per_weight = Some(batch_size_per_weight);
         self
     }
 
@@ -283,6 +294,7 @@ impl HashiNetworkBuilder {
         for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = Some(TEST_WEIGHT_DIVISOR);
+            config.test_batch_size_per_weight = self.test_batch_size_per_weight;
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

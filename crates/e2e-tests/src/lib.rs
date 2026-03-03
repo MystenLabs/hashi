@@ -119,6 +119,13 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_batch_size_per_weight(mut self, batch_size_per_weight: u16) -> Self {
+        self.hashi_builder = self
+            .hashi_builder
+            .with_batch_size_per_weight(batch_size_per_weight);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")

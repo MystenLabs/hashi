@@ -226,6 +226,17 @@ impl Hashi {
         ));
         let address = self.config.validator_address()?;
         let chain_id = self.config.sui_chain_id();
+        let batch_size_per_weight =
+            if let Some(override_val) = self.config.test_batch_size_per_weight {
+                assert!(
+                    chain_id != constants::SUI_MAINNET_CHAIN_ID
+                        && chain_id != constants::SUI_TESTNET_CHAIN_ID,
+                    "test_batch_size_per_weight must not be set on mainnet or testnet"
+                );
+                override_val
+            } else {
+                BATCH_SIZE_PER_WEIGHT
+            };
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
@@ -236,7 +247,7 @@ impl Hashi {
             WEIGHT_REDUCTION_ALLOWED_DELTA,
             chain_id,
             self.config.test_weight_divisor,
-            BATCH_SIZE_PER_WEIGHT,
+            batch_size_per_weight,
         )?)
     }
 

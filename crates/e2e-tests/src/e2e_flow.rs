@@ -476,4 +476,133 @@ mod tests {
         info!("=== Bitcoin Withdrawal E2E Test Passed ===");
         Ok(())
     }
+
+    async fn withdraw_and_confirm(
+        networks: &mut TestNetworks,
+        hashi: &hashi::Hashi,
+        signer: sui_crypto::ed25519::Ed25519PrivateKey,
+        withdrawal_amount_sats: u64,
+    ) -> Result<()> {
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+        let mut executor =
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(signer);
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes, 0)
+            .await?;
+        let confirmed = wait_for_withdrawal_confirmation(
+            &mut networks.sui_network.client,
+            Duration::from_secs(60),
+        )
+        .await?;
+        let withdrawal_txid = address_to_txid(&confirmed.txid);
+        wait_for_withdrawal_tx_success(
+            &networks.bitcoin_node,
+            &withdrawal_txid,
+            &btc_destination,
+            Amount::from_sat(withdrawal_amount_sats),
+            Duration::from_secs(30),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_presigning_recovery_within_batch() -> Result<()> {
+        init_test_logging();
+        let mut networks = setup_test_networks().await?;
+        let deposit_amount_sats = 100_000u64;
+        let withdrawal_amount_sats = 20_000u64;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+
+        // First deposit
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        // First withdrawal
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(
+            &mut networks,
+            &hashi,
+            user_key.clone(),
+            withdrawal_amount_sats,
+        )
+        .await?;
+
+        // Second deposit
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        // Restart node 0
+        networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+
+        // Second withdrawal
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(
+            &mut networks,
+            &hashi,
+            user_key.clone(),
+            withdrawal_amount_sats,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_presigning_recovery_across_batch_boundary() -> Result<()> {
+        init_test_logging();
+
+        // Use batch_size_per_weight=1 for small batches (~3 presigs each).
+        let networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_batch_size_per_weight(1)
+            .build()
+            .await?;
+        let mut networks = networks;
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+        let deposit_amount_sats = 100_000u64;
+        let withdrawal_amount_sats = 10_000u64;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+
+        // Perform 4 deposit+withdrawal cycles to exhaust batch 0 (~3 presigs)
+        // and consume 1 presig from batch 1.
+        let num_withdrawals = 4;
+        for _ in 0..num_withdrawals {
+            create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+            let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+            withdraw_and_confirm(
+                &mut networks,
+                &hashi,
+                user_key.clone(),
+                withdrawal_amount_sats,
+            )
+            .await?;
+        }
+
+        // One more deposit to provide a UTXO for the post-recovery withdrawal.
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        // Restart node 0 — recovery should reconstruct batch 1.
+        networks.hashi_network_mut().nodes_mut()[0]
+            .restart()
+            .await?;
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+
+        // Final withdrawal — proves the recovered node can sign with batch 1 presigs.
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(
+            &mut networks,
+            &hashi,
+            user_key.clone(),
+            withdrawal_amount_sats,
+        )
+        .await?;
+        Ok(())
+    }
 }

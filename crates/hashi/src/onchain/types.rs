@@ -372,6 +372,7 @@ pub struct WithdrawalRequestQueue {
     pub(super) requests: BTreeMap<Address, WithdrawalRequest>,
     pub(super) pending_withdrawals_id: Address,
     pub(super) pending_withdrawals: BTreeMap<Address, PendingWithdrawal>,
+    pub(super) num_consumed_presigs: u64,
 }
 
 impl WithdrawalRequestQueue {
@@ -389,6 +390,10 @@ impl WithdrawalRequestQueue {
 
     pub fn pending_withdrawals(&self) -> &BTreeMap<Address, PendingWithdrawal> {
         &self.pending_withdrawals
+    }
+
+    pub fn num_consumed_presigs(&self) -> u64 {
+        self.num_consumed_presigs
     }
 }
 

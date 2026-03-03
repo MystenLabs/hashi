@@ -82,6 +82,12 @@ impl SigningManager {
         self.next_batch.is_some()
     }
 
+    pub fn skip_consumed_presigs(&mut self, n: usize) {
+        for _ in 0..n {
+            self.presignatures.next();
+        }
+    }
+
     pub fn initial_presig_count(&self) -> usize {
         self.initial_presig_count
     }

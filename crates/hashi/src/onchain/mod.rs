@@ -927,6 +927,7 @@ async fn scrape_withdrawal_queue(
         requests,
         pending_withdrawals_id: withdrawal_queue.pending_withdrawals.id,
         pending_withdrawals,
+        num_consumed_presigs: withdrawal_queue.num_consumed_presigs,
     })
 }
 

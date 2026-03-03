@@ -127,6 +127,11 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_weight_divisor: Option<u16>,
 
+    /// Override `BATCH_SIZE_PER_WEIGHT` for testing smaller presignature batches.
+    /// Can only be set if `sui_chain_id` is not mainnet or testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_batch_size_per_weight: Option<u16>,
+
     /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
     /// When not set, AML screening is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 
 use crate::mpc::types::RotationMessages;
 
-pub struct Database {
+struct DatabaseInner {
     #[allow(unused)]
     db: fjall::Database,
     // keyspaces
@@ -45,6 +45,10 @@ pub struct Database {
     nonce_messages: Keyspace,
 }
 
+pub struct Database {
+    inner: std::sync::Mutex<Option<DatabaseInner>>,
+}
+
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
@@ -63,12 +67,34 @@ impl Database {
             db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         Ok(Self {
-            db,
-            encryption_keys,
-            dealer_messages,
-            rotation_messages,
-            nonce_messages,
+            inner: std::sync::Mutex::new(Some(DatabaseInner {
+                db,
+                encryption_keys,
+                dealer_messages,
+                rotation_messages,
+                nonce_messages,
+            })),
         })
+    }
+
+    /// Close the database, releasing the file lock.
+    ///
+    /// This drops all internal fjall handles, which releases the OS file lock
+    /// even if other `Arc<Database>` references exist.
+    /// Any subsequent operations on this database will return an error.
+    pub fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+
+    fn with_inner<T>(&self, f: impl FnOnce(&DatabaseInner) -> Result<T>) -> Result<T> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| fjall::Error::Io(std::io::Error::other("database mutex poisoned")))?;
+        let inner = guard
+            .as_ref()
+            .ok_or_else(|| fjall::Error::Io(std::io::Error::other("database closed")))?;
+        f(inner)
     }
 
     /// Store encryption key for the given epoch.
@@ -76,6 +102,83 @@ impl Database {
     /// No-op if a key already exists for this epoch (idempotent for restart safety).
     /// Also cleans up old encryption keys (keeps only current and previous epoch).
     pub fn store_encryption_key(
+        &self,
+        epoch: u64,
+        encryption_key: &EncryptionPrivateKey,
+    ) -> Result<()> {
+        self.with_inner(|inner| inner.store_encryption_key(epoch, encryption_key))
+    }
+
+    pub fn get_encryption_key(&self, epoch: u64) -> Result<Option<EncryptionPrivateKey>> {
+        self.with_inner(|inner| inner.get_encryption_key(epoch))
+    }
+
+    pub fn store_dealer_message(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+        message: &avss::Message,
+    ) -> Result<()> {
+        self.with_inner(|inner| inner.store_dealer_message(epoch, dealer, message))
+    }
+
+    pub fn get_dealer_message(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> Result<Option<avss::Message>> {
+        self.with_inner(|inner| inner.get_dealer_message(epoch, dealer))
+    }
+
+    pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
+        self.with_inner(|inner| inner.list_all_dealer_messages(epoch))
+    }
+
+    pub fn store_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+        messages: &RotationMessages,
+    ) -> Result<()> {
+        self.with_inner(|inner| inner.store_rotation_messages(epoch, dealer, messages))
+    }
+
+    pub fn get_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> Result<Option<RotationMessages>> {
+        self.with_inner(|inner| inner.get_rotation_messages(epoch, dealer))
+    }
+
+    pub fn list_all_rotation_messages(
+        &self,
+        epoch: u64,
+    ) -> Result<Vec<(Address, RotationMessages)>> {
+        self.with_inner(|inner| inner.list_all_rotation_messages(epoch))
+    }
+
+    pub fn store_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        message: &batch_avss::Message,
+    ) -> Result<()> {
+        self.with_inner(|inner| inner.store_nonce_message(epoch, batch_index, dealer, message))
+    }
+
+    pub fn list_nonce_messages(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> Result<Vec<(Address, batch_avss::Message)>> {
+        self.with_inner(|inner| inner.list_nonce_messages(epoch, batch_index))
+    }
+}
+
+impl DatabaseInner {
+    fn store_encryption_key(
         &self,
         epoch: u64,
         encryption_key: &EncryptionPrivateKey,
@@ -89,7 +192,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_encryption_key(&self, epoch: u64) -> Result<Option<EncryptionPrivateKey>> {
+    fn get_encryption_key(&self, epoch: u64) -> Result<Option<EncryptionPrivateKey>> {
         let key = epoch.to_be_bytes();
         let bytes = match self.encryption_keys.get(key) {
             Ok(Some(bytes)) => bytes,
@@ -131,7 +234,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn store_dealer_message(
+    fn store_dealer_message(
         &self,
         epoch: u64,
         dealer: &Address,
@@ -143,11 +246,7 @@ impl Database {
         clean_up_old_epochs(&self.dealer_messages, epoch)
     }
 
-    pub fn get_dealer_message(
-        &self,
-        epoch: u64,
-        dealer: &Address,
-    ) -> Result<Option<avss::Message>> {
+    fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<Option<avss::Message>> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
 
         let bytes = match self.dealer_messages.get(key) {
@@ -166,11 +265,11 @@ impl Database {
         Ok(Some(message))
     }
 
-    pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
+    fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
         list_messages_by_prefix(&self.dealer_messages, &epoch.to_be_bytes())
     }
 
-    pub fn store_rotation_messages(
+    fn store_rotation_messages(
         &self,
         epoch: u64,
         dealer: &Address,
@@ -182,7 +281,7 @@ impl Database {
         clean_up_old_epochs(&self.rotation_messages, epoch)
     }
 
-    pub fn get_rotation_messages(
+    fn get_rotation_messages(
         &self,
         epoch: u64,
         dealer: &Address,
@@ -202,14 +301,11 @@ impl Database {
         Ok(Some(messages))
     }
 
-    pub fn list_all_rotation_messages(
-        &self,
-        epoch: u64,
-    ) -> Result<Vec<(Address, RotationMessages)>> {
+    fn list_all_rotation_messages(&self, epoch: u64) -> Result<Vec<(Address, RotationMessages)>> {
         list_messages_by_prefix(&self.rotation_messages, &epoch.to_be_bytes())
     }
 
-    pub fn store_nonce_message(
+    fn store_nonce_message(
         &self,
         epoch: u64,
         batch_index: u32,
@@ -227,7 +323,7 @@ impl Database {
         clean_up_old_epochs(&self.nonce_messages, epoch)
     }
 
-    pub fn list_nonce_messages(
+    fn list_nonce_messages(
         &self,
         epoch: u64,
         batch_index: u32,
