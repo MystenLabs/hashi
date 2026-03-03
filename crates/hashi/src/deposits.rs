@@ -1,8 +1,8 @@
 use crate::Hashi;
+use crate::leader::RetryPolicy;
 use crate::onchain::types::DepositRequest;
 use anyhow::Context;
 use anyhow::anyhow;
-use anyhow::bail;
 use bitcoin::ScriptBuf;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::XOnlyPublicKey;
@@ -11,6 +11,7 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
+use thiserror::Error;
 
 impl Hashi {
     pub async fn validate_and_sign_deposit_confirmation(
@@ -24,7 +25,7 @@ impl Hashi {
     pub async fn validate_deposit_request(
         &self,
         deposit_request: &DepositRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DepositValidationError> {
         self.validate_deposit_request_on_sui(deposit_request)?;
         self.validate_deposit_request_on_bitcoin(deposit_request)
             .await?;
@@ -34,7 +35,10 @@ impl Hashi {
 
     /// Run AML/Sanctions checks for the deposit request.
     /// If no screener client is configured, checks are skipped.
-    async fn screen_deposit(&self, deposit_request: &DepositRequest) -> anyhow::Result<()> {
+    async fn screen_deposit(
+        &self,
+        deposit_request: &DepositRequest,
+    ) -> Result<(), DepositValidationError> {
         let Some(screener) = self.screener_client() else {
             tracing::debug!("AML checks skipped: no screener configured");
             return Ok(());
@@ -44,22 +48,26 @@ impl Hashi {
         let txid_bytes: [u8; 32] = deposit_request.utxo.id.txid.into();
         let btc_txid = bitcoin::Txid::from_byte_array(txid_bytes);
         let source_tx_hash = btc_txid.to_string();
+        let bitcoin_chain_id = self.config.bitcoin_chain_id().to_string();
 
         // sui
         let destination_address = deposit_request.id.to_string();
+        let sui_chain_id = self.config.sui_chain_id().to_string();
 
         let approved = screener
             .approve_deposit(
                 &source_tx_hash,
                 &destination_address,
-                self.config.bitcoin_chain_id(),
-                self.config.sui_chain_id(),
+                &bitcoin_chain_id,
+                &sui_chain_id,
             )
             .await
-            .map_err(|e| anyhow!("Screener service error: {e}"))?;
+            .map_err(|e| DepositValidationError::AmlServiceError(anyhow!(e)))?;
 
         if !approved {
-            bail!("AML checks failed for tx {source_tx_hash}");
+            return Err(DepositValidationError::NeverRetry(anyhow!(
+                "AML checks failed for source tx {source_tx_hash}, destination {destination_address}, bitcoin chain {bitcoin_chain_id}, sui chain {sui_chain_id}"
+            )));
         }
 
         Ok(())
@@ -69,23 +77,20 @@ impl Hashi {
     fn validate_deposit_request_on_sui(
         &self,
         deposit_request: &DepositRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DepositValidationError> {
         let state = self.onchain_state().state();
         let deposit_queue = &state.hashi().deposit_queue;
         match deposit_queue.requests().get(&deposit_request.id) {
             None => {
-                bail!(
-                    "Deposit request not found on Sui: {:?}",
-                    deposit_request.utxo.id
-                );
+                return Err(DepositValidationError::NeverRetry(anyhow!(
+                    "Invalid deposit request state on Sui"
+                )));
             }
             Some(onchain_request) => {
                 if onchain_request != deposit_request {
-                    bail!(
-                        "Given deposit request does not match deposit request on sui. Given: {:?}, onchain: {:?}",
-                        deposit_request,
-                        onchain_request
-                    );
+                    return Err(DepositValidationError::NeverRetry(anyhow!(
+                        "Invalid deposit request state on Sui"
+                    )));
                 }
             }
         }
@@ -96,7 +101,7 @@ impl Hashi {
     async fn validate_deposit_request_on_bitcoin(
         &self,
         deposit_request: &DepositRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DepositValidationError> {
         let outpoint = bitcoin::OutPoint {
             txid: bitcoin::Txid::from_byte_array(deposit_request.utxo.id.txid.into()),
             vout: deposit_request.utxo.id.vout,
@@ -105,36 +110,42 @@ impl Hashi {
             .btc_monitor()
             .confirm_deposit(outpoint)
             .await
-            .map_err(|e| anyhow!("Failed to confirm Bitcoin deposit: {}", e))?;
+            .map_err(|e| DepositValidationError::BitcoinConfirmFailed(anyhow!(e)))?;
         if txout.value.to_sat() != deposit_request.utxo.amount {
-            bail!(
+            return Err(DepositValidationError::NeverRetry(anyhow!(
                 "Bitcoin deposit amount mismatch: got {}, onchain is {}",
                 deposit_request.utxo.amount,
-                txout.value
-            );
+                txout.value.to_sat(),
+            )));
         }
 
-        let deposit_address = self.bitcoin_address_from_script_pubkey(&txout.script_pubkey)?;
-        self.validate_deposit_request_derivation_path(deposit_address, deposit_request)
+        self.validate_deposit_request_derivation_path(&txout.script_pubkey, deposit_request)
             .await?;
         Ok(())
     }
 
     async fn validate_deposit_request_derivation_path(
         &self,
-        deposit_address: bitcoin::Address,
+        script_pubkey: &ScriptBuf,
         deposit_request: &DepositRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DepositValidationError> {
+        let deposit_address =
+            bitcoin::Address::from_script(script_pubkey, self.config.bitcoin_network()).map_err(
+                |e| {
+                    DepositValidationError::NeverRetry(anyhow!(
+                        "Failed to extract address from script_pubkey: {e}"
+                    ))
+                },
+            )?;
         let hashi_pubkey = self.get_hashi_pubkey();
-        let expected_address =
-            self.get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())?;
+        let expected_address = self
+            .get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())
+            .map_err(DepositValidationError::NeverRetry)?;
 
         if deposit_address != expected_address {
-            bail!(
-                "Deposit address mismatch. Expected: {}, got: {}",
-                expected_address,
-                deposit_address
-            );
+            return Err(DepositValidationError::NeverRetry(anyhow!(
+                "Expected address {expected_address}, got address {deposit_address}",
+            )));
         }
 
         Ok(())
@@ -172,14 +183,6 @@ impl Hashi {
 
     pub(crate) fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
         bitcoin_utils::single_key_taproot_script_path_address(pubkey, self.config.bitcoin_network())
-    }
-
-    fn bitcoin_address_from_script_pubkey(
-        &self,
-        script_pubkey: &ScriptBuf,
-    ) -> anyhow::Result<bitcoin::Address> {
-        bitcoin::Address::from_script(script_pubkey, self.config.bitcoin_network())
-            .map_err(|e| anyhow!("Failed to extract address from script_pubkey: {}", e))
     }
 
     pub fn get_hashi_pubkey(&self) -> XOnlyPublicKey {
@@ -222,5 +225,54 @@ impl Hashi {
             public_key: Some(public_key_bytes),
             signature: Some(signature_bytes),
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DepositValidationErrorKind {
+    BitcoinConfirmFailed,
+    AmlServiceError,
+    NeverRetry,
+}
+
+impl RetryPolicy for DepositValidationErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        match self {
+            Self::BitcoinConfirmFailed | Self::AmlServiceError => 30 * 1000,
+            Self::NeverRetry => 60 * 60 * 1000,
+        }
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        60 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        match self {
+            Self::BitcoinConfirmFailed | Self::AmlServiceError => u32::MAX,
+            Self::NeverRetry => 0,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DepositValidationError {
+    #[error("Failed to confirm Bitcoin deposit: {0}")]
+    BitcoinConfirmFailed(#[source] anyhow::Error),
+
+    #[error("Screener service error: {0}")]
+    AmlServiceError(#[source] anyhow::Error),
+
+    #[error("Never retry: {0}")]
+    NeverRetry(#[source] anyhow::Error),
+}
+
+impl DepositValidationError {
+    pub fn kind(&self) -> DepositValidationErrorKind {
+        match self {
+            Self::BitcoinConfirmFailed(_) => DepositValidationErrorKind::BitcoinConfirmFailed,
+            Self::AmlServiceError(_) => DepositValidationErrorKind::AmlServiceError,
+            Self::NeverRetry(_) => DepositValidationErrorKind::NeverRetry,
+        }
     }
 }

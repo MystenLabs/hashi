@@ -1,7 +1,11 @@
 mod garbage_collection;
+mod retry;
+pub(crate) use retry::RetryPolicy;
 
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
+use crate::deposits::DepositValidationErrorKind;
+use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
@@ -40,11 +44,15 @@ const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 #[derive(Clone)]
 pub struct LeaderService {
     inner: Arc<Hashi>,
+    deposit_retry_tracker: RetryTracker<DepositValidationErrorKind>,
 }
 
 impl LeaderService {
     pub fn new(hashi: Arc<Hashi>) -> Self {
-        Self { inner: hashi }
+        Self {
+            inner: hashi,
+            deposit_retry_tracker: RetryTracker::new(),
+        }
     }
 
     /// Start the leader service and return a `Service` for lifecycle management.
@@ -124,32 +132,52 @@ impl LeaderService {
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
+        self.deposit_retry_tracker.prune(&deposit_requests);
 
         debug!("Processing {} deposit requests", deposit_requests.len());
 
         // TODO: parallelize?
         for deposit_request in &deposit_requests {
-            self.process_deposit_request(deposit_request).await;
+            self.process_deposit_request(deposit_request, checkpoint_timestamp_ms)
+                .await;
         }
 
         self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms)
             .await;
     }
 
-    async fn process_deposit_request(&self, deposit_request: &DepositRequest) {
+    async fn process_deposit_request(
+        &self,
+        deposit_request: &DepositRequest,
+        checkpoint_timestamp_ms: u64,
+    ) {
         // TODO: parallelize, and after we have a quorum of sigs, stop waiting for sigs from any
         // additional validators
+
+        if self
+            .deposit_retry_tracker
+            .should_skip(&deposit_request.id, checkpoint_timestamp_ms)
+        {
+            return;
+        }
+
         info!("Processing deposit request: {:?}", deposit_request.id);
 
         // Validate deposit_request before asking for signatures
-        let validate_result = self.inner.validate_deposit_request(deposit_request).await;
-        if let Err(e) = validate_result {
-            error!(
-                "Deposit request {:?} failed validation: {e}",
-                deposit_request.id
-            );
-            return;
+        match self.inner.validate_deposit_request(deposit_request).await {
+            Ok(()) => {
+                self.deposit_retry_tracker.clear(&deposit_request.id);
+            }
+            Err(e) => {
+                self.deposit_retry_tracker.record_failure(
+                    e.kind(),
+                    deposit_request.id,
+                    checkpoint_timestamp_ms,
+                );
+                return;
+            }
         }
+
         info!(
             "Deposit request {:?} validated successfully",
             deposit_request.id
