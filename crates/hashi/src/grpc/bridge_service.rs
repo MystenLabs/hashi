@@ -190,11 +190,7 @@ fn parse_deposit_request(
 }
 
 fn parse_request_approval(request: &SignRequestApprovalRequest) -> anyhow::Result<RequestApproval> {
-    anyhow::ensure!(
-        request.request_ids.len() == 1,
-        "Expected exactly one request_id"
-    );
-    let request_id = parse_address(&request.request_ids[0])?;
+    let request_id = parse_address(&request.request_id)?;
     Ok(RequestApproval { request_id })
 }
 

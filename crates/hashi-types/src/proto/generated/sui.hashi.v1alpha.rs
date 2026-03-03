@@ -63,9 +63,9 @@ pub struct SignDepositConfirmationResponse {
 /// Maps to crate::withdrawals::RequestApproval
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRequestApprovalRequest {
-    /// Withdrawal request ids to approve (each 32 bytes).
-    #[prost(bytes = "bytes", repeated, tag = "1")]
-    pub request_ids: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Withdrawal request id to approve (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub request_id: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRequestApprovalResponse {

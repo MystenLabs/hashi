@@ -1252,7 +1252,7 @@ fn parse_member_signature(
 impl RequestApproval {
     fn to_proto(&self) -> SignRequestApprovalRequest {
         SignRequestApprovalRequest {
-            request_ids: vec![self.request_id.as_bytes().to_vec().into()],
+            request_id: self.request_id.as_bytes().to_vec().into(),
         }
     }
 }

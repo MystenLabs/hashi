@@ -84,8 +84,8 @@ message SignDepositConfirmationResponse {
 
 // Maps to crate::withdrawals::RequestApproval
 message SignRequestApprovalRequest {
-  // Withdrawal request ids to approve (each 32 bytes).
-  repeated bytes request_ids = 1;
+  // Withdrawal request id to approve (32 bytes).
+  bytes request_id = 1;
 }
 
 message SignRequestApprovalResponse {
