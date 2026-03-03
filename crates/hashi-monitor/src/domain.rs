@@ -11,11 +11,9 @@
 //! TODO: Track IOP-203 which plans to add a check in Sui: match the withdrawal destination & amount that a user inputs with that in E_hashi.
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
-use std::collections::BTreeSet;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use crate::OutputUTXO;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -28,8 +26,6 @@ pub fn now_unix_seconds() -> UnixSeconds {
         .as_secs()
 }
 
-/// Note that utxo's are, strictly speaking, unnecessary to monitor, and txid tracking alone suffices.
-/// We keep track of it for the sake of providing richer context when something fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalEvent {
     /// Who produced the event?
@@ -39,17 +35,10 @@ pub struct WithdrawalEvent {
     pub wid: WithdrawalID,
 
     /// Unix timestamp of sui checkpoint / s3 log / btc block
-    pub timestamp: UnixSeconds,
+    pub timestamp_secs: UnixSeconds,
 
     /// btc txid
     pub btc_txid: Txid,
-
-    /// output utxo's belonging to external parties
-    /// TODO: Check address belongs to right network for all UTXO's
-    pub external_output_utxos: BTreeSet<OutputUTXO>,
-
-    /// output utxo's belonging to hashi
-    pub internal_output_utxos: BTreeSet<OutputUTXO>,
 }
 
 /// Event source or type.

@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Batch { config, start, end } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
             let end = end.unwrap_or_else(now_unix_seconds);
-            let mut auditor = hashi_monitor::audit::BatchAuditor::new(cfg, start, end)?;
+            let mut auditor = hashi_monitor::audit::BatchAuditor::new(cfg, start, end).await?;
             auditor
                 .run()
                 .await
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Continuous { config, start } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg, start)?;
+            let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(cfg, start).await?;
             auditor.run().await?;
         }
     }

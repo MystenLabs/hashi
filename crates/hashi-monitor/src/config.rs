@@ -1,8 +1,8 @@
+use crate::domain::WithdrawalEventType;
 use anyhow::anyhow;
+use hashi_types::guardian::S3Config;
 use serde::Deserialize;
 use std::path::Path;
-
-use crate::domain::WithdrawalEventType;
 
 /// Configuration for the cursorless batch auditor.
 #[derive(Clone, Debug, Deserialize)]
@@ -14,7 +14,7 @@ pub struct Config {
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
-    pub guardian: GuardianConfig,
+    pub guardian: S3Config,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
 }
@@ -23,12 +23,6 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "Vec<(WithdrawalEventType, u64)>")]
 pub struct NextEventDelays(Vec<(WithdrawalEventType, u64)>);
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct GuardianConfig {
-    /// S3 bucket holding Guardian logs.
-    pub s3_bucket: String,
-}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SuiConfig {

@@ -50,7 +50,7 @@ impl BatchAuditWindow {
 
 impl AuditWindow for BatchAuditWindow {
     fn in_window(&self, e: &WithdrawalEvent) -> bool {
-        e.timestamp >= self.user_start && e.timestamp <= self.user_end
+        e.timestamp_secs >= self.user_start && e.timestamp_secs <= self.user_end
     }
 }
 
@@ -76,7 +76,7 @@ pub struct BatchAuditor {
 }
 
 impl BatchAuditor {
-    pub fn new(cfg: Config, start: UnixSeconds, end: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(cfg: Config, start: UnixSeconds, end: UnixSeconds) -> anyhow::Result<Self> {
         anyhow::ensure!(
             start <= end,
             "invalid time range: start={start} > end={end}"
@@ -93,7 +93,7 @@ impl BatchAuditor {
             guardian: audit_window.guardian_start,
         };
         Ok(Self {
-            inner: AuditorCore::new(cfg, cursors),
+            inner: AuditorCore::new(cfg, cursors).await?,
             audit_window,
             violation_found: false,
         })
@@ -194,7 +194,7 @@ impl BatchAuditor {
 
             // Guardian timeline is authoritative for deciding next batch boundary.
             if let Some(e2) = sm.get(WithdrawalEventType::E2GuardianApproved) {
-                verified_up_to = verified_up_to.min(e2.timestamp);
+                verified_up_to = verified_up_to.min(e2.timestamp_secs);
             } else {
                 tracing::warn!(
                     wid = sm.wid(),

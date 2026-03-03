@@ -337,6 +337,50 @@ impl TxUTXOs {
             .sum()
     }
 
+    /// Constructs an unsigned Bitcoin transaction for these UTXOs.
+    fn unsigned_tx(
+        &self,
+        enclave_pubkey: &BitcoinPubkey,
+        hashi_pubkey: &BitcoinPubkey,
+    ) -> Transaction {
+        let all_outputs = self.compute_all_outputs(enclave_pubkey, hashi_pubkey);
+        construct_tx(
+            self.inputs.iter().map(|input| input.txin()).collect(),
+            all_outputs,
+        )
+    }
+
+    /// Constructs sighash messages for each input, ready for signing.
+    ///
+    /// Uses `taproot_script_spend_signature_hash` for script-path spending.
+    pub fn signing_messages_and_txid(
+        &self,
+        enclave_pubkey: &BitcoinPubkey,
+        hashi_pubkey: &BitcoinPubkey,
+    ) -> (Vec<Message>, Txid) {
+        let tx = self.unsigned_tx(enclave_pubkey, hashi_pubkey);
+        let prevouts: Vec<TxOut> = self.inputs.iter().map(|input| input.prevout()).collect();
+
+        let messages = self
+            .inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let mut sighasher = SighashCache::new(tx.clone());
+                let sighash = sighasher
+                    .taproot_script_spend_signature_hash(
+                        index,
+                        &Prevouts::All(&prevouts),
+                        input.leaf_hash,
+                        TapSighashType::Default,
+                    )
+                    .expect("sighash failed unexpectedly");
+                Message::from_digest(*sighash.as_byte_array())
+            })
+            .collect::<Vec<Message>>();
+        (messages, tx.compute_txid())
+    }
+
     fn assert_positive_fees(&self) -> super::GuardianResult<()> {
         let input_sum = self.inputs.iter().map(|utxo| utxo.amount).sum::<Amount>();
         let output_sum = self.outputs.iter().map(|utxo| utxo.amount()).sum();
@@ -367,44 +411,6 @@ pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSign
             sighash_type: TapSighashType::Default,
         })
         .collect()
-}
-
-/// Constructs sighash messages for each input, ready for signing.
-///
-/// Uses `taproot_script_spend_signature_hash` for script-path spending.
-pub fn construct_signing_messages(
-    tx_info: &TxUTXOs,
-    enclave_pubkey: &BitcoinPubkey,
-    hashi_pubkey: &BitcoinPubkey,
-) -> Vec<Message> {
-    let inputs = tx_info.get_inputs();
-
-    // Construct tx
-    let all_outputs = tx_info.compute_all_outputs(enclave_pubkey, hashi_pubkey);
-    let tx = construct_tx(
-        inputs.iter().map(|input| input.txin()).collect(),
-        all_outputs,
-    );
-
-    // Construct signing messages
-    let prevouts: Vec<TxOut> = inputs.iter().map(|input| input.prevout()).collect();
-
-    inputs
-        .iter()
-        .enumerate()
-        .map(|(index, input)| {
-            let mut sighasher = SighashCache::new(tx.clone());
-            let sighash = sighasher
-                .taproot_script_spend_signature_hash(
-                    index,
-                    &Prevouts::All(&prevouts),
-                    input.leaf_hash,
-                    TapSighashType::Default,
-                )
-                .expect("sighash failed unexpectedly");
-            Message::from_digest(*sighash.as_byte_array())
-        })
-        .collect::<Vec<Message>>()
 }
 
 /// Constructs a Bitcoin transaction with the given inputs and outputs.
@@ -740,7 +746,7 @@ mod bitcoin_tests {
         )
         .unwrap();
 
-        let messages = construct_signing_messages(&tx_info, &enclave_pk, &hashi_pk);
+        let (messages, _) = tx_info.signing_messages_and_txid(&enclave_pk, &hashi_pk);
         let enclave_signatures = sign_btc_tx(&messages, &enclave_keypair);
 
         // D) Hashi signs the transaction.

@@ -1,9 +1,10 @@
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
+use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
-use hashi_types::guardian::S3_DIR_INIT;
+use std::collections::BTreeSet;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -14,18 +15,15 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3Directory;
-use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::UnixMillis;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
 
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 pub struct S3Logger {
-    /// A unique session ID. Used as a prefix in log keys.
-    session_id: String,
     /// S3 config: bucket name, region, API keys
     config: S3Config,
     /// S3 client
@@ -37,7 +35,7 @@ impl S3Logger {
     // Constructors
     // ========================================================================
 
-    pub async fn new(session_id: String, config: S3Config) -> Self {
+    pub async fn new(config: S3Config) -> Self {
         info!("S3 Configuration:");
         info!("   Bucket: {}", config.bucket_name());
         info!("   Region: {}", config.region());
@@ -58,22 +56,14 @@ impl S3Logger {
             .await;
         let client = S3Client::new(&aws_config);
 
-        Self {
-            session_id,
-            client,
-            config,
-        }
+        Self { client, config }
     }
 
     /// Construct an `S3Logger` from an already-configured S3 client.
     /// This is intended for unit tests that use a mock S3 Client.
     /// This is not put behind cfg(test) as tests in the enclave crate also use it.
-    pub fn from_client_for_tests(session_id: String, config: S3Config, client: S3Client) -> Self {
-        Self {
-            session_id,
-            client,
-            config,
-        }
+    pub fn from_client_for_tests(config: S3Config, client: S3Client) -> Self {
+        Self { client, config }
     }
 
     // ========================================================================
@@ -88,30 +78,10 @@ impl S3Logger {
     // S3 Write
     // ========================================================================
 
-    /// Write an init value to S3 under `init/{session_id}-{suffix}.json`.
-    pub async fn write_init_with_suffix<T: Serialize>(
-        &self,
-        suffix: &str,
-        value: &T,
-        object_lock_duration: Duration,
-    ) -> GuardianResult<()> {
-        let key = format!("{}/{}-{}.json", S3_DIR_INIT, self.session_id, suffix);
-        self.write_at_key(&key, value, object_lock_duration).await
-    }
-
-    /// Write values to S3 under
-    /// `{prefix}/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{suffix}.json`.
-    pub async fn write_hour_partitioned_with_suffix<T: Serialize>(
-        &self,
-        prefix: &str,
-        timestamp_ms: UnixMillis,
-        suffix: &str,
-        value: &T,
-        object_lock_duration: Duration,
-    ) -> GuardianResult<()> {
-        let dir = S3Directory::new(prefix, unix_millis_to_seconds(timestamp_ms));
-        let key = format!("{}/{}-{}.json", dir, self.session_id, suffix);
-        self.write_at_key(&key, value, object_lock_duration).await
+    pub async fn write_log_record(&self, log: LogRecord) -> GuardianResult<()> {
+        let object_lock_duration = log.object_lock_duration();
+        let key = log.object_key();
+        self.write_at_key(&key, &log, object_lock_duration).await
     }
 
     /// Write a value to S3 at an explicit key.
@@ -222,7 +192,7 @@ impl S3Logger {
 
     /// List up to 10 objects in the bucket.
     /// This is intended as a lightweight connectivity/debug helper (primarily for testing).
-    pub async fn list_objects(&self) -> GuardianResult<()> {
+    pub async fn list_objects_sample(&self) -> GuardianResult<()> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -269,6 +239,141 @@ impl S3Logger {
 
         Ok(())
     }
+
+    // ========================================================================
+    // S3 Reads
+    // ========================================================================
+
+    async fn ensure_no_duplicates_or_deletions(
+        &self,
+        dir: &S3Directory,
+    ) -> GuardianResult<Vec<String>> {
+        let prefix = dir.to_string();
+        let s3_client = &self.client;
+        let s3_config = &self.config;
+
+        let mut key_marker: Option<String> = None;
+        let mut version_id_marker: Option<String> = None;
+        let mut seen_keys: BTreeSet<String> = BTreeSet::new();
+
+        loop {
+            let mut req = s3_client
+                .list_object_versions()
+                .bucket(s3_config.bucket_name())
+                .prefix(&prefix);
+            if let Some(ref marker) = key_marker {
+                req = req.key_marker(marker);
+            }
+            if let Some(ref marker) = version_id_marker {
+                req = req.version_id_marker(marker);
+            }
+
+            let response = req.send().await.map_err(|e| {
+                S3Error(format!(
+                    "Failed to list object versions for prefix {}: {}",
+                    prefix,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+
+            for marker in response.delete_markers() {
+                if let Some(key) = marker.key() {
+                    return Err(S3Error(format!(
+                        "Delete marker found for key {} under prefix {}",
+                        key, prefix
+                    )));
+                }
+            }
+
+            for version in response.versions() {
+                let key = version.key().ok_or_else(|| {
+                    S3Error("Missing key in list_object_versions response".into())
+                })?;
+
+                if !seen_keys.insert(key.to_string()) {
+                    return Err(S3Error(format!(
+                        "Duplicate version found for key {} under prefix {}",
+                        key, prefix
+                    )));
+                }
+            }
+
+            let next_key_marker = response.next_key_marker().map(ToString::to_string);
+            let next_version_id_marker = response.next_version_id_marker().map(ToString::to_string);
+            let has_more = response.is_truncated() == Some(true)
+                || next_key_marker.is_some()
+                || next_version_id_marker.is_some();
+
+            if !has_more {
+                break;
+            }
+
+            key_marker = next_key_marker;
+            version_id_marker = next_version_id_marker;
+        }
+
+        Ok(seen_keys.into_iter().collect())
+    }
+
+    // Batch read
+    pub async fn list_all_objects_in_dir<T: DeserializeOwned>(
+        &self,
+        dir: &S3Directory,
+    ) -> GuardianResult<Vec<T>> {
+        let keys = self.ensure_no_duplicates_or_deletions(dir).await?;
+
+        let mut out = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let obj: T = self.get_object(key).await?;
+            out.push(obj);
+        }
+
+        // TOCTOU hardening: ensure no mutation (delete-marker / duplicate version) happened
+        // while we were reading the listed objects.
+        let new_keys = self.ensure_no_duplicates_or_deletions(dir).await?;
+        if keys != new_keys {
+            return Err(S3Error(
+                "new items added to bucket before the end of reads".to_string(),
+            ));
+        }
+
+        Ok(out)
+    }
+
+    // Point read
+    pub async fn get_object<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+        let s3_client = &self.client;
+        let s3_config = &self.config;
+
+        let response = s3_client
+            .get_object()
+            .bucket(s3_config.bucket_name())
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to get object {}: {}",
+                    key,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+
+        let bytes = response.body.collect().await.map_err(|e| {
+            S3Error(format!(
+                "Failed to read object body for key {}: {}",
+                key,
+                DisplayErrorContext(&e)
+            ))
+        })?;
+
+        serde_json::from_slice::<T>(&bytes.into_bytes()).map_err(|e| {
+            S3Error(format!(
+                "Failed to deserialize object {} into target type: {}",
+                key, e
+            ))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -289,7 +394,7 @@ mod tests {
                 region: "us-east-1".to_string(),
             },
         };
-        S3Logger::from_client_for_tests("session".to_string(), config, client)
+        S3Logger::from_client_for_tests(config, client)
     }
 
     #[derive(Serialize)]
@@ -313,8 +418,8 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write_init_with_suffix(
-                "oi-attestation-unsigned",
+            .write_at_key(
+                "init/session-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )
@@ -341,8 +446,8 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write_init_with_suffix(
-                "oi-attestation-unsigned",
+            .write_at_key(
+                "init/session-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )

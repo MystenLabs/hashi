@@ -2682,10 +2682,14 @@ name = "hashi-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
+ "aws-smithy-mocks",
  "bitcoin",
  "clap",
+ "hashi-guardian-enclave",
  "hashi-types",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "tracing",

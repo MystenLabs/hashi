@@ -35,7 +35,7 @@ pub struct ContinuousAuditor {
 
 impl AuditWindow for ContinuousAuditWindow {
     fn in_window(&self, e: &WithdrawalEvent) -> bool {
-        e.timestamp >= self.user_start
+        e.timestamp_secs >= self.user_start
     }
 }
 
@@ -56,7 +56,7 @@ impl ContinuousAuditWindow {
 }
 
 impl ContinuousAuditor {
-    pub fn new(cfg: Config, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(cfg: Config, start: UnixSeconds) -> anyhow::Result<Self> {
         let cur_time = now_unix_seconds();
         anyhow::ensure!(
             start <= cur_time,
@@ -69,7 +69,7 @@ impl ContinuousAuditor {
         };
 
         Ok(Self {
-            inner: AuditorCore::new(cfg, cursors),
+            inner: AuditorCore::new(cfg, cursors).await?,
             window: audit_window,
         })
     }

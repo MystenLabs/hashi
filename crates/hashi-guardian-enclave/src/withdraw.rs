@@ -1,5 +1,6 @@
 use crate::Enclave;
 use bitcoin::Amount;
+use bitcoin::Txid;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
 use hashi_types::guardian::GuardianError::InternalError;
@@ -28,9 +29,10 @@ pub async fn standard_withdrawal(
     let wid = unsigned_request.wid;
 
     match normal_withdrawal_inner(enclave.clone(), signed_request) {
-        Ok((response, limiter_guard)) => {
+        Ok((txid, response, limiter_guard)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
             let msg = WithdrawalLogMessage::Success {
+                txid,
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 response: response.clone(),
@@ -62,7 +64,7 @@ struct LimiterGuard {
 fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
-) -> GuardianResult<(StandardWithdrawalResponse, LimiterGuard)> {
+) -> GuardianResult<(Txid, StandardWithdrawalResponse, LimiterGuard)> {
     // 0) Validation
     if !enclave.is_fully_initialized() {
         return Err(EnclaveUninitialized);
@@ -89,7 +91,7 @@ fn normal_withdrawal_inner(
 
     // 2) Sign tx
     info!("Generating BTC signatures.");
-    let signatures = enclave
+    let (txid, signatures) = enclave
         .config
         .btc_sign(request.utxos())
         .expect("All BTC keys should be set");
@@ -98,7 +100,7 @@ fn normal_withdrawal_inner(
     };
     info!("BTC signatures generated.");
 
-    Ok((response, limiter_guard))
+    Ok((txid, response, limiter_guard))
 }
 
 impl LimiterGuard {

@@ -32,7 +32,7 @@ impl HeartbeatWriter {
             return Ok(());
         }
 
-        match self.enclave.log_heartbeat_at_seq(self.next_seq).await {
+        match self.enclave.log_heartbeat(self.next_seq).await {
             Ok(()) => {
                 self.consecutive_failures = 0;
                 self.next_seq += 1;
@@ -78,11 +78,7 @@ mod tests {
     use hashi_types::guardian::S3Config;
 
     fn mk_s3_logger(client: Client) -> S3Logger {
-        S3Logger::from_client_for_tests(
-            "test-session-id".to_string(),
-            S3Config::mock_for_testing(),
-            client,
-        )
+        S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
     }
 
     async fn mk_operator_initialized_enclave(s3_logger: S3Logger) -> Arc<Enclave> {

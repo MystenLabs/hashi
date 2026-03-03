@@ -234,28 +234,7 @@ impl ProvisionerInitState {
 }
 
 impl StandardWithdrawalRequest {
-    /// Returns a signed request and the committee used to produce the signature
-    pub fn mock_signed_and_committee_for_testing(
-        network: Network,
-    ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
-        let epoch = 0u64;
-        let req = Self::mock_for_testing(network);
-        let committee = mock_committee_with_one_member(epoch);
-
-        let sk = mock_hashi_bls_sk();
-        let address = TEST_SIGNER_ADDRESS;
-        let mut agg = BlsSignatureAggregator::new(&committee, req.clone());
-        agg.add_signature(sk.sign(epoch, address, &req))
-            .expect("member signature should verify");
-
-        (agg.finish().expect("finish aggregator"), committee)
-    }
-
-    pub fn mock_signed_for_testing(network: Network) -> HashiSigned<StandardWithdrawalRequest> {
-        Self::mock_signed_and_committee_for_testing(network).0
-    }
-
-    pub fn mock_for_testing(network: Network) -> Self {
+    fn mock_for_testing(network: Network, wid: u64) -> Self {
         let kp = create_btc_keypair(&[2u8; 32]);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&kp);
         let addr_unchecked =
@@ -283,7 +262,47 @@ impl StandardWithdrawalRequest {
         let utxos = TxUTXOs::new(vec![input], vec![output_external, output_internal])
             .expect("valid TxUTXOs");
 
-        StandardWithdrawalRequest::new(123, utxos)
+        StandardWithdrawalRequest::new(wid, utxos)
+    }
+
+    fn sign_for_request(
+        req: StandardWithdrawalRequest,
+    ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
+        let epoch = 0u64;
+        let committee = mock_committee_with_one_member(epoch);
+
+        let sk = mock_hashi_bls_sk();
+        let address = TEST_SIGNER_ADDRESS;
+        let mut agg = BlsSignatureAggregator::new(&committee, req.clone());
+        agg.add_signature(sk.sign(epoch, address, &req))
+            .expect("member signature should verify");
+
+        (agg.finish().expect("finish aggregator"), committee)
+    }
+
+    fn sign_for_wid(
+        network: Network,
+        wid: u64,
+    ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
+        Self::sign_for_request(Self::mock_for_testing(network, wid))
+    }
+
+    /// Returns a signed request and the committee used to produce the signature
+    pub fn mock_signed_and_committee_for_testing(
+        network: Network,
+    ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
+        Self::sign_for_wid(network, 123)
+    }
+
+    pub fn mock_signed_for_testing(network: Network) -> HashiSigned<StandardWithdrawalRequest> {
+        Self::mock_signed_and_committee_for_testing(network).0
+    }
+
+    pub fn mock_signed_for_testing_with_wid(
+        network: Network,
+        wid: u64,
+    ) -> HashiSigned<StandardWithdrawalRequest> {
+        Self::sign_for_wid(network, wid).0
     }
 }
 

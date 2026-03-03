@@ -56,13 +56,13 @@ pub struct AuditorCore {
 }
 
 impl AuditorCore {
-    pub fn new(cfg: Config, cursors: Cursors) -> Self {
-        Self {
+    pub async fn new(cfg: Config, cursors: Cursors) -> anyhow::Result<Self> {
+        Ok(Self {
             cfg: cfg.clone(),
             pending: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::new(cfg.guardian, cursors.guardian),
+            guardian_poller: GuardianWithdrawalsPoller::new(cfg.guardian, cursors.guardian).await?,
             sui_cursor: cursors.sui,
-        }
+        })
     }
 
     pub fn ingest(&mut self, event: WithdrawalEvent) -> Option<MonitorError> {

@@ -1,6 +1,5 @@
 //! Withdrawal state machine for tracking event flow.
 
-use crate::OutputUTXO;
 use crate::audit::AuditWindow;
 use crate::config::Config;
 use crate::domain::Cursors;
@@ -12,7 +11,6 @@ use crate::errors::MonitorError::*;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
-use std::collections::BTreeSet;
 
 /// A record of all the events tracking a single withdrawal.
 ///
@@ -39,10 +37,6 @@ pub struct WithdrawalStateMachine {
     wid: WithdrawalID,
     /// immutable txid
     btc_txid: Txid,
-    /// internal output utxos
-    internal_output_utxos: BTreeSet<OutputUTXO>,
-    /// external output utxos
-    external_output_utxos: BTreeSet<OutputUTXO>,
 }
 
 pub enum BtcFetchOutcome {
@@ -59,8 +53,6 @@ impl WithdrawalStateMachine {
             btc_checked_at: None,
             wid: event.wid,
             btc_txid: event.btc_txid,
-            internal_output_utxos: event.internal_output_utxos.clone(),
-            external_output_utxos: event.external_output_utxos.clone(),
         };
         sm.add_event(event, cfg).expect("First event never fails");
         sm
@@ -74,12 +66,6 @@ impl WithdrawalStateMachine {
 
     pub fn btc_txid(&self) -> Txid {
         self.btc_txid
-    }
-
-    pub fn all_outputs(&self) -> impl Iterator<Item = &OutputUTXO> {
-        self.external_output_utxos
-            .iter()
-            .chain(self.internal_output_utxos.iter())
     }
 
     pub fn wid(&self) -> WithdrawalID {
@@ -113,7 +99,7 @@ impl WithdrawalStateMachine {
     }
 
     pub fn earliest_event_time(&self) -> Option<UnixSeconds> {
-        self.seen_events.iter().map(|e| e.timestamp).min()
+        self.seen_events.iter().map(|e| e.timestamp_secs).min()
     }
 
     /// `add_event` adds an event e and checks the following. Let e's neighbors be [e.predecessor(), e.successor()].
@@ -148,25 +134,13 @@ impl WithdrawalStateMachine {
             return Err(InvalidEventAdded("invalid btc_txid".to_string()));
         }
 
-        if self.external_output_utxos != new_event.external_output_utxos {
-            return Err(InvalidEventAdded(
-                "invalid external_output_utxos".to_string(),
-            ));
-        }
-
-        if self.internal_output_utxos != new_event.internal_output_utxos {
-            return Err(InvalidEventAdded(
-                "invalid internal_output_utxos".to_string(),
-            ));
-        }
-
         // if neighbor is there, then we check that the gap between the two is as expected.
         for (src, deadline) in self.expected_events.iter() {
-            if *src == new_event.event_type && *deadline < new_event.timestamp {
+            if *src == new_event.event_type && *deadline < new_event.timestamp_secs {
                 return Err(EventOccurredAfterDeadline {
                     event: new_event.clone(),
                     deadline: *deadline,
-                    occurred_at: new_event.timestamp,
+                    occurred_at: new_event.timestamp_secs,
                 });
             }
         }
@@ -175,14 +149,14 @@ impl WithdrawalStateMachine {
         if let Some(predecessor_event_type) = new_event.event_type.predecessor()
             && self.get(predecessor_event_type).is_none()
         {
-            let predecessor_deadline = new_event.timestamp + cfg.clock_skew;
+            let predecessor_deadline = new_event.timestamp_secs + cfg.clock_skew;
             self.expected_events
                 .push((predecessor_event_type, predecessor_deadline));
         }
         if let Some(successor_event_type) = new_event.event_type.successor()
             && self.get(successor_event_type).is_none()
         {
-            let successor_deadline = new_event.timestamp
+            let successor_deadline = new_event.timestamp_secs
                 + cfg
                     .next_event_delay(new_event.event_type)
                     .expect("has a successor");
@@ -213,22 +187,13 @@ impl WithdrawalStateMachine {
         let cur_time = now_unix_seconds();
 
         match crate::rpc::btc::lookup_btc_confirmation(cfg, btc_txid) {
-            Ok(Some((block_time, utxos))) => {
+            Ok(Some(block_time)) => {
                 self.btc_checked_at = Some(cur_time);
-
-                if !utxos.iter().eq(self.all_outputs()) {
-                    return Ok(BtcFetchOutcome::Confirmed(Some(InvalidEventAdded(
-                        "btc outputs do not match expected outputs".to_string(),
-                    ))));
-                }
-
                 let e_btc = WithdrawalEvent {
                     event_type: WithdrawalEventType::E3BtcConfirmed,
                     wid,
                     btc_txid,
-                    timestamp: block_time,
-                    external_output_utxos: self.external_output_utxos.clone(),
-                    internal_output_utxos: self.internal_output_utxos.clone(),
+                    timestamp_secs: block_time,
                 };
                 Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg).err()))
             }
@@ -272,18 +237,12 @@ impl WithdrawalStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::Amount;
-    use bitcoin::address::NetworkUnchecked;
-    use bitcoin::hashes::Hash as _;
-    use hashi_types::guardian::BitcoinAddress;
-    use std::collections::BTreeSet;
-    use std::str::FromStr;
-
     use super::*;
     use crate::config::BtcConfig;
-    use crate::config::GuardianConfig;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
+    use bitcoin::hashes::Hash as _;
+    use hashi_types::guardian::S3Config;
 
     struct TestWindow {
         start: UnixSeconds,
@@ -292,7 +251,7 @@ mod tests {
 
     impl AuditWindow for TestWindow {
         fn in_window(&self, e: &WithdrawalEvent) -> bool {
-            e.timestamp >= self.start && e.timestamp <= self.end
+            e.timestamp_secs >= self.start && e.timestamp_secs <= self.end
         }
     }
 
@@ -304,9 +263,7 @@ mod tests {
             ])
             .expect("valid intra-event delays"),
             clock_skew: 10,
-            guardian: GuardianConfig {
-                s3_bucket: "bucket".to_string(),
-            },
+            guardian: S3Config::mock_for_testing(),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
             },
@@ -326,33 +283,11 @@ mod tests {
         timestamp: UnixSeconds,
         fill: u8,
     ) -> WithdrawalEvent {
-        let external_output_utxos = vec![OutputUTXO {
-            address: BitcoinAddress::<NetworkUnchecked>::from_str(
-                "mk2QpYatsKicvFVuTAQLBryyccRXMUaGHP",
-            )
-            .expect("valid btc address"),
-            amount: Amount::from_sat(1_000),
-        }]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-
-        let internal_output_utxos = vec![OutputUTXO {
-            address: BitcoinAddress::<NetworkUnchecked>::from_str(
-                "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
-            )
-            .expect("valid btc address"),
-            amount: Amount::from_sat(250),
-        }]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-
         WithdrawalEvent {
             event_type: source,
             wid,
-            timestamp,
+            timestamp_secs: timestamp,
             btc_txid: txid(fill),
-            external_output_utxos,
-            internal_output_utxos,
         }
     }
 

@@ -3,7 +3,7 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
-use hashi_types::guardian::bitcoin_utils::construct_signing_messages;
+use bitcoin::Txid;
 use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
@@ -32,7 +32,6 @@ use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::epoch_store::ConsecutiveEpochStore;
-use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
@@ -193,7 +192,7 @@ impl EnclaveConfig {
     }
 
     /// Sign a BTC tx. Returns an Err if enclave btc keypair or hashi btc pk is not set.
-    pub fn btc_sign(&self, tx_utxos: &TxUTXOs) -> GuardianResult<Vec<BitcoinSignature>> {
+    pub fn btc_sign(&self, tx_utxos: &TxUTXOs) -> GuardianResult<(Txid, Vec<BitcoinSignature>)> {
         let enclave_keypair = self
             .enclave_btc_keypair
             .get()
@@ -203,12 +202,9 @@ impl EnclaveConfig {
             .get()
             .ok_or(InvalidInputs("Hashi BTC public key not set".into()))?;
 
-        let messages = construct_signing_messages(
-            tx_utxos,
-            &enclave_keypair.x_only_public_key().0,
-            hashi_btc_pk,
-        );
-        Ok(sign_btc_tx(&messages, enclave_keypair))
+        let enclave_btc_pk = enclave_keypair.x_only_public_key().0;
+        let (messages, txid) = tx_utxos.signing_messages_and_txid(&enclave_btc_pk, hashi_btc_pk);
+        Ok((txid, sign_btc_tx(&messages, enclave_keypair)))
     }
 
     // ========================================================================
@@ -539,71 +535,26 @@ impl Enclave {
         self.signing_pubkey().as_bytes().to_lower_hex_string()
     }
 
-    /// Log an init message at a deterministic semantic key.
-    ///
-    /// Init messages are expected to be logged in the following order.
-    /// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
+    async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
+        let log = LogRecord::new(
+            self.s3_session_id(),
+            message,
+            &self.config.eph_keys.signing_keys,
+        );
+
+        self.config.s3_logger()?.write_log_record(log).await
+    }
+
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
-        let suffix = match &msg {
-            InitLogMessage::OIAttestationUnsigned { .. } => "oi-attestation-unsigned".to_string(),
-            InitLogMessage::OIGuardianInfo(_) => "oi-guardian-info".to_string(),
-            InitLogMessage::SetupNewKeySuccess { .. } => "setup-new-key-success".to_string(),
-            InitLogMessage::PISuccess { share_id, .. } => {
-                format!("pi-success-share-{}", share_id.get())
-            }
-            InitLogMessage::PIEnclaveFullyInitialized => "pi-enclave-fully-initialized".to_string(),
-        };
-
-        let env = match msg {
-            OIAttestationUnsigned { .. } => LogMessageEnvelope::Timestamped(Timestamped {
-                data: LogMessage::Init(Box::new(msg)),
-                timestamp_ms: now_timestamp_ms(),
-            }),
-            _ => LogMessageEnvelope::Signed(self.sign(LogMessage::Init(Box::new(msg)))),
-        };
-
-        self.config
-            .s3_logger()?
-            .write_init_with_suffix(&suffix, &env, S3_OBJECT_LOCK_DURATION_INIT)
-            .await
+        self.write_log(LogMessage::Init(Box::new(msg))).await
     }
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
-        let status = match &msg {
-            WithdrawalLogMessage::Success { .. } => "success",
-            WithdrawalLogMessage::Failure { .. } => "failure",
-        };
-        let wid = msg.wid();
-        let env = LogMessageEnvelope::Signed(self.sign(LogMessage::Withdrawal(Box::new(msg))));
-        let suffix = format!("wid{}-{}-{:08x}", wid, status, rand::random::<u32>());
-
-        self.config
-            .s3_logger()?
-            .write_hour_partitioned_with_suffix(
-                S3_DIR_WITHDRAW,
-                env.timestamp_ms(),
-                &suffix,
-                &env,
-                S3_OBJECT_LOCK_DURATION_WITHDRAW,
-            )
-            .await
+        self.write_log(LogMessage::Withdrawal(Box::new(msg))).await
     }
 
-    /// Throws: InvalidInputs (if logger is not init) or S3Error.
-    pub async fn log_heartbeat_at_seq(&self, seq: u64) -> GuardianResult<()> {
-        let env = LogMessageEnvelope::Signed(self.sign(LogMessage::Heartbeat));
-        let suffix = format!("{:020}", seq);
-
-        self.config
-            .s3_logger()?
-            .write_hour_partitioned_with_suffix(
-                S3_DIR_HEARTBEAT,
-                env.timestamp_ms(),
-                &suffix,
-                &env,
-                S3_OBJECT_LOCK_DURATION_HEARTBEAT,
-            )
-            .await
+    pub async fn log_heartbeat(&self, seq: u64) -> GuardianResult<()> {
+        self.write_log(LogMessage::Heartbeat { seq }).await
     }
 
     // ========================================================================
@@ -698,7 +649,7 @@ pub fn mock_logger() -> S3Logger {
 
     let config = S3Config::mock_for_testing();
 
-    S3Logger::from_client_for_tests("test-session-id".to_string(), config, client)
+    S3Logger::from_client_for_tests(config, client)
 }
 
 #[cfg(test)]
