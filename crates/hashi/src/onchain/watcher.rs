@@ -305,9 +305,16 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .pending_withdrawals
                     .insert(pending.id, pending);
             }
-            HashiEvent::WithdrawalSignedEvent(_event) => {
-                // Signatures are stored on-chain; the watcher doesn't need to
-                // track them locally since the leader reads them when needed.
+            HashiEvent::WithdrawalSignedEvent(event) => {
+                let mut state = state.state_mut();
+                if let Some(pending) = state
+                    .hashi
+                    .withdrawal_queue
+                    .pending_withdrawals
+                    .get_mut(&event.withdrawal_id)
+                {
+                    pending.signatures = Some(event.signatures.clone());
+                }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
                 state

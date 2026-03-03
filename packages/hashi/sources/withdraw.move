@@ -24,7 +24,7 @@ public struct RequestApprovalMessage has copy, drop, store {
 }
 
 // MESSAGE STEP 2
-public struct WithdrawalConstructionMessage has copy, drop, store {
+public struct WithdrawalCommitmentMessage has copy, drop, store {
     request_ids: vector<address>,
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
@@ -51,13 +51,13 @@ public(package) fun new_request_approval_message(
     RequestApprovalMessage { request_ids }
 }
 
-public(package) fun new_withdrawal_construction_message(
+public(package) fun new_withdrawal_commitment_message(
     request_ids: vector<address>,
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
-): WithdrawalConstructionMessage {
-    WithdrawalConstructionMessage { request_ids, selected_utxos, outputs, txid }
+): WithdrawalCommitmentMessage {
+    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid }
 }
 
 public(package) fun new_withdrawal_signed_message(
@@ -132,7 +132,7 @@ entry fun approve_request(
 }
 
 // TODO: Check withdrawal outputs against request_ids
-entry fun construct_withdrawal(
+entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
     selected_utxos: vector<vector<u8>>,
@@ -162,7 +162,7 @@ entry fun construct_withdrawal(
     // outputs
     let outputs = outputs.map!(|raw| hashi::withdrawal_queue::output_utxo_from_bcs(raw));
 
-    let approval = WithdrawalConstructionMessage {
+    let approval = WithdrawalCommitmentMessage {
         request_ids,
         selected_utxos,
         outputs,
@@ -173,7 +173,7 @@ entry fun construct_withdrawal(
         threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
     hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
 
-    let WithdrawalConstructionMessage {
+    let WithdrawalCommitmentMessage {
         outputs,
         txid,
         ..,

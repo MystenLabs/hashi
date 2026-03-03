@@ -9,7 +9,7 @@ use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::withdrawals::RequestApproval;
-use crate::withdrawals::WithdrawalTxConstruction;
+use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
@@ -81,11 +81,11 @@ impl BridgeService for HttpService {
         request: Request<SignWithdrawalTxConstructionRequest>,
     ) -> Result<Response<SignWithdrawalTxConstructionResponse>, Status> {
         authenticate_caller(&request)?;
-        let approval = parse_withdrawal_tx_construction(request.get_ref())
+        let approval = parse_withdrawal_tx_commitment(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_tx_construction(&approval)
+            .validate_and_sign_withdrawal_tx_commitment(&approval)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         Ok(Response::new(SignWithdrawalTxConstructionResponse {
@@ -198,9 +198,9 @@ fn parse_request_approval(request: &SignRequestApprovalRequest) -> anyhow::Resul
     Ok(RequestApproval { request_ids })
 }
 
-fn parse_withdrawal_tx_construction(
+fn parse_withdrawal_tx_commitment(
     request: &SignWithdrawalTxConstructionRequest,
-) -> anyhow::Result<WithdrawalTxConstruction> {
+) -> anyhow::Result<WithdrawalTxCommitment> {
     let request_ids: Vec<Address> = request
         .request_ids
         .iter()
@@ -229,7 +229,7 @@ fn parse_withdrawal_tx_construction(
         .collect();
     let txid = parse_address(&request.txid)?;
 
-    Ok(WithdrawalTxConstruction {
+    Ok(WithdrawalTxCommitment {
         request_ids,
         selected_utxos,
         outputs,

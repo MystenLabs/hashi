@@ -57,7 +57,7 @@ use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
-use crate::withdrawals::WithdrawalTxConstruction;
+use crate::withdrawals::WithdrawalTxCommitment;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -664,7 +664,7 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Execute `withdraw::construct_withdrawal` to commit to a withdrawal on-chain.
+    /// Execute `withdraw::commit_withdrawal_tx` to commit to a withdrawal on-chain.
     ///
     /// The Move function expects:
     /// - `hashi: &mut Hashi`
@@ -675,9 +675,9 @@ impl SuiTxExecutor {
     /// - `epoch, signature, signers_bitmap` — committee certificate
     /// - `clock: &Clock`
     /// - `r: &Random`
-    pub async fn execute_construct_withdrawal(
+    pub async fn execute_commit_withdrawal_tx(
         &mut self,
-        approval: &WithdrawalTxConstruction,
+        approval: &WithdrawalTxCommitment,
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
@@ -724,7 +724,7 @@ impl SuiTxExecutor {
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("construct_withdrawal"),
+                Identifier::from_static("commit_withdrawal_tx"),
             ),
             vec![
                 hashi_arg,
@@ -743,7 +743,7 @@ impl SuiTxExecutor {
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "construct_withdrawal failed: {:?}",
+                "commit_withdrawal_tx failed: {:?}",
                 response.transaction().effects().status()
             );
         }

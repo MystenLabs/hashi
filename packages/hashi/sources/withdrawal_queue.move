@@ -39,7 +39,6 @@ public struct PendingWithdrawal has store {
     outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
-    btc_tx: Option<vector<u8>>,
     signatures: Option<vector<vector<u8>>>,
 }
 
@@ -115,7 +114,6 @@ public(package) fun new_pending_withdrawal(
         outputs,
         timestamp_ms: clock.timestamp_ms(),
         randomness,
-        btc_tx: option::none(),
         signatures: option::none(),
     }
 }
@@ -211,7 +209,6 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal) {
         outputs: _,
         timestamp_ms: _,
         randomness: _,
-        btc_tx: _,
         signatures: _,
     } = self;
 
@@ -253,6 +250,7 @@ public(package) fun emit_withdrawal_signed(self: &PendingWithdrawal) {
     sui::event::emit(WithdrawalSignedEvent {
         withdrawal_id: self.id,
         request_ids: self.requests.map_ref!(|info| info.id),
+        signatures: *self.signatures.borrow(),
     });
 }
 
@@ -288,7 +286,6 @@ public(package) fun new_pending_withdrawal_for_testing(
         outputs,
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
-        btc_tx: option::none(),
         signatures: option::none(),
     }
 }
@@ -339,6 +336,7 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
 public struct WithdrawalSignedEvent has copy, drop {
     withdrawal_id: address,
     request_ids: vector<address>,
+    signatures: vector<vector<u8>>,
 }
 
 public struct WithdrawalConfirmedEvent has copy, drop {
