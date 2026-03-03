@@ -6,6 +6,7 @@ use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
 use sui_futures::service::Service;
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -27,6 +28,7 @@ pub struct Monitor {
     requester: kyoto::Requester,
     tip: Option<HeaderCheckpoint>,
     pending_deposits: Vec<PendingDeposit>,
+    pending_deposit_workers: JoinSet<()>,
 }
 
 impl Monitor {
@@ -64,6 +66,7 @@ impl Monitor {
             client_tx: client_tx.clone(),
             tip: None,
             pending_deposits: vec![],
+            pending_deposit_workers: JoinSet::new(),
         };
 
         // Spawn tasks with graceful shutdown support.
@@ -94,6 +97,11 @@ impl Monitor {
                         }
                         Some(msg) = kyoto_client.warn_rx.recv() => {
                             warn!("Kyoto: {msg}");
+                        }
+                        Some(join_result) = monitor.pending_deposit_workers.join_next(), if !monitor.pending_deposit_workers.is_empty() => {
+                            if let Err(e) = join_result {
+                                error!("Pending deposit worker task failed: {e}");
+                            }
                         }
                         else => {
                             break;
@@ -189,14 +197,15 @@ impl Monitor {
             return;
         }
 
-        tokio::spawn(Monitor::process_pending_deposit(
-            tip.to_owned(),
-            self.config.confirmation_threshold,
-            self.bitcoind_rpc.clone(),
-            self.requester.clone(),
-            self.client_tx.clone(),
-            pending_deposit,
-        ));
+        self.pending_deposit_workers
+            .spawn(Monitor::process_pending_deposit(
+                tip.to_owned(),
+                self.config.confirmation_threshold,
+                self.bitcoind_rpc.clone(),
+                self.requester.clone(),
+                self.client_tx.clone(),
+                pending_deposit,
+            ));
     }
 
     fn get_recent_fee_rate(
@@ -277,14 +286,15 @@ impl Monitor {
             self.pending_deposits.len()
         );
         for pending_deposit in std::mem::take(&mut self.pending_deposits) {
-            tokio::spawn(Monitor::process_pending_deposit(
-                tip.to_owned(),
-                self.config.confirmation_threshold,
-                self.bitcoind_rpc.clone(),
-                self.requester.clone(),
-                self.client_tx.clone(),
-                pending_deposit,
-            ));
+            self.pending_deposit_workers
+                .spawn(Monitor::process_pending_deposit(
+                    tip.to_owned(),
+                    self.config.confirmation_threshold,
+                    self.bitcoind_rpc.clone(),
+                    self.requester.clone(),
+                    self.client_tx.clone(),
+                    pending_deposit,
+                ));
         }
     }
 
@@ -466,14 +476,12 @@ impl AsRef<PendingDeposit> for PendingDepositGuard {
 
 impl Drop for PendingDepositGuard {
     fn drop(&mut self) {
-        if let Some(deposit) = self.deposit.take() {
-            let client_tx = self.client_tx.clone();
-            tokio::spawn(async move {
-                client_tx
-                    .send(MonitorMessage::ConfirmDeposit(deposit))
-                    .await
-                    .expect("re-enqueue PendingDeposit must succeed");
-            });
+        if let Some(deposit) = self.deposit.take()
+            && let Err(e) = self
+                .client_tx
+                .try_send(MonitorMessage::ConfirmDeposit(deposit))
+        {
+            warn!("Failed to re-enqueue PendingDeposit on drop: {e}");
         }
     }
 }

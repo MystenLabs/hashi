@@ -77,15 +77,6 @@ impl Database {
         })
     }
 
-    /// Close the database, releasing the file lock.
-    ///
-    /// This drops all internal fjall handles, which releases the OS file lock
-    /// even if other `Arc<Database>` references exist.
-    /// Any subsequent operations on this database will return an error.
-    pub fn close(&self) {
-        let _ = self.inner.lock().unwrap().take();
-    }
-
     fn with_inner<T>(&self, f: impl FnOnce(&DatabaseInner) -> Result<T>) -> Result<T> {
         let guard = self
             .inner

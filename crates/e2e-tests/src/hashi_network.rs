@@ -102,7 +102,7 @@ impl HashiNodeHandle {
     }
 
     async fn shutdown(&mut self) {
-        let Some((service, hashi)) = self.service.take() else {
+        let Some((service, _hashi)) = self.service.take() else {
             tracing::warn!("Hashi node not running, cannot shutdown");
             return;
         };
@@ -110,10 +110,6 @@ impl HashiNodeHandle {
         if let Err(e) = result {
             tracing::warn!("Hashi shutdown error: {e}");
         }
-        // Explicitly close the database to release the file lock.
-        // After shutdown, orphaned background tasks may still hold Arc<Hashi>,
-        // preventing the fjall database from being dropped naturally.
-        hashi.db.close();
     }
 
     pub async fn restart(&mut self) -> Result<()> {
