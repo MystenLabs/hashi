@@ -190,12 +190,12 @@ fn parse_deposit_request(
 }
 
 fn parse_request_approval(request: &SignRequestApprovalRequest) -> anyhow::Result<RequestApproval> {
-    let request_ids: Vec<Address> = request
-        .request_ids
-        .iter()
-        .map(|bytes| parse_address(bytes))
-        .collect::<anyhow::Result<_>>()?;
-    Ok(RequestApproval { request_ids })
+    anyhow::ensure!(
+        request.request_ids.len() == 1,
+        "Expected exactly one request_id"
+    );
+    let request_id = parse_address(&request.request_ids[0])?;
+    Ok(RequestApproval { request_id })
 }
 
 fn parse_withdrawal_tx_commitment(

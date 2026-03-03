@@ -621,10 +621,9 @@ impl SuiTxExecutor {
     }
 
     /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
-    pub async fn execute_approve_request(
+    pub async fn execute_approve_requests(
         &mut self,
-        request_ids: &[Address],
-        cert: &CommitteeSignature,
+        approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
 
@@ -633,26 +632,28 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
-        let request_ids_vec = request_ids.to_vec();
-        let requests_arg = builder.pure(&request_ids_vec);
-        let epoch_arg = builder.pure(&cert.epoch());
-        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
-        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
 
-        builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("withdraw"),
-                Identifier::from_static("approve_request"),
-            ),
-            vec![
-                hashi_arg,
-                requests_arg,
-                epoch_arg,
-                signature_arg,
-                signers_bitmap_arg,
-            ],
-        );
+        for (request_id, cert) in approvals {
+            let request_id_arg = builder.pure(request_id);
+            let epoch_arg = builder.pure(&cert.epoch());
+            let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+            let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+            builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("withdraw"),
+                    Identifier::from_static("approve_request"),
+                ),
+                vec![
+                    hashi_arg,
+                    request_id_arg,
+                    epoch_arg,
+                    signature_arg,
+                    signers_bitmap_arg,
+                ],
+            );
+        }
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {

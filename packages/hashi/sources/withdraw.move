@@ -20,7 +20,7 @@ const ERequestAlreadyApproved: vector<u8> = b"Request has already been approved"
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
-    request_ids: vector<address>,
+    request_id: address,
 }
 
 // MESSAGE STEP 2
@@ -45,10 +45,8 @@ public struct WithdrawalConfirmationMessage has copy, drop, store {
 
 // ======== Message Constructors ========
 
-public(package) fun new_request_approval_message(
-    request_ids: vector<address>,
-): RequestApprovalMessage {
-    RequestApprovalMessage { request_ids }
+public(package) fun new_request_approval_message(request_id: address): RequestApprovalMessage {
+    RequestApprovalMessage { request_id }
 }
 
 public(package) fun new_withdrawal_commitment_message(
@@ -105,30 +103,25 @@ public fun request_withdrawal(
 
 entry fun approve_request(
     hashi: &mut Hashi,
-    request_ids: vector<address>,
+    request_id: address,
     epoch: u64,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
-    // Do not allow scheduling of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
     let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
 
-    let approval = RequestApprovalMessage {
-        request_ids,
-    };
+    let approval = RequestApprovalMessage { request_id };
 
     let threshold =
         threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
     hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
 
-    request_ids.do_ref!(|request_id| {
-        hashi.withdrawal_queue_mut().approve_request(*request_id);
-        hashi::withdrawal_queue::emit_withdrawal_approved(*request_id);
-    });
+    hashi.withdrawal_queue_mut().approve_request(request_id);
+    hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
 }
 
 // TODO: Check withdrawal outputs against request_ids

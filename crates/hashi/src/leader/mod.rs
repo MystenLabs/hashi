@@ -317,27 +317,7 @@ impl LeaderService {
             return;
         }
 
-        let request_ids: Vec<Address> = screened.iter().map(|r| r.id).collect();
-        info!("Approving {} withdrawal requests", request_ids.len());
-
-        let approval = RequestApproval {
-            request_ids: request_ids.clone(),
-        };
-
-        // Validate and sign locally first — fail fast before asking other validators
-        let local_sig = match self.inner.validate_and_sign_request_approval(&approval) {
-            Ok(sig) => match parse_member_signature(sig) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("Failed to parse local request approval signature: {e}");
-                    return;
-                }
-            },
-            Err(e) => {
-                error!("Local request approval validation failed: {e}");
-                return;
-            }
-        };
+        info!("Approving {} withdrawal requests", screened.len());
 
         let this_validator_address = self
             .inner
@@ -351,53 +331,128 @@ impl LeaderService {
             .current_committee_members()
             .expect("No current committee members");
 
-        let proto_request = approval.to_proto();
-        let mut signatures: Vec<MemberSignature> = vec![local_sig];
-        for member in &members {
-            if member.validator_address() == this_validator_address {
-                continue;
-            }
-            if let Some(signature) = self
-                .request_approval_signature(proto_request.clone(), member)
-                .await
-            {
-                signatures.push(signature);
-            }
-        }
-
         let committee = self
             .inner
             .onchain_state()
             .current_committee()
             .expect("No current committee");
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, approval);
-        for sig in signatures {
-            if let Err(e) = aggregator.add_signature(sig) {
-                error!("Failed to add request approval signature: {e}");
+        // Collect a per-request BLS certificate for each screened request.
+        // Validators independently validate each request (including sanctions checks),
+        // so a single bad request only blocks itself, not the whole batch.
+        let mut certified: Vec<(Address, CommitteeSignature)> = Vec::new();
+        for request in &screened {
+            let approval = RequestApproval {
+                request_id: request.id,
+            };
+
+            // Validate and sign locally first
+            let local_sig = match self.inner.validate_and_sign_request_approval(&approval) {
+                Ok(sig) => match parse_member_signature(sig) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(
+                            "Failed to parse local approval signature for {:?}: {e}",
+                            request.id
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    error!("Local approval validation failed for {:?}: {e}", request.id);
+                    continue;
+                }
+            };
+
+            let proto_request = approval.to_proto();
+            let mut signatures: Vec<MemberSignature> = vec![local_sig];
+            for member in &members {
+                if member.validator_address() == this_validator_address {
+                    continue;
+                }
+                if let Some(signature) = self
+                    .request_approval_signature(proto_request.clone(), member)
+                    .await
+                {
+                    signatures.push(signature);
+                }
+            }
+
+            let mut aggregator = BlsSignatureAggregator::new(&committee, approval);
+            for sig in signatures {
+                if let Err(e) = aggregator.add_signature(sig) {
+                    error!("Failed to add approval signature for {:?}: {e}", request.id);
+                }
+            }
+
+            let weight = aggregator.weight();
+            let required_weight = certificate_threshold(committee.total_weight());
+            if weight < required_weight {
+                error!(
+                    "Insufficient approval signatures for {:?}: weight {weight} < {required_weight}",
+                    request.id
+                );
+                continue;
+            }
+
+            match aggregator.finish() {
+                Ok(signed) => {
+                    certified.push((request.id, signed.committee_signature().clone()));
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to build approval certificate for {:?}: {e}",
+                        request.id
+                    );
+                }
             }
         }
 
-        let weight = aggregator.weight();
-        let required_weight = certificate_threshold(committee.total_weight());
-        if weight < required_weight {
-            error!("Insufficient request approval signatures: weight {weight} < {required_weight}");
+        if certified.is_empty() {
             return;
         }
 
-        let signed = match aggregator.finish() {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to build request approval certificate: {e}");
-                return;
-            }
-        };
+        // Submit all certified approvals in a single PTB.
+        // On failure (e.g. a request was canceled mid-flight), remove the
+        // offending request and retry until we succeed or run out of requests.
+        self.submit_approve_requests_with_retry(certified).await;
+    }
 
-        if let Err(e) = self
-            .submit_approve_request(&request_ids, signed.committee_signature())
-            .await
-        {
-            error!("Failed to submit approve_request: {e}");
+    async fn submit_approve_requests_with_retry(
+        &self,
+        mut certified: Vec<(Address, CommitteeSignature)>,
+    ) {
+        loop {
+            let approvals: Vec<(Address, &CommitteeSignature)> =
+                certified.iter().map(|(id, cert)| (*id, cert)).collect();
+
+            match self.submit_approve_requests(&approvals).await {
+                Ok(()) => return,
+                Err(e) => {
+                    let err_msg = format!("{e}");
+                    error!("approve_request PTB failed: {err_msg}");
+
+                    // Try to identify which request caused the failure by checking
+                    // which ones no longer exist in the queue (canceled).
+                    let before_len = certified.len();
+                    certified.retain(|(id, _)| {
+                        self.inner.onchain_state().withdrawal_request(id).is_some()
+                    });
+
+                    if certified.len() == before_len {
+                        error!("Could not identify failed request, aborting retry");
+                        return;
+                    }
+                    if certified.is_empty() {
+                        return;
+                    }
+
+                    info!(
+                        "Retrying approve_request with {} remaining requests",
+                        certified.len()
+                    );
+                }
+            }
         }
     }
 
@@ -1095,18 +1150,17 @@ impl LeaderService {
             .ok()
     }
 
-    async fn submit_approve_request(
+    async fn submit_approve_requests(
         &self,
-        request_ids: &[Address],
-        cert: &CommitteeSignature,
+        approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         info!(
-            "Submitting approve_request for {} requests",
-            request_ids.len()
+            "Submitting approve_request PTB for {} requests",
+            approvals.len()
         );
 
         let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-        executor.execute_approve_request(request_ids, cert).await
+        executor.execute_approve_requests(approvals).await
     }
 
     async fn submit_commit_withdrawal_tx(
@@ -1198,11 +1252,7 @@ fn parse_member_signature(
 impl RequestApproval {
     fn to_proto(&self) -> SignRequestApprovalRequest {
         SignRequestApprovalRequest {
-            request_ids: self
-                .request_ids
-                .iter()
-                .map(|id| id.as_bytes().to_vec().into())
-                .collect(),
+            request_ids: vec![self.request_id.as_bytes().to_vec().into()],
         }
     }
 }

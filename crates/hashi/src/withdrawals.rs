@@ -58,11 +58,10 @@ pub struct UtxoSelection {
     pub change: Option<u64>,
 }
 
-/// The data that validators BLS-sign over to approve withdrawal requests.
-/// This is the lightweight step 1 certificate — just approving request IDs.
+/// The data that validators BLS-sign over to approve a single withdrawal request.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct RequestApproval {
-    pub request_ids: Vec<Address>,
+    pub request_id: Address,
 }
 
 /// The data that validators BLS-sign over to commit to a withdrawal transaction.
@@ -96,19 +95,20 @@ impl Hashi {
         &self,
         approval: &RequestApproval,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
-
-        // Verify each request_id exists and is not yet approved
-        for id in &approval.request_ids {
-            let request = self
-                .onchain_state()
-                .withdrawal_request(id)
-                .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
-            anyhow::ensure!(
-                !request.approved,
-                "Withdrawal request {id} is already approved"
-            );
-        }
+        let request = self
+            .onchain_state()
+            .withdrawal_request(&approval.request_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Withdrawal request {} not found in queue",
+                    approval.request_id
+                )
+            })?;
+        anyhow::ensure!(
+            !request.approved,
+            "Withdrawal request {} is already approved",
+            approval.request_id
+        );
 
         self.sign_message_proto(&approval)
     }
