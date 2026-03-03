@@ -124,6 +124,8 @@ entry fun approve_request(
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
 }
 
+// NOTE: request_ids and outputs must come presorted, so that request_ids[i] matches outputs[i].
+// If there is a change output, it must be the last one in outputs.
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
