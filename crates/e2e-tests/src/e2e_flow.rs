@@ -530,11 +530,18 @@ mod tests {
         // Second deposit
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
 
-        // Restart node 0
+        // Restart nodes 0 and 1 — with 2 of 4 restarted,
+        // at least one restarted node must participate in signing.
         networks.hashi_network_mut().nodes_mut()[0]
             .restart()
             .await?;
+        networks.hashi_network_mut().nodes_mut()[1]
+            .restart()
+            .await?;
         networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+        networks.hashi_network.nodes()[1]
             .wait_for_mpc_key(Duration::from_secs(120))
             .await?;
 
@@ -586,11 +593,18 @@ mod tests {
         // One more deposit to provide a UTXO for the post-recovery withdrawal.
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
 
-        // Restart node 0 — recovery should reconstruct batch 1.
+        // Restart nodes 0 and 1 — with 2 of 4 restarted,
+        // at least one restarted node must participate in signing.
         networks.hashi_network_mut().nodes_mut()[0]
             .restart()
             .await?;
+        networks.hashi_network_mut().nodes_mut()[1]
+            .restart()
+            .await?;
         networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+        networks.hashi_network.nodes()[1]
             .wait_for_mpc_key(Duration::from_secs(120))
             .await?;
 
