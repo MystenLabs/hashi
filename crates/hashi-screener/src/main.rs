@@ -300,10 +300,12 @@ async fn main() -> Result<()> {
     // Enable gRPC reflection for debugging (v1 and v1alpha for compatibility)
     let reflection_v1 = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
     let reflection_v1alpha = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1alpha()?;
 
     Server::builder()
