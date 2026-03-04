@@ -7,6 +7,7 @@ use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
 use sui_futures::service::Service;
 use tokio::sync::watch;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -112,12 +113,17 @@ impl MpcService {
                 match self.recover_mpc_state().await {
                     Ok(output) => {
                         let epoch = self.inner.onchain_state().epoch();
-                        if let Err(e) = self.recover_presigning_state(&output) {
-                            error!(
-                                "Presigning recovery from DB failed: {e}, falling back to fresh nonce generation"
-                            );
-                            if let Err(e) = self.prepare_signing(epoch, &output).await {
-                                error!("Failed to init signing after DKG recovery: {e}");
+                        match self.recover_presigning_state(&output) {
+                            Ok(()) => {
+                                info!("Recovered presigning state from DB");
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "No presigning state in DB ({e}), running fresh nonce generation"
+                                );
+                                if let Err(e) = self.prepare_signing(epoch, &output).await {
+                                    error!("Failed to init signing after DKG recovery: {e}");
+                                }
                             }
                         }
                         let _ = self.key_ready_tx.send(Some(output.public_key));
