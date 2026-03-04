@@ -100,9 +100,34 @@ jobs:
           # Export SUI_BINARY for tests
           echo "SUI_BINARY=/usr/local/bin/sui" >> $GITHUB_ENV
 
-      - name: Run tests
+      - name: Install grpcurl
         run: |
-          cargo nextest run --all-features --profile ci
+          GRPCURL_VERSION=1.9.3
+          wget -qO- "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Build hashi-screener Docker image
+        run: docker build -t hashi-screener -f docker/hashi-screener/Containerfile .
+
+      - name: Start hashi-screener container
+        run: |
+          docker run -d --name hashi-screener \
+            -e MERKLE_SCIENCE_API_KEY=${{ secrets.MERKLE_SCIENCE_API_KEY }} \
+            -p 50051:50051 -p 9184:9184 \
+            hashi-screener
+          timeout 120 bash -c \
+            'until grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check; do sleep 2; done'
+          echo "hashi-screener is healthy"
+
+      - name: Dump hashi-screener logs
+        if: failure()
+        run: docker logs hashi-screener
+
+      - name: Run tests
+        env:
+          SCREENER_ENDPOINT: http://localhost:50051
+        run: |
+          cargo nextest run --all-features --profile ci --run-ignored all
           cargo test --all-features --doc
 
       - run: make is-dirty
