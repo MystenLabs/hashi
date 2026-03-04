@@ -200,7 +200,8 @@ pub struct HashiNetwork {
     ids: HashiIds,
     nodes: Vec<HashiNodeHandle>,
     /// Keeps the mock screener gRPC server alive for the lifetime of the test network.
-    _screener_service: Service,
+    /// `None` when using an external screener endpoint (via `SCREENER_ENDPOINT` env var).
+    _screener_service: Option<Service>,
 }
 
 impl HashiNetwork {
@@ -264,10 +265,22 @@ impl HashiNetworkBuilder {
         bitcoin: &BitcoinNodeHandle,
         hashi_ids: HashiIds,
     ) -> Result<HashiNetwork> {
-        // Start a mock screener server for integration tests
-        let (screener_addr, screener_service) =
-            hashi_screener::test_utils::start_mock_screener_server().await;
-        let screener_endpoint = format!("http://{}", screener_addr);
+        // Use a live screener endpoint if SCREENER_ENDPOINT is set, otherwise start a mock.
+        let (screener_endpoint, screener_service) = match std::env::var("SCREENER_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            Some(endpoint) => {
+                tracing::info!("Using live screener endpoint: {}", endpoint);
+                (endpoint, None)
+            }
+            None => {
+                tracing::info!("Using mock screener server");
+                let (addr, service) =
+                    hashi_screener::test_utils::start_mock_screener_server().await;
+                (format!("http://{}", addr), Some(service))
+            }
+        };
 
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();

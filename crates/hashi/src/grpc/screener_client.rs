@@ -17,7 +17,7 @@ pub struct ScreenerClient {
 
 impl ScreenerClient {
     pub fn new(endpoint: &str) -> Result<Self, tonic::Status> {
-        let channel = Endpoint::from_shared(endpoint.to_string())
+        let channel = Endpoint::new(endpoint.to_string())
             .map_err(Into::<BoxError>::into)
             .map_err(tonic::Status::from_error)?
             .connect_timeout(Duration::from_secs(5))
