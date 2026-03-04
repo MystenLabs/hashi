@@ -518,10 +518,12 @@ impl SuiTxExecutor {
     /// Execute a validator registration transaction.
     ///
     /// This builds and executes a PTB that:
-    /// 1. Calls `validator::register` with the BLS public key, proof-of-possession, and encryption key
-    /// 2. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
-    /// 3. Calls `validator::update_tls_public_key` to set the validator's TLS key
-    /// 4. Optionally calls `validator::update_operator_address` if an operator address is provided
+    /// 1. Calls `validator::register` to register the validator
+    /// 2. Calls `validator::update_next_epoch_public_key` to set the BLS key and proof-of-possession
+    /// 3. Calls `validator::update_next_epoch_encryption_public_key` to set the encryption key
+    /// 4. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
+    /// 5. Calls `validator::update_tls_public_key` to set the validator's TLS key
+    /// 6. Optionally calls `validator::update_operator_address` if an operator address is provided
     ///
     /// All required fields are read from the provided `Config`.
     pub async fn execute_register_validator(
@@ -854,10 +856,12 @@ impl SuiTxExecutor {
 /// Build a validator registration transaction without signing or executing it.
 ///
 /// This builds a PTB that:
-/// 1. Calls `validator::register` with the BLS public key, proof-of-possession, and encryption key
-/// 2. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
-/// 3. Calls `validator::update_tls_public_key` to set the validator's TLS key
-/// 4. Optionally calls `validator::update_operator_address` if an operator address is provided
+/// 1. Calls `validator::register` to register the validator
+/// 2. Calls `validator::update_next_epoch_public_key` to set the BLS key and proof-of-possession
+/// 3. Calls `validator::update_next_epoch_encryption_public_key` to set the encryption key
+/// 4. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
+/// 5. Calls `validator::update_tls_public_key` to set the validator's TLS key
+/// 6. Optionally calls `validator::update_operator_address` if an operator address is provided
 ///
 /// The sender is set to `config.validator_address()`. The returned `Transaction` is
 /// finalized (dry-run, gas estimation, object resolution) but unsigned.
@@ -901,6 +905,7 @@ pub async fn build_register_validator_tx(
             .with_mutable(false),
     );
 
+    let validator_address_arg = builder.pure(&validator_address);
     let public_key_arg = builder.pure(&protocol_public_key.as_ref().to_vec());
     let pop_signature_arg = builder.pure(&pop.signature().as_ref().to_vec());
     let encryption_key_arg = builder.pure(
@@ -910,26 +915,44 @@ pub async fn build_register_validator_tx(
             .as_slice()
             .to_vec(),
     );
-    let validator_address_arg = builder.pure(&validator_address);
     let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
 
-    // 1. validator::register(hashi, sui_system, public_key, pop_signature, encryption_public_key)
+    // 1. validator::register(hashi, sui_system)
     builder.move_call(
         Function::new(
             hashi_ids.package_id,
             Identifier::from_static("validator"),
             Identifier::from_static("register"),
         ),
+        vec![hashi_arg, sui_system_arg],
+    );
+
+    // 2. validator::update_next_epoch_public_key(hashi, validator_address, public_key, pop_signature)
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("validator"),
+            Identifier::from_static("update_next_epoch_public_key"),
+        ),
         vec![
             hashi_arg,
-            sui_system_arg,
+            validator_address_arg,
             public_key_arg,
             pop_signature_arg,
-            encryption_key_arg,
         ],
     );
 
-    // 2. validator::update_endpoint_url(hashi, validator_address, endpoint_url)
+    // 3. validator::update_next_epoch_encryption_public_key(hashi, validator_address, encryption_key)
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("validator"),
+            Identifier::from_static("update_next_epoch_encryption_public_key"),
+        ),
+        vec![hashi_arg, validator_address_arg, encryption_key_arg],
+    );
+
+    // 4. validator::update_endpoint_url(hashi, validator_address, endpoint_url)
     if let Some(url) = &endpoint_url {
         let endpoint_url_arg = builder.pure(url);
         builder.move_call(
@@ -942,7 +965,7 @@ pub async fn build_register_validator_tx(
         );
     }
 
-    // 3. validator::update_tls_public_key(hashi, validator_address, tls_key)
+    // 5. validator::update_tls_public_key(hashi, validator_address, tls_key)
     builder.move_call(
         Function::new(
             hashi_ids.package_id,
@@ -952,7 +975,7 @@ pub async fn build_register_validator_tx(
         vec![hashi_arg, validator_address_arg, tls_key_arg],
     );
 
-    // 4. Optionally update_operator_address(hashi, validator_address, operator_address)
+    // 6. Optionally update_operator_address(hashi, validator_address, operator_address)
     if let Some(operator) = operator_address {
         let operator_arg = builder.pure(&operator);
         builder.move_call(

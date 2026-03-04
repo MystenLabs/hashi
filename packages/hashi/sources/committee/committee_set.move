@@ -111,9 +111,6 @@ public struct MemberInfo has store {
 public(package) fun new_member(
     committee_set: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    public_key: vector<u8>,
-    proof_of_possession_signature: vector<u8>,
-    encryption_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
     let validator_address = ctx.sender();
@@ -121,22 +118,13 @@ public(package) fun new_member(
     // Only allow Sui Validators to register as Hashi members
     assert!(sui_system.active_validator_addresses_ref().contains(&validator_address));
 
-    let next_epoch_public_key = verify_bls_public_key(
-        ctx.epoch(),
-        validator_address,
-        public_key,
-        proof_of_possession_signature,
-    );
-
-    assert!(encryption_public_key.length() == 32);
-
     let member = MemberInfo {
         validator_address: validator_address,
         operator_address: validator_address,
-        next_epoch_public_key: next_epoch_public_key,
+        next_epoch_public_key: g1_to_uncompressed_g1(&sui::bls12381::g1_identity()),
         endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
-        next_epoch_encryption_public_key: encryption_public_key,
+        next_epoch_encryption_public_key: std::vector::empty(),
     };
 
     committee_set.insert_member(member);
@@ -299,6 +287,7 @@ fun new_committee_from_validator_set(
 ): Committee {
     let epoch = ctx.epoch();
     let mut validator_set = sui_system.active_validator_voting_powers();
+    let g1_identity = g1_to_uncompressed_g1(&sui::bls12381::g1_identity());
 
     let mut committee_members = vector[];
 
@@ -311,6 +300,16 @@ fun new_committee_from_validator_set(
         };
 
         let member = self.member(validator_address);
+
+        // If the member has not registered a valid bls public key, skip them
+        if (sui::group_ops::equal(&member.next_epoch_public_key, &g1_identity)) {
+            continue
+        };
+
+        // If the member has not registered a valid encryption key, skip them
+        if (member.next_epoch_encryption_public_key.is_empty()) {
+            continue
+        };
 
         let committee_member = committee::new_committee_member(
             validator_address,
