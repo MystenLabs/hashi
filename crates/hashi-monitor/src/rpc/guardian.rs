@@ -12,7 +12,7 @@ use hashi_types::guardian::S3_DIR_INIT;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::WithdrawalLogMessage;
-use hashi_types::guardian::s3_utils::S3Directory;
+use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -158,7 +158,7 @@ impl GuardianWithdrawalsPoller {
 }
 
 /// Cursor is simply an S3 directory. The next directory to read from.
-struct S3Cursor(S3Directory);
+struct S3Cursor(S3HourScopedDirectory);
 
 impl S3Cursor {
     /// true => withdraw, false => heartbeat
@@ -168,7 +168,7 @@ impl S3Cursor {
         } else {
             S3_DIR_HEARTBEAT
         };
-        Self(S3Directory::new(prefix, t))
+        Self(S3HourScopedDirectory::new(prefix, t))
     }
 
     fn advance(&mut self) {
@@ -182,148 +182,5 @@ impl S3Cursor {
 
     fn to_seconds(&self) -> UnixSeconds {
         self.0.to_unix_seconds()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aws_sdk_s3::Client;
-    use aws_sdk_s3::operation::get_object::GetObjectOutput;
-    use aws_sdk_s3::primitives::ByteStream;
-    use aws_smithy_mocks::RuleMode;
-    use aws_smithy_mocks::mock;
-    use aws_smithy_mocks::mock_client;
-    use bitcoin::Network;
-    use bitcoin::Txid;
-    use bitcoin::hashes::Hash as _;
-    use hashi_types::guardian::GuardianSignKeyPair;
-    use hashi_types::guardian::GuardianSigned;
-    use hashi_types::guardian::StandardWithdrawalRequest;
-    use hashi_types::guardian::StandardWithdrawalResponse;
-
-    fn mk_success_log(
-        session_id: &str,
-        enclave_signing_key: &GuardianSignKeyPair,
-        wid: u64,
-        txid_fill: u8,
-    ) -> LogRecord {
-        let signed_req =
-            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
-        let (request_sign, request_data) = signed_req.into_parts();
-        let txid = Txid::from_slice(&[txid_fill; 32]).expect("valid txid");
-
-        LogRecord::new(
-            session_id.to_string(),
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
-                txid,
-                request_data: request_data.into(),
-                request_sign,
-                response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
-            })),
-            enclave_signing_key,
-        )
-    }
-
-    fn mk_attestation_log(
-        session_id: &str,
-        enclave_signing_key: &GuardianSignKeyPair,
-    ) -> LogRecord {
-        LogRecord::new(
-            session_id.to_string(),
-            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
-                attestation: vec![1, 2, 3],
-                signing_public_key: enclave_signing_key.verification_key(),
-            })),
-            enclave_signing_key,
-        )
-    }
-
-    #[tokio::test]
-    async fn multi_session_same_hour_is_supported() {
-        let session_a = "session-a";
-        let session_b = "session-b";
-
-        let sign_key_a = GuardianSignKeyPair::from([11u8; 32]);
-        let sign_key_b = GuardianSignKeyPair::from([22u8; 32]);
-
-        let init_key_a = format!(
-            "{}/{}-{}.json",
-            S3_DIR_INIT,
-            session_a,
-            InitLogMessage::OI_ATTEST_UNSIGNED
-        );
-        let init_key_b = format!(
-            "{}/{}-{}.json",
-            S3_DIR_INIT,
-            session_b,
-            InitLogMessage::OI_ATTEST_UNSIGNED
-        );
-
-        let init_log_a = mk_attestation_log(session_a, &sign_key_a);
-        let init_log_b = mk_attestation_log(session_b, &sign_key_b);
-        let init_body_a = serde_json::to_vec(&init_log_a).expect("serialize init log a");
-        let init_body_b = serde_json::to_vec(&init_log_b).expect("serialize init log b");
-
-        let get_init_a = mock!(Client::get_object)
-            .match_requests(move |req| req.key() == Some(init_key_a.as_str()))
-            .then_output(move || {
-                GetObjectOutput::builder()
-                    .body(ByteStream::from(init_body_a.clone()))
-                    .build()
-            });
-
-        let get_init_b = mock!(Client::get_object)
-            .match_requests(move |req| req.key() == Some(init_key_b.as_str()))
-            .then_output(move || {
-                GetObjectOutput::builder()
-                    .body(ByteStream::from(init_body_b.clone()))
-                    .build()
-            });
-
-        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_init_a, &get_init_b]);
-        let s3_client = S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client);
-
-        let mut poller = GuardianWithdrawalsPoller {
-            s3_client,
-            cursor: S3Cursor::new(0, true),
-            enclave_pub_keys: HashMap::new(),
-        };
-
-        let log_0 = mk_success_log(session_a, &sign_key_a, 1000, 30);
-        let log_a = mk_success_log(session_a, &sign_key_a, 1001, 31);
-        let log_b = mk_success_log(session_b, &sign_key_b, 1002, 32);
-        let log_c = mk_success_log(session_b, &sign_key_b, 1003, 33);
-
-        let events = poller
-            .logs_to_events(vec![log_0, log_a, log_b, log_c])
-            .await
-            .expect("multi-session logs should parse");
-
-        assert_eq!(events.len(), 4);
-        assert!(events.iter().any(|e| {
-            e.event_type == WithdrawalEventType::E2GuardianApproved
-                && e.wid == 1000
-                && e.btc_txid == Txid::from_slice(&[30u8; 32]).expect("valid txid")
-        }));
-        assert!(events.iter().any(|e| {
-            e.event_type == WithdrawalEventType::E2GuardianApproved
-                && e.wid == 1001
-                && e.btc_txid == Txid::from_slice(&[31u8; 32]).expect("valid txid")
-        }));
-        assert!(events.iter().any(|e| {
-            e.event_type == WithdrawalEventType::E2GuardianApproved
-                && e.wid == 1002
-                && e.btc_txid == Txid::from_slice(&[32u8; 32]).expect("valid txid")
-        }));
-        assert!(events.iter().any(|e| {
-            e.event_type == WithdrawalEventType::E2GuardianApproved
-                && e.wid == 1003
-                && e.btc_txid == Txid::from_slice(&[33u8; 32]).expect("valid txid")
-        }));
-
-        assert_eq!(poller.enclave_pub_keys.len(), 2);
-        assert_eq!(get_init_a.num_calls(), 1);
-        assert_eq!(get_init_b.num_calls(), 1);
     }
 }

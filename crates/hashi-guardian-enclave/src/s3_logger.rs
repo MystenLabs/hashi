@@ -14,7 +14,7 @@ use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
-use hashi_types::guardian::s3_utils::S3Directory;
+use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use serde::de::DeserializeOwned;
@@ -244,11 +244,11 @@ impl S3Logger {
     // S3 Reads
     // ========================================================================
 
-    async fn ensure_no_duplicates_or_deletions(
-        &self,
-        dir: &S3Directory,
-    ) -> GuardianResult<Vec<String>> {
-        let prefix = dir.to_string();
+    /// Checks that all matching object keys do not have either deletions or overwrites.
+    /// The prefix can either correspond to a directory or a complete object key.
+    ///
+    /// Returns: list of keys.
+    async fn ensure_no_duplicates_or_deletions(&self, prefix: &str) -> GuardianResult<Vec<String>> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -260,7 +260,7 @@ impl S3Logger {
             let mut req = s3_client
                 .list_object_versions()
                 .bucket(s3_config.bucket_name())
-                .prefix(&prefix);
+                .prefix(prefix);
             if let Some(ref marker) = key_marker {
                 req = req.key_marker(marker);
             }
@@ -276,21 +276,30 @@ impl S3Logger {
                 ))
             })?;
 
-            for marker in response.delete_markers() {
-                if let Some(key) = marker.key() {
-                    return Err(S3Error(format!(
-                        "Delete marker found for key {} under prefix {}",
-                        key, prefix
-                    )));
-                }
+            if !response.delete_markers().is_empty() {
+                return Err(S3Error(format!(
+                    "Delete marker found under prefix {}",
+                    prefix
+                )));
             }
 
+            // https://docs.aws.amazon.com/AmazonS3/latest/API/API_ObjectVersion.html
             for version in response.versions() {
                 let key = version.key().ok_or_else(|| {
                     S3Error("Missing key in list_object_versions response".into())
                 })?;
 
+                // NOTE: If an object's lock expires, then all bets are off.
+                // For example, is_latest could be true even though an older version of it was deleted (post lock expiry).
+                if version.is_latest() != Some(true) {
+                    return Err(S3Error(format!(
+                        "Non-latest version found for key {} under prefix {}",
+                        key, prefix
+                    )));
+                }
+
                 if !seen_keys.insert(key.to_string()) {
+                    // this check is redundant as we ensure is_latest = true above
                     return Err(S3Error(format!(
                         "Duplicate version found for key {} under prefix {}",
                         key, prefix
@@ -298,50 +307,44 @@ impl S3Logger {
                 }
             }
 
-            let next_key_marker = response.next_key_marker().map(ToString::to_string);
-            let next_version_id_marker = response.next_version_id_marker().map(ToString::to_string);
-            let has_more = response.is_truncated() == Some(true)
-                || next_key_marker.is_some()
-                || next_version_id_marker.is_some();
-
-            if !has_more {
+            if response.is_truncated() != Some(true) {
                 break;
             }
 
-            key_marker = next_key_marker;
-            version_id_marker = next_version_id_marker;
+            key_marker = response.next_key_marker().map(ToString::to_string);
+            version_id_marker = response.next_version_id_marker().map(ToString::to_string);
+
+            if key_marker.is_none() {
+                return Err(S3Error(format!(
+                    "Truncated response but no next_key_marker for prefix {}",
+                    prefix
+                )));
+            }
         }
 
         Ok(seen_keys.into_iter().collect())
     }
 
-    // Batch read
+    /// Batch read. Callers must ensure that all objects with prefix `dir.to_string()` have
+    /// unexpired compliance-mode object locks.
+    ///
+    /// Returns: List of objects.
     pub async fn list_all_objects_in_dir<T: DeserializeOwned>(
         &self,
-        dir: &S3Directory,
+        dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<T>> {
-        let keys = self.ensure_no_duplicates_or_deletions(dir).await?;
-
+        let prefix = dir.to_string();
+        let keys = self.ensure_no_duplicates_or_deletions(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in &keys {
-            let obj: T = self.get_object(key).await?;
+            let obj: T = self.get_object_unsafe(key).await?;
             out.push(obj);
         }
-
-        // TOCTOU hardening: ensure no mutation (delete-marker / duplicate version) happened
-        // while we were reading the listed objects.
-        let new_keys = self.ensure_no_duplicates_or_deletions(dir).await?;
-        if keys != new_keys {
-            return Err(S3Error(
-                "new items added to bucket before the end of reads".to_string(),
-            ));
-        }
-
         Ok(out)
     }
 
-    // Point read
-    pub async fn get_object<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+    /// Point read. This method is unsafe to use since the bucket operator might've overwritten objects.
+    async fn get_object_unsafe<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -359,6 +362,16 @@ impl S3Logger {
                 ))
             })?;
 
+        // NOTE: Here we are explicitly assuming locks are unexpired.
+        if response.object_lock_mode() != Some(&ObjectLockMode::Compliance)
+            || response.object_lock_retain_until_date().is_none()
+        {
+            return Err(S3Error(format!(
+                "Missing or invalid object lock metadata for key {}",
+                key
+            )));
+        }
+
         let bytes = response.body.collect().await.map_err(|e| {
             S3Error(format!(
                 "Failed to read object body for key {}: {}",
@@ -373,6 +386,19 @@ impl S3Logger {
                 key, e
             ))
         })
+    }
+
+    /// Caller must ensure that the object has unexpired compliance-mode object lock.
+    pub async fn get_object<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+        let keys = self.ensure_no_duplicates_or_deletions(key).await?;
+        if keys.len() != 1 || keys[0] != key {
+            return Err(S3Error(format!(
+                "expected exactly one object for key {}, found {:?}",
+                key, keys
+            )));
+        }
+
+        self.get_object_unsafe::<T>(key).await
     }
 }
 

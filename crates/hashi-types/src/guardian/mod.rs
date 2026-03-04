@@ -26,7 +26,7 @@ pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 use crate::committee::CommitteeSignature;
 pub use crate::committee::SignedMessage as HashiSigned;
-use crate::guardian::s3_utils::S3Directory;
+use crate::guardian::s3_utils::S3HourScopedDirectory;
 pub use bitcoin::Address as BitcoinAddress;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
@@ -212,6 +212,8 @@ pub enum LogMessage {
 
 /// OI: operator_init
 /// PI: provisioner_init
+/// Init messages are expected to be logged in the following order:
+/// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
@@ -516,7 +518,7 @@ impl WithdrawalLogMessage {
             WithdrawalLogMessage::Failure { .. } => "failure",
         };
         format!(
-            "{}-wid{}-{}-{:08x}.json",
+            "{}-{}-{}-{:08x}.json",
             prefix,
             self.wid(),
             status,
@@ -538,15 +540,17 @@ impl LogMessage {
         !self.is_allowed_unsigned()
     }
 
-    /// The directory under which logs are written
+    /// The directory under which logs are written. Ends with a slash.
     pub fn log_dir(&self, timestamp_ms: UnixMillis) -> String {
         match self {
-            LogMessage::Init(_) => S3_DIR_INIT.to_string(),
+            LogMessage::Init(_) => format!("{}/", S3_DIR_INIT),
             LogMessage::Heartbeat { .. } => {
-                S3Directory::new(S3_DIR_HEARTBEAT, unix_millis_to_seconds(timestamp_ms)).to_string()
+                S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, unix_millis_to_seconds(timestamp_ms))
+                    .to_string()
             }
             LogMessage::Withdrawal(..) => {
-                S3Directory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms)).to_string()
+                S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms))
+                    .to_string()
             }
         }
     }
@@ -554,8 +558,8 @@ impl LogMessage {
     /// The name of the log.
     pub fn log_name(&self, prefix: &str) -> String {
         match self {
-            LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Init(init_message) => init_message.log_name(prefix),
+            LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
         }
     }
@@ -584,7 +588,7 @@ impl LogRecord {
     pub fn object_key(&self) -> String {
         let dir = self.message.log_dir(self.timestamp_ms);
         let log_name = self.message.log_name(&self.session_id);
-        format!("{}/{}", dir, log_name)
+        format!("{}{}", dir, log_name)
     }
 
     pub fn object_lock_duration(&self) -> Duration {
@@ -752,5 +756,81 @@ impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
             withdrawal_state: c,
             hashi_btc_master_pubkey: d,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::hashes::Hash as _;
+
+    fn set_timestamp(log: &mut LogRecord, timestamp_ms: UnixMillis) {
+        log.timestamp_ms = timestamp_ms;
+    }
+
+    #[test]
+    fn object_key_for_init_attestation_unsigned() {
+        let session_id = "session-a".to_string();
+        let signing_key = GuardianSignKeyPair::from([7u8; 32]);
+        let mut log = LogRecord::new(
+            session_id.clone(),
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                attestation: vec![1, 2, 3],
+                signing_public_key: signing_key.verification_key(),
+            })),
+            &signing_key,
+        );
+        set_timestamp(&mut log, 1_700_000_000_000);
+
+        assert_eq!(
+            log.object_key(),
+            "init/session-a-oi-attestation-unsigned.json"
+        );
+    }
+
+    #[test]
+    fn object_key_for_heartbeat() {
+        let session_id = "session-b".to_string();
+        let signing_key = GuardianSignKeyPair::from([8u8; 32]);
+        let seq = 42_u64;
+        let timestamp_ms = 1_700_000_000_000;
+
+        let mut log = LogRecord::new(
+            session_id.clone(),
+            LogMessage::Heartbeat { seq },
+            &signing_key,
+        );
+        set_timestamp(&mut log, timestamp_ms);
+
+        assert_eq!(
+            log.object_key(),
+            "heartbeat/2023/11/14/22/session-b-00000000000000000042.json"
+        );
+    }
+
+    #[test]
+    fn object_key_for_withdrawal_success() {
+        let session_id = "session-c".to_string();
+        let signing_key = GuardianSignKeyPair::from([9u8; 32]);
+        let timestamp_ms = 1_700_000_000_000;
+        let signed_request =
+            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, 999);
+        let (request_sign, request_data) = signed_request.into_parts();
+
+        let mut log = LogRecord::new(
+            session_id.clone(),
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+                txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
+                request_data: request_data.into(),
+                request_sign,
+                response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+            })),
+            &signing_key,
+        );
+        set_timestamp(&mut log, timestamp_ms);
+
+        let key = log.object_key();
+        assert!(key.starts_with("withdraw/2023/11/14/22/session-c-999-success-"));
+        assert!(key.ends_with(".json"));
     }
 }
