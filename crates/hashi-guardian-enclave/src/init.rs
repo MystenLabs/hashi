@@ -33,7 +33,7 @@ pub async fn operator_init(
     info!("Enclave state validated.");
 
     let (config, commitments, network) = request.into_parts();
-    let logger = S3Logger::new(config).await;
+    let logger = S3Logger::new(&config).await;
     logger.test_s3_connectivity().await?;
     info!("S3 connectivity check complete.");
 

@@ -16,3 +16,10 @@ sui:
 
 btc:
   rpc_url: "http://localhost:8332"
+  rpc_auth:
+    type: none
+    # type: user_pass
+    # username: "rpcuser"
+    # password: "rpcpassword"
+    # type: cookie_file
+    # path: "/path/to/.cookie"

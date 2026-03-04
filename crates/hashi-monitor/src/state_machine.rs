@@ -8,6 +8,7 @@ use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use crate::errors::MonitorError;
 use crate::errors::MonitorError::*;
+use crate::rpc::btc::BtcRpcClient;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -178,7 +179,11 @@ impl WithdrawalStateMachine {
     ///     - Returns `Ok(BtcFetchOutcome::Confirmed(None))` if confirmed and E3 ingest succeeded.
     ///     - Returns `Ok(BtcFetchOutcome::Confirmed(Some(err)))` if confirmed but E3 ingest produced a domain finding.
     ///     - Returns `Err` for BTC RPC/infrastructure failures.
-    pub fn try_fetch_btc_tx(&mut self, cfg: &Config) -> anyhow::Result<BtcFetchOutcome> {
+    pub fn try_fetch_btc_tx(
+        &mut self,
+        cfg: &Config,
+        btc_rpc_client: &BtcRpcClient,
+    ) -> anyhow::Result<BtcFetchOutcome> {
         if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
             return Ok(BtcFetchOutcome::NotExpected);
         }
@@ -186,7 +191,7 @@ impl WithdrawalStateMachine {
         let wid = self.wid;
         let cur_time = now_unix_seconds();
 
-        match crate::rpc::btc::lookup_btc_confirmation(cfg, btc_txid) {
+        match btc_rpc_client.lookup_confirmation(btc_txid) {
             Ok(Some(block_time)) => {
                 self.btc_checked_at = Some(cur_time);
                 let e_btc = WithdrawalEvent {
@@ -239,6 +244,7 @@ impl WithdrawalStateMachine {
 mod tests {
     use super::*;
     use crate::config::BtcConfig;
+    use crate::config::BtcRpcAuth;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use bitcoin::hashes::Hash as _;
@@ -269,6 +275,7 @@ mod tests {
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
+                rpc_auth: BtcRpcAuth::None,
             },
         }
     }

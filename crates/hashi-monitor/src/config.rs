@@ -1,8 +1,13 @@
-use crate::domain::WithdrawalEventType;
+use std::path::Path;
+use std::path::PathBuf;
+
+use anyhow::Context;
 use anyhow::anyhow;
+use bitcoincore_rpc::Auth;
 use hashi_types::guardian::S3Config;
 use serde::Deserialize;
-use std::path::Path;
+
+use crate::domain::WithdrawalEventType;
 
 /// Configuration for the cursorless batch auditor.
 #[derive(Clone, Debug, Deserialize)]
@@ -32,8 +37,38 @@ pub struct SuiConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct BtcConfig {
-    /// Sui RPC endpoint.
+    /// Bitcoin Core RPC endpoint.
     pub rpc_url: String,
+
+    /// Bitcoin Core RPC auth.
+    #[serde(default)]
+    pub rpc_auth: BtcRpcAuth,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BtcRpcAuth {
+    #[default]
+    None,
+    UserPass {
+        username: String,
+        password: String,
+    },
+    CookieFile {
+        path: PathBuf,
+    },
+}
+
+impl BtcRpcAuth {
+    pub fn to_bitcoincore_rpc_auth(&self) -> Auth {
+        match self {
+            BtcRpcAuth::None => Auth::None,
+            BtcRpcAuth::UserPass { username, password } => {
+                Auth::UserPass(username.clone(), password.clone())
+            }
+            BtcRpcAuth::CookieFile { path } => Auth::CookieFile(path.clone()),
+        }
+    }
 }
 
 fn default_clock_skew() -> u64 {
@@ -84,8 +119,10 @@ impl TryFrom<Vec<(WithdrawalEventType, u64)>> for NextEventDelays {
 
 impl Config {
     pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        let cfg = serde_yaml::from_slice(&bytes)?;
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read config file at {}", path.display()))?;
+        let cfg = serde_yaml::from_slice(&bytes)
+            .with_context(|| format!("failed to parse config yaml at {}", path.display()))?;
         Ok(cfg)
     }
 

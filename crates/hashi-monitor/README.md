@@ -52,6 +52,8 @@ sui:
 
 btc:
   rpc_url: "http://localhost:8332"
+  rpc_auth:
+    type: none
 ```
 
 ## Status

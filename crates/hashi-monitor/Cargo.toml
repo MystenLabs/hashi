@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bitcoin.workspace = true
+bitcoincore-rpc.workspace = true
 clap.workspace = true
 hashi-types = { path = "../hashi-types" }
 # enclave imported for s3 logger
@@ -15,3 +16,7 @@ serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+e2e-tests = { path = "../e2e-tests" }
+tempfile.workspace = true

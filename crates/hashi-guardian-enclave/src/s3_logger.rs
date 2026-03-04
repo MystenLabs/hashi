@@ -35,7 +35,7 @@ impl S3Logger {
     // Constructors
     // ========================================================================
 
-    pub async fn new(config: S3Config) -> Self {
+    pub async fn new(config: &S3Config) -> Self {
         info!("S3 Configuration:");
         info!("   Bucket: {}", config.bucket_name());
         info!("   Region: {}", config.region());
@@ -56,7 +56,10 @@ impl S3Logger {
             .await;
         let client = S3Client::new(&aws_config);
 
-        Self { client, config }
+        Self {
+            client,
+            config: config.clone(),
+        }
     }
 
     /// Construct an `S3Logger` from an already-configured S3 client.

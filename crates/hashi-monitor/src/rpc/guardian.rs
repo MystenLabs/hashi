@@ -1,7 +1,9 @@
+use crate::config::Config;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
+use anyhow::Context;
 use hashi_guardian_enclave::s3_logger::S3Logger;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::InitLogMessage;
@@ -10,7 +12,6 @@ use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
 use hashi_types::guardian::S3_DIR_INIT;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
-use hashi_types::guardian::S3Config;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -33,9 +34,9 @@ pub struct GuardianWithdrawalsPoller {
 
 impl GuardianWithdrawalsPoller {
     // Note: Throws an error if there is a connectivity issue with S3
-    pub async fn new(config: S3Config, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         let poller = Self {
-            s3_client: S3Logger::new(config).await,
+            s3_client: S3Logger::new(&cfg.guardian).await,
             cursor: S3Cursor::new(start, true),
             enclave_pub_keys: HashMap::new(),
         };
@@ -44,7 +45,7 @@ impl GuardianWithdrawalsPoller {
             .s3_client
             .test_s3_connectivity()
             .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .context("failed to verify guardian S3 connectivity")?;
         info!("S3 connectivity check complete.");
 
         Ok(poller)
@@ -57,7 +58,7 @@ impl GuardianWithdrawalsPoller {
             .s3_client
             .list_all_objects_in_dir::<LogRecord>(&self.cursor.0)
             .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .with_context(|| format!("failed to list guardian logs in {}", self.cursor.0))?;
 
         self.logs_to_events(all_guardian_logs).await
     }
@@ -72,7 +73,14 @@ impl GuardianWithdrawalsPoller {
                 return Err(anyhow::anyhow!("non-withdrawal logs found"));
             }
 
-            self.ensure_session_loaded(&log.session_id).await?;
+            self.ensure_session_loaded(&log.session_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load new session for session_id={}",
+                        log.session_id
+                    )
+                })?;
 
             let signing_pubkey = self
                 .enclave_pub_keys
@@ -80,7 +88,9 @@ impl GuardianWithdrawalsPoller {
                 .ok_or_else(|| anyhow::anyhow!("missing session signing pubkey"))?;
 
             let signed_timestamp = log.timestamp_ms;
-            let message = log.verify(signing_pubkey).map_err(|e| anyhow::anyhow!(e))?;
+            let message = log
+                .verify(signing_pubkey)
+                .with_context(|| "failed to verify guardian log signature")?;
 
             if let LogMessage::Withdrawal(withdrawal_message) = message
                 && let WithdrawalLogMessage::Success {
@@ -114,7 +124,7 @@ impl GuardianWithdrawalsPoller {
             .s3_client
             .get_object::<LogRecord>(&init_key)
             .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .with_context(|| format!("failed to fetch init log at key={init_key}"))?;
 
         let log = log
             .message

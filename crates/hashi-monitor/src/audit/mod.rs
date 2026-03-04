@@ -21,6 +21,7 @@ pub mod continuous;
 
 use crate::config::Config;
 use crate::errors::MonitorError;
+use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::WithdrawalStateMachine;
@@ -51,6 +52,7 @@ pub struct AuditorCore {
     // mutable
     pending: HashMap<WithdrawalID, WithdrawalStateMachine>,
     guardian_poller: GuardianWithdrawalsPoller,
+    btc_client: BtcRpcClient,
     // placeholder until we implement sui rpc
     sui_cursor: UnixSeconds,
 }
@@ -60,7 +62,8 @@ impl AuditorCore {
         Ok(Self {
             cfg: cfg.clone(),
             pending: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::new(cfg.guardian, cursors.guardian).await?,
+            guardian_poller: GuardianWithdrawalsPoller::new(&cfg, cursors.guardian).await?,
+            btc_client: BtcRpcClient::new(&cfg)?,
             sui_cursor: cursors.sui,
         })
     }
@@ -104,7 +107,8 @@ impl AuditorCore {
 
             // Fetch BTC info for expecting withdrawals
             if sm.expects(WithdrawalEventType::E3BtcConfirmed)
-                && let BtcFetchOutcome::Confirmed(Some(e)) = sm.try_fetch_btc_tx(&self.cfg)?
+                && let BtcFetchOutcome::Confirmed(Some(e)) =
+                    sm.try_fetch_btc_tx(&self.cfg, &self.btc_client)?
             {
                 errors.push(e);
             }
