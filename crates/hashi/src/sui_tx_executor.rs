@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
+use futures::TryStreamExt;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
@@ -966,4 +967,140 @@ pub async fn build_register_validator_tx(
     let transaction = builder.build(client).await?;
 
     Ok(transaction)
+}
+
+/// Sweeps SUI coins into the account's Address Balance
+pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
+    let signer = config.operator_private_key()?;
+    let sender = signer.public_key().derive_address();
+
+    // First we need to sweep any SUI into the account's AB so that subsequent txn can all be done
+    // in parallel, using its AB to pay for gas fees.
+    let balance = client
+        .state_client()
+        .get_balance(
+            sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default()
+                .with_owner(sender)
+                .with_coin_type(StructTag::sui()),
+        )
+        .await?
+        .into_inner()
+        .balance
+        .take()
+        .unwrap_or_default();
+
+    // Bootstrap by ensuring sender has at least 1 SUI in its AB
+    if balance.address_balance() < 1_000_000_000 {
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(sender);
+        let sender_arg = builder.pure(&sender);
+        let coin = builder.intent(CoinWithBalance::sui(1_000_000_000));
+        builder.move_call(
+            Function::new(
+                Address::TWO,
+                Identifier::from_static("coin"),
+                Identifier::from_static("send_funds"),
+            )
+            .with_type_args(vec![StructTag::sui().into()]),
+            vec![coin, sender_arg],
+        );
+
+        let transaction = builder.build(client).await?;
+
+        let signature = signer.sign_transaction(&transaction)?;
+
+        let response = client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(transaction.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("effects.status,effects.gas_used")),
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            )
+            .await?
+            .into_inner();
+
+        if !response.transaction().effects().status().success() {
+            return Err(anyhow::anyhow!(
+                "txn failed {:?}",
+                response.transaction().effects().status()
+            ));
+        }
+    }
+
+    let coin_struct = StructTag::coin(StructTag::sui().into());
+    let list_request = sui_rpc::proto::sui::rpc::v2::ListOwnedObjectsRequest::default()
+        .with_owner(sender)
+        .with_object_type(&coin_struct)
+        .with_page_size(500u32)
+        .with_read_mask(FieldMask::from_paths([
+            "object_id",
+            "version",
+            "digest",
+            "balance",
+            "owner",
+        ]));
+
+    let mut coins: Vec<ObjectInput> = client
+        .list_owned_objects(list_request)
+        .try_filter_map(|o| async move {
+            if let Ok(object_id) = o.object_id().parse() {
+                Ok(Some(ObjectInput::new(object_id)))
+            } else {
+                Ok(None)
+            }
+        })
+        .try_collect()
+        .await?;
+
+    while !coins.is_empty() {
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(sender);
+        let sender_arg = builder.pure(&sender);
+
+        let to_merge = coins.split_off(coins.len().saturating_sub(2000));
+
+        if let [first, rest @ ..] = to_merge
+            .into_iter()
+            .map(|coin| builder.object(coin))
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            for chunk in rest.chunks(500) {
+                builder.merge_coins(*first, chunk.to_vec());
+            }
+
+            builder.move_call(
+                Function::new(
+                    Address::TWO,
+                    Identifier::from_static("coin"),
+                    Identifier::from_static("send_funds"),
+                )
+                .with_type_args(vec![StructTag::sui().into()]),
+                vec![*first, sender_arg],
+            );
+        }
+
+        let transaction = builder.build(client).await?;
+
+        let signature = signer.sign_transaction(&transaction)?;
+
+        let response = client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(transaction.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("effects.status,effects.gas_used")),
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            )
+            .await?
+            .into_inner();
+
+        if !response.transaction().effects().status().success() {
+            return Err(anyhow::anyhow!(
+                "txn failed {:?}",
+                response.transaction().effects().status()
+            ));
+        }
+    }
+
+    Ok(())
 }

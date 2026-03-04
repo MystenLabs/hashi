@@ -297,6 +297,11 @@ impl Hashi {
 
         // Initialize
         let onchain_service = self.initialize_onchain_state().await?;
+
+        // Sweep any SUI in the configured account to AB to enable parallelization of txns
+        sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)
+            .await?;
+
         if self.is_in_current_committee() {
             let epoch = self.onchain_state().epoch();
             let mpc_manager = self
