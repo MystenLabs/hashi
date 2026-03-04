@@ -690,7 +690,7 @@ mod tests {
 
         // Verify all nodes are reachable via RPC before restart cycles
         for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
-            let client = hashi::grpc::Client::new_no_auth(node.https_url())?;
+            let client = hashi::grpc::Client::new_no_auth(node.endpoint_url())?;
             client
                 .get_service_info()
                 .await
@@ -726,7 +726,7 @@ mod tests {
 
             // Verify all nodes are reachable via RPC after restart
             for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
-                let client = hashi::grpc::Client::new_no_auth(node.https_url())?;
+                let client = hashi::grpc::Client::new_no_auth(node.endpoint_url())?;
                 client.get_service_info().await.unwrap_or_else(|e| {
                     panic!(
                         "Node {i} RPC failed after restart iteration {}: {e}",

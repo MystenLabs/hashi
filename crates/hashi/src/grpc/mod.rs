@@ -105,7 +105,7 @@ impl HttpService {
         let server_handle = Arc::new(
             sui_http::Builder::new()
                 .tls_config(tls_config)
-                .serve(self.inner.config.https_address(), router)
+                .serve(self.inner.config.listen_address(), router)
                 .unwrap(),
         );
         let local_addr = *server_handle.local_addr();

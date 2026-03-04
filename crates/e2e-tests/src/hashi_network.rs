@@ -30,8 +30,6 @@ pub struct ReconfigCompletionMessage {
 use crate::BitcoinNodeHandle;
 use crate::SuiNetworkHandle;
 
-const HTTPS_SCHEME: &str = "https://";
-const HTTP_SCHEME: &str = "http://";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const TEST_WEIGHT_DIVISOR: u16 = 100;
 
@@ -107,24 +105,16 @@ impl HashiNodeHandle {
         &self.service.as_ref().expect("Hashi node not started").1
     }
 
-    pub fn https_url(&self) -> String {
-        format!("{}{}", HTTPS_SCHEME, self.https_address())
-    }
-
-    pub fn http_url(&self) -> String {
-        format!("{}{}", HTTP_SCHEME, self.http_address())
+    pub fn endpoint_url(&self) -> &str {
+        self.config.endpoint_url().expect("endpoint_url not set")
     }
 
     pub fn metrics_url(&self) -> String {
-        format!("{}{}", HTTP_SCHEME, self.metrics_address())
+        format!("http://{}", self.metrics_address())
     }
 
-    pub fn https_address(&self) -> SocketAddr {
-        self.config.https_address()
-    }
-
-    pub fn http_address(&self) -> SocketAddr {
-        self.config.http_address()
+    pub fn listen_address(&self) -> SocketAddr {
+        self.config.listen_address()
     }
 
     pub fn metrics_address(&self) -> SocketAddr {
@@ -324,10 +314,10 @@ impl HashiNetworkBuilder {
         for node in &mut nodes[..initially_active] {
             node.start().await?;
             debug!(
-                "Created Hashi node {} at HTTPS: {}, HTTP: {}, Metrics: {}",
+                "Created Hashi node {} at listen: {}, endpoint: {}, metrics: {}",
                 node.config.validator_address()?,
-                node.https_address(),
-                node.http_address(),
+                node.listen_address(),
+                node.endpoint_url(),
                 node.metrics_address()
             );
         }

@@ -69,17 +69,16 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_address: Option<Address>,
 
-    /// Configure the address to listen on for https
+    /// The local address to bind the gRPC+TLS server on.
     ///
     /// Defaults to `0.0.0.0:443` if not specified.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub https_address: Option<SocketAddr>,
+    pub listen_address: Option<SocketAddr>,
 
-    /// Configure the address to listen on for http
-    ///
-    /// Defaults to `0.0.0.0:80` if not specified.
+    /// The publicly reachable URL advertised to other validators on-chain
+    /// (e.g. `https://validator1.example.com:8443`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub http_address: Option<SocketAddr>,
+    pub endpoint_url: Option<String>,
 
     /// Configure the address to listen on for http metrics
     ///
@@ -215,14 +214,13 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("no validator address configured"))
     }
 
-    pub fn https_address(&self) -> SocketAddr {
-        self.https_address
+    pub fn listen_address(&self) -> SocketAddr {
+        self.listen_address
             .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 443)))
     }
 
-    pub fn http_address(&self) -> SocketAddr {
-        self.http_address
-            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 80)))
+    pub fn endpoint_url(&self) -> Option<&str> {
+        self.endpoint_url.as_deref()
     }
 
     pub fn metrics_http_address(&self) -> SocketAddr {
@@ -326,8 +324,9 @@ impl Config {
         config.protocol_private_key = Some(Bls12381PrivateKey::generate(&mut rand::thread_rng()));
         config.encryption_private_key = Some(EncryptionPrivateKey::new(&mut rand::thread_rng()));
 
-        config.https_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
-        config.http_address = Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
+        let listen_addr = SocketAddr::from(([127, 0, 0, 1], get_available_port()));
+        config.listen_address = Some(listen_addr);
+        config.endpoint_url = Some(format!("https://{listen_addr}"));
         config.metrics_http_address =
             Some(SocketAddr::from(([127, 0, 0, 1], get_available_port())));
 
@@ -386,17 +385,17 @@ mod tests {
         let localhost = std::net::Ipv4Addr::new(127, 0, 0, 1);
 
         // Test addresses use localhost
-        assert_eq!(config.https_address().ip(), localhost);
-        assert_eq!(config.http_address().ip(), localhost);
+        assert_eq!(config.listen_address().ip(), localhost);
         assert_eq!(config.metrics_http_address().ip(), localhost);
 
         // Test ports are different
-        let https_port = config.https_address().port();
-        let http_port = config.http_address().port();
+        let listen_port = config.listen_address().port();
         let metrics_port = config.metrics_http_address().port();
-        assert_ne!(https_port, http_port);
-        assert_ne!(https_port, metrics_port);
-        assert_ne!(http_port, metrics_port);
+        assert_ne!(listen_port, metrics_port);
+
+        // Test endpoint_url is derived from listen_address
+        let endpoint_url = config.endpoint_url().unwrap();
+        assert_eq!(endpoint_url, format!("https://127.0.0.1:{listen_port}"));
 
         // Test TLS key is generated and valid PEM format
         assert!(config.tls_private_key.is_some());

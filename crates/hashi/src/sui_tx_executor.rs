@@ -873,7 +873,7 @@ pub async fn build_register_validator_tx(
     let protocol_public_key = protocol_key.public_key();
     let encryption_public_key = config.encryption_public_key()?;
     let validator_address = config.validator_address()?;
-    let https_url = format!("https://{}", config.https_address());
+    let endpoint_url = config.endpoint_url().map(|s| s.to_string());
     let tls_key = config.tls_public_key()?;
 
     // Fetch current Sui epoch for proof-of-possession
@@ -911,7 +911,6 @@ pub async fn build_register_validator_tx(
             .to_vec(),
     );
     let validator_address_arg = builder.pure(&validator_address);
-    let https_url_arg = builder.pure(&https_url);
     let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
 
     // 1. validator::register(hashi, sui_system, public_key, pop_signature, encryption_public_key)
@@ -930,15 +929,18 @@ pub async fn build_register_validator_tx(
         ],
     );
 
-    // 2. validator::update_https_address(hashi, validator_address, https_url)
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("validator"),
-            Identifier::from_static("update_https_address"),
-        ),
-        vec![hashi_arg, validator_address_arg, https_url_arg],
-    );
+    // 2. validator::update_https_address(hashi, validator_address, endpoint_url)
+    if let Some(url) = &endpoint_url {
+        let endpoint_url_arg = builder.pure(url);
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("update_https_address"),
+            ),
+            vec![hashi_arg, validator_address_arg, endpoint_url_arg],
+        );
+    }
 
     // 3. validator::update_tls_public_key(hashi, validator_address, tls_key)
     builder.move_call(
