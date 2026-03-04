@@ -90,7 +90,7 @@ public struct MemberInfo has store {
     ///
     /// This HTTPS address can be rotated and any such updates will take effect
     /// immediately.
-    https_address: String,
+    endpoint_url: String,
     /// ed25519 public key used to verify TLS self-signed x509 certs
     ///
     /// This public key can be rotated and any such updates will take effect
@@ -134,7 +134,7 @@ public(package) fun new_member(
         validator_address: validator_address,
         operator_address: validator_address,
         next_epoch_public_key: next_epoch_public_key,
-        https_address: std::vector::empty().to_string(),
+        endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
         next_epoch_encryption_public_key: encryption_public_key,
     };
@@ -167,17 +167,17 @@ public(package) fun set_next_epoch_public_key(
     member.next_epoch_public_key = next_epoch_public_key;
 }
 
-/// Set the https_address of the member.
-public(package) fun set_https_address(
+/// Set the endpoint_url of the member.
+public(package) fun set_endpoint_url(
     self: &mut CommitteeSet,
     validator_address: address,
-    https_address: String,
+    endpoint_url: String,
     ctx: &TxContext,
 ) {
     let member = self.member_mut(validator_address);
     member.assert_update_permitted(ctx);
 
-    member.https_address = https_address;
+    member.endpoint_url = endpoint_url;
 }
 
 /// Set the tls_public_key of the member.
@@ -232,9 +232,9 @@ fun next_epoch_public_key(self: &MemberInfo): &Element<UncompressedG1> {
     &self.next_epoch_public_key
 }
 
-/// Return the https_address of the node.
-fun https_address(self: &MemberInfo): &String {
-    &self.https_address
+/// Return the endpoint_url of the node.
+fun endpoint_url(self: &MemberInfo): &String {
+    &self.endpoint_url
 }
 
 /// Return the tls_public_key of the node.
@@ -438,7 +438,7 @@ fun create_member_info_for_testing(
         validator_address,
         operator_address: validator_address,
         next_epoch_public_key: public_key,
-        https_address: std::vector::empty().to_string(),
+        endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
         next_epoch_encryption_public_key: encryption_key,
     }

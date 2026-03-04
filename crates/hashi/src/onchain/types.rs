@@ -129,21 +129,20 @@ impl CommitteeSet {
             .members
             .values()
             .filter_map(|info| {
-                if let (Some(addr), Some(public_key)) =
-                    (info.https_address(), info.tls_public_key())
+                if let (Some(addr), Some(public_key)) = (info.endpoint_url(), info.tls_public_key())
                 {
                     Some((info.validator_address, addr, public_key))
                 } else {
                     None
                 }
             })
-            .filter_map(|(validator, https_address, tls_public_key)| {
+            .filter_map(|(validator, endpoint_url, tls_public_key)| {
                 let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
                     crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
                 } else {
                     crate::tls::make_client_config(tls_public_key)
                 };
-                let client = Client::new(https_address, tls_config)
+                let client = Client::new(endpoint_url, tls_config)
                     .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
                     .ok()?;
                 Some((validator, client))
@@ -171,7 +170,7 @@ impl CommitteeSet {
 
         // update client
         self.clients.remove(&validator);
-        if let Some(https_address) = &info.https_address
+        if let Some(endpoint_url) = &info.endpoint_url
             && let Some(tls_public_key) = &info.tls_public_key
         {
             let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
@@ -179,7 +178,7 @@ impl CommitteeSet {
             } else {
                 crate::tls::make_client_config(tls_public_key)
             };
-            if let Ok(client) = Client::new(https_address, tls_config)
+            if let Ok(client) = Client::new(endpoint_url, tls_config)
                 .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
             {
                 self.clients.insert(validator, client);
@@ -239,12 +238,12 @@ pub struct MemberInfo {
     /// beginning of the next epoch.
     pub next_epoch_public_key: BLS12381PublicKey,
 
-    /// The HTTPS network address where the instance of the `hashi` service for
-    /// this validator can be reached.
+    /// The publicly reachable URL where the `hashi` service for this validator
+    /// can be reached.
     ///
-    /// This HTTPS address can be rotated and any such updates will take effect
+    /// This URL can be rotated and any such updates will take effect
     /// immediately.
-    pub https_address: Option<http::Uri>,
+    pub endpoint_url: Option<http::Uri>,
 
     /// ed25519 public key used to verify TLS self-signed x509 certs
     ///
@@ -277,8 +276,8 @@ impl MemberInfo {
         self.tls_public_key.as_ref()
     }
 
-    pub fn https_address(&self) -> Option<&http::Uri> {
-        self.https_address.as_ref()
+    pub fn endpoint_url(&self) -> Option<&http::Uri> {
+        self.endpoint_url.as_ref()
     }
 
     pub fn next_epoch_encryption_public_key(&self) -> Option<&EncryptionPublicKey> {

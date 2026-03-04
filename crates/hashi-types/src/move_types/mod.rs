@@ -90,12 +90,12 @@ pub struct MemberInfo {
     /// beginning of the next epoch.
     pub next_epoch_public_key: Vec<u8>, //Element<UncompressedG1>,
 
-    /// The HTTPS network address where the instance of the `hashi` service for
-    /// this validator can be reached.
+    /// The publicly reachable URL where the `hashi` service for this validator
+    /// can be reached.
     ///
-    /// This HTTPS address can be rotated and any such updates will take effect
+    /// This URL can be rotated and any such updates will take effect
     /// immediately.
-    pub https_address: String,
+    pub endpoint_url: String,
 
     /// ed25519 public key used to verify TLS self-signed x509 certs
     ///

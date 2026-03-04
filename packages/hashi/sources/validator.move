@@ -61,14 +61,14 @@ public fun update_operator_address(
     event::emit(ValidatorUpdated { validator });
 }
 
-public fun update_https_address(
+public fun update_endpoint_url(
     self: &mut Hashi,
     validator: address,
-    https_address: String,
+    endpoint_url: String,
     ctx: &mut TxContext,
 ) {
     self.config().assert_version_enabled();
-    self.committee_set_mut().set_https_address(validator, https_address, ctx);
+    self.committee_set_mut().set_endpoint_url(validator, endpoint_url, ctx);
 
     event::emit(ValidatorUpdated { validator });
 }

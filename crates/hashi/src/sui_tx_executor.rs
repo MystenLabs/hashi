@@ -519,7 +519,7 @@ impl SuiTxExecutor {
     ///
     /// This builds and executes a PTB that:
     /// 1. Calls `validator::register` with the BLS public key, proof-of-possession, and encryption key
-    /// 2. Calls `validator::update_https_address` to set the validator's HTTPS endpoint
+    /// 2. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
     /// 3. Calls `validator::update_tls_public_key` to set the validator's TLS key
     /// 4. Optionally calls `validator::update_operator_address` if an operator address is provided
     ///
@@ -855,7 +855,7 @@ impl SuiTxExecutor {
 ///
 /// This builds a PTB that:
 /// 1. Calls `validator::register` with the BLS public key, proof-of-possession, and encryption key
-/// 2. Calls `validator::update_https_address` to set the validator's HTTPS endpoint
+/// 2. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
 /// 3. Calls `validator::update_tls_public_key` to set the validator's TLS key
 /// 4. Optionally calls `validator::update_operator_address` if an operator address is provided
 ///
@@ -929,14 +929,14 @@ pub async fn build_register_validator_tx(
         ],
     );
 
-    // 2. validator::update_https_address(hashi, validator_address, endpoint_url)
+    // 2. validator::update_endpoint_url(hashi, validator_address, endpoint_url)
     if let Some(url) = &endpoint_url {
         let endpoint_url_arg = builder.pure(url);
         builder.move_call(
             Function::new(
                 hashi_ids.package_id,
                 Identifier::from_static("validator"),
-                Identifier::from_static("update_https_address"),
+                Identifier::from_static("update_endpoint_url"),
             ),
             vec![hashi_arg, validator_address_arg, endpoint_url_arg],
         );

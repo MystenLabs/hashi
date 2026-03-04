@@ -688,7 +688,7 @@ async fn scrape_all_member_info(
                  validator_address,
                  operator_address,
                  next_epoch_public_key,
-                 https_address,
+                 endpoint_url,
                  tls_public_key,
                  next_epoch_encryption_public_key,
              }| {
@@ -698,7 +698,7 @@ async fn scrape_all_member_info(
                     next_epoch_public_key: convert_move_uncompressed_g1_pubkey(
                         &next_epoch_public_key,
                     ),
-                    https_address: https_address.try_into().ok(),
+                    endpoint_url: endpoint_url.try_into().ok(),
                     tls_public_key: tls_public_key.as_slice().try_into().ok(),
                     next_epoch_encryption_public_key: parse_encryption_public_key(
                         next_epoch_encryption_public_key.as_slice(),
@@ -745,7 +745,7 @@ async fn scrape_member_info(
         validator_address,
         operator_address,
         next_epoch_public_key,
-        https_address,
+        endpoint_url,
         tls_public_key,
         next_epoch_encryption_public_key,
     } = field.value;
@@ -754,7 +754,7 @@ async fn scrape_member_info(
         validator_address,
         operator_address,
         next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
-        https_address: https_address.try_into().ok(),
+        endpoint_url: endpoint_url.try_into().ok(),
         tls_public_key: tls_public_key.as_slice().try_into().ok(),
         next_epoch_encryption_public_key: parse_encryption_public_key(
             next_epoch_encryption_public_key.as_slice(),

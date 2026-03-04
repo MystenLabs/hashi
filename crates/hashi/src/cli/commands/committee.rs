@@ -99,8 +99,8 @@ pub async fn view_member(config: &CliConfig, address: &str) -> Result<()> {
                 "Operator:".bold(),
                 display::format_address_full(&m.operator_address)
             );
-            if let Some(uri) = &m.https_address {
-                println!("  {} {}", "HTTPS:".bold(), uri);
+            if let Some(uri) = &m.endpoint_url {
+                println!("  {} {}", "Endpoint:".bold(), uri);
             }
             println!("{}", "━".repeat(60).dimmed());
         }
