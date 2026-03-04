@@ -12,27 +12,13 @@ use serde;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use sui_crypto::SuiSigner;
 use sui_futures::service::Service;
-use sui_rpc::field::FieldMask;
-use sui_rpc::field::FieldMaskUtil;
-use sui_rpc::proto::sui::rpc::v2::BatchGetObjectsRequest;
-use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
-use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_sdk_types::Address;
-use sui_sdk_types::Argument;
-use sui_sdk_types::GasPayment;
 use sui_sdk_types::Identifier;
-use sui_sdk_types::Input;
-use sui_sdk_types::MoveCall;
-use sui_sdk_types::ProgrammableTransaction;
-use sui_sdk_types::SharedInput;
-use sui_sdk_types::StructTag;
-use sui_sdk_types::Transaction;
-use sui_sdk_types::TransactionExpiration;
-use sui_sdk_types::TransactionKind;
-use sui_sdk_types::bcs::ToBcs;
+use sui_transaction_builder::Function;
+use sui_transaction_builder::ObjectInput;
+use sui_transaction_builder::TransactionBuilder;
 use tracing::debug;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -374,164 +360,70 @@ async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Resu
     executor.execute_register_validator(config, None).await
 }
 
-pub async fn update_tls_public_key(
-    mut client: sui_rpc::Client,
-    config: &HashiConfig,
-) -> Result<()> {
-    let ids = config.hashi_ids();
+pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+    let hashi_ids = config.hashi_ids();
     let private_key = config.operator_private_key()?;
-    let sender = private_key.public_key().derive_address();
     let validator_address = config.validator_address()?;
-    let price = client.get_reference_gas_price().await?;
+    let tls_key = config.tls_public_key()?;
 
-    let gas_objects = client
-        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
-        .await?;
+    let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, private_key, hashi_ids);
 
-    let system_objects = client
-        .ledger_client()
-        .batch_get_objects(
-            BatchGetObjectsRequest::default()
-                .with_requests(vec![
-                    GetObjectRequest::new(&Address::from_static("0x5")),
-                    GetObjectRequest::new(&ids.hashi_object_id),
-                ])
-                .with_read_mask(FieldMask::from_str("*")),
-        )
-        .await?
-        .into_inner();
-    let hashi_system = system_objects.objects[1].object();
+    let mut builder = TransactionBuilder::new();
 
-    let tls_public_key = Input::Pure(config.tls_public_key()?.as_bytes().to_vec().to_bcs()?);
-    let validator_address_pure = Input::Pure(validator_address.to_bcs()?);
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let validator_address_arg = builder.pure(&validator_address);
+    let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
 
-    let pt = ProgrammableTransaction {
-        inputs: vec![
-            Input::Shared(SharedInput::new(
-                hashi_system.object_id().parse()?,
-                hashi_system.owner().version(),
-                true,
-            )),
-            validator_address_pure,
-            tls_public_key,
-        ],
-        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
-            package: ids.package_id,
-            module: Identifier::from_static("validator"),
-            function: Identifier::from_static("update_tls_public_key"),
-            type_arguments: vec![],
-            arguments: vec![Argument::Input(0), Argument::Input(1), Argument::Input(2)],
-        })],
-    };
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("validator"),
+            Identifier::from_static("update_tls_public_key"),
+        ),
+        vec![hashi_arg, validator_address_arg, tls_key_arg],
+    );
 
-    let transaction = Transaction {
-        kind: TransactionKind::ProgrammableTransaction(pt),
-        sender,
-        gas_payment: GasPayment {
-            objects: gas_objects
-                .iter()
-                .map(|o| (&o.object_reference()).try_into())
-                .collect::<Result<_, _>>()?,
-            owner: sender,
-            price,
-            budget: 1_000_000_000,
-        },
-        expiration: TransactionExpiration::None,
-    };
-
-    let signature = private_key.sign_transaction(&transaction)?;
-
-    let response = client
-        .execute_transaction_and_wait_for_checkpoint(
-            ExecuteTransactionRequest::new(transaction.into())
-                .with_signatures(vec![signature.into()])
-                .with_read_mask(FieldMask::from_str("*")),
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-        .into_inner();
-
+    let response = executor.execute(builder).await?;
     assert!(
         response.transaction().effects().status().success(),
-        "register failed"
+        "update_tls_public_key failed"
     );
 
     Ok(())
 }
 
 async fn start_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
-    let mut client = sui.client.clone();
-    let private_key = sui.user_keys.first().unwrap();
-    let sender = private_key.public_key().derive_address();
-    let price = client.get_reference_gas_price().await?;
+    let private_key = sui.user_keys.first().unwrap().clone();
+    let mut executor =
+        hashi::sui_tx_executor::SuiTxExecutor::new(sui.client.clone(), private_key, hashi_ids);
 
-    let gas_objects = client
-        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
-        .await?;
+    let mut builder = TransactionBuilder::new();
 
-    let system_objects = client
-        .ledger_client()
-        .batch_get_objects(
-            BatchGetObjectsRequest::default()
-                .with_requests(vec![
-                    GetObjectRequest::new(&Address::from_static("0x5")),
-                    GetObjectRequest::new(&hashi_ids.hashi_object_id),
-                ])
-                .with_read_mask(FieldMask::from_str("*")),
-        )
-        .await?
-        .into_inner();
-    let sui_system = system_objects.objects[0].object();
-    let hashi_system = system_objects.objects[1].object();
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let sui_system_arg = builder.object(
+        ObjectInput::new(Address::from_static("0x5"))
+            .as_shared()
+            .with_mutable(false),
+    );
 
-    let pt = ProgrammableTransaction {
-        inputs: vec![
-            Input::Shared(SharedInput::new(
-                sui_system.object_id().parse()?,
-                sui_system.owner().version(),
-                false,
-            )),
-            Input::Shared(SharedInput::new(
-                hashi_system.object_id().parse()?,
-                hashi_system.owner().version(),
-                true,
-            )),
-        ],
-        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
-            package: hashi_ids.package_id,
-            module: Identifier::from_static("reconfig"),
-            function: Identifier::from_static("start_reconfig"),
-            type_arguments: vec![],
-            arguments: vec![Argument::Input(1), Argument::Input(0)],
-        })],
-    };
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("reconfig"),
+            Identifier::from_static("start_reconfig"),
+        ),
+        vec![hashi_arg, sui_system_arg],
+    );
 
-    let transaction = Transaction {
-        kind: TransactionKind::ProgrammableTransaction(pt),
-        sender,
-        gas_payment: GasPayment {
-            objects: gas_objects
-                .iter()
-                .map(|o| (&o.object_reference()).try_into())
-                .collect::<Result<_, _>>()?,
-            owner: sender,
-            price,
-            budget: 1_000_000_000,
-        },
-        expiration: TransactionExpiration::None,
-    };
-
-    let signature = private_key.sign_transaction(&transaction)?;
-
-    let response = client
-        .execute_transaction_and_wait_for_checkpoint(
-            ExecuteTransactionRequest::new(transaction.into())
-                .with_signatures(vec![signature.into()])
-                .with_read_mask(FieldMask::from_str("*")),
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-        .into_inner();
+    let response = executor.execute(builder).await?;
 
     if let Some(status) = response.transaction().effects().status().error_opt() {
         dbg!(status);
@@ -551,10 +443,9 @@ async fn end_reconfig(
     bls_keys: &[(Address, Bls12381PrivateKey, EncryptionPublicKey)],
     mpc_public_key: Vec<u8>,
 ) -> Result<()> {
-    let mut client = sui.client.clone();
-    let private_key = sui.user_keys.first().unwrap();
-    let sender = private_key.public_key().derive_address();
-    let price = client.get_reference_gas_price().await?;
+    let client = sui.client.clone();
+    let private_key = sui.user_keys.first().unwrap().clone();
+
     let service_info = client
         .clone()
         .ledger_client()
@@ -562,6 +453,7 @@ async fn end_reconfig(
         .await?
         .into_inner();
     let epoch = service_info.epoch.unwrap_or(0);
+
     let committee_members: Vec<CommitteeMember> = bls_keys
         .iter()
         .map(|(addr, bls_key, enc_key)| {
@@ -584,67 +476,35 @@ async fn end_reconfig(
         .expect("Local signature verification failed");
     let signature_bytes = signed_message.signature_bytes();
     let signers_bitmap_bytes = signed_message.signers_bitmap_bytes();
-    let gas_objects = client
-        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
-        .await?;
-    let hashi_object = client
-        .ledger_client()
-        .batch_get_objects(
-            BatchGetObjectsRequest::default()
-                .with_requests(vec![GetObjectRequest::new(&hashi_ids.hashi_object_id)])
-                .with_read_mask(FieldMask::from_str("*")),
-        )
-        .await?
-        .into_inner();
-    let hashi_system = hashi_object.objects[0].object();
-    let pt = ProgrammableTransaction {
-        inputs: vec![
-            Input::Shared(SharedInput::new(
-                hashi_system.object_id().parse()?,
-                hashi_system.owner().version(),
-                true,
-            )),
-            Input::Pure(mpc_public_key.to_bcs()?),
-            Input::Pure(signature_bytes.to_vec().to_bcs()?),
-            Input::Pure(signers_bitmap_bytes.to_vec().to_bcs()?),
+
+    let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, private_key, hashi_ids);
+
+    let mut builder = TransactionBuilder::new();
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let mpc_public_key_arg = builder.pure(&mpc_public_key);
+    let signature_arg = builder.pure(&signature_bytes.to_vec());
+    let signers_bitmap_arg = builder.pure(&signers_bitmap_bytes.to_vec());
+
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("reconfig"),
+            Identifier::from_static("end_reconfig"),
+        ),
+        vec![
+            hashi_arg,
+            mpc_public_key_arg,
+            signature_arg,
+            signers_bitmap_arg,
         ],
-        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
-            package: hashi_ids.package_id,
-            module: Identifier::from_static("reconfig"),
-            function: Identifier::from_static("end_reconfig"),
-            type_arguments: vec![],
-            arguments: vec![
-                Argument::Input(0),
-                Argument::Input(1),
-                Argument::Input(2),
-                Argument::Input(3),
-            ],
-        })],
-    };
-    let transaction = Transaction {
-        kind: TransactionKind::ProgrammableTransaction(pt),
-        sender,
-        gas_payment: GasPayment {
-            objects: gas_objects
-                .iter()
-                .map(|o| (&o.object_reference()).try_into())
-                .collect::<Result<_, _>>()?,
-            owner: sender,
-            price,
-            budget: 1_000_000_000,
-        },
-        expiration: TransactionExpiration::None,
-    };
-    let tx_signature = private_key.sign_transaction(&transaction)?;
-    let response = client
-        .execute_transaction_and_wait_for_checkpoint(
-            ExecuteTransactionRequest::new(transaction.into())
-                .with_signatures(vec![tx_signature.into()])
-                .with_read_mask(FieldMask::from_str("*")),
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-        .into_inner();
+    );
+
+    let response = executor.execute(builder).await?;
     assert!(
         response.transaction().effects().status().success(),
         "end_reconfig failed: {:?}",

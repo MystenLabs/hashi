@@ -8,17 +8,23 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
-use crate::withdrawals::WithdrawalApproval;
+use crate::withdrawals::RequestApproval;
+use crate::withdrawals::WithdrawalTxCommitment;
+use crate::withdrawals::WithdrawalTxSigning;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
-use hashi_types::proto::SignWithdrawalApprovalRequest;
-use hashi_types::proto::SignWithdrawalApprovalResponse;
+use hashi_types::proto::SignRequestApprovalRequest;
+use hashi_types::proto::SignRequestApprovalResponse;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalConfirmationResponse;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTransactionResponse;
+use hashi_types::proto::SignWithdrawalTxConstructionRequest;
+use hashi_types::proto::SignWithdrawalTxConstructionResponse;
+use hashi_types::proto::SignWithdrawalTxSigningRequest;
+use hashi_types::proto::SignWithdrawalTxSigningResponse;
 use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
@@ -52,19 +58,37 @@ impl BridgeService for HttpService {
         }))
     }
 
-    async fn sign_withdrawal_approval(
+    /// Step 1: Validate and sign approval for a batch of unapproved withdrawal requests.
+    async fn sign_request_approval(
         &self,
-        request: Request<SignWithdrawalApprovalRequest>,
-    ) -> Result<Response<SignWithdrawalApprovalResponse>, Status> {
+        request: Request<SignRequestApprovalRequest>,
+    ) -> Result<Response<SignRequestApprovalResponse>, Status> {
         authenticate_caller(&request)?;
-        let approval = parse_withdrawal_approval(request.get_ref())
+        let approval = parse_request_approval(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_approval(&approval)
+            .validate_and_sign_request_approval(&approval)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        Ok(Response::new(SignRequestApprovalResponse {
+            member_signature: Some(member_signature),
+        }))
+    }
+
+    /// Step 2: Validate and sign a proposed withdrawal transaction construction.
+    async fn sign_withdrawal_tx_construction(
+        &self,
+        request: Request<SignWithdrawalTxConstructionRequest>,
+    ) -> Result<Response<SignWithdrawalTxConstructionResponse>, Status> {
+        authenticate_caller(&request)?;
+        let approval = parse_withdrawal_tx_commitment(request.get_ref())
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let member_signature = self
+            .inner
+            .validate_and_sign_withdrawal_tx_commitment(&approval)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        Ok(Response::new(SignWithdrawalApprovalResponse {
+        Ok(Response::new(SignWithdrawalTxConstructionResponse {
             member_signature: Some(member_signature),
         }))
     }
@@ -93,6 +117,23 @@ impl BridgeService for HttpService {
                 .iter()
                 .map(|sig| sig.to_byte_array().to_vec().into())
                 .collect(),
+        }))
+    }
+
+    /// Step 3: Validate and sign the BLS certificate over witness signatures.
+    async fn sign_withdrawal_tx_signing(
+        &self,
+        request: Request<SignWithdrawalTxSigningRequest>,
+    ) -> Result<Response<SignWithdrawalTxSigningResponse>, Status> {
+        authenticate_caller(&request)?;
+        let message = parse_withdrawal_tx_signing(request.get_ref())
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let member_signature = self
+            .inner
+            .validate_and_sign_withdrawal_tx_signing(&message)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        Ok(Response::new(SignWithdrawalTxSigningResponse {
+            member_signature: Some(member_signature),
         }))
     }
 
@@ -148,9 +189,14 @@ fn parse_deposit_request(
     })
 }
 
-fn parse_withdrawal_approval(
-    request: &SignWithdrawalApprovalRequest,
-) -> anyhow::Result<WithdrawalApproval> {
+fn parse_request_approval(request: &SignRequestApprovalRequest) -> anyhow::Result<RequestApproval> {
+    let request_id = parse_address(&request.request_id)?;
+    Ok(RequestApproval { request_id })
+}
+
+fn parse_withdrawal_tx_commitment(
+    request: &SignWithdrawalTxConstructionRequest,
+) -> anyhow::Result<WithdrawalTxCommitment> {
     let request_ids: Vec<Address> = request
         .request_ids
         .iter()
@@ -179,11 +225,32 @@ fn parse_withdrawal_approval(
         .collect();
     let txid = parse_address(&request.txid)?;
 
-    Ok(WithdrawalApproval {
+    Ok(WithdrawalTxCommitment {
         request_ids,
         selected_utxos,
         outputs,
         txid,
+    })
+}
+
+fn parse_withdrawal_tx_signing(
+    request: &SignWithdrawalTxSigningRequest,
+) -> anyhow::Result<WithdrawalTxSigning> {
+    let withdrawal_id = parse_address(&request.withdrawal_id)?;
+    let request_ids: Vec<Address> = request
+        .request_ids
+        .iter()
+        .map(|bytes| parse_address(bytes))
+        .collect::<anyhow::Result<_>>()?;
+    let signatures: Vec<Vec<u8>> = request
+        .signatures
+        .iter()
+        .map(|bytes| bytes.to_vec())
+        .collect();
+    Ok(WithdrawalTxSigning {
+        withdrawal_id,
+        request_ids,
+        signatures,
     })
 }
 

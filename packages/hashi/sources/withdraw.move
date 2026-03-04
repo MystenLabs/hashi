@@ -15,16 +15,61 @@ use sui::{clock::Clock, coin::{Self, Coin}, random::Random, sui::SUI};
 const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
 #[error]
 const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
+#[error]
+const ERequestAlreadyApproved: vector<u8> = b"Request has already been approved";
 
-public struct WithdrawalApproval has copy, drop, store {
+// MESSAGE STEP 1
+public struct RequestApprovalMessage has copy, drop, store {
+    request_id: address,
+}
+
+// MESSAGE STEP 2
+public struct WithdrawalCommitmentMessage has copy, drop, store {
     request_ids: vector<address>,
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
 }
 
-public struct WithdrawalConfirmation has copy, drop, store {
+// MESSAGE STEP 3
+public struct WithdrawalSignedMessage has copy, drop, store {
     withdrawal_id: address,
+    request_ids: vector<address>,
+    signatures: vector<vector<u8>>,
+}
+
+// MESSAGE STEP 4
+public struct WithdrawalConfirmationMessage has copy, drop, store {
+    withdrawal_id: address,
+}
+
+// ======== Message Constructors ========
+
+public(package) fun new_request_approval_message(request_id: address): RequestApprovalMessage {
+    RequestApprovalMessage { request_id }
+}
+
+public(package) fun new_withdrawal_commitment_message(
+    request_ids: vector<address>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
+    txid: address,
+): WithdrawalCommitmentMessage {
+    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid }
+}
+
+public(package) fun new_withdrawal_signed_message(
+    withdrawal_id: address,
+    request_ids: vector<address>,
+    signatures: vector<vector<u8>>,
+): WithdrawalSignedMessage {
+    WithdrawalSignedMessage { withdrawal_id, request_ids, signatures }
+}
+
+public(package) fun new_withdrawal_confirmation_message(
+    withdrawal_id: address,
+): WithdrawalConfirmationMessage {
+    WithdrawalConfirmationMessage { withdrawal_id }
 }
 
 // User entry-point for requesting a withdrawal
@@ -56,14 +101,31 @@ public fun request_withdrawal(
     hashi.withdrawal_queue_mut().insert_request(request);
 }
 
-// Leader picks request to process
-// - Do sanctions checks
-// - Do rate limit checks
-// - Coin selection and craft txn (outputs would be to withdrawal address and change goes to hashi pubkey)
-// - Broadcast txn to committee for agreement (maybe get preauth from guardian?)
-// - Send txn onchain to commit to the txn
-// - commit to utxos to use in input
-entry fun pick_withdrawal_for_processing(
+entry fun approve_request(
+    hashi: &mut Hashi,
+    request_id: address,
+    epoch: u64,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+) {
+    hashi.config().assert_version_enabled();
+    hashi.assert_unpaused();
+    hashi.assert_not_reconfiguring();
+
+    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
+
+    let approval = RequestApprovalMessage { request_id };
+
+    let threshold =
+        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
+    hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
+
+    hashi.withdrawal_queue_mut().approve_request(request_id);
+    hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
+}
+
+// TODO: Check withdrawal outputs against request_ids
+entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
     selected_utxos: vector<vector<u8>>,
@@ -83,16 +145,6 @@ entry fun pick_withdrawal_for_processing(
 
     let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
 
-    let requests = request_ids.map!(|request_id| {
-        let request = hashi.withdrawal_queue_mut().remove_request(request_id);
-        let (request, btc) = hashi::withdrawal_queue::request_into_parts(request);
-
-        // burn BTC
-        hashi.treasury_mut().burn(btc);
-
-        request
-    });
-
     // Selected UTXOs
     let epoch = hashi.committee_set().epoch();
     let selected_utxos = selected_utxos.map!(|raw| hashi::utxo::utxo_id_from_bcs(raw));
@@ -103,7 +155,7 @@ entry fun pick_withdrawal_for_processing(
     // outputs
     let outputs = outputs.map!(|raw| hashi::withdrawal_queue::output_utxo_from_bcs(raw));
 
-    let approval = WithdrawalApproval {
+    let approval = WithdrawalCommitmentMessage {
         request_ids,
         selected_utxos,
         outputs,
@@ -112,18 +164,25 @@ entry fun pick_withdrawal_for_processing(
 
     let threshold =
         threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    let approval = hashi
-        .current_committee()
-        .verify_certificate(approval, cert, threshold)
-        .into_message();
+    hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
 
-    let WithdrawalApproval {
+    let WithdrawalCommitmentMessage {
         outputs,
         txid,
         ..,
     } = approval;
 
-    let pending = hashi::withdrawal_queue::new_pending_withdrawal(
+    let requests = request_ids.map!(|request_id| {
+        let request = hashi.withdrawal_queue_mut().remove_approved_request(request_id);
+        let (request, btc) = hashi::withdrawal_queue::request_into_parts(request);
+
+        // burn BTC
+        hashi.treasury_mut().burn(btc);
+
+        request
+    });
+
+    let pending_withdrawal = hashi::withdrawal_queue::new_pending_withdrawal(
         requests,
         inputs,
         outputs,
@@ -132,8 +191,41 @@ entry fun pick_withdrawal_for_processing(
         r,
         ctx,
     );
-    pending.emit_withdrawal_picked_for_processing();
-    hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending);
+
+    pending_withdrawal.emit_withdrawal_picked_for_processing();
+    hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending_withdrawal);
+}
+
+entry fun sign_withdrawal(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    request_ids: vector<address>,
+    signatures: vector<vector<u8>>,
+    epoch: u64,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+    _ctx: &mut TxContext,
+) {
+    hashi.config().assert_version_enabled();
+    hashi.assert_unpaused();
+    // Do not allow scheduling of withdrawals during a reconfiguration.
+    hashi.assert_not_reconfiguring();
+
+    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
+
+    let approval = WithdrawalSignedMessage {
+        withdrawal_id,
+        request_ids,
+        signatures,
+    };
+
+    let threshold =
+        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
+    hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
+
+    let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
+
+    hashi.withdrawal_queue_mut().sign_pending_withdrawal(withdrawal_id, signatures);
 }
 
 entry fun confirm_withdrawal(
@@ -150,7 +242,7 @@ entry fun confirm_withdrawal(
 
     let threshold =
         threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    let confirmation = WithdrawalConfirmation { withdrawal_id };
+    let confirmation = WithdrawalConfirmationMessage { withdrawal_id };
     let _ = hashi
         .current_committee()
         .verify_certificate(confirmation, cert, threshold)
@@ -172,6 +264,8 @@ public fun cancel_withdrawal(
     ctx: &mut TxContext,
 ): Coin<BTC> {
     hashi.config().assert_version_enabled();
+
+    assert!(!hashi.withdrawal_queue().is_request_approved(request_id), ERequestAlreadyApproved);
 
     let request = hashi.withdrawal_queue_mut().remove_request(request_id);
 

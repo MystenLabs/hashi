@@ -11,13 +11,16 @@ service BridgeService {
   rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
   // Sign a deposit confirmation, confirming that bitcoin has been deposited into hashi
   rpc SignDepositConfirmation(SignDepositConfirmationRequest) returns (SignDepositConfirmationResponse);
-  // Sign approval for a proposed withdrawal transaction, confirming that the
-  // validator agrees the bitcoin transaction is valid and should be processed.
-  rpc SignWithdrawalApproval(SignWithdrawalApprovalRequest) returns (SignWithdrawalApprovalResponse);
-  // Sign a bitcoin withdrawal transaction. The validator checks that a matching
-  // PendingWithdrawal exists on-chain, then produces a partial signature.
+  // Step 1: Sign approval for a batch of unapproved withdrawal requests.
+  rpc SignRequestApproval(SignRequestApprovalRequest) returns (SignRequestApprovalResponse);
+  // Step 2: Sign approval for a proposed withdrawal transaction construction,
+  // confirming that the validator agrees the bitcoin transaction is valid.
+  rpc SignWithdrawalTxConstruction(SignWithdrawalTxConstructionRequest) returns (SignWithdrawalTxConstructionResponse);
+  // Step 2b: Sign a bitcoin withdrawal transaction (MPC Schnorr).
   rpc SignWithdrawalTransaction(SignWithdrawalTransactionRequest) returns (SignWithdrawalTransactionResponse);
-  // Sign committee approval to confirm a processed withdrawal on-chain.
+  // Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
+  rpc SignWithdrawalTxSigning(SignWithdrawalTxSigningRequest) returns (SignWithdrawalTxSigningResponse);
+  // Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
   rpc SignWithdrawalConfirmation(SignWithdrawalConfirmationRequest) returns (SignWithdrawalConfirmationResponse);
 }
 
@@ -79,8 +82,18 @@ message SignDepositConfirmationResponse {
   MemberSignature member_signature = 1;
 }
 
-// Maps to crate::withdrawals::WithdrawalApproval
-message SignWithdrawalApprovalRequest {
+// Maps to crate::withdrawals::RequestApproval
+message SignRequestApprovalRequest {
+  // Withdrawal request id to approve (32 bytes).
+  bytes request_id = 1;
+}
+
+message SignRequestApprovalResponse {
+  MemberSignature member_signature = 1;
+}
+
+// Maps to crate::withdrawals::WithdrawalTxConstruction
+message SignWithdrawalTxConstructionRequest {
   // Withdrawal request ids (each 32 bytes).
   repeated bytes request_ids = 1;
 
@@ -102,7 +115,7 @@ message WithdrawalOutput {
   bytes bitcoin_address = 2;
 }
 
-message SignWithdrawalApprovalResponse {
+message SignWithdrawalTxConstructionResponse {
   MemberSignature member_signature = 1;
 }
 
@@ -114,6 +127,22 @@ message SignWithdrawalTransactionRequest {
 message SignWithdrawalTransactionResponse {
   // One aggregated MPC Schnorr signature per transaction input.
   repeated bytes signatures_by_input = 1;
+}
+
+// Maps to crate::withdrawals::WithdrawalTxSigning
+message SignWithdrawalTxSigningRequest {
+  // Pending withdrawal id on Sui (32 bytes).
+  bytes withdrawal_id = 1;
+
+  // Withdrawal request ids (each 32 bytes).
+  repeated bytes request_ids = 2;
+
+  // One Schnorr signature per transaction input.
+  repeated bytes signatures = 3;
+}
+
+message SignWithdrawalTxSigningResponse {
+  MemberSignature member_signature = 1;
 }
 
 message SignWithdrawalConfirmationRequest {

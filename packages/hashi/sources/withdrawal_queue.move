@@ -5,11 +5,12 @@ use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
 
 const NUMBER_OF_RANDOM_BYTES: u16 = 32;
 
+#[error]
+const ERequestNotApproved: vector<u8> = b"Withdrawal request has not been approved";
+
 public struct WithdrawalRequestQueue has store {
-    // XXX bag or table?
     requests: Bag,
-    // XXX do we need a separate bag or can we just use the same bag?
-    pending_withdrawals: Bag, //vector<PendingWithdrawal>,
+    pending_withdrawals: Bag,
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
     num_consumed_presigs: u64,
@@ -18,9 +19,10 @@ public struct WithdrawalRequestQueue has store {
 public struct WithdrawalRequest has store {
     info: WithdrawalRequestInfo,
     btc: Balance<BTC>,
+    approved: bool,
 }
 
-public struct WithdrawalRequestInfo has drop, store {
+public struct WithdrawalRequestInfo has copy, drop, store {
     id: address,
     btc_amount: u64,
     bitcoin_address: vector<u8>, // 32 or 20 bytes?
@@ -30,14 +32,14 @@ public struct WithdrawalRequestInfo has drop, store {
 }
 
 public struct PendingWithdrawal has store {
-    txid: address,
     id: address,
+    txid: address,
     requests: vector<WithdrawalRequestInfo>,
     inputs: vector<Utxo>,
-    // change: Option<()>,
     outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
+    signatures: Option<vector<vector<u8>>>,
 }
 
 public struct OutputUtxo has copy, drop, store {
@@ -73,6 +75,7 @@ public(package) fun withdrawal_request(
             sui_tx_digest: *ctx.digest(),
         },
         btc,
+        approved: false,
     }
 }
 
@@ -98,7 +101,7 @@ public(package) fun new_pending_withdrawal(
     assert!(input_amount >= output_amount);
     let _fee = input_amount - output_amount;
 
-    // TODO Check that all requests have a corrisponding output and that the amount is X - required BTC fee
+    // TODO Check that all requests have a corresponding output and that the amount is X - required BTC fee
 
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(NUMBER_OF_RANDOM_BYTES);
@@ -109,10 +112,20 @@ public(package) fun new_pending_withdrawal(
         requests,
         inputs,
         outputs,
-        // fee,
         timestamp_ms: clock.timestamp_ms(),
         randomness,
+        signatures: option::none(),
     }
+}
+
+public(package) fun approve_request(self: &mut WithdrawalRequestQueue, request_id: address) {
+    let request: &mut WithdrawalRequest = self.requests.borrow_mut(request_id);
+    request.approved = true;
+}
+
+public(package) fun is_request_approved(self: &WithdrawalRequestQueue, request_id: address): bool {
+    let request: &WithdrawalRequest = self.requests.borrow(request_id);
+    request.approved
 }
 
 public(package) fun remove_request(
@@ -120,6 +133,15 @@ public(package) fun remove_request(
     id: address,
 ): WithdrawalRequest {
     self.requests.remove(id)
+}
+
+public(package) fun remove_approved_request(
+    self: &mut WithdrawalRequestQueue,
+    id: address,
+): WithdrawalRequest {
+    let request: WithdrawalRequest = self.requests.remove(id);
+    assert!(request.approved, ERequestNotApproved);
+    request
 }
 
 public(package) fun insert_request(self: &mut WithdrawalRequestQueue, request: WithdrawalRequest) {
@@ -138,6 +160,16 @@ public(package) fun remove_pending_withdrawal(
     withdrawal_id: address,
 ): PendingWithdrawal {
     self.pending_withdrawals.remove(withdrawal_id)
+}
+
+public(package) fun sign_pending_withdrawal(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
+    signatures: vector<vector<u8>>,
+) {
+    let pending: &mut PendingWithdrawal = self.pending_withdrawals.borrow_mut(withdrawal_id);
+    pending.signatures = option::some(signatures);
+    emit_withdrawal_signed(pending);
 }
 
 public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
@@ -163,7 +195,7 @@ public(package) fun reset_num_consumed_presigs(self: &mut WithdrawalRequestQueue
 public(package) fun request_into_parts(
     self: WithdrawalRequest,
 ): (WithdrawalRequestInfo, Balance<BTC>) {
-    let WithdrawalRequest { info, btc } = self;
+    let WithdrawalRequest { info, btc, approved: _ } = self;
     (info, btc)
 }
 
@@ -177,6 +209,7 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal) {
         outputs: _,
         timestamp_ms: _,
         randomness: _,
+        signatures: _,
     } = self;
 
     inputs.destroy!(|utxo| {
@@ -195,6 +228,12 @@ public(package) fun emit_withdrawal_requested(self: &WithdrawalRequest) {
     });
 }
 
+public(package) fun emit_withdrawal_approved(request_id: address) {
+    sui::event::emit(WithdrawalApprovedEvent {
+        request_id,
+    });
+}
+
 public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdrawal) {
     sui::event::emit(WithdrawalPickedForProcessingEvent {
         pending_id: self.id,
@@ -204,6 +243,14 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdraw
         outputs: self.outputs,
         timestamp_ms: self.timestamp_ms,
         randomness: self.randomness,
+    });
+}
+
+public(package) fun emit_withdrawal_signed(self: &PendingWithdrawal) {
+    sui::event::emit(WithdrawalSignedEvent {
+        withdrawal_id: self.id,
+        request_ids: self.requests.map_ref!(|info| info.id),
+        signatures: *self.signatures.borrow(),
     });
 }
 
@@ -220,6 +267,31 @@ public(package) fun emit_withdrawal_cancelled(self: &WithdrawalRequest) {
         requester_address: self.info.requester_address,
         btc_amount: self.info.btc_amount,
     });
+}
+
+#[test_only]
+public(package) fun new_pending_withdrawal_for_testing(
+    requests: vector<WithdrawalRequestInfo>,
+    inputs: vector<Utxo>,
+    outputs: vector<OutputUtxo>,
+    txid: address,
+    clock: &sui::clock::Clock,
+    ctx: &mut TxContext,
+): PendingWithdrawal {
+    PendingWithdrawal {
+        id: ctx.fresh_object_address(),
+        txid,
+        requests,
+        inputs,
+        outputs,
+        timestamp_ms: clock.timestamp_ms(),
+        randomness: vector[0, 0, 0, 0],
+        signatures: option::none(),
+    }
+}
+
+public(package) fun pending_withdrawal_id(self: &PendingWithdrawal): address {
+    self.id
 }
 
 public(package) fun requester_address(self: &WithdrawalRequest): address {
@@ -247,6 +319,10 @@ public struct WithdrawalRequestedEvent has copy, drop {
     sui_tx_digest: vector<u8>,
 }
 
+public struct WithdrawalApprovedEvent has copy, drop {
+    request_id: address,
+}
+
 public struct WithdrawalPickedForProcessingEvent has copy, drop {
     pending_id: address,
     txid: address,
@@ -255,6 +331,12 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
     outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
+}
+
+public struct WithdrawalSignedEvent has copy, drop {
+    withdrawal_id: address,
+    request_ids: vector<address>,
+    signatures: vector<vector<u8>>,
 }
 
 public struct WithdrawalConfirmedEvent has copy, drop {

@@ -215,6 +215,7 @@ pub struct WithdrawalRequestQueue {
 pub struct WithdrawalRequest {
     pub info: WithdrawalRequestInfo,
     pub btc: u64,
+    pub approved: bool,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestInfo type.
@@ -231,13 +232,14 @@ pub struct WithdrawalRequestInfo {
 /// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct PendingWithdrawal {
-    pub txid: Address,
     pub id: Address,
+    pub txid: Address,
     pub requests: Vec<WithdrawalRequestInfo>,
     pub inputs: Vec<Utxo>,
     pub outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
+    pub signatures: Option<Vec<Vec<u8>>>,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.
@@ -423,7 +425,9 @@ pub enum HashiEvent {
     DepositConfirmedEvent(DepositConfirmedEvent),
     ExpiredDepositDeletedEvent(ExpiredDepositDeletedEvent),
     WithdrawalRequestedEvent(WithdrawalRequestedEvent),
+    WithdrawalApprovedEvent(WithdrawalApprovedEvent),
     WithdrawalPickedForProcessingEvent(WithdrawalPickedForProcessingEvent),
+    WithdrawalSignedEvent(WithdrawalSignedEvent),
     WithdrawalConfirmedEvent(WithdrawalConfirmedEvent),
     UtxoSpentEvent(UtxoSpentEvent),
     SpentUtxoDeletedEvent(SpentUtxoDeletedEvent),
@@ -477,8 +481,14 @@ impl HashiEvent {
             WithdrawalRequestedEvent::MODULE_NAME => {
                 WithdrawalRequestedEvent::from_bcs(bcs.value())?.into()
             }
+            WithdrawalApprovedEvent::MODULE_NAME => {
+                WithdrawalApprovedEvent::from_bcs(bcs.value())?.into()
+            }
             WithdrawalPickedForProcessingEvent::MODULE_NAME => {
                 WithdrawalPickedForProcessingEvent::from_bcs(bcs.value())?.into()
+            }
+            WithdrawalSignedEvent::MODULE_NAME => {
+                WithdrawalSignedEvent::from_bcs(bcs.value())?.into()
             }
             WithdrawalConfirmedEvent::MODULE_NAME => {
                 WithdrawalConfirmedEvent::from_bcs(bcs.value())?.into()
@@ -854,6 +864,22 @@ impl From<WithdrawalRequestedEvent> for HashiEvent {
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalApprovedEvent {
+    pub request_id: Address,
+}
+
+impl MoveType for WithdrawalApprovedEvent {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "WithdrawalApprovedEvent";
+}
+
+impl From<WithdrawalApprovedEvent> for HashiEvent {
+    fn from(value: WithdrawalApprovedEvent) -> Self {
+        Self::WithdrawalApprovedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalPickedForProcessingEvent {
     pub pending_id: Address,
     pub txid: Address,
@@ -872,6 +898,24 @@ impl MoveType for WithdrawalPickedForProcessingEvent {
 impl From<WithdrawalPickedForProcessingEvent> for HashiEvent {
     fn from(value: WithdrawalPickedForProcessingEvent) -> Self {
         Self::WithdrawalPickedForProcessingEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalSignedEvent {
+    pub withdrawal_id: Address,
+    pub request_ids: Vec<Address>,
+    pub signatures: Vec<Vec<u8>>,
+}
+
+impl MoveType for WithdrawalSignedEvent {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "WithdrawalSignedEvent";
+}
+
+impl From<WithdrawalSignedEvent> for HashiEvent {
+    fn from(value: WithdrawalSignedEvent) -> Self {
+        Self::WithdrawalSignedEvent(value)
     }
 }
 

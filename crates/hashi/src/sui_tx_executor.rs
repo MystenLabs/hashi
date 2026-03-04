@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
+use futures::TryStreamExt;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
@@ -57,7 +58,7 @@ use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
-use crate::withdrawals::WithdrawalApproval;
+use crate::withdrawals::WithdrawalTxCommitment;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -620,7 +621,52 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Execute `withdraw::pick_withdrawal_for_processing` to commit to a withdrawal on-chain.
+    /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
+    pub async fn execute_approve_requests(
+        &mut self,
+        approvals: &[(Address, &CommitteeSignature)],
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+
+        for (request_id, cert) in approvals {
+            let request_id_arg = builder.pure(request_id);
+            let epoch_arg = builder.pure(&cert.epoch());
+            let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+            let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+            builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("withdraw"),
+                    Identifier::from_static("approve_request"),
+                ),
+                vec![
+                    hashi_arg,
+                    request_id_arg,
+                    epoch_arg,
+                    signature_arg,
+                    signers_bitmap_arg,
+                ],
+            );
+        }
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "approve_request failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::commit_withdrawal_tx` to commit to a withdrawal on-chain.
     ///
     /// The Move function expects:
     /// - `hashi: &mut Hashi`
@@ -628,11 +674,12 @@ impl SuiTxExecutor {
     /// - `selected_utxos: vector<vector<u8>>` — BCS-encoded `UtxoId`s
     /// - `outputs: vector<vector<u8>>` — BCS-encoded `OutputUtxo`s
     /// - `txid: address` — bitcoin transaction ID
+    /// - `epoch, signature, signers_bitmap` — committee certificate
     /// - `clock: &Clock`
     /// - `r: &Random`
-    pub async fn execute_pick_withdrawal_for_processing(
+    pub async fn execute_commit_withdrawal_tx(
         &mut self,
-        approval: &WithdrawalApproval,
+        approval: &WithdrawalTxCommitment,
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
@@ -661,8 +708,8 @@ impl SuiTxExecutor {
 
         let txid_arg = builder.pure(&approval.txid);
         let epoch_arg = builder.pure(&cert.epoch());
-        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
         let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
 
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
@@ -679,7 +726,7 @@ impl SuiTxExecutor {
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("pick_withdrawal_for_processing"),
+                Identifier::from_static("commit_withdrawal_tx"),
             ),
             vec![
                 hashi_arg,
@@ -698,7 +745,58 @@ impl SuiTxExecutor {
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "pick_withdrawal_for_processing failed: {:?}",
+                "commit_withdrawal_tx failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::sign_withdrawal` to store witness signatures on-chain.
+    pub async fn execute_sign_withdrawal(
+        &mut self,
+        withdrawal_id: &Address,
+        request_ids: &[Address],
+        signatures: &[Vec<u8>],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let request_ids_vec = request_ids.to_vec();
+        let request_ids_arg = builder.pure(&request_ids_vec);
+        let signatures_vec = signatures.to_vec();
+        let signatures_arg = builder.pure(&signatures_vec);
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("sign_withdrawal"),
+            ),
+            vec![
+                hashi_arg,
+                withdrawal_id_arg,
+                request_ids_arg,
+                signatures_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "sign_withdrawal failed: {:?}",
                 response.transaction().effects().status()
             );
         }
@@ -869,4 +967,140 @@ pub async fn build_register_validator_tx(
     let transaction = builder.build(client).await?;
 
     Ok(transaction)
+}
+
+/// Sweeps SUI coins into the account's Address Balance
+pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
+    let signer = config.operator_private_key()?;
+    let sender = signer.public_key().derive_address();
+
+    // First we need to sweep any SUI into the account's AB so that subsequent txn can all be done
+    // in parallel, using its AB to pay for gas fees.
+    let balance = client
+        .state_client()
+        .get_balance(
+            sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default()
+                .with_owner(sender)
+                .with_coin_type(StructTag::sui()),
+        )
+        .await?
+        .into_inner()
+        .balance
+        .take()
+        .unwrap_or_default();
+
+    // Bootstrap by ensuring sender has at least 1 SUI in its AB
+    if balance.address_balance() < 1_000_000_000 {
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(sender);
+        let sender_arg = builder.pure(&sender);
+        let coin = builder.intent(CoinWithBalance::sui(1_000_000_000));
+        builder.move_call(
+            Function::new(
+                Address::TWO,
+                Identifier::from_static("coin"),
+                Identifier::from_static("send_funds"),
+            )
+            .with_type_args(vec![StructTag::sui().into()]),
+            vec![coin, sender_arg],
+        );
+
+        let transaction = builder.build(client).await?;
+
+        let signature = signer.sign_transaction(&transaction)?;
+
+        let response = client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(transaction.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("effects.status,effects.gas_used")),
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            )
+            .await?
+            .into_inner();
+
+        if !response.transaction().effects().status().success() {
+            return Err(anyhow::anyhow!(
+                "txn failed {:?}",
+                response.transaction().effects().status()
+            ));
+        }
+    }
+
+    let coin_struct = StructTag::coin(StructTag::sui().into());
+    let list_request = sui_rpc::proto::sui::rpc::v2::ListOwnedObjectsRequest::default()
+        .with_owner(sender)
+        .with_object_type(&coin_struct)
+        .with_page_size(500u32)
+        .with_read_mask(FieldMask::from_paths([
+            "object_id",
+            "version",
+            "digest",
+            "balance",
+            "owner",
+        ]));
+
+    let mut coins: Vec<ObjectInput> = client
+        .list_owned_objects(list_request)
+        .try_filter_map(|o| async move {
+            if let Ok(object_id) = o.object_id().parse() {
+                Ok(Some(ObjectInput::new(object_id)))
+            } else {
+                Ok(None)
+            }
+        })
+        .try_collect()
+        .await?;
+
+    while !coins.is_empty() {
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(sender);
+        let sender_arg = builder.pure(&sender);
+
+        let to_merge = coins.split_off(coins.len().saturating_sub(2000));
+
+        if let [first, rest @ ..] = to_merge
+            .into_iter()
+            .map(|coin| builder.object(coin))
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            for chunk in rest.chunks(500) {
+                builder.merge_coins(*first, chunk.to_vec());
+            }
+
+            builder.move_call(
+                Function::new(
+                    Address::TWO,
+                    Identifier::from_static("coin"),
+                    Identifier::from_static("send_funds"),
+                )
+                .with_type_args(vec![StructTag::sui().into()]),
+                vec![*first, sender_arg],
+            );
+        }
+
+        let transaction = builder.build(client).await?;
+
+        let signature = signer.sign_transaction(&transaction)?;
+
+        let response = client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(transaction.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("effects.status,effects.gas_used")),
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            )
+            .await?
+            .into_inner();
+
+        if !response.transaction().effects().status().success() {
+            return Err(anyhow::anyhow!(
+                "txn failed {:?}",
+                response.transaction().effects().status()
+            ));
+        }
+    }
+
+    Ok(())
 }

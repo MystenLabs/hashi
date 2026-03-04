@@ -115,14 +115,12 @@ impl ScreenerServiceImpl {
                 &self.state.api_key,
                 tx_hash,
                 source_chain.merkle_blockchain_id(),
-                transaction_type,
             ),
             query_address_risk_level(
                 &self.state.http_client,
                 &self.state.api_key,
                 dest_addr,
                 dest_chain.merkle_blockchain_id(),
-                transaction_type,
             ),
         )
         .map_err(|e| {

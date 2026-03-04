@@ -405,6 +405,7 @@ pub struct WithdrawalRequest {
     pub timestamp_ms: u64,
     pub requester_address: Address,
     pub sui_tx_digest: Digest,
+    pub approved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
@@ -416,6 +417,7 @@ pub struct PendingWithdrawal {
     pub outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
+    pub signatures: Option<Vec<Vec<u8>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
