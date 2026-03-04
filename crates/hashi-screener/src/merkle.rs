@@ -1,7 +1,10 @@
 use crate::error::HashiScreenerError;
+use backon::ExponentialBuilder;
+use backon::Retryable;
 use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
+use std::time::Duration;
 
 /// Base URL for the MerkleScience API.
 /// API docs: <https://docs.merklescience.com/reference>
@@ -15,15 +18,6 @@ pub enum TransactionType {
 }
 
 impl TransactionType {
-    /// MerkleScience transaction type for advanced transaction screening.
-    /// See: <https://docs.merklescience.com/reference/transaction-screening-1>
-    pub fn as_i32(self) -> i32 {
-        match self {
-            Self::Deposit => 1,
-            Self::Withdrawal => 2,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Deposit => "deposit",
@@ -36,8 +30,6 @@ impl TransactionType {
 pub struct MerkleScienceRequest {
     identifier: String,
     blockchain: String,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    screening_type: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,10 +42,9 @@ pub async fn query_transaction_risk_level(
     api_key: &str,
     tx_hash: &str,
     blockchain: &str,
-    screening_type: TransactionType,
 ) -> Result<i64, HashiScreenerError> {
     let url = format!("{}/api/v4.2/transactions/", MERKLE_SCIENCE_BASE_URL);
-    query_risk_level(client, api_key, &url, tx_hash, blockchain, screening_type).await
+    query_risk_level(client, api_key, &url, tx_hash, blockchain).await
 }
 
 pub async fn query_address_risk_level(
@@ -61,10 +52,24 @@ pub async fn query_address_risk_level(
     api_key: &str,
     address: &str,
     blockchain: &str,
-    screening_type: TransactionType,
 ) -> Result<i64, HashiScreenerError> {
     let url = format!("{}/api/v4.2/addresses/", MERKLE_SCIENCE_BASE_URL);
-    query_risk_level(client, api_key, &url, address, blockchain, screening_type).await
+    query_risk_level(client, api_key, &url, address, blockchain).await
+}
+
+fn retry_policy() -> ExponentialBuilder {
+    // Recommended retry policy from merkle science docs:
+    // https://docs.merklescience.com/reference/retry-policy
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(30))
+        .with_max_delay(Duration::from_secs(3000))
+        .with_max_times(10)
+}
+
+#[derive(Debug)]
+enum ApiError {
+    Retryable(String),
+    Permanent(HashiScreenerError),
 }
 
 async fn query_risk_level(
@@ -73,49 +78,89 @@ async fn query_risk_level(
     url: &str,
     identifier: &str,
     blockchain: &str,
-    screening_type: TransactionType,
 ) -> Result<i64, HashiScreenerError> {
-    // TODO: Implement exponential backoff retry for known API Errors (rate limits, chain indexing etc)
     let request_body = MerkleScienceRequest {
         identifier: identifier.to_string(),
         blockchain: blockchain.to_string(),
-        screening_type: Some(screening_type.as_i32()),
     };
 
-    let response = client
-        .post(url)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .header("X-API-KEY", api_key)
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| {
-            HashiScreenerError::InternalError(format!("MerkleScience API request failed: {}", e))
-        })?;
+    let result = (|| async {
+        let response = client
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("X-API-KEY", api_key)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| ApiError::Retryable(format!("MerkleScience API request failed: {}", e)))?;
 
-    if !response.status().is_success() {
+        if response.status().is_success() {
+            let merkle_response: MerkleScienceResponse = response.json().await.map_err(|e| {
+                ApiError::Permanent(HashiScreenerError::InternalError(format!(
+                    "Failed to deserialize response: {}",
+                    e
+                )))
+            })?;
+
+            return merkle_response.risk_level.ok_or(ApiError::Permanent(
+                HashiScreenerError::InternalError(
+                    "Missing risk_level field in response".to_string(),
+                ),
+            ));
+        }
+
         let status = response.status().as_u16();
         let body = response
             .text()
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(HashiScreenerError::InternalError(format!(
-            "MerkleScience API returned HTTP {}: {}",
-            status, body
-        )));
+
+        // Transaction not Indexed (400) , Rate limits (429) and server errors (5xx) are retryable.
+        if status == 400 || status == 429 || status >= 500 {
+            return Err(ApiError::Retryable(format!("HTTP {status}: {body}",)));
+        }
+
+        // Other client errors (4xx) are not retryable.
+        Err(ApiError::Permanent(HashiScreenerError::InternalError(
+            format!("HTTP {}: {}", status, body),
+        )))
+    })
+    .retry(retry_policy())
+    .when(|e| matches!(e, ApiError::Retryable(_)))
+    .notify(|err, dur| {
+        tracing::warn!(
+            error = ?err,
+            retry_after = ?dur,
+            url = %url,
+            identifier = %identifier,
+            blockchain = %blockchain,
+            "MerkleScience API - Retrying Request",
+        );
+    })
+    .await;
+
+    match result {
+        Ok(risk_level) => Ok(risk_level),
+        Err(ApiError::Permanent(e)) => {
+            tracing::error!(
+                error = %e,
+                url = %url,
+                identifier = %identifier,
+                blockchain = %blockchain,
+                "MerkleScience API - Permanent Error",
+            );
+            Err(e)
+        }
+        Err(ApiError::Retryable(msg)) => {
+            tracing::error!(
+                error = %msg,
+                url = %url,
+                identifier = %identifier,
+                blockchain = %blockchain,
+                "MerkleScience API - Retries Exhausted",
+            );
+            Err(HashiScreenerError::InternalError(msg))
+        }
     }
-
-    let merkle_response: MerkleScienceResponse = response.json().await.map_err(|e| {
-        HashiScreenerError::InternalError(format!(
-            "MerkleScience API returned invalid response: {}",
-            e
-        ))
-    })?;
-
-    merkle_response
-        .risk_level
-        .ok_or(HashiScreenerError::InternalError(
-            "MerkleScience API returned invalid response: missing risk_level field".to_string(),
-        ))
 }

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+backon.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
