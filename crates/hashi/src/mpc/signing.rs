@@ -28,6 +28,10 @@ use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
 
+/// Number of consecutive `TooManyInvalidSignatures` failures before
+/// triggering presignature recovery.
+const DESYNC_RECOVERY_THRESHOLD: u32 = 2;
+
 pub struct SigningManager {
     address: Address,
     committee: Committee,
@@ -42,6 +46,8 @@ pub struct SigningManager {
     refill_divisor: usize,
     refill_tx: Arc<watch::Sender<u32>>,
     next_batch: Option<Presignatures>,
+    consecutive_sign_failures: u32,
+    recovery_tx: Arc<watch::Sender<bool>>,
 }
 
 impl SigningManager {
@@ -56,6 +62,7 @@ impl SigningManager {
         batch_index: u32,
         refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
+        recovery_tx: Arc<watch::Sender<bool>>,
     ) -> Self {
         let initial_presig_count = presignatures.len();
         Self {
@@ -71,6 +78,8 @@ impl SigningManager {
             refill_divisor,
             refill_tx,
             next_batch: None,
+            consecutive_sign_failures: 0,
+            recovery_tx,
         }
     }
 
@@ -98,6 +107,14 @@ impl SigningManager {
 
     pub fn epoch(&self) -> u64 {
         self.committee.epoch()
+    }
+
+    pub fn threshold(&self) -> u16 {
+        self.threshold
+    }
+
+    pub fn key_shares(&self) -> &avss::SharesForNode {
+        &self.key_shares
     }
 
     pub fn verifying_key(&self) -> G {
@@ -158,6 +175,7 @@ impl SigningManager {
                         )
                         .map_err(|e| SigningError::CryptoError(e.to_string()))?
                     } else {
+                        let _ = mgr.recovery_tx.send(true);
                         return Err(SigningError::PoolExhausted);
                     }
                 }
@@ -222,7 +240,7 @@ impl SigningManager {
             verifying_key: &verifying_key,
             derivation_address,
         };
-        match aggregate_signatures(
+        let result = match aggregate_signatures(
             params.message,
             params.public_nonce,
             params.beacon_value,
@@ -231,25 +249,39 @@ impl SigningManager {
             params.verifying_key,
             params.derivation_address,
         ) {
-            Ok(sig) => return Ok(sig),
+            Ok(sig) => Ok(sig),
             Err(FastCryptoError::InvalidSignature) => {
                 tracing::info!(
                     "Initial signature aggregation failed for {}, entering recovery",
                     sui_request_id,
                 );
+                recover_signature_with_reed_solomon(
+                    p2p_channel,
+                    sui_request_id,
+                    &params,
+                    &request,
+                    deadline,
+                    &mut all_partial_sigs,
+                    &mut remaining_peers,
+                )
+                .await
             }
-            Err(e) => return Err(SigningError::CryptoError(e.to_string())),
+            Err(e) => Err(SigningError::CryptoError(e.to_string())),
+        };
+        match &result {
+            Ok(_) => {
+                signing_manager.write().unwrap().consecutive_sign_failures = 0;
+            }
+            Err(SigningError::TooManyInvalidSignatures { .. }) => {
+                let mut mgr = signing_manager.write().unwrap();
+                mgr.consecutive_sign_failures += 1;
+                if mgr.consecutive_sign_failures >= DESYNC_RECOVERY_THRESHOLD {
+                    let _ = mgr.recovery_tx.send(true);
+                }
+            }
+            _ => {}
         }
-        recover_signature_with_reed_solomon(
-            p2p_channel,
-            sui_request_id,
-            &params,
-            &request,
-            deadline,
-            &mut all_partial_sigs,
-            &mut remaining_peers,
-        )
-        .await
+        result
     }
 }
 
@@ -551,6 +583,7 @@ mod tests {
         managers: Vec<Arc<RwLock<SigningManager>>>,
         verifying_key: G,
         refill_rx: watch::Receiver<u32>,
+        recovery_rx: watch::Receiver<bool>,
         n: u16,
         f: u16,
         t: u16,
@@ -606,6 +639,8 @@ mod tests {
 
             let (refill_tx, refill_rx) = watch::channel(0u32);
             let refill_tx = Arc::new(refill_tx);
+            let (recovery_tx, _recovery_rx) = watch::channel(false);
+            let recovery_tx = Arc::new(recovery_tx);
 
             let managers: Vec<_> = (0..n as usize)
                 .map(|i| {
@@ -639,6 +674,7 @@ mod tests {
                         0,
                         crate::constants::PRESIG_REFILL_DIVISOR,
                         refill_tx.clone(),
+                        recovery_tx.clone(),
                     );
                     Arc::new(RwLock::new(mgr))
                 })
@@ -648,6 +684,7 @@ mod tests {
                 managers,
                 verifying_key: vk,
                 refill_rx,
+                recovery_rx: _recovery_rx,
                 n,
                 f,
                 t,
@@ -1217,5 +1254,133 @@ mod tests {
 
         assert!(setup.refill_rx.has_changed().unwrap());
         assert_eq!(*setup.refill_rx.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pool_exhausted_triggers_recovery_signal() {
+        let setup = SigningTestSetup::new(4);
+        setup.exhaust_pool();
+
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"fail",
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+        assert!(setup.recovery_rx.has_changed().unwrap());
+        assert!(*setup.recovery_rx.borrow());
+    }
+
+    #[tokio::test]
+    async fn test_too_many_invalid_triggers_recovery_after_threshold() {
+        // n=4, t=2, f=1. All 3 peers return corrupt sigs → TooManyInvalidSignatures.
+        // First failure should NOT trigger recovery. Second should.
+        let setup = SigningTestSetup::new(4);
+        let beacon = S::zero();
+
+        // First signing failure.
+        let req1 = Address::new([0x01; 32]);
+        let (_, all_sigs1) = setup.prepare_all(b"msg1", &beacon, req1, Some(0));
+        let p2p1 =
+            canned_p2p_with_corruptions(&all_sigs1, &[1, 2, 3], &mut StdRng::seed_from_u64(100));
+        let result1 = SigningManager::sign(
+            &setup.managers[0],
+            &p2p1,
+            req1,
+            b"msg1",
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(matches!(
+            result1,
+            Err(SigningError::TooManyInvalidSignatures { .. })
+        ));
+        assert!(
+            !setup.recovery_rx.has_changed().unwrap(),
+            "recovery should not trigger after first failure"
+        );
+        assert_eq!(
+            setup.managers[0].read().unwrap().consecutive_sign_failures,
+            1
+        );
+
+        // Second signing failure → hits DESYNC_RECOVERY_THRESHOLD (2).
+        let req2 = Address::new([0x02; 32]);
+        let (_, all_sigs2) = setup.prepare_all(b"msg2", &beacon, req2, Some(0));
+        let p2p2 =
+            canned_p2p_with_corruptions(&all_sigs2, &[1, 2, 3], &mut StdRng::seed_from_u64(200));
+        let result2 = SigningManager::sign(
+            &setup.managers[0],
+            &p2p2,
+            req2,
+            b"msg2",
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(matches!(
+            result2,
+            Err(SigningError::TooManyInvalidSignatures { .. })
+        ));
+        assert!(setup.recovery_rx.has_changed().unwrap());
+        assert!(*setup.recovery_rx.borrow());
+    }
+
+    #[tokio::test]
+    async fn test_successful_sign_resets_failure_counter() {
+        let setup = SigningTestSetup::new(4);
+        let beacon = S::zero();
+
+        // Cause one failure to set consecutive_sign_failures = 1.
+        let req1 = Address::new([0x01; 32]);
+        let (_, all_sigs1) = setup.prepare_all(b"msg1", &beacon, req1, Some(0));
+        let p2p1 =
+            canned_p2p_with_corruptions(&all_sigs1, &[1, 2, 3], &mut StdRng::seed_from_u64(300));
+        let _ = SigningManager::sign(
+            &setup.managers[0],
+            &p2p1,
+            req1,
+            b"msg1",
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(
+            setup.managers[0].read().unwrap().consecutive_sign_failures,
+            1
+        );
+
+        // Successful sign resets counter.
+        let req2 = Address::new([0x02; 32]);
+        setup.prepare_all(b"msg2", &beacon, req2, Some(0));
+        let p2p2 = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p2,
+            req2,
+            b"msg2",
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, b"msg2", &sig);
+        assert_eq!(
+            setup.managers[0].read().unwrap().consecutive_sign_failures,
+            0
+        );
     }
 }

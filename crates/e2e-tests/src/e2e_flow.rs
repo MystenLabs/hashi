@@ -621,4 +621,84 @@ mod tests {
         .await?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_runtime_pool_exhaustion_recovery() -> Result<()> {
+        init_test_logging();
+        let mut networks = setup_test_networks().await?;
+        let deposit_amount_sats = 100_000u64;
+        let withdrawal_amount_sats = 20_000u64;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        // Exhaust all presigs on every node.
+        for node in networks.hashi_network.nodes() {
+            let sm = node.hashi().signing_manager();
+            let pool_size = sm.read().unwrap().initial_presig_count();
+            sm.write().unwrap().skip_consumed_presigs(pool_size);
+        }
+
+        // Submit withdrawal — the leader will fail MPC signing (`PoolExhausted`),
+        // triggering recovery. On a subsequent checkpoint the leader retries
+        // and the withdrawal completes.
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(
+            &mut networks,
+            &hashi,
+            user_key.clone(),
+            withdrawal_amount_sats,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_runtime_nonce_desync_recovery() -> Result<()> {
+        init_test_logging();
+        let mut networks = setup_test_networks().await?;
+        let deposit_amount_sats = 100_000u64;
+        let withdrawal_amount_sats = 20_000u64;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+
+        // First deposit + withdrawal to establish a consistent
+        // `num_consumed_presigs` on chain.
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+        {
+            let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+            withdraw_and_confirm(
+                &mut networks,
+                &hashi,
+                user_key.clone(),
+                withdrawal_amount_sats,
+            )
+            .await?;
+        }
+
+        // Desync each node's presig index by a unique amount.
+        // With 4 unique offsets, every node uses a different nonce,
+        // guaranteeing `TooManyInvalidSignatures` on all nodes.
+        for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+            node.hashi()
+                .signing_manager()
+                .write()
+                .unwrap()
+                .skip_consumed_presigs(i + 1);
+        }
+
+        // Second deposit + withdrawal. The leader's first signing attempts
+        // fail (nonce mismatch). After `DESYNC_RECOVERY_THRESHOLD` consecutive
+        // failures, recovery triggers and restores a consistent presig state.
+        // The leader then retries and the withdrawal completes.
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(
+            &mut networks,
+            &hashi,
+            user_key.clone(),
+            withdrawal_amount_sats,
+        )
+        .await?;
+        Ok(())
+    }
 }

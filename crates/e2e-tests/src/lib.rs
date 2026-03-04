@@ -413,6 +413,7 @@ mod tests {
                 mgr.committee.clone()
             };
             let (refill_tx, _) = tokio::sync::watch::channel(0u32);
+            let (recovery_tx, _) = tokio::sync::watch::channel(false);
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
                 committee,
@@ -423,6 +424,7 @@ mod tests {
                 0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
+                std::sync::Arc::new(recovery_tx),
             );
             node.hashi().set_signing_manager(signing_manager);
         }

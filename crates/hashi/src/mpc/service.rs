@@ -33,7 +33,7 @@ use hashi_types::move_types::ReconfigCompletionMessage;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
-const START_RECONFIG_MAX_ATTEMPTS: u32 = 3;
+const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
@@ -73,17 +73,22 @@ pub struct MpcService {
     key_ready_tx: watch::Sender<Option<G>>,
     refill_tx: Arc<watch::Sender<u32>>,
     refill_rx: watch::Receiver<u32>,
+    recovery_tx: Arc<watch::Sender<bool>>,
+    recovery_rx: watch::Receiver<bool>,
 }
 
 impl MpcService {
     pub fn new(hashi: Arc<Hashi>) -> (Self, MpcHandle) {
         let (key_ready_tx, key_ready_rx) = watch::channel(None);
         let (refill_tx, refill_rx) = watch::channel(0u32);
+        let (recovery_tx, recovery_rx) = watch::channel(false);
         let service = Self {
             inner: hashi,
             key_ready_tx,
             refill_tx: Arc::new(refill_tx),
             refill_rx,
+            recovery_tx: Arc::new(recovery_tx),
+            recovery_rx,
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -154,10 +159,24 @@ impl MpcService {
                 }
                 Ok(()) = self.refill_rx.changed() => {
                     let next_batch = *self.refill_rx.borrow();
-                    if let Err(e) = self.refill_presignatures(next_batch).await {
-                        // TODO: Failed refill can desynchronize this node's presignature
-                        // index from peers. Recovery requires presig state sync with peers.
-                        error!("Presignature refill failed: {e}");
+                    for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
+                        match self.refill_presignatures(next_batch).await {
+                            Ok(()) => break,
+                            Err(e) => {
+                                error!(
+                                    "Presignature refill attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}"
+                                );
+                                if attempt < MAX_PROTOCOL_ATTEMPTS {
+                                    tokio::time::sleep(RETRY_INTERVAL).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(()) = self.recovery_rx.changed() => {
+                    if *self.recovery_rx.borrow() {
+                        self.recover_presignatures().await;
+                        let _ = self.recovery_tx.send(false);
                     }
                 }
             }
@@ -279,6 +298,7 @@ impl MpcService {
             0,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
+            self.recovery_tx.clone(),
         );
         self.inner.set_or_init_signing_manager(signing_manager);
         Ok(())
@@ -342,6 +362,7 @@ impl MpcService {
             batch_index,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
+            self.recovery_tx.clone(),
         );
         signing_manager.skip_consumed_presigs(index_in_batch);
         self.inner.set_or_init_signing_manager(signing_manager);
@@ -351,6 +372,29 @@ impl MpcService {
              (num_consumed_presigs={num_consumed})"
         );
         Ok(())
+    }
+
+    async fn recover_presignatures(&self) {
+        let output = {
+            let sm = self.inner.signing_manager();
+            let sm = sm.read().unwrap();
+            DkgOutput {
+                public_key: sm.verifying_key(),
+                key_shares: sm.key_shares().clone(),
+                threshold: sm.threshold(),
+                commitments: std::collections::BTreeMap::new(),
+            }
+        };
+        let epoch = self.inner.onchain_state().epoch();
+        match self.recover_presigning_state(&output) {
+            Ok(()) => return,
+            Err(e) => {
+                warn!("Presig state recovery failed: {e}, falling back to fresh nonce generation");
+            }
+        }
+        if let Err(e) = self.prepare_signing(epoch, &output).await {
+            error!("Fresh nonce generation also failed: {e}. Node cannot sign.");
+        }
     }
 
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
@@ -381,7 +425,7 @@ impl MpcService {
         if hashi_epoch >= sui_epoch {
             return;
         }
-        for attempt in 1..=START_RECONFIG_MAX_ATTEMPTS {
+        for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             let result = async {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
@@ -392,10 +436,8 @@ impl MpcService {
                     return;
                 }
                 Err(e) => {
-                    warn!(
-                        "start_reconfig attempt {attempt}/{START_RECONFIG_MAX_ATTEMPTS} failed: {e}"
-                    );
-                    if attempt < START_RECONFIG_MAX_ATTEMPTS {
+                    warn!("start_reconfig attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}");
+                    if attempt < MAX_PROTOCOL_ATTEMPTS {
                         // Poll for pending epoch change while waiting, so we can
                         // return early if another node submitted start_reconfig.
                         let polls = (RETRY_INTERVAL.as_millis()
@@ -455,10 +497,24 @@ impl MpcService {
                 }
             }
         }
-        if let Err(e) = self.prepare_signing(target_epoch, &output).await {
-            // TODO: Node has valid key but no presignatures, can't sign.
-            // Recovery requires presig state sync with peers.
-            error!("Failed to init signing after key rotation to epoch {target_epoch}: {e}");
+        for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
+            match self.prepare_signing(target_epoch, &output).await {
+                Ok(()) => break,
+                Err(e) => {
+                    error!(
+                        "prepare_signing attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} \
+                         for epoch {target_epoch}: {e}"
+                    );
+                    if attempt < MAX_PROTOCOL_ATTEMPTS {
+                        tokio::time::sleep(RETRY_INTERVAL).await;
+                    } else {
+                        error!(
+                            "All prepare_signing attempts exhausted for epoch {target_epoch}. \
+                             Node cannot sign until next recovery trigger."
+                        );
+                    }
+                }
+            }
         }
     }
 
