@@ -21,6 +21,8 @@ public struct CommitteeSet has store {
     committees: Bag,
     //TODO do we want more info for this?
     pending_epoch_change: Option<u64>,
+    /// The MPC committee's threshold public key.
+    mpc_public_key: vector<u8>,
 }
 
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
@@ -29,6 +31,7 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         epoch: 0,
         committees: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
+        mpc_public_key: std::vector::empty(),
     }
 }
 
@@ -370,10 +373,25 @@ public(package) fun start_reconfig(
     epoch
 }
 
-public(package) fun end_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+public(package) fun end_reconfig(
+    self: &mut CommitteeSet,
+    mpc_public_key: vector<u8>,
+    _ctx: &TxContext,
+): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();
     assert!(self.has_committee(next_epoch));
+
+    // If the mpc_public_key is empty, then this is the initial reconfig where
+    // DKG is run and we need to set the produce pubkey.
+    if (self.mpc_public_key.is_empty()) {
+        self.mpc_public_key = mpc_public_key;
+    };
+
+    // On subsequent reconfigs where key resharing is performing instead of
+    // DKG, we need to ensure that the pubkey remains constant
+    assert!(self.mpc_public_key == mpc_public_key);
+
     self.epoch = next_epoch;
     next_epoch
 }
@@ -397,12 +415,8 @@ public fun create_for_testing(
     encryption_key: vector<u8>,
     ctx: &mut TxContext,
 ): CommitteeSet {
-    let mut committee_set = CommitteeSet {
-        members: sui::bag::new(ctx),
-        epoch: committee.epoch(),
-        committees: sui::bag::new(ctx),
-        pending_epoch_change: option::none(),
-    };
+    let mut committee_set = create(ctx);
+    committee_set.epoch = committee.epoch();
 
     // Add member info for each address so has_member checks pass
     member_addresses.do!(|addr| {

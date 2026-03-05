@@ -561,6 +561,7 @@ async fn scrape_hashi(
     committee_set
         .set_epoch(committees.epoch)
         .set_pending_epoch_change(committees.pending_epoch_change)
+        .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
         .set_committees(committees_per_epoch);
 

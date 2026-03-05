@@ -367,7 +367,8 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                     .hashi
                     .committees
                     .set_epoch(end_reconfig_event.epoch)
-                    .set_pending_epoch_change(None);
+                    .set_pending_epoch_change(None)
+                    .set_mpc_public_key(end_reconfig_event.mpc_public_key.clone());
             }
             HashiEvent::AbortReconfigEvent(abort_reconfig_event) => {
                 let mut state = state.state_mut();

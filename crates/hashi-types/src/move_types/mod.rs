@@ -53,6 +53,9 @@ pub struct CommitteeSet {
     pub epoch: u64,
     pub committees: Bag,
     pub pending_epoch_change: Option<u64>,
+
+    /// The MPC committee's threshold public key.
+    pub mpc_public_key: Vec<u8>,
 }
 
 /// Rust version of the Move sui::bag::Bag type.
@@ -988,6 +991,7 @@ impl From<StartReconfigEvent> for HashiEvent {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct EndReconfigEvent {
     pub epoch: u64,
+    pub mpc_public_key: Vec<u8>,
 }
 
 impl MoveType for EndReconfigEvent {

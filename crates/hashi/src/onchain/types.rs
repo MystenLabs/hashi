@@ -38,6 +38,10 @@ pub struct CommitteeSet {
     /// The current epoch.
     epoch: u64,
     pending_epoch_change: Option<u64>,
+
+    /// The MPC committee's threshold public key.
+    mpc_public_key: Vec<u8>,
+
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
     committees: BTreeMap<u64, Committee>,
@@ -54,6 +58,7 @@ impl CommitteeSet {
             tls_public_key_to_address: BTreeMap::new(),
             epoch: 0,
             pending_epoch_change: None,
+            mpc_public_key: Vec::new(),
             committees_id,
             committees: BTreeMap::new(),
             tls_private_key: None,
@@ -93,6 +98,10 @@ impl CommitteeSet {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    pub fn mpc_public_key(&self) -> &[u8] {
+        &self.mpc_public_key
     }
 
     pub fn pending_epoch_change(&self) -> Option<u64> {
@@ -203,6 +212,12 @@ impl CommitteeSet {
 
     pub fn set_pending_epoch_change(&mut self, pending_epoch_change: Option<u64>) -> &mut Self {
         self.pending_epoch_change = pending_epoch_change;
+        self
+    }
+
+    pub fn set_mpc_public_key(&mut self, mpc_public_key: Vec<u8>) -> &mut Self {
+        assert!(self.mpc_public_key.is_empty() || self.mpc_public_key == mpc_public_key);
+        self.mpc_public_key = mpc_public_key;
         self
     }
 

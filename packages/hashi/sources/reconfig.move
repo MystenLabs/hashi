@@ -49,8 +49,8 @@ entry fun end_reconfig(
     let threshold = threshold::certificate_threshold(next_committee.total_weight() as u16) as u64;
     let _cert = next_committee.verify_certificate(message, sig, threshold);
     self.withdrawal_queue_mut().reset_num_consumed_presigs();
-    let epoch = self.committee_set_mut().end_reconfig(ctx);
-    sui::event::emit(EndReconfigEvent { epoch });
+    let epoch = self.committee_set_mut().end_reconfig(mpc_public_key, ctx);
+    sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
 }
 
 // TODO: Re-enable with committee certificate verification.
@@ -64,6 +64,8 @@ public struct StartReconfigEvent has copy, drop {
 
 public struct EndReconfigEvent has copy, drop {
     epoch: u64,
+    /// The MPC committee's threshold public key.
+    mpc_public_key: vector<u8>,
 }
 
 #[allow(unused_field)]

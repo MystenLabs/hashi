@@ -510,32 +510,31 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
-        // Determine whether this is an initial DKG (no previous committee) or
-        // a key rotation (previous committee exists).
-        let has_previous_committee = {
-            let state = self.inner.onchain_state().state();
-            let committees = &state.hashi().committees;
-            let source_epoch = committees.epoch();
-            // At genesis, source_epoch == target_epoch (both are the Sui epoch
-            // when start_reconfig was called), so we must not treat the newly
-            // created pending committee as a "previous" committee.
-            source_epoch != target_epoch && committees.committees().contains_key(&source_epoch)
-        };
+        // Determine whether this is an initial DKG or a key KeyRotation
+        // based on if we already have a committed to mpc_public_key.
+        let run_dkg = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .mpc_public_key()
+            .is_empty();
 
         // Create the MpcManager once before the retry loop so retries reuse
         // the same manager (and its accumulated messages) instead of generating
         // fresh random dealer messages that conflict with previously sent ones.
-        if has_previous_committee {
-            if let Err(e) = self.setup_key_rotation(target_epoch) {
+        if run_dkg {
+            if let Err(e) = self.setup_initial_dkg(target_epoch) {
                 error!(
-                    "Failed to set up key rotation for epoch {}: {e}",
+                    "Failed to set up initial DKG for epoch {}: {e}",
                     target_epoch
                 );
                 return;
             }
-        } else if let Err(e) = self.setup_initial_dkg(target_epoch) {
+        } else if let Err(e) = self.setup_key_rotation(target_epoch) {
             error!(
-                "Failed to set up initial DKG for epoch {}: {e}",
+                "Failed to set up key rotation for epoch {}: {e}",
                 target_epoch
             );
             return;
@@ -545,10 +544,10 @@ impl MpcService {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 return;
             }
-            let result = if has_previous_committee {
-                self.run_key_rotation(target_epoch).await
-            } else {
+            let result = if run_dkg {
                 self.run_dkg().await
+            } else {
+                self.run_key_rotation(target_epoch).await
             };
             match result {
                 Ok(output) => break output,
