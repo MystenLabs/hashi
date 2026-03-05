@@ -2,14 +2,21 @@ use crate::domain::now_unix_seconds;
 use crate::rpc::guardian::GuardianLogDir;
 use crate::rpc::guardian::GuardianPollerCore;
 use crate::rpc::guardian::VerifiedLogRecord;
-use hashi_guardian_enclave::NO_HEARTBEAT_PERIOD;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::S3Config;
-use hashi_types::guardian::s3_utils::SECONDS_PER_HOUR;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use tracing::info;
+
+/// Maximum acceptable heartbeat age for the selected "live" session.
+/// Set to HEARTBEAT_INTERVAL + grace period to account for clock skew and retries.
+const LIVE_SESSION_MAX_AGE: Duration = Duration::from_mins(3);
+
+/// If another session has a heartbeat newer than this window, it is considered still active.
+/// MAX_HEARTBEAT_FAILURES * HEARTBEAT_INTERVAL + grace period to account for retries and clock skew.
+const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
 #[derive(Debug, Clone)]
 pub struct GuardianSessionInfo {
@@ -18,59 +25,78 @@ pub struct GuardianSessionInfo {
     pub last_heartbeat: UnixSeconds,
 }
 
-/// Implements check A of IOP-225
+/// Implements check A of IOP-225.
 pub async fn kp_heartbeat_audits(cfg: &S3Config) -> anyhow::Result<String> {
-    let one_hour_ago = now_unix_seconds().saturating_sub(SECONDS_PER_HOUR);
+    let summary = read_recent_heartbeat_summary(cfg).await?;
+    let now = now_unix_seconds();
+    select_live_session(
+        &summary,
+        now,
+        LIVE_SESSION_MAX_AGE.as_secs(),
+        OTHER_SESSION_QUIET_PERIOD.as_secs(),
+    )
+}
+
+async fn read_recent_heartbeat_summary(cfg: &S3Config) -> anyhow::Result<Vec<GuardianSessionInfo>> {
+    let one_hour_ago = now_unix_seconds().saturating_sub(60 * 60);
     let mut poller = GuardianPollerCore::new(cfg, one_hour_ago, GuardianLogDir::Heartbeat).await?;
     let mut logs = Vec::new();
     logs.extend(poller.read_cur_dir().await?);
     poller.advance_cursor();
     logs.extend(poller.read_cur_dir().await?);
 
-    let mut summary = summarize_logs_by_session(logs)?;
+    summarize_logs_by_session(logs)
+}
+
+/// Checks that exactly one session is live and returns its ID.
+fn select_live_session(
+    summary: &[GuardianSessionInfo],
+    now: UnixSeconds,
+    live_session_max_age_secs: UnixSeconds,
+    other_session_quiet_secs: UnixSeconds,
+) -> anyhow::Result<String> {
+    let mut summary = summary.to_vec();
+
     summary.sort_by_key(|s| s.last_heartbeat);
-    let target_session_info = summary
+    let live_session_info = summary
         .last()
         .ok_or_else(|| anyhow::anyhow!("no heartbeat logs found in the most recent 2 hours"))?;
-    let target_session_id = &target_session_info.session_id;
+    let live_session_id = &live_session_info.session_id;
 
-    let now = now_unix_seconds();
-    // currently set to 10 mins
-    let threshold_secs = NO_HEARTBEAT_PERIOD.as_secs();
-    let target_age_secs = now.saturating_sub(target_session_info.last_heartbeat);
-    // TODO: Should we use a tighter bound for the new enclave's timestamp?
-    if target_age_secs > threshold_secs {
+    let live_session_age_secs = now.saturating_sub(live_session_info.last_heartbeat);
+    if live_session_age_secs > live_session_max_age_secs {
         anyhow::bail!(
-            "latest session {} is stale: last heartbeat {}s ago (threshold {}s)",
-            target_session_id,
-            target_age_secs,
-            threshold_secs
+            "latest session {} is stale: last heartbeat {}s ago (expected <= {}s)",
+            live_session_id,
+            live_session_age_secs,
+            live_session_max_age_secs
         );
     }
 
     let active_other_sessions = summary
         .iter()
-        .filter(|s| s.session_id != *target_session_id)
+        .filter(|s| s.session_id != *live_session_id)
         .filter_map(|s| {
             let age_secs = now.saturating_sub(s.last_heartbeat);
-            (age_secs < threshold_secs).then(|| format!("{} ({}s ago)", s.session_id, age_secs))
+            (age_secs < other_session_quiet_secs)
+                .then(|| format!("{} ({}s ago)", s.session_id, age_secs))
         })
         .collect::<Vec<_>>();
     if !active_other_sessions.is_empty() {
         anyhow::bail!(
             "other sessions are still active within {}s: {}",
-            threshold_secs,
+            other_session_quiet_secs,
             active_other_sessions.join(", ")
         );
     }
 
     info!(
         "Selected session {} with a heartbeat {}s ago",
-        target_session_id,
-        now.saturating_sub(target_session_info.last_heartbeat)
+        live_session_id,
+        now.saturating_sub(live_session_info.last_heartbeat)
     );
 
-    Ok(target_session_id.clone())
+    Ok(live_session_id.clone())
 }
 
 /// Aggregates verified heartbeat logs into [first, last] bounds per session.
@@ -103,4 +129,68 @@ fn summarize_logs_by_session(
             },
         )
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_live_session_picks_latest_session() {
+        let now = 1_000;
+        let summary = vec![
+            GuardianSessionInfo {
+                session_id: "old".to_string(),
+                first_heartbeat: 100,
+                last_heartbeat: 300,
+            },
+            GuardianSessionInfo {
+                session_id: "new".to_string(),
+                first_heartbeat: 600,
+                last_heartbeat: 990,
+            },
+        ];
+
+        let target =
+            select_live_session(&summary, now, 100, 600).expect("must select newest session");
+        assert_eq!(target, "new");
+    }
+
+    #[test]
+    fn select_live_session_fails_when_empty() {
+        let err = select_live_session(&[], 1_000, 100, 600).expect_err("must fail");
+        assert!(err.to_string().contains("no heartbeat logs found"));
+    }
+
+    #[test]
+    fn select_live_session_fails_when_latest_stale() {
+        let summary = vec![GuardianSessionInfo {
+            session_id: "only".to_string(),
+            first_heartbeat: 100,
+            last_heartbeat: 200,
+        }];
+
+        let err = select_live_session(&summary, 1_000, 100, 600).expect_err("must fail");
+        assert!(err.to_string().contains("stale"));
+    }
+
+    #[test]
+    fn select_live_session_fails_when_other_session_is_active() {
+        let now = 1_000;
+        let summary = vec![
+            GuardianSessionInfo {
+                session_id: "old".to_string(),
+                first_heartbeat: 100,
+                last_heartbeat: 950,
+            },
+            GuardianSessionInfo {
+                session_id: "new".to_string(),
+                first_heartbeat: 900,
+                last_heartbeat: 990,
+            },
+        ];
+
+        let err = select_live_session(&summary, now, 100, 100).expect_err("must fail");
+        assert!(err.to_string().contains("other sessions are still active"));
+    }
 }
