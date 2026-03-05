@@ -334,6 +334,10 @@ impl Hashi {
             self.mpc_manager
                 .set(Arc::new(RwLock::new(mpc_manager)))
                 .map_err(|_| anyhow!("MpcManager already set"))?;
+        } else if self.onchain_state().epoch() == 0
+            && self.onchain_state().current_committee().is_none()
+        {
+            tracing::info!("No initial committee yet; MPC service will handle genesis bootstrap");
         } else {
             tracing::info!(
                 "Node is not in the current committee; skipping initial DKG manager creation"

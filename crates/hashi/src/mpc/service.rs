@@ -106,10 +106,13 @@ impl MpcService {
     async fn run(mut self) {
         if let Some(epoch) = self.get_pending_epoch_change() {
             self.handle_reconfig(epoch).await;
+        } else if self.is_awaiting_genesis() {
+            // No committee has been formed yet (epoch 0, no committee for epoch 0).
+            // Wait for enough validators to register then trigger genesis reconfig.
+            info!("No initial committee yet; waiting for enough validators to register...");
+            self.try_submit_genesis_reconfig().await;
         } else if self.inner.is_in_current_committee() {
             loop {
-                // TODO: Store DKG public key on-chain, and read it from there if it already exists.
-                // Note that restart is already supported in `MpcManager`, so the latter is not strictly necessary despite more direct.
                 match self.recover_mpc_state().await {
                     Ok(output) => {
                         let epoch = self.inner.onchain_state().epoch();
@@ -202,6 +205,51 @@ impl MpcService {
             .hashi()
             .committees
             .pending_epoch_change()
+    }
+
+    /// Returns true if no committee has ever been formed (genesis state).
+    fn is_awaiting_genesis(&self) -> bool {
+        let state = self.inner.onchain_state().state();
+        let committees = &state.hashi().committees;
+        committees.epoch() == 0 && committees.current_committee().is_none()
+    }
+
+    /// Wait for enough validators to register, then submit `start_reconfig`
+    /// to form the initial committee. Blocks until a pending epoch change
+    /// appears (either from our own submission or another node's).
+    async fn try_submit_genesis_reconfig(&self) {
+        loop {
+            if self.get_pending_epoch_change().is_some() {
+                return;
+            }
+            // Attempt to submit start_reconfig. This will fail on-chain if
+            // not enough validators have registered (95% stake threshold).
+            let result = async {
+                let mut executor =
+                    crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
+                executor.execute_start_reconfig().await
+            };
+            match result.await {
+                Ok(()) => {
+                    info!("Genesis start_reconfig submitted successfully");
+                    return;
+                }
+                Err(e) => {
+                    debug!("Genesis start_reconfig not yet possible: {e}");
+                    // Poll for pending epoch change while waiting, in case
+                    // another node submitted start_reconfig.
+                    let polls = (RETRY_INTERVAL.as_millis()
+                        / START_RECONFIG_POLL_INTERVAL.as_millis())
+                        as u32;
+                    for _ in 0..polls {
+                        if self.get_pending_epoch_change().is_some() {
+                            return;
+                        }
+                        tokio::time::sleep(START_RECONFIG_POLL_INTERVAL).await;
+                    }
+                }
+            }
+        }
     }
 
     async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
@@ -462,25 +510,51 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
+        // Determine whether this is an initial DKG (no previous committee) or
+        // a key rotation (previous committee exists).
+        let has_previous_committee = {
+            let state = self.inner.onchain_state().state();
+            let committees = &state.hashi().committees;
+            let source_epoch = committees.epoch();
+            // At genesis, source_epoch == target_epoch (both are the Sui epoch
+            // when start_reconfig was called), so we must not treat the newly
+            // created pending committee as a "previous" committee.
+            source_epoch != target_epoch && committees.committees().contains_key(&source_epoch)
+        };
+
         // Create the MpcManager once before the retry loop so retries reuse
         // the same manager (and its accumulated messages) instead of generating
         // fresh random dealer messages that conflict with previously sent ones.
-        if let Err(e) = self.setup_key_rotation(target_epoch) {
+        if has_previous_committee {
+            if let Err(e) = self.setup_key_rotation(target_epoch) {
+                error!(
+                    "Failed to set up key rotation for epoch {}: {e}",
+                    target_epoch
+                );
+                return;
+            }
+        } else if let Err(e) = self.setup_initial_dkg(target_epoch) {
             error!(
-                "Failed to set up key rotation for epoch {}: {e}",
+                "Failed to set up initial DKG for epoch {}: {e}",
                 target_epoch
             );
             return;
         }
+
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 return;
             }
-            match self.run_key_rotation(target_epoch).await {
+            let result = if has_previous_committee {
+                self.run_key_rotation(target_epoch).await
+            } else {
+                self.run_dkg().await
+            };
+            match result {
                 Ok(output) => break output,
                 Err(e) => {
                     error!(
-                        "Key rotation to epoch {} failed: {e}, retrying...",
+                        "MPC protocol for epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
                     self.sleep_if_still_pending(target_epoch).await;
@@ -522,6 +596,14 @@ impl MpcService {
                 }
             }
         }
+    }
+
+    fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {
+        let dkg_manager = self
+            .inner
+            .create_mpc_manager(target_epoch, ProtocolType::Dkg)?;
+        self.inner.set_mpc_manager(dkg_manager);
+        Ok(())
     }
 
     fn setup_key_rotation(&self, target_epoch: u64) -> anyhow::Result<()> {

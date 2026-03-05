@@ -3,29 +3,16 @@ use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
-use hashi_types::committee::Bls12381PrivateKey;
-use hashi_types::committee::BlsSignatureAggregator;
-use hashi_types::committee::Committee;
-use hashi_types::committee::CommitteeMember;
-use hashi_types::committee::EncryptionPublicKey;
-use serde;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use sui_futures::service::Service;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
-use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::debug;
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ReconfigCompletionMessage {
-    pub epoch: u64,
-    pub mpc_public_key: Vec<u8>,
-}
 
 use crate::BitcoinNodeHandle;
 use crate::SuiNetworkHandle;
@@ -131,6 +118,7 @@ impl HashiNodeHandle {
         loop {
             if let Some(mpc_handle) = self.hashi().mpc_handle()
                 && mpc_handle.public_key().is_some()
+                && self.hashi().signing_verifying_key().is_some()
             {
                 return Ok(());
             }
@@ -293,26 +281,9 @@ impl HashiNetworkBuilder {
             "initially_active ({initially_active}) must be <= num_nodes ({})",
             configs.len()
         );
-        let active_bls_keys: Vec<_> = configs[..initially_active]
-            .iter()
-            .map(|c| {
-                (
-                    c.validator_address().unwrap(),
-                    c.protocol_private_key().unwrap(),
-                    c.encryption_public_key().unwrap(),
-                )
-            })
-            .collect();
-        for config in &configs[..initially_active] {
-            let client = sui.client.clone();
-            register_onchain(client, config).await?;
-        }
-        // Initialize the initial committee with only active nodes
-        start_reconfig(sui, hashi_ids).await?;
-        // TODO: Remove this test-only logic once the node service handles committing the
-        // MPC public key on-chain after DKG.
-        let placeholder_mpc_public_key = vec![0u8; 33];
-        end_reconfig(sui, hashi_ids, &active_bls_keys, placeholder_mpc_public_key).await?;
+        // Nodes register themselves on startup, and will trigger
+        // start_reconfig + DKG + end_reconfig automatically once enough
+        // validators have registered.
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
             let node_handle = HashiNodeHandle::new(config)?;
@@ -329,6 +300,17 @@ impl HashiNetworkBuilder {
                 node.metrics_address()
             );
         }
+
+        // Wait for the initial genesis bootstrap (start_reconfig → DKG →
+        // end_reconfig) to complete on all active nodes before returning.
+        let dkg_timeout = std::time::Duration::from_secs(120);
+        for (i, node) in nodes[..initially_active].iter().enumerate() {
+            node.wait_for_mpc_key(dkg_timeout)
+                .await
+                .map_err(|e| anyhow::anyhow!("Node {i} failed to complete initial DKG: {e}"))?;
+        }
+        debug!("All active nodes completed initial DKG");
+
         Ok(HashiNetwork {
             ids: hashi_ids,
             nodes,
@@ -386,122 +368,5 @@ pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig
         "update_tls_public_key failed"
     );
 
-    Ok(())
-}
-
-async fn start_reconfig(sui: &SuiNetworkHandle, hashi_ids: HashiIds) -> Result<()> {
-    let private_key = sui.user_keys.first().unwrap().clone();
-    let mut executor =
-        hashi::sui_tx_executor::SuiTxExecutor::new(sui.client.clone(), private_key, hashi_ids);
-
-    let mut builder = TransactionBuilder::new();
-
-    let hashi_arg = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    let sui_system_arg = builder.object(
-        ObjectInput::new(Address::from_static("0x5"))
-            .as_shared()
-            .with_mutable(false),
-    );
-
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("reconfig"),
-            Identifier::from_static("start_reconfig"),
-        ),
-        vec![hashi_arg, sui_system_arg],
-    );
-
-    let response = executor.execute(builder).await?;
-
-    if let Some(status) = response.transaction().effects().status().error_opt() {
-        dbg!(status);
-    }
-
-    assert!(
-        response.transaction().effects().status().success(),
-        "start_reconfig failed"
-    );
-
-    Ok(())
-}
-
-async fn end_reconfig(
-    sui: &SuiNetworkHandle,
-    hashi_ids: HashiIds,
-    bls_keys: &[(Address, Bls12381PrivateKey, EncryptionPublicKey)],
-    mpc_public_key: Vec<u8>,
-) -> Result<()> {
-    let client = sui.client.clone();
-    let private_key = sui.user_keys.first().unwrap().clone();
-
-    let service_info = client
-        .clone()
-        .ledger_client()
-        .get_service_info(GetServiceInfoRequest::default())
-        .await?
-        .into_inner();
-    let epoch = service_info.epoch.unwrap_or(0);
-
-    let committee_members: Vec<CommitteeMember> = bls_keys
-        .iter()
-        .map(|(addr, bls_key, enc_key)| {
-            CommitteeMember::new(*addr, bls_key.public_key(), enc_key.clone(), 1)
-        })
-        .collect();
-    let committee = Committee::new(committee_members, epoch);
-    let message = ReconfigCompletionMessage {
-        epoch,
-        mpc_public_key: mpc_public_key.clone(),
-    };
-    let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
-    for (addr, bls_key, _) in bls_keys {
-        let member_sig = bls_key.sign(epoch, *addr, &message);
-        aggregator.add_signature(member_sig)?;
-    }
-    let signed_message = aggregator.finish()?;
-    committee
-        .verify_signature(&signed_message)
-        .expect("Local signature verification failed");
-    let signature_bytes = signed_message.signature_bytes();
-    let signers_bitmap_bytes = signed_message.signers_bitmap_bytes();
-
-    let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, private_key, hashi_ids);
-
-    let mut builder = TransactionBuilder::new();
-
-    let hashi_arg = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    let mpc_public_key_arg = builder.pure(&mpc_public_key);
-    let signature_arg = builder.pure(&signature_bytes.to_vec());
-    let signers_bitmap_arg = builder.pure(&signers_bitmap_bytes.to_vec());
-
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("reconfig"),
-            Identifier::from_static("end_reconfig"),
-        ),
-        vec![
-            hashi_arg,
-            mpc_public_key_arg,
-            signature_arg,
-            signers_bitmap_arg,
-        ],
-    );
-
-    let response = executor.execute(builder).await?;
-    assert!(
-        response.transaction().effects().status().success(),
-        "end_reconfig failed: {:?}",
-        response.transaction().effects().status().error_opt()
-    );
     Ok(())
 }
