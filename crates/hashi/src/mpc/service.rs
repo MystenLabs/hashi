@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
 use sui_futures::service::Service;
@@ -93,6 +94,19 @@ impl MpcService {
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
+    }
+
+    fn log_key(&self) {
+        if let Some(g) = *self.key_ready_tx.borrow() {
+            // Convert G (ProjectivePoint, 33 bytes compressed) to SchnorrPublicKey (32 bytes x-only)
+            let schnorr_pk = fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey::try_from(&g)
+                .expect("valid non-zero group element for schnorr key");
+            let pubkey = bitcoin::XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())
+                .expect("valid 32-byte x-only key");
+            tracing::error!("public key {}", pubkey);
+        } else {
+            tracing::error!("no pubkey");
+        }
     }
 
     /// Start the MPC service and return a `Service` for lifecycle management.
@@ -221,6 +235,8 @@ impl MpcService {
     }
 
     async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
+        tracing::error!("RUNNING DKG");
+        self.log_key();
         let onchain_state = self.inner.onchain_state().clone();
         let (epoch, committee) = get_epoch_and_committee(&onchain_state)?;
         let mpc_manager = self
@@ -533,6 +549,8 @@ impl MpcService {
     }
 
     async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
+        tracing::error!("RUNNING key rotation");
+        self.log_key();
         let onchain_state = self.inner.onchain_state().clone();
         let target_committee = onchain_state
             .state()
@@ -579,6 +597,15 @@ impl MpcService {
         )
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;
+
+        tracing::error!("FINISHED key rotation");
+        // Convert G (ProjectivePoint, 33 bytes compressed) to SchnorrPublicKey (32 bytes x-only)
+        let schnorr_pk =
+            fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey::try_from(&output.public_key)
+                .expect("valid non-zero group element for schnorr key");
+        let pubkey = bitcoin::XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())
+            .expect("valid 32-byte x-only key");
+        tracing::error!("public key {}", pubkey);
         Ok(output)
     }
 
