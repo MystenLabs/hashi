@@ -1,6 +1,7 @@
 mod garbage_collection;
 
 use crate::Hashi;
+use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
@@ -9,6 +10,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::RequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
+use bitcoin::hashes::Hash;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
@@ -673,60 +675,131 @@ impl LeaderService {
         pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
 
         for pending in &pending_withdrawals {
-            self.broadcast_and_confirm_withdrawal(pending).await;
+            self.handle_signed_withdrawal(pending).await;
         }
     }
 
-    async fn broadcast_and_confirm_withdrawal(&self, pending: &PendingWithdrawal) {
-        let raw_signatures = pending.signatures.as_ref().expect("checked by caller");
+    /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
+    /// enough BTC confirmations are reached.
+    async fn handle_signed_withdrawal(&self, pending: &PendingWithdrawal) {
+        let confirmation_threshold = self.inner.config.bitcoin_confirmation_threshold();
+        let txid = bitcoin::Txid::from_byte_array(pending.txid.into());
 
-        let signatures: Vec<SchnorrSignature> = match raw_signatures
-            .iter()
-            .map(|bytes| {
-                let arr: &[u8; 64] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("Signature not 64 bytes"))?;
-                SchnorrSignature::from_byte_array(arr)
-                    .map_err(|e| anyhow::anyhow!("Invalid Schnorr signature: {e}"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()
-        {
-            Ok(sigs) => sigs,
-            Err(e) => {
-                error!(
-                    "Failed to parse signatures for pending withdrawal {:?}: {e}",
-                    pending.id
+        match self.inner.btc_monitor().get_transaction_status(txid).await {
+            Ok(TxStatus::Confirmed { confirmations })
+                if confirmations >= confirmation_threshold =>
+            {
+                info!(
+                    "Withdrawal tx {} confirmed with {confirmations} confirmations, \
+                     proceeding to on-chain confirmation for {:?}",
+                    txid, pending.id
+                );
+                self.confirm_withdrawal_on_sui(pending).await;
+                return;
+            }
+            Ok(TxStatus::Confirmed { confirmations }) => {
+                debug!(
+                    "Withdrawal tx {} has {confirmations}/{confirmation_threshold} \
+                     confirmations, waiting for more",
+                    txid
                 );
                 return;
             }
-        };
+            Ok(TxStatus::InMempool) => {
+                debug!(
+                    "Withdrawal tx {} in mempool for {:?}, waiting for confirmations",
+                    txid, pending.id
+                );
+                return;
+            }
+            Ok(TxStatus::NotFound) => {
+                // Not in mempool or blockchain — rebuild and broadcast from on-chain state.
+            }
+            Err(e) => {
+                error!(
+                    "Failed to query transaction status for {:?} (txid {}): {e}",
+                    pending.id, txid
+                );
+                return;
+            }
+        }
 
-        let broadcastable_tx = match self.build_broadcastable_withdrawal_tx(pending, &signatures) {
+        // Rebuild signed tx from on-chain signatures and broadcast.
+        warn!(
+            "Withdrawal tx {} not found for {:?}, re-broadcasting from on-chain signatures",
+            txid, pending.id
+        );
+        let tx = match self.rebuild_signed_tx_from_onchain(pending) {
             Ok(tx) => tx,
             Err(e) => {
                 error!(
-                    "Failed to build broadcastable withdrawal tx for {:?}: {e}",
+                    "Failed to rebuild signed tx from on-chain data for {:?}: {e}",
                     pending.id
                 );
                 return;
             }
         };
 
-        if let Err(e) = self
-            .inner
-            .btc_monitor()
-            .broadcast_transaction(broadcastable_tx)
-            .await
-        {
-            error!(
-                "Failed to broadcast withdrawal tx for {:?}: {e}",
-                pending.id
-            );
-            return;
+        match self.inner.btc_monitor().broadcast_transaction(tx).await {
+            Ok(()) => {
+                info!("Re-broadcast withdrawal tx {} for {:?}", txid, pending.id);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to re-broadcast withdrawal tx {} for {:?}: {e}",
+                    txid, pending.id
+                );
+            }
         }
-        info!("Broadcast withdrawal tx for {:?}", pending.id);
+    }
 
+    /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
+    fn rebuild_signed_tx_from_onchain(
+        &self,
+        pending: &PendingWithdrawal,
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        let raw_sigs = pending
+            .signatures
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No signatures on pending withdrawal"))?;
+
+        let mut tx = self
+            .inner
+            .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
+
+        anyhow::ensure!(
+            raw_sigs.len() == tx.input.len(),
+            "Signature count mismatch: tx has {} inputs, on-chain has {} signatures",
+            tx.input.len(),
+            raw_sigs.len()
+        );
+        anyhow::ensure!(
+            tx.input.len() == pending.inputs.len(),
+            "Input count mismatch: tx has {} inputs, pending has {}",
+            tx.input.len(),
+            pending.inputs.len()
+        );
+
+        let hashi_pubkey = self.inner.get_hashi_pubkey();
+        for ((input, pending_input), sig_bytes) in
+            tx.input.iter_mut().zip(pending.inputs.iter()).zip(raw_sigs)
+        {
+            let pubkey = self
+                .inner
+                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
+            let (script, control_block, _) =
+                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+            let mut witness = bitcoin::Witness::new();
+            witness.push(sig_bytes);
+            witness.push(script.to_bytes());
+            witness.push(control_block.serialize());
+            input.witness = witness;
+        }
+
+        Ok(tx)
+    }
+
+    async fn confirm_withdrawal_on_sui(&self, pending: &PendingWithdrawal) {
         let members = match self.inner.onchain_state().current_committee_members() {
             Some(m) => m,
             None => {
@@ -801,55 +874,6 @@ impl LeaderService {
         }
 
         Ok(signature_aggregator.finish()?.into_parts().0)
-    }
-
-    fn build_broadcastable_withdrawal_tx(
-        &self,
-        pending: &PendingWithdrawal,
-        signatures: &[SchnorrSignature],
-    ) -> anyhow::Result<bitcoin::Transaction> {
-        info!(
-            "Building broadcastable withdrawal tx for pending withdrawal id {} with {} signatures",
-            pending.id,
-            signatures.len()
-        );
-        let mut tx = self
-            .inner
-            .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
-
-        anyhow::ensure!(
-            tx.input.len() == signatures.len(),
-            "Signature count mismatch: {} inputs but {} signatures",
-            tx.input.len(),
-            signatures.len()
-        );
-        anyhow::ensure!(
-            tx.input.len() == pending.inputs.len(),
-            "Input count mismatch: tx has {} inputs, pending has {}",
-            tx.input.len(),
-            pending.inputs.len()
-        );
-
-        let hashi_pubkey = self.inner.get_hashi_pubkey();
-        for ((input, pending_input), signature) in tx
-            .input
-            .iter_mut()
-            .zip(pending.inputs.iter())
-            .zip(signatures)
-        {
-            let pubkey = self
-                .inner
-                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
-            let (script, control_block, _) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
-            let mut witness = bitcoin::Witness::new();
-            witness.push(signature.to_byte_array());
-            witness.push(script.to_bytes());
-            witness.push(control_block.serialize());
-            input.witness = witness;
-        }
-
-        Ok(tx)
     }
 
     async fn request_withdrawal_tx_commitment_signature(

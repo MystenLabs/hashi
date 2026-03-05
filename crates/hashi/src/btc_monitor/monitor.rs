@@ -17,6 +17,13 @@ use super::config::MonitorConfig;
 /// 1 sat/vB expressed as sat/kwu.
 const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxStatus {
+    Confirmed { confirmations: u32 },
+    InMempool,
+    NotFound,
+}
+
 /// Monitor loop that tracks the state of the Bitcoin chain.
 ///
 /// Client provides functions for querying for specific transactions,
@@ -170,6 +177,9 @@ impl Monitor {
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
                 self.broadcast_transaction(tx, result_tx);
             }
+            MonitorMessage::GetTransactionStatus(txid, result_tx) => {
+                self.get_transaction_status(txid, result_tx);
+            }
         }
     }
 
@@ -270,6 +280,31 @@ impl Monitor {
             broadcast_policy: kyoto::TxBroadcastPolicy::AllPeers,
         });
         let _ = result_tx.send(result.map_err(|e| anyhow::anyhow!(e)));
+    }
+
+    fn get_transaction_status(
+        &self,
+        txid: bitcoin::Txid,
+        result_tx: oneshot::Sender<Result<TxStatus>>,
+    ) {
+        let result = match self.bitcoind_rpc.get_raw_transaction_info(&txid, None) {
+            Ok(tx_info) => {
+                if tx_info.blockhash.is_some() {
+                    let confirmations = tx_info.confirmations.unwrap_or(0);
+                    Ok(TxStatus::Confirmed { confirmations })
+                } else {
+                    Ok(TxStatus::InMempool)
+                }
+            }
+            Err(bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(
+                ref e,
+            ))) if e.code == -5 => {
+                // RPC error -5: "No such mempool or blockchain transaction"
+                Ok(TxStatus::NotFound)
+            }
+            Err(e) => Err(anyhow::anyhow!("Failed to query transaction status: {e}")),
+        };
+        let _ = result_tx.send(result);
     }
 
     fn process_pending_deposits(&mut self) {
@@ -524,6 +559,15 @@ impl MonitorClient {
             .map_err(|e| anyhow::anyhow!(e))?;
         rx.await.map_err(|e| anyhow::anyhow!(e))?
     }
+
+    pub async fn get_transaction_status(&self, txid: bitcoin::Txid) -> Result<TxStatus> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::GetTransactionStatus(txid, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
 }
 
 enum MonitorMessage {
@@ -537,4 +581,7 @@ enum MonitorMessage {
 
     // Broadcast a transaction to the network.
     BroadcastTransaction(bitcoin::Transaction, oneshot::Sender<Result<()>>),
+
+    // Query the status of a transaction (confirmed, in mempool, or not found).
+    GetTransactionStatus(bitcoin::Txid, oneshot::Sender<Result<TxStatus>>),
 }
