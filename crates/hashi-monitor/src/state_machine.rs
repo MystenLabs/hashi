@@ -3,7 +3,7 @@
 use crate::audit::AuditWindow;
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::WithdrawalEvent;
+use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use crate::errors::MonitorError;
@@ -29,7 +29,7 @@ use hashi_types::guardian::time_utils::UnixSeconds;
 ///     - Pending: neither valid nor invalid.
 pub struct WithdrawalStateMachine {
     /// the set of events we have seen until now related to this withdrawal
-    seen_events: Vec<WithdrawalEvent>,
+    seen_events: Vec<MonitorWithdrawalEvent>,
     /// an entry (e, t) in expected_events signals that we are expecting to hear e by time t
     expected_events: Vec<(WithdrawalEventType, UnixSeconds)>,
     /// last time at which we checked for a btc withdrawal tx
@@ -47,7 +47,7 @@ pub enum BtcFetchOutcome {
 }
 
 impl WithdrawalStateMachine {
-    pub fn new(event: WithdrawalEvent, cfg: &Config) -> Self {
+    pub fn new(event: MonitorWithdrawalEvent, cfg: &Config) -> Self {
         let mut sm = Self {
             seen_events: Vec::new(),
             expected_events: Vec::new(),
@@ -59,7 +59,7 @@ impl WithdrawalStateMachine {
         sm
     }
 
-    pub fn get(&self, event_type: WithdrawalEventType) -> Option<&WithdrawalEvent> {
+    pub fn get(&self, event_type: WithdrawalEventType) -> Option<&MonitorWithdrawalEvent> {
         self.seen_events
             .iter()
             .find(|event| event.event_type == event_type)
@@ -114,7 +114,7 @@ impl WithdrawalStateMachine {
     /// Throws: InvalidEventAdded, EventOccurredAfterDeadline
     pub fn add_event(
         &mut self,
-        new_event: WithdrawalEvent,
+        new_event: MonitorWithdrawalEvent,
         cfg: &Config,
     ) -> Result<(), MonitorError> {
         if let Some(existing_event) = self.get(new_event.event_type) {
@@ -194,7 +194,7 @@ impl WithdrawalStateMachine {
         match btc_rpc_client.lookup_confirmation(btc_txid) {
             Ok(Some(block_time)) => {
                 self.btc_checked_at = Some(cur_time);
-                let e_btc = WithdrawalEvent {
+                let e_btc = MonitorWithdrawalEvent {
                     event_type: WithdrawalEventType::E3BtcConfirmed,
                     wid,
                     btc_txid,
@@ -256,7 +256,7 @@ mod tests {
     }
 
     impl AuditWindow for TestWindow {
-        fn in_window(&self, e: &WithdrawalEvent) -> bool {
+        fn in_window(&self, e: &MonitorWithdrawalEvent) -> bool {
             e.timestamp_secs >= self.start && e.timestamp_secs <= self.end
         }
     }
@@ -289,8 +289,8 @@ mod tests {
         wid: WithdrawalID,
         timestamp: UnixSeconds,
         fill: u8,
-    ) -> WithdrawalEvent {
-        WithdrawalEvent {
+    ) -> MonitorWithdrawalEvent {
+        MonitorWithdrawalEvent {
             event_type: source,
             wid,
             timestamp_secs: timestamp,

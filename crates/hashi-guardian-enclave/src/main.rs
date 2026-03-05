@@ -4,6 +4,8 @@ use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::Txid;
+use hashi_guardian_enclave::HEARTBEAT_INTERVAL;
+use hashi_guardian_enclave::MAX_HEARTBEAT_FAILURES;
 use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
@@ -94,10 +96,6 @@ pub struct EphemeralKeyPairs {
     pub signing_keys: GuardianSignKeyPair,
     pub encryption_keys: GuardianEncKeyPair,
 }
-
-// TODO: Leave as consts or make them configurable?
-const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
-const MAX_HEARTBEAT_FAILURES: u32 = 5;
 
 /// Enclave initialization.
 /// SETUP_MODE=true: only get_attestation, operator_init and setup_new_key are enabled.

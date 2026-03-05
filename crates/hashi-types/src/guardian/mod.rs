@@ -60,7 +60,7 @@ pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian-enclave/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
-pub const S3_DIR_WITHDRAW: &str = "withdraw";
+pub const S3_DIR_WITHDRAW: &str = "guardian";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 
 // ---------------------------------
@@ -239,14 +239,14 @@ pub enum InitLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WithdrawalLogMessage {
-    /// Immediate withdraw success
+    /// Immediate guardian success
     Success {
         txid: Txid,
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         response: StandardWithdrawalResponse,
     },
-    /// Immediate withdraw failure
+    /// Immediate guardian failure
     /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
     Failure {
         request_data: StandardWithdrawalRequestWire,
@@ -497,6 +497,15 @@ impl InitLogMessage {
         };
 
         format!("{}-{}.json", prefix, suffix)
+    }
+
+    pub fn attestation_object_key(session_id: &str) -> String {
+        format!(
+            "{}/{}-{}.json",
+            S3_DIR_INIT,
+            session_id,
+            Self::OI_ATTEST_UNSIGNED
+        )
     }
 
     pub fn to_attestation_log(self) -> Option<(Attestation, GuardianPubKey)> {
@@ -830,7 +839,7 @@ mod tests {
         set_timestamp(&mut log, timestamp_ms);
 
         let key = log.object_key();
-        assert!(key.starts_with("withdraw/2023/11/14/22/session-c-999-success-"));
+        assert!(key.starts_with("guardian/2023/11/14/22/session-c-999-success-"));
         assert!(key.ends_with(".json"));
     }
 }
