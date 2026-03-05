@@ -301,15 +301,29 @@ impl HashiNetworkBuilder {
             );
         }
 
-        // Wait for the initial genesis bootstrap (start_reconfig → DKG →
-        // end_reconfig) to complete on all active nodes before returning.
-        let dkg_timeout = std::time::Duration::from_secs(120);
-        for (i, node) in nodes[..initially_active].iter().enumerate() {
-            node.wait_for_mpc_key(dkg_timeout)
-                .await
-                .map_err(|e| anyhow::anyhow!("Node {i} failed to complete initial DKG: {e}"))?;
-        }
-        debug!("All active nodes completed initial DKG");
+        // Wait for the initial committee to appear on-chain, which indicates
+        // that the genesis bootstrap (start_reconfig → DKG → end_reconfig)
+        // has completed.
+        let genesis_timeout = std::time::Duration::from_secs(120);
+        tokio::time::timeout(genesis_timeout, async {
+            loop {
+                if let Some(onchain) = nodes[0].hashi().onchain_state_opt()
+                    && onchain.current_committee().is_some()
+                    && onchain
+                        .state()
+                        .hashi()
+                        .committees
+                        .pending_epoch_change()
+                        .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for initial committee to form"))?;
+        debug!("Initial committee formed on-chain");
 
         Ok(HashiNetwork {
             ids: hashi_ids,
