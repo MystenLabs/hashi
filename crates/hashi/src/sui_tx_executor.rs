@@ -41,7 +41,9 @@ use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
+use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -56,6 +58,7 @@ use crate::Hashi;
 use crate::config::Config;
 use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
+use crate::onchain;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositRequest;
 use crate::withdrawals::WithdrawalTxCommitment;
@@ -515,29 +518,29 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Execute a validator registration transaction.
+    /// Register and/or update validator metadata on-chain.
     ///
-    /// This builds and executes a PTB that:
-    /// 1. Calls `validator::register` to register the validator
-    /// 2. Calls `validator::update_next_epoch_public_key` to set the BLS key and proof-of-possession
-    /// 3. Calls `validator::update_next_epoch_encryption_public_key` to set the encryption key
-    /// 4. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
-    /// 5. Calls `validator::update_tls_public_key` to set the validator's TLS key
-    /// 6. Optionally calls `validator::update_operator_address` if an operator address is provided
-    ///
-    /// All required fields are read from the provided `Config`.
-    pub async fn execute_register_validator(
+    /// Delegates to [`build_register_or_update_validator_tx`] to determine which
+    /// move calls are needed, then signs and executes the resulting transaction.
+    /// Returns `Ok(false)` if nothing needed to be updated.
+    pub async fn execute_register_or_update_validator(
         &mut self,
         config: &Config,
         operator_address: Option<Address>,
-    ) -> anyhow::Result<()> {
-        let transaction = build_register_validator_tx(
+    ) -> anyhow::Result<bool> {
+        let sender = self.signer.public_key().derive_address();
+        let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
             config,
             operator_address,
+            Some(sender),
         )
         .await?;
+
+        let Some(transaction) = transaction else {
+            return Ok(false);
+        };
 
         let signature = self.signer.sign_transaction(&transaction)?;
         let response = self
@@ -557,7 +560,7 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Execute a certificate submission transaction.
@@ -853,108 +856,147 @@ impl SuiTxExecutor {
     }
 }
 
-/// Build a validator registration transaction without signing or executing it.
+/// Build a transaction to register and/or update validator metadata.
 ///
-/// This builds a PTB that:
-/// 1. Calls `validator::register` to register the validator
-/// 2. Calls `validator::update_next_epoch_public_key` to set the BLS key and proof-of-possession
-/// 3. Calls `validator::update_next_epoch_encryption_public_key` to set the encryption key
-/// 4. Calls `validator::update_endpoint_url` to set the validator's HTTPS endpoint
-/// 5. Calls `validator::update_tls_public_key` to set the validator's TLS key
-/// 6. Optionally calls `validator::update_operator_address` if an operator address is provided
+/// Fetches the validator's current onchain state via `client`. If the validator is not yet
+/// registered, includes a `validator::register` call and sets the sender to `validator_address`.
+/// If already registered, only includes update calls for metadata that differs from what is
+/// currently onchain. Returns `None` if no changes are needed.
 ///
-/// The sender is set to `config.validator_address()`. The returned `Transaction` is
-/// finalized (dry-run, gas estimation, object resolution) but unsigned.
-pub async fn build_register_validator_tx(
+/// When not registering, the sender is set to `sender` if provided (typically the operator
+/// address), otherwise falls back to `validator_address`.
+pub async fn build_register_or_update_validator_tx(
     client: &mut Client,
     hashi_ids: &HashiIds,
     config: &Config,
     operator_address: Option<Address>,
-) -> anyhow::Result<Transaction> {
-    let protocol_key = config
-        .protocol_private_key()
-        .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
-    let protocol_public_key = protocol_key.public_key();
-    let encryption_public_key = config.encryption_public_key()?;
+    sender: Option<Address>,
+) -> anyhow::Result<Option<Transaction>> {
     let validator_address = config.validator_address()?;
-    let endpoint_url = config.endpoint_url().map(|s| s.to_string());
-    let tls_key = config.tls_public_key()?;
 
-    // Fetch current Sui epoch for proof-of-possession
-    let service_info = client
-        .clone()
+    // Fetch the Hashi object to get the members Bag ID.
+    let hashi_object = client
         .ledger_client()
-        .get_service_info(GetServiceInfoRequest::default())
+        .get_object(
+            GetObjectRequest::new(&hashi_ids.hashi_object_id).with_read_mask(
+                FieldMask::from_paths([
+                    Object::path_builder().contents().finish(),
+                    Object::path_builder().object_id(),
+                ]),
+            ),
+        )
         .await?
         .into_inner();
-    let current_epoch = service_info.epoch.unwrap_or(0);
+    let hashi_move: hashi_types::move_types::Hashi =
+        hashi_object.object().contents().deserialize()?;
+    let members_id = hashi_move.committees.members.id;
 
-    // Compute proof-of-possession
-    let pop = protocol_key.proof_of_possession(current_epoch, validator_address);
+    // Try to fetch existing member info. A missing dynamic field means the validator
+    // is not yet registered.
+    let onchain_member = onchain::scrape_member_info(client.clone(), members_id, validator_address)
+        .await
+        .ok();
+    let registering = onchain_member.is_none();
 
     let mut builder = TransactionBuilder::new();
+    let mut has_calls = false;
 
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
             .as_shared()
             .with_mutable(true),
     );
-    let sui_system_arg = builder.object(
-        ObjectInput::new(SUI_SYSTEM_STATE_OBJECT_ID)
-            .as_shared()
-            .with_mutable(false),
-    );
-
     let validator_address_arg = builder.pure(&validator_address);
-    let public_key_arg = builder.pure(&protocol_public_key.as_ref().to_vec());
-    let pop_signature_arg = builder.pure(&pop.signature().as_ref().to_vec());
-    let encryption_key_arg = builder.pure(
-        &encryption_public_key
-            .as_element()
-            .to_byte_array()
-            .as_slice()
-            .to_vec(),
-    );
-    let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
 
-    // 1. validator::register(hashi, sui_system)
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("validator"),
-            Identifier::from_static("register"),
-        ),
-        vec![hashi_arg, sui_system_arg],
-    );
+    // 1. Register if not already registered.
+    if registering {
+        let sui_system_arg = builder.object(
+            ObjectInput::new(SUI_SYSTEM_STATE_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("register"),
+            ),
+            vec![hashi_arg, sui_system_arg],
+        );
+        has_calls = true;
+    }
 
-    // 2. validator::update_next_epoch_public_key(hashi, validator_address, public_key, pop_signature)
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("validator"),
-            Identifier::from_static("update_next_epoch_public_key"),
-        ),
-        vec![
-            hashi_arg,
-            validator_address_arg,
-            public_key_arg,
-            pop_signature_arg,
-        ],
-    );
+    // 2. Update BLS public key if available and changed.
+    if let Some(protocol_key) = config.protocol_private_key()
+        && onchain_member
+            .as_ref()
+            .map(|m| m.next_epoch_public_key().as_ref() != protocol_key.public_key().as_ref())
+            .unwrap_or(true)
+    {
+        let service_info = client
+            .clone()
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        let current_epoch = service_info.epoch();
+        let pop = protocol_key.proof_of_possession(current_epoch, validator_address);
 
-    // 3. validator::update_next_epoch_encryption_public_key(hashi, validator_address, encryption_key)
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("validator"),
-            Identifier::from_static("update_next_epoch_encryption_public_key"),
-        ),
-        vec![hashi_arg, validator_address_arg, encryption_key_arg],
-    );
+        let public_key_arg = builder.pure(&protocol_key.public_key().as_ref().to_vec());
+        let pop_signature_arg = builder.pure(&pop.signature().as_ref().to_vec());
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("update_next_epoch_public_key"),
+            ),
+            vec![
+                hashi_arg,
+                validator_address_arg,
+                public_key_arg,
+                pop_signature_arg,
+            ],
+        );
+        has_calls = true;
+    }
 
-    // 4. validator::update_endpoint_url(hashi, validator_address, endpoint_url)
-    if let Some(url) = &endpoint_url {
-        let endpoint_url_arg = builder.pure(url);
+    // 3. Update encryption key if available and changed.
+    if let Ok(encryption_public_key) = config.encryption_public_key()
+        && onchain_member
+            .as_ref()
+            .and_then(|m| m.next_epoch_encryption_public_key())
+            .map(|k| {
+                k.as_element().to_byte_array() != encryption_public_key.as_element().to_byte_array()
+            })
+            .unwrap_or(true)
+    {
+        let encryption_key_arg = builder.pure(
+            &encryption_public_key
+                .as_element()
+                .to_byte_array()
+                .as_slice()
+                .to_vec(),
+        );
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("update_next_epoch_encryption_public_key"),
+            ),
+            vec![hashi_arg, validator_address_arg, encryption_key_arg],
+        );
+        has_calls = true;
+    }
+
+    // 4. Update endpoint URL if available and changed.
+    if let Some(config_url) = config.endpoint_url()
+        && onchain_member
+            .as_ref()
+            .and_then(|m| m.endpoint_url())
+            .map(|u| config_url != u)
+            .unwrap_or(true)
+    {
+        let endpoint_url_arg = builder.pure(&config_url.to_string());
         builder.move_call(
             Function::new(
                 hashi_ids.package_id,
@@ -963,20 +1005,35 @@ pub async fn build_register_validator_tx(
             ),
             vec![hashi_arg, validator_address_arg, endpoint_url_arg],
         );
+        has_calls = true;
     }
 
-    // 5. validator::update_tls_public_key(hashi, validator_address, tls_key)
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("validator"),
-            Identifier::from_static("update_tls_public_key"),
-        ),
-        vec![hashi_arg, validator_address_arg, tls_key_arg],
-    );
+    // 5. Update TLS key if available and changed.
+    if let Ok(tls_key) = config.tls_public_key()
+        && onchain_member
+            .as_ref()
+            .map(|m| m.tls_public_key() != Some(&tls_key))
+            .unwrap_or(true)
+    {
+        let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("update_tls_public_key"),
+            ),
+            vec![hashi_arg, validator_address_arg, tls_key_arg],
+        );
+        has_calls = true;
+    }
 
-    // 6. Optionally update_operator_address(hashi, validator_address, operator_address)
-    if let Some(operator) = operator_address {
+    // 6. Update operator address if provided and changed.
+    if let Some(operator) = operator_address
+        && onchain_member
+            .as_ref()
+            .map(|m| *m.operator_address() != operator)
+            .unwrap_or(true)
+    {
         let operator_arg = builder.pure(&operator);
         builder.move_call(
             Function::new(
@@ -986,12 +1043,22 @@ pub async fn build_register_validator_tx(
             ),
             vec![hashi_arg, validator_address_arg, operator_arg],
         );
+        has_calls = true;
     }
 
-    builder.set_sender(validator_address);
-    let transaction = builder.build(client).await?;
+    if !has_calls {
+        return Ok(None);
+    }
 
-    Ok(transaction)
+    let effective_sender = if registering {
+        validator_address
+    } else {
+        sender.unwrap_or(validator_address)
+    };
+    builder.set_sender(effective_sender);
+
+    let transaction = builder.build(client).await?;
+    Ok(Some(transaction))
 }
 
 /// Sweeps SUI coins into the account's Address Balance

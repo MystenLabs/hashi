@@ -535,16 +535,22 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         let hashi_ids = config.hashi_ids();
 
         print_info("Building registration transaction ...");
-        let transaction = crate::sui_tx_executor::build_register_validator_tx(
+        let transaction = crate::sui_tx_executor::build_register_or_update_validator_tx(
             &mut client,
             &hashi_ids,
             &config,
             operator_address,
+            None,
         )
         .await?;
 
-        let tx_base64 = transaction.to_bcs_base64()?;
-        println!("{tx_base64}");
+        match transaction {
+            Some(tx) => {
+                let tx_base64 = tx.to_bcs_base64()?;
+                println!("{tx_base64}");
+            }
+            None => print_info("Validator metadata is already up-to-date; nothing to do."),
+        }
         return Ok(());
     }
 
@@ -566,10 +572,14 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
 
     print_info("Registering validator ...");
-    executor
-        .execute_register_validator(&config, operator_address)
+    let updated = executor
+        .execute_register_or_update_validator(&config, operator_address)
         .await?;
 
-    print_success("Validator registered successfully");
+    if updated {
+        print_success("Validator registered/updated successfully");
+    } else {
+        print_info("Validator metadata is already up-to-date; nothing to do.");
+    }
     Ok(())
 }

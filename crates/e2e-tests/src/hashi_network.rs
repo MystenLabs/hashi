@@ -339,7 +339,10 @@ async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Resu
     let signer = config.operator_private_key()?;
     let hashi_ids = config.hashi_ids();
     let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
-    executor.execute_register_validator(config, None).await
+    executor
+        .execute_register_or_update_validator(config, None)
+        .await
+        .map(|_| ())
 }
 
 pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {

@@ -714,7 +714,7 @@ async fn scrape_all_member_info(
     Ok(member_info)
 }
 
-async fn scrape_member_info(
+pub(crate) async fn scrape_member_info(
     mut client: Client,
     member_info_id: Address,
     validator: Address,
