@@ -1471,12 +1471,10 @@ impl MpcManager {
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::error!(
-                    "Self in certificate signers but message not available for dealer {:?}.",
+                    "Self in certificate signers but message not available for dealer {:?}. \
+                     Possible DB corruption — recovering from other signers.",
                     message.dealer_address
                 );
-                return Err(MpcError::ProtocolFailed(
-                    "Self in certificate signers but message not available".to_string(),
-                ));
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
@@ -1534,12 +1532,10 @@ impl MpcManager {
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::error!(
-                    "Self in certificate signers but nonce message not available for dealer {:?}.",
+                    "Self in certificate signers but nonce message not available for dealer {:?}. \
+                     Possible DB corruption — recovering from other signers.",
                     message.dealer_address
                 );
-                return Err(MpcError::ProtocolFailed(
-                    "Self in certificate signers but nonce message not available".to_string(),
-                ));
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
@@ -1676,12 +1672,10 @@ impl MpcManager {
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::error!(
-                    "Self in certificate signers but rotation messages not available for dealer {:?}.",
+                    "Self in certificate signers but rotation messages not available for dealer {:?}. \
+                     Possible DB corruption — recovering from other signers.",
                     message.dealer_address
                 );
-                return Err(MpcError::ProtocolFailed(
-                    "Self in certificate signers but rotation messages not available".to_string(),
-                ));
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
@@ -6324,65 +6318,6 @@ mod tests {
                 .unwrap()
                 .dealer_messages
                 .contains_key(&dealer_addr)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_retrieve_dealer_message_aborts_when_self_in_signers() {
-        // Tests that retrieve_dealer_message aborts with error when requesting party is in signer list
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let setup = TestSetup::new(5);
-
-        // Create dealer with message (validator 0)
-        let dealer_addr = setup.address(0);
-        let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
-
-        // Create party that will request (party 1)
-        let party_addr = setup.address(1);
-        let party_mgr = setup.create_manager(1);
-
-        // Get dealer's message for certificate creation
-        let dealer_message = dealer_mgr.dealer_messages.get(&dealer_addr).unwrap();
-
-        // Create DkgMessage
-        let messages_hash = compute_messages_hash(dealer_message);
-        let dkg_message = DealerMessagesHash {
-            dealer_address: dealer_addr,
-            messages_hash,
-        };
-
-        // Create certificate with signers including the requesting party
-        // This is an invalid state - party shouldn't be retrieving a message it signed for
-        let party_signature = setup.signing_keys[1].sign(setup.epoch(), party_addr, &dkg_message);
-        let dealer_signature = setup.signing_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
-
-        let committee = setup.committee();
-        let cert = create_certificate_with_signers(
-            committee,
-            dealer_addr,
-            dealer_message,
-            vec![party_signature, dealer_signature],
-        )
-        .unwrap();
-
-        // MockP2PChannel: include dealer
-        let mut managers = HashMap::new();
-        managers.insert(dealer_addr, dealer_mgr);
-        let mock_p2p = MockP2PChannel::new(managers, party_addr);
-
-        let party_mgr = Arc::new(RwLock::new(party_mgr));
-
-        // Should abort with ProtocolFailed error due to invariant violation
-        let result =
-            MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &mock_p2p).await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, MpcError::ProtocolFailed(_)));
-        assert!(
-            err.to_string()
-                .contains("Self in certificate signers but message not available")
         );
     }
 
