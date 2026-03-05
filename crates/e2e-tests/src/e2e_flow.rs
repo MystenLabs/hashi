@@ -303,6 +303,52 @@ mod tests {
         Ok(hbtc_recipient)
     }
 
+    /// Mines one block per second on Bitcoin regtest until stopped.
+    /// Stops automatically when dropped.
+    struct BackgroundMiner {
+        stop_flag: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl BackgroundMiner {
+        fn start(bitcoin_node: &crate::BitcoinNodeHandle) -> Self {
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let stop_clone = stop_flag.clone();
+            let rpc_url = bitcoin_node.rpc_url().to_string();
+            let handle = std::thread::spawn(move || {
+                let rpc = bitcoincore_rpc::Client::new(
+                    &rpc_url,
+                    bitcoincore_rpc::Auth::UserPass(
+                        crate::bitcoin_node::RPC_USER.to_string(),
+                        crate::bitcoin_node::RPC_PASSWORD.to_string(),
+                    ),
+                )
+                .expect("failed to create mining RPC client");
+                let addr = rpc
+                    .get_new_address(None, None)
+                    .expect("failed to get mining address")
+                    .assume_checked();
+                while !stop_clone.load(Ordering::Relaxed) {
+                    let _ = rpc.generate_to_address(1, &addr);
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
+            Self {
+                stop_flag,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for BackgroundMiner {
+        fn drop(&mut self) {
+            self.stop_flag.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
     fn extract_witness_program(address: &bitcoin::Address) -> Result<Vec<u8>> {
         let script = address.script_pubkey();
         let bytes = script.as_bytes();
@@ -466,29 +512,7 @@ mod tests {
             .await?;
         info!("Withdrawal request created: {}", withdrawal_request_id);
 
-        // Spawn a background thread that mines blocks periodically so the BTC
-        // withdrawal tx accumulates confirmations and the leader can confirm on Sui.
-        let stop_mining = Arc::new(AtomicBool::new(false));
-        let stop_flag = stop_mining.clone();
-        let mining_rpc_url = networks.bitcoin_node.rpc_url().to_string();
-        let mining_handle = std::thread::spawn(move || {
-            let rpc = bitcoincore_rpc::Client::new(
-                &mining_rpc_url,
-                bitcoincore_rpc::Auth::UserPass(
-                    crate::bitcoin_node::RPC_USER.to_string(),
-                    crate::bitcoin_node::RPC_PASSWORD.to_string(),
-                ),
-            )
-            .expect("failed to create mining RPC client");
-            let addr = rpc
-                .get_new_address(None, None)
-                .expect("failed to get mining address")
-                .assume_checked();
-            while !stop_flag.load(Ordering::Relaxed) {
-                let _ = rpc.generate_to_address(1, &addr);
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
         let confirmed_event = wait_for_withdrawal_confirmation(
             &mut networks.sui_network.client,
@@ -497,8 +521,7 @@ mod tests {
         .await?;
         info!("Withdrawal confirmed on Sui");
 
-        stop_mining.store(true, Ordering::Relaxed);
-        mining_handle.join().expect("mining thread panicked");
+        drop(miner);
 
         let hbtc_balance_after = get_hbtc_balance(
             &mut networks.sui_network.client,
@@ -544,29 +567,7 @@ mod tests {
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes, 0)
             .await?;
 
-        // Mine blocks in the background so the BTC withdrawal tx accumulates
-        // enough confirmations for the leader to confirm on Sui.
-        let stop_mining = Arc::new(AtomicBool::new(false));
-        let stop_flag = stop_mining.clone();
-        let mining_rpc_url = networks.bitcoin_node.rpc_url().to_string();
-        let mining_handle = std::thread::spawn(move || {
-            let rpc = bitcoincore_rpc::Client::new(
-                &mining_rpc_url,
-                bitcoincore_rpc::Auth::UserPass(
-                    crate::bitcoin_node::RPC_USER.to_string(),
-                    crate::bitcoin_node::RPC_PASSWORD.to_string(),
-                ),
-            )
-            .expect("failed to create mining RPC client");
-            let addr = rpc
-                .get_new_address(None, None)
-                .expect("failed to get mining address")
-                .assume_checked();
-            while !stop_flag.load(Ordering::Relaxed) {
-                let _ = rpc.generate_to_address(1, &addr);
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
         let confirmed = wait_for_withdrawal_confirmation(
             &mut networks.sui_network.client,
@@ -574,8 +575,7 @@ mod tests {
         )
         .await?;
 
-        stop_mining.store(true, Ordering::Relaxed);
-        mining_handle.join().expect("mining thread panicked");
+        drop(miner);
 
         let withdrawal_txid = address_to_txid(&confirmed.txid);
         wait_for_withdrawal_tx_success(
