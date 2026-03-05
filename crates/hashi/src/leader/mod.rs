@@ -695,7 +695,6 @@ impl LeaderService {
                     txid, pending.id
                 );
                 self.confirm_withdrawal_on_sui(pending).await;
-                return;
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
                 debug!(
@@ -703,42 +702,91 @@ impl LeaderService {
                      confirmations, waiting for more",
                     txid
                 );
-                return;
             }
             Ok(TxStatus::InMempool) => {
                 debug!(
                     "Withdrawal tx {} in mempool for {:?}, waiting for confirmations",
                     txid, pending.id
                 );
-                return;
             }
             Ok(TxStatus::NotFound) => {
-                // Not in mempool or blockchain — rebuild and broadcast from on-chain state.
+                self.rebuild_and_broadcast(pending, txid).await;
             }
             Err(e) => {
                 error!(
                     "Failed to query transaction status for {:?} (txid {}): {e}",
                     pending.id, txid
                 );
-                return;
             }
         }
+    }
 
-        // Rebuild signed tx from on-chain signatures and broadcast.
+    /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
+    /// data (stored witness signatures) and broadcast it to the Bitcoin network.
+    async fn rebuild_and_broadcast(&self, pending: &PendingWithdrawal, txid: bitcoin::Txid) {
         warn!(
             "Withdrawal tx {} not found for {:?}, re-broadcasting from on-chain signatures",
             txid, pending.id
         );
-        let tx = match self.rebuild_signed_tx_from_onchain(pending) {
-            Ok(tx) => tx,
-            Err(e) => {
+
+        let raw_sigs = match pending.signatures.as_ref() {
+            Some(sigs) => sigs,
+            None => {
                 error!(
-                    "Failed to rebuild signed tx from on-chain data for {:?}: {e}",
+                    "No signatures on pending withdrawal {:?}, cannot rebuild",
                     pending.id
                 );
                 return;
             }
         };
+
+        let mut tx = match self
+            .inner
+            .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)
+        {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(
+                    "Failed to build unsigned withdrawal tx for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        if raw_sigs.len() != tx.input.len() || tx.input.len() != pending.inputs.len() {
+            error!(
+                "Count mismatch for {:?}: {} signatures, {} tx inputs, {} pending inputs",
+                pending.id,
+                raw_sigs.len(),
+                tx.input.len(),
+                pending.inputs.len()
+            );
+            return;
+        }
+
+        let hashi_pubkey = self.inner.get_hashi_pubkey();
+        for ((input, pending_input), sig_bytes) in
+            tx.input.iter_mut().zip(pending.inputs.iter()).zip(raw_sigs)
+        {
+            let pubkey = match self
+                .inner
+                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())
+            {
+                Ok(pk) => pk,
+                Err(e) => {
+                    error!("Failed to derive deposit pubkey for {:?}: {e}", pending.id);
+                    return;
+                }
+            };
+            let (script, control_block, _) =
+                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+            let mut witness = bitcoin::Witness::new();
+            witness.push(sig_bytes);
+            witness.push(script.to_bytes());
+            witness.push(control_block.serialize());
+            input.witness = witness;
+        }
 
         match self.inner.btc_monitor().broadcast_transaction(tx).await {
             Ok(()) => {
@@ -751,52 +799,6 @@ impl LeaderService {
                 );
             }
         }
-    }
-
-    /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
-    fn rebuild_signed_tx_from_onchain(
-        &self,
-        pending: &PendingWithdrawal,
-    ) -> anyhow::Result<bitcoin::Transaction> {
-        let raw_sigs = pending
-            .signatures
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No signatures on pending withdrawal"))?;
-
-        let mut tx = self
-            .inner
-            .build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
-
-        anyhow::ensure!(
-            raw_sigs.len() == tx.input.len(),
-            "Signature count mismatch: tx has {} inputs, on-chain has {} signatures",
-            tx.input.len(),
-            raw_sigs.len()
-        );
-        anyhow::ensure!(
-            tx.input.len() == pending.inputs.len(),
-            "Input count mismatch: tx has {} inputs, pending has {}",
-            tx.input.len(),
-            pending.inputs.len()
-        );
-
-        let hashi_pubkey = self.inner.get_hashi_pubkey();
-        for ((input, pending_input), sig_bytes) in
-            tx.input.iter_mut().zip(pending.inputs.iter()).zip(raw_sigs)
-        {
-            let pubkey = self
-                .inner
-                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
-            let (script, control_block, _) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
-            let mut witness = bitcoin::Witness::new();
-            witness.push(sig_bytes);
-            witness.push(script.to_bytes());
-            witness.push(control_block.serialize());
-            input.witness = witness;
-        }
-
-        Ok(tx)
     }
 
     async fn confirm_withdrawal_on_sui(&self, pending: &PendingWithdrawal) {
