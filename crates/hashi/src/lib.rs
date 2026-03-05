@@ -302,6 +302,16 @@ impl Hashi {
         sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)
             .await?;
 
+        // Register validator (if not already registered) and update any stale metadata.
+        match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
+            .execute_register_or_update_validator(&self.config, None)
+            .await
+        {
+            Ok(true) => tracing::info!("Validator registered/updated on-chain"),
+            Ok(false) => tracing::debug!("Validator metadata is already up-to-date"),
+            Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
+        }
+
         if self.is_in_current_committee() {
             let epoch = self.onchain_state().epoch();
             let mpc_manager = self
