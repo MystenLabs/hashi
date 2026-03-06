@@ -656,14 +656,16 @@ pub struct OperatorInitTestArgs {
 #[cfg(test)]
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
-        let dummy = ShareCommitment {
-            id: std::num::NonZeroU16::new(1).unwrap(),
-            digest: vec![],
-        };
+        let commitments = (1..=NUM_OF_SHARES)
+            .map(|id| ShareCommitment {
+                id: std::num::NonZeroU16::new(id as u16).unwrap(),
+                digest: vec![],
+            })
+            .collect();
 
         Self {
             network: Network::Regtest,
-            commitments: ShareCommitments::new(vec![dummy; NUM_OF_SHARES]).unwrap(),
+            commitments: ShareCommitments::new(commitments).unwrap(),
             s3_logger: mock_logger(),
         }
     }
