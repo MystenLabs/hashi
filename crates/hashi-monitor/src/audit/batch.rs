@@ -76,7 +76,7 @@ pub struct BatchAuditor {
 }
 
 impl BatchAuditor {
-    pub async fn new(cfg: Config, start: UnixSeconds, end: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &Config, start: UnixSeconds, end: UnixSeconds) -> anyhow::Result<Self> {
         anyhow::ensure!(
             start <= end,
             "invalid time range: start={start} > end={end}"
@@ -87,7 +87,7 @@ impl BatchAuditor {
             "end is in the future: end={end} > cur_time={cur_time}"
         );
 
-        let audit_window = BatchAuditWindow::new(&cfg, start, end, cur_time);
+        let audit_window = BatchAuditWindow::new(cfg, start, end, cur_time);
         let cursors = Cursors {
             sui: audit_window.sui_start,
             guardian: audit_window.guardian_start,

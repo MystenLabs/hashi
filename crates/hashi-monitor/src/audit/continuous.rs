@@ -56,13 +56,13 @@ impl ContinuousAuditWindow {
 }
 
 impl ContinuousAuditor {
-    pub async fn new(cfg: Config, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         let cur_time = now_unix_seconds();
         anyhow::ensure!(
             start <= cur_time,
             "start is in the future: start={start} > cur_time={cur_time}"
         );
-        let audit_window = ContinuousAuditWindow::new(&cfg, start);
+        let audit_window = ContinuousAuditWindow::new(cfg, start);
         let cursors = Cursors {
             sui: audit_window.sui_start,
             guardian: audit_window.guardian_start,
