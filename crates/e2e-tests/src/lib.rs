@@ -212,8 +212,12 @@ mod tests {
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
     const SIGNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+    fn get_mpc_key(nodes: &[HashiNodeHandle]) -> G {
+        nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap()
+    }
+
     fn assert_nodes_agree_on_mpc_key(nodes: &[HashiNodeHandle]) {
-        let pk = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+        let pk = get_mpc_key(nodes);
         for (i, node) in nodes.iter().enumerate().skip(1) {
             let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
             assert_eq!(pk, node_pk, "Node {i} public key differs from node 0");
@@ -238,9 +242,15 @@ mod tests {
         test_networks: &mut TestNetworks,
         target_epoch: u64,
     ) -> u64 {
+        let key_before = get_mpc_key(test_networks.hashi_network().nodes());
         test_networks.sui_network.force_close_epoch().await.unwrap();
         let epoch = wait_for_rotation(test_networks.hashi_network().nodes(), target_epoch).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        let key_after = get_mpc_key(test_networks.hashi_network().nodes());
+        assert_eq!(
+            key_before, key_after,
+            "Public key changed during rotation to epoch {target_epoch}"
+        );
         epoch
     }
 

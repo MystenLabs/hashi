@@ -2305,7 +2305,13 @@ impl MpcManager {
         let source_session_id =
             SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
         let mut certified_dealers = HashMap::new();
+        let mut dealer_weight_sum = 0u16;
         for cert in certificates {
+            // This matches the behavior of `run_as_party` during DKG, which also
+            // stops at threshold.
+            if dealer_weight_sum >= previous_threshold {
+                break;
+            }
             let CertificateV1::Dkg(dkg_cert) = cert else {
                 return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all DKG certificates".into(),
@@ -2346,26 +2352,20 @@ impl MpcManager {
                 DealerOutputsKey::Dkg(dealer_address),
                 ComplaintsToProcessKey::Dkg(dealer_address),
             )?;
+            let dealer_party_id = previous_committee
+                .index_of(&dealer_address)
+                .expect("certified dealer must be in previous committee")
+                as u16;
+            let dealer_weight = previous_nodes
+                .weight_of(dealer_party_id)
+                .expect("party_id must be valid");
+            dealer_weight_sum += dealer_weight;
             certified_dealers.insert(dealer_address, cert.clone());
         }
-        // Unlike normal flow which accumulates until threshold in a loop, reconstruction
-        // receives all certificates at once. Check threshold for better error handling.
-        let total_weight: u16 = certified_dealers
-            .keys()
-            .map(|dealer| {
-                let party_id = previous_committee
-                    .index_of(dealer)
-                    .expect("certified dealer must be in previous committee")
-                    as u16;
-                previous_nodes
-                    .weight_of(party_id)
-                    .expect("party_id must be valid")
-            })
-            .sum();
-        if total_weight < previous_threshold {
+        if dealer_weight_sum < previous_threshold {
             return Err(MpcError::NotEnoughApprovals {
                 needed: previous_threshold as usize,
-                got: total_weight as usize,
+                got: dealer_weight_sum as usize,
             });
         }
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
@@ -7296,7 +7296,7 @@ mod tests {
     /// For rotation tests that provides a completed DKG setup.
     struct RotationTestSetup {
         setup: TestSetup,
-        certificates: HashMap<Address, CertificateV1>,
+        certificates: BTreeMap<Address, CertificateV1>,
         dealer_messages: Vec<Messages>,
         dealer_indices: Vec<usize>,
     }
@@ -7325,8 +7325,8 @@ mod tests {
                 })
                 .collect();
 
-            // Create certificates by collecting signatures
-            let mut certificates = HashMap::new();
+            // Create certificates by collecting signatures (BTreeMap for deterministic order)
+            let mut certificates = BTreeMap::new();
             for (i, messages) in dealer_messages.iter().enumerate() {
                 let dealer_address = dealer_managers[i].address;
 
@@ -7360,6 +7360,26 @@ mod tests {
             self.certificates.values().cloned().collect()
         }
 
+        /// Returns the subset of dealer addresses that `reconstruct_from_dkg_certificates`
+        /// would use (sorted order, stopping at threshold weight).
+        /// This matches `run_as_party` behavior during live DKG.
+        fn threshold_dealer_addresses(&self) -> Vec<Address> {
+            let committee = self.setup.committee();
+            let (nodes, threshold) =
+                build_reduced_nodes(committee, TEST_ALLOWED_DELTA, TEST_WEIGHT_DIVISOR).unwrap();
+            let mut result = Vec::new();
+            let mut weight_sum = 0u16;
+            for addr in self.certificates.keys() {
+                if weight_sum >= threshold {
+                    break;
+                }
+                let party_id = committee.index_of(addr).unwrap() as u16;
+                weight_sum += nodes.weight_of(party_id).unwrap();
+                result.push(*addr);
+            }
+            result
+        }
+
         /// Sets previous_committee, previous_nodes, and previous_threshold on a
         /// DKG manager so it can be used for rotation tests. In production, these
         /// are set by MpcManager::new when pending_epoch_change is set.
@@ -7389,7 +7409,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = receiver_manager
-                .complete_dkg(self.certificates.keys().copied())
+                .complete_dkg(self.threshold_dealer_addresses().into_iter())
                 .unwrap();
 
             // Clear state to prepare for rotation (new committee formation)
@@ -7422,7 +7442,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = receiver_manager
-                .complete_dkg(self.certificates.keys().copied())
+                .complete_dkg(self.threshold_dealer_addresses().into_iter())
                 .unwrap();
 
             // Clear state to prepare for rotation (new committee formation)
@@ -7449,7 +7469,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = dealer_manager
-                .complete_dkg(self.certificates.keys().copied())
+                .complete_dkg(self.threshold_dealer_addresses().into_iter())
                 .unwrap();
 
             // Clear state to prepare for rotation (new committee formation)
@@ -7490,7 +7510,7 @@ mod tests {
 
             // Complete DKG
             let dkg_output = dealer_manager
-                .complete_dkg(self.certificates.keys().copied())
+                .complete_dkg(self.threshold_dealer_addresses().into_iter())
                 .unwrap();
 
             // Clear state to prepare for rotation (new committee formation)
@@ -9063,6 +9083,148 @@ mod tests {
             reconstructed.key_shares.shares.len(),
             dkg_outputs[shifted_member_index].key_shares.shares.len(),
             "Should have same number of key shares"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
+        let mut rng = rand::thread_rng();
+
+        // 5 members with weight 3 each. Total=15, threshold=ceil(15/3)=5.
+        // Each dealer has weight 3, so 2 dealers (weight 6) meet threshold.
+        let weights = [3u16, 3, 3, 3, 3];
+        let setup = TestSetup::with_weights(&weights);
+        let epoch = setup.epoch(); // 100
+
+        // Create 4 dealers (indices 0..4), each generates a DKG message.
+        let dealer_indices: Vec<usize> = vec![0, 1, 2, 3];
+        let mut dealer_managers: Vec<_> = dealer_indices
+            .iter()
+            .map(|&i| setup.create_manager(i))
+            .collect();
+        let dealer_messages: Vec<Messages> = dealer_managers
+            .iter()
+            .map(|dm| Messages::Dkg(dm.create_dealer_message(&mut rng)))
+            .collect();
+
+        // Every member (including a 5th non-dealer) receives all dealer messages.
+        // We use member 4 as our reconstruction target.
+        let target_index = 4usize;
+        let mut target_manager = setup.create_manager(target_index);
+        for (i, msg) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            receive_dealer_messages(&mut target_manager, msg, dealer_addr).unwrap();
+            // Also have each dealer receive all messages (needed for certificate signing)
+            for dm in dealer_managers.iter_mut() {
+                let _ = receive_dealer_messages(dm, msg, dealer_addr);
+            }
+        }
+
+        // Complete DKG with threshold subset (dealers 0,1 — weight 6 >= 5).
+        let threshold_dealers: Vec<Address> = vec![setup.address(0), setup.address(1)];
+        let key_threshold = target_manager
+            .complete_dkg(threshold_dealers.iter().copied())
+            .unwrap()
+            .public_key;
+
+        // Complete DKG with all 4 dealers for comparison.
+        let all_dealers: Vec<Address> = dealer_indices.iter().map(|&i| setup.address(i)).collect();
+        // Reset outputs so we can call complete_dkg again with all dealers.
+        target_manager.dealer_outputs.clear();
+        for &i in &dealer_indices {
+            target_manager
+                .process_certified_dkg_message(setup.address(i))
+                .unwrap();
+        }
+        let key_all = target_manager
+            .complete_dkg(all_dealers.iter().copied())
+            .unwrap()
+            .public_key;
+
+        // Sanity: adding extra dealers changes the public key.
+        assert_ne!(
+            key_threshold, key_all,
+            "DKG is additive: different dealer sets must produce different keys"
+        );
+
+        // Create certificates for all 4 dealers (signed by dealers 0 and 1).
+        let committee = setup.committee();
+        let mut certificates = Vec::new();
+        for (i, msg) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            let sigs: Vec<MemberSignature> = [0usize, 1]
+                .iter()
+                .map(|&signer_idx| {
+                    setup.signing_keys[signer_idx].sign(
+                        epoch,
+                        setup.address(signer_idx),
+                        &DealerMessagesHash {
+                            dealer_address: dealer_addr,
+                            messages_hash: compute_messages_hash(msg),
+                        },
+                    )
+                })
+                .collect();
+            let cert = create_test_certificate(committee, msg, dealer_addr, sigs).unwrap();
+            certificates.push(CertificateV1::Dkg(cert));
+        }
+
+        // Set up CommitteeSet for reconstruction: epoch=100 is "previous",
+        // pending_epoch_change=101 is "target".
+        let target_epoch = epoch + 1;
+        let members: Vec<_> = committee.members().to_vec();
+        let previous_committee = Committee::new(members.clone(), epoch);
+        let target_committee = Committee::new(members, target_epoch);
+
+        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        let mut committees = BTreeMap::new();
+        committees.insert(epoch, previous_committee);
+        committees.insert(target_epoch, target_committee);
+        committee_set
+            .set_epoch(epoch)
+            .set_pending_epoch_change(Some(target_epoch))
+            .set_committees(committees);
+
+        // Create InMemoryPublicMessagesStore with all 4 dealer messages.
+        let mut store = InMemoryPublicMessagesStore::new();
+        for (i, msg) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            let Messages::Dkg(inner) = msg else {
+                unreachable!()
+            };
+            store.store_dealer_message(&dealer_addr, inner).unwrap();
+        }
+
+        // Create manager for member 4 at target epoch.
+        let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
+        let mut manager = MpcManager::new(
+            setup.address(target_index),
+            &committee_set,
+            session_id,
+            setup.encryption_keys[target_index].clone(),
+            setup.signing_keys[target_index].clone(),
+            Box::new(store),
+            TEST_ALLOWED_DELTA,
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+        )
+        .unwrap();
+
+        // Pass all 4 certificates. Without the threshold fix, this would use all 4
+        // dealers and produce key_all. With the fix, it stops at threshold (2 dealers)
+        // and produces key_threshold.
+        let reconstructed = manager
+            .reconstruct_from_dkg_certificates(&certificates)
+            .unwrap();
+
+        assert_eq!(
+            reconstructed.public_key, key_threshold,
+            "Reconstruction must stop at threshold and match the live DKG key"
+        );
+        assert_ne!(
+            reconstructed.public_key, key_all,
+            "Reconstruction must NOT use extra dealers beyond threshold"
         );
     }
 
