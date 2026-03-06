@@ -60,7 +60,7 @@ pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian-enclave/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
-pub const S3_DIR_WITHDRAW: &str = "guardian";
+pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 
 /// Canonical guardian session ID derived from the enclave signing public key.
