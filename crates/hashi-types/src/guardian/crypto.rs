@@ -111,13 +111,6 @@ impl ShareCommitments {
             digest: digest.clone(),
         })
     }
-
-    pub fn into_vec(self) -> Vec<ShareCommitment> {
-        self.0
-            .into_iter()
-            .map(|(id, digest)| ShareCommitment { id, digest })
-            .collect()
-    }
 }
 
 impl IntoIterator for ShareCommitments {
@@ -125,7 +118,11 @@ impl IntoIterator for ShareCommitments {
     type IntoIter = std::vec::IntoIter<ShareCommitment>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.into_vec().into_iter()
+        self.0
+            .into_iter()
+            .map(|(id, digest)| ShareCommitment { id, digest })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 

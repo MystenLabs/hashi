@@ -28,7 +28,6 @@ use crate::committee::CommitteeSignature;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::guardian::s3_utils::S3HourScopedDirectory;
 pub use bitcoin::Address as BitcoinAddress;
-use bitcoin::hex::DisplayHex;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
@@ -65,7 +64,7 @@ pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 
 /// Canonical guardian session ID derived from the enclave signing public key.
 pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> String {
-    signing_pub_key.as_bytes().to_lower_hex_string()
+    ::hex::encode(signing_pub_key.as_bytes())
 }
 
 // ---------------------------------
@@ -252,15 +251,14 @@ pub enum InitLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WithdrawalLogMessage {
-    /// Immediate guardian success
+    /// Immediate withdraw success
     Success {
         txid: Txid,
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         response: StandardWithdrawalResponse,
     },
-    /// Immediate guardian failure
-    /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
+    /// Immediate withdraw failure
     Failure {
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
@@ -864,7 +862,7 @@ mod tests {
         set_timestamp(&mut log, timestamp_ms);
 
         let key = log.object_key();
-        assert!(key.starts_with("guardian/2023/11/14/22/session-c-999-success-"));
+        assert!(key.starts_with("withdraw/2023/11/14/22/session-c-999-success-"));
         assert!(key.ends_with(".json"));
     }
 }

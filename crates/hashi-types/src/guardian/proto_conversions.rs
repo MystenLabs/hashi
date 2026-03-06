@@ -300,7 +300,6 @@ pub fn operator_init_request_to_pb(
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
         share_commitments: share_commitments
-            .into_vec()
             .into_iter()
             .map(share_commitment_to_pb)
             .collect(),
@@ -460,7 +459,6 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .share_commitments
             .map(|v| pb::GuardianShareCommitments {
                 share_commitments: v
-                    .into_vec()
                     .into_iter()
                     .map(share_commitment_to_pb)
                     .collect(),
