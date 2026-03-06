@@ -510,8 +510,8 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
-        // Determine whether this is an initial DKG or a key KeyRotation
-        // based on if we already have a committed to mpc_public_key.
+        // Determine whether this is an initial DKG or a key rotation
+        // based on if we already have a committed mpc_public_key.
         let run_dkg = self
             .inner
             .onchain_state()

@@ -383,7 +383,7 @@ public(package) fun end_reconfig(
     assert!(self.has_committee(next_epoch));
 
     // If the mpc_public_key is empty, then this is the initial reconfig where
-    // DKG is run and we need to set the produce pubkey.
+    // DKG is run and we need to set the produced pubkey.
     if (self.mpc_public_key.is_empty()) {
         self.mpc_public_key = mpc_public_key;
     };
