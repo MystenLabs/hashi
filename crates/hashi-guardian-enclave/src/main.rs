@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -81,7 +80,7 @@ pub struct Scratchpad {
     /// TODO: Investigate if it can be moved to std::sync::Mutex
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// The share commitments
-    pub share_commitments: OnceLock<Vec<ShareCommitment>>,
+    pub share_commitments: OnceLock<ShareCommitments>,
     /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
@@ -530,7 +529,7 @@ impl Enclave {
 
     /// A unique session ID for the current enclave session.
     pub fn s3_session_id(&self) -> String {
-        self.signing_pubkey().as_bytes().to_lower_hex_string()
+        session_id_from_signing_pubkey(&self.signing_pubkey())
     }
 
     async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
@@ -575,14 +574,14 @@ impl Enclave {
         &self.scratchpad.shares
     }
 
-    pub fn share_commitments(&self) -> GuardianResult<&Vec<ShareCommitment>> {
+    pub fn share_commitments(&self) -> GuardianResult<&ShareCommitments> {
         self.scratchpad
             .share_commitments
             .get()
             .ok_or(InvalidInputs("Share commitments not set".into()))
     }
 
-    pub fn set_share_commitments(&self, commitments: Vec<ShareCommitment>) -> GuardianResult<()> {
+    pub fn set_share_commitments(&self, commitments: ShareCommitments) -> GuardianResult<()> {
         if commitments.len() != NUM_OF_SHARES {
             return Err(InvalidInputs("Number of commitments does not match".into()));
         }
@@ -653,7 +652,7 @@ pub fn mock_logger() -> S3Logger {
 #[cfg(test)]
 pub struct OperatorInitTestArgs {
     pub network: Network,
-    pub commitments: Vec<ShareCommitment>,
+    pub commitments: ShareCommitments,
     pub s3_logger: S3Logger,
 }
 
@@ -667,7 +666,7 @@ impl Default for OperatorInitTestArgs {
 
         Self {
             network: Network::Regtest,
-            commitments: vec![dummy; NUM_OF_SHARES],
+            commitments: ShareCommitments::new(vec![dummy; NUM_OF_SHARES]).unwrap(),
             s3_logger: mock_logger(),
         }
     }
@@ -680,7 +679,7 @@ impl OperatorInitTestArgs {
         self
     }
 
-    pub fn with_commitments(mut self, commitments: Vec<ShareCommitment>) -> Self {
+    pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
         self.commitments = commitments;
         self
     }

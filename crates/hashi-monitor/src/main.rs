@@ -68,8 +68,8 @@ async fn main() -> anyhow::Result<()> {
             auditor.run().await?;
         }
         Command::KpInit { config } => {
-            let cfg = hashi_monitor::kp_init::KpInitConfig::load_yaml(&config)?;
-            hashi_monitor::kp_init::run(cfg).await?;
+            let cfg = hashi_monitor::kp::ProvisionerConfig::load_yaml(&config)?;
+            hashi_monitor::kp::run(cfg).await?;
         }
     }
 

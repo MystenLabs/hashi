@@ -33,8 +33,7 @@ pub async fn operator_init(
     info!("Enclave state validated.");
 
     let (config, commitments, network) = request.into_parts();
-    let logger = S3Logger::new(&config).await;
-    logger.test_s3_connectivity().await?;
+    let logger = S3Logger::new_checked(&config).await?;
     info!("S3 connectivity check complete.");
 
     info!("Storing S3 configuration.");
@@ -229,7 +228,7 @@ async fn finalize_init(
     info!("Enclave initialization complete.");
 }
 
-fn verify_share(share: &Share, commitments: &[ShareCommitment]) -> GuardianResult<()> {
+fn verify_share(share: &Share, commitments: &ShareCommitments) -> GuardianResult<()> {
     commitments
         .contains(&commit_share(share))
         .then_some(())
@@ -249,9 +248,9 @@ mod tests {
     async fn setup_test_shares_and_enclave() -> (Vec<Share>, Arc<Enclave>) {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let shares = split_secret(&sk, &mut rand::thread_rng());
-        let share_commitments: Vec<ShareCommitment> = shares.iter().map(commit_share).collect();
+        let share_commitments = ShareCommitments::from_shares(&shares).unwrap();
         let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_commitments(share_commitments.clone()),
+            OperatorInitTestArgs::default().with_commitments(share_commitments),
         )
         .await;
         (shares, enclave)

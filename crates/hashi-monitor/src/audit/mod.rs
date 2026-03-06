@@ -22,7 +22,7 @@ pub mod continuous;
 use crate::config::Config;
 use crate::errors::MonitorError;
 use crate::rpc::btc::BtcRpcClient;
-use crate::rpc::guardian::withdraw::GuardianWithdrawalsPoller;
+use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::WithdrawalStateMachine;
 pub use batch::BatchAuditor;

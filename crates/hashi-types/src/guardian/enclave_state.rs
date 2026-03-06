@@ -8,6 +8,7 @@ use super::epoch_store::ConsecutiveEpochStoreRepr;
 use super::epoch_store::EpochWindow;
 use bitcoin::Amount;
 use serde::Serialize;
+use serde_derive::Deserialize;
 
 /// Rate limiter state: Amount withdrawn in the last N epochs.
 /// RateLimiterState and CommitteeStore have the same window & entries size. This is enforced in
@@ -160,8 +161,14 @@ impl CommitteeStore {
     }
 }
 
-#[derive(Serialize)]
-pub(crate) struct CommitteeStoreRepr(ConsecutiveEpochStoreRepr<crate::move_types::Committee>);
+#[derive(Serialize, Deserialize)]
+pub struct CommitteeStoreRepr(pub ConsecutiveEpochStoreRepr<crate::move_types::Committee>);
+
+impl CommitteeStoreRepr {
+    pub fn epoch_window(&self) -> EpochWindow {
+        self.0.window
+    }
+}
 
 impl From<CommitteeStore> for CommitteeStoreRepr {
     fn from(store: CommitteeStore) -> Self {
@@ -169,6 +176,22 @@ impl From<CommitteeStore> for CommitteeStoreRepr {
             window: store.0.epoch_window(),
             entries: store.0.iter().map(|(_, c)| c.into()).collect(),
         })
+    }
+}
+
+impl TryFrom<CommitteeStoreRepr> for CommitteeStore {
+    type Error = anyhow::Error;
+
+    fn try_from(value: CommitteeStoreRepr) -> Result<Self, Self::Error> {
+        let window = value.0.window;
+        let committees = value
+            .0
+            .entries
+            .into_iter()
+            .map(crate::committee::Committee::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        CommitteeStore::new(window, committees)
+            .map_err(|e| anyhow::anyhow!("invalid committee store repr: {e}"))
     }
 }
 

@@ -1,10 +1,6 @@
-pub mod heartbeat;
-
-pub mod withdraw;
-
-pub use withdraw::GuardianWithdrawalsPoller;
-
+use crate::config::Config;
 use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use anyhow::Context;
@@ -31,9 +27,9 @@ pub enum GuardianLogDir {
     Heartbeat,
 }
 
-pub enum VerifiedWithdrawal {
+enum VerifiedWithdrawal {
     Success(MonitorWithdrawalEvent),
-    Failure(Box<WithdrawalLogMessage>),
+    Failure,
 }
 
 /// Reusable S3 poller core with attestation and signature checks. Meant to be used for either withdrawal or heartbeat logs.
@@ -72,7 +68,7 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
             }
             failure @ WithdrawalLogMessage::Failure { .. } => {
                 info!(?failure, "failed guardian withdrawal log");
-                Ok(VerifiedWithdrawal::Failure(Box::new(failure)))
+                Ok(VerifiedWithdrawal::Failure)
             }
         }
     }
@@ -93,23 +89,23 @@ impl GuardianPollerCore {
         start: UnixSeconds,
         log_dir: GuardianLogDir,
     ) -> anyhow::Result<Self> {
-        let poller = Self {
-            s3_client: S3Logger::new(config).await,
+        let s3_client = S3Logger::new_checked(config)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("failed to verify guardian S3 connectivity")?;
+        Ok(Self::from_s3_client(s3_client, start, log_dir))
+    }
+
+    pub fn from_s3_client(
+        s3_client: S3Logger,
+        start: UnixSeconds,
+        log_dir: GuardianLogDir,
+    ) -> Self {
+        Self {
+            s3_client,
             cursor: S3HourScopedDirectory::new(log_dir.as_prefix(), start),
             enclave_pub_keys: HashMap::new(),
-        };
-
-        poller
-            .s3_client
-            .test_s3_connectivity()
-            .await
-            .context("failed to verify guardian S3 connectivity")?;
-        info!(
-            prefix = log_dir.as_prefix(),
-            "S3 connectivity check complete."
-        );
-
-        Ok(poller)
+        }
     }
 
     pub fn is_readable(&self) -> bool {
@@ -162,5 +158,45 @@ impl GuardianPollerCore {
         self.enclave_pub_keys
             .insert(session_id.to_string(), signing_pubkey);
         Ok(())
+    }
+}
+
+// Note: current design does not check if multiple concurrent sessions are running.
+//       one way to impl this: store the first & last observed session timestamp & ensure no overlap between time ranges.
+pub struct GuardianWithdrawalsPoller(GuardianPollerCore);
+
+impl GuardianWithdrawalsPoller {
+    // Note: Throws an error if there is a S3 connectivity issue
+    pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
+        Ok(Self(
+            GuardianPollerCore::new(&config.guardian, start, GuardianLogDir::Withdraw).await?,
+        ))
+    }
+
+    pub fn cursor_seconds(&self) -> UnixSeconds {
+        self.0.cursor_seconds()
+    }
+
+    /// Polls the Guardian S3 bucket for one hour worth of events.
+    /// A more aggressive fetch, e.g., one day at a time, can also be done if needed.
+    pub async fn poll_one_hour(&mut self) -> anyhow::Result<PollOutcome> {
+        if !self.0.is_readable() {
+            return Ok(PollOutcome::CursorUnmoved);
+        }
+
+        let verified_logs = self.0.read_cur_dir().await?;
+        let withdrawal_events = verified_logs
+            .into_iter()
+            .map(VerifiedWithdrawal::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|e| match e {
+                VerifiedWithdrawal::Success(event) => Some(event),
+                VerifiedWithdrawal::Failure => None,
+            })
+            .collect::<Vec<MonitorWithdrawalEvent>>();
+
+        self.0.advance_cursor();
+        Ok(PollOutcome::CursorAdvanced(withdrawal_events))
     }
 }

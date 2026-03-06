@@ -18,6 +18,7 @@ use super::S3Config;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
+use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawalConfig;
@@ -31,6 +32,7 @@ use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
 use crate::committee::EncryptionPublicKey;
+use crate::guardian::epoch_store::EpochWindow;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::hashes::Hash as _;
@@ -45,7 +47,6 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
-
 // -------------------------------
 // Shared deterministic test values
 // -------------------------------
@@ -91,13 +92,14 @@ impl SetupNewKeyRequest {
     }
 }
 
-fn dummy_commitments() -> Vec<ShareCommitment> {
-    (0..NUM_OF_SHARES)
+fn dummy_commitments() -> ShareCommitments {
+    let commitments = (0..NUM_OF_SHARES)
         .map(|i| ShareCommitment {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
             digest: vec![0u8; 32],
         })
-        .collect()
+        .collect();
+    ShareCommitments::new(commitments).unwrap()
 }
 
 fn dummy_encrypted_shares() -> Vec<EncryptedShare> {
@@ -145,7 +147,7 @@ impl OperatorInitRequest {
 
         OperatorInitRequest {
             s3_config,
-            share_commitments,
+            share_commitments: ShareCommitments::new(share_commitments).unwrap(),
             network: super::Network::Regtest,
         }
     }
@@ -215,13 +217,9 @@ impl ProvisionerInitState {
                 delayed_withdrawals_min_delay: Duration::from_secs(10),
                 delayed_withdrawals_timeout: Duration::from_secs(60),
             },
-            withdrawal_state: WithdrawalState::new(
-                RateLimiter::new(
-                    epoch_window,
-                    vec![Amount::from_sat(0)],
-                    max_withdrawable_per_epoch,
-                )
-                .unwrap(),
+            withdrawal_state: WithdrawalState::mock_for_testing(
+                epoch_window,
+                max_withdrawable_per_epoch,
             ),
             hashi_committees: CommitteeStore::new(
                 epoch_window,
@@ -230,6 +228,19 @@ impl ProvisionerInitState {
             .unwrap(),
             hashi_btc_master_pubkey: kp.x_only_public_key().0,
         }
+    }
+}
+
+impl WithdrawalState {
+    pub fn mock_for_testing(epoch_window: EpochWindow, max_withdrawable_per_epoch: Amount) -> Self {
+        WithdrawalState::new(
+            RateLimiter::new(
+                epoch_window,
+                vec![Amount::from_sat(0)],
+                max_withdrawable_per_epoch,
+            )
+            .unwrap(),
+        )
     }
 }
 

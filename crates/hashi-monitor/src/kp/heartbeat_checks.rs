@@ -1,9 +1,9 @@
 use crate::domain::now_unix_seconds;
 use crate::rpc::guardian::GuardianLogDir;
 use crate::rpc::guardian::GuardianPollerCore;
-use crate::rpc::guardian::VerifiedLogRecord;
+use hashi_guardian_enclave::s3_logger::S3Logger;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use std::collections::BTreeMap;
@@ -26,8 +26,9 @@ pub struct GuardianSessionInfo {
 }
 
 /// Implements check A of IOP-225.
-pub async fn kp_heartbeat_audits(cfg: &S3Config) -> anyhow::Result<String> {
-    let summary = read_recent_heartbeat_summary(cfg).await?;
+pub async fn kp_heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
+    let recent_heartbeats = read_recent_heartbeats(s3_client).await?;
+    let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
     let now = now_unix_seconds();
     select_live_session(
         &summary,
@@ -37,15 +38,50 @@ pub async fn kp_heartbeat_audits(cfg: &S3Config) -> anyhow::Result<String> {
     )
 }
 
-async fn read_recent_heartbeat_summary(cfg: &S3Config) -> anyhow::Result<Vec<GuardianSessionInfo>> {
+async fn read_recent_heartbeats(s3_client: &S3Logger) -> anyhow::Result<Vec<VerifiedLogRecord>> {
     let one_hour_ago = now_unix_seconds().saturating_sub(60 * 60);
-    let mut poller = GuardianPollerCore::new(cfg, one_hour_ago, GuardianLogDir::Heartbeat).await?;
+    let mut poller = GuardianPollerCore::from_s3_client(
+        s3_client.clone(),
+        one_hour_ago,
+        GuardianLogDir::Heartbeat,
+    );
     let mut logs = Vec::new();
     logs.extend(poller.read_cur_dir().await?);
     poller.advance_cursor();
     logs.extend(poller.read_cur_dir().await?);
+    Ok(logs)
+}
 
-    summarize_logs_by_session(logs)
+/// Aggregates verified heartbeat logs into [first, last] bounds per session.
+fn summarize_heartbeats_by_session(
+    logs: Vec<VerifiedLogRecord>,
+) -> anyhow::Result<Vec<GuardianSessionInfo>> {
+    let mut map: BTreeMap<String, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
+
+    for log in logs {
+        if !matches!(log.message, LogMessage::Heartbeat { .. }) {
+            anyhow::bail!("non-heartbeat logs found");
+        }
+
+        let ts = unix_millis_to_seconds(log.timestamp_ms);
+        map.entry(log.session_id)
+            .and_modify(|(first, last)| {
+                *first = (*first).min(ts);
+                *last = (*last).max(ts);
+            })
+            .or_insert((ts, ts));
+    }
+
+    Ok(map
+        .into_iter()
+        .map(
+            |(session_id, (first_heartbeat, last_heartbeat))| GuardianSessionInfo {
+                session_id,
+                first_heartbeat,
+                last_heartbeat,
+            },
+        )
+        .collect())
 }
 
 /// Checks that exactly one session is live and returns its ID.
@@ -91,44 +127,14 @@ fn select_live_session(
     }
 
     info!(
-        "Selected session {} with a heartbeat {}s ago",
+        "Selected session {} (first={}s, last={}s, age={}s)",
         live_session_id,
+        live_session_info.first_heartbeat,
+        live_session_info.last_heartbeat,
         now.saturating_sub(live_session_info.last_heartbeat)
     );
 
     Ok(live_session_id.clone())
-}
-
-/// Aggregates verified heartbeat logs into [first, last] bounds per session.
-fn summarize_logs_by_session(
-    logs: Vec<VerifiedLogRecord>,
-) -> anyhow::Result<Vec<GuardianSessionInfo>> {
-    let mut map: BTreeMap<String, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
-
-    for log in logs {
-        if !matches!(log.message, LogMessage::Heartbeat { .. }) {
-            anyhow::bail!("non-heartbeat logs found");
-        }
-
-        let ts = unix_millis_to_seconds(log.timestamp_ms);
-        map.entry(log.session_id)
-            .and_modify(|(first, last)| {
-                *first = (*first).min(ts);
-                *last = (*last).max(ts);
-            })
-            .or_insert((ts, ts));
-    }
-
-    Ok(map
-        .into_iter()
-        .map(
-            |(session_id, (first_heartbeat, last_heartbeat))| GuardianSessionInfo {
-                session_id,
-                first_heartbeat,
-                last_heartbeat,
-            },
-        )
-        .collect())
 }
 
 #[cfg(test)]

@@ -28,6 +28,7 @@ use tracing::info;
 
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 
+#[derive(Clone)]
 pub struct S3Logger {
     /// S3 config: bucket name, region, API keys
     config: S3Config,
@@ -65,6 +66,12 @@ impl S3Logger {
             client,
             config: config.clone(),
         }
+    }
+
+    pub async fn new_checked(config: &S3Config) -> GuardianResult<Self> {
+        let logger = Self::new(config).await;
+        logger.test_s3_connectivity().await?;
+        Ok(logger)
     }
 
     /// Construct an `S3Logger` from an already-configured S3 client.

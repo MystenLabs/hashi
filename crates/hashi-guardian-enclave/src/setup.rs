@@ -63,7 +63,7 @@ pub async fn setup_new_key(
 
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
-        share_commitments,
+        share_commitments: ShareCommitments::new(share_commitments)?,
     });
 
     Ok(response)
@@ -100,17 +100,16 @@ mod tests {
         let validated_resp = resp.verify(verification_key).unwrap();
         assert_eq!(validated_resp.encrypted_shares.len(), NUM_OF_SHARES);
 
-        for (i, (enc_share, sk)) in validated_resp
+        for (enc_share, sk) in validated_resp
             .encrypted_shares
             .iter()
             .zip(kp_private_keys.iter())
-            .enumerate()
             .take(NUM_OF_SHARES)
         {
             let share = decrypt_share(enc_share, sk, None).unwrap();
-            let commitment = &validated_resp.share_commitments[i];
+            let commitment = commit_share(&share);
             assert_eq!(enc_share.id, commitment.id);
-            assert_eq!(commit_share(&share), *commitment);
+            assert!(validated_resp.share_commitments.contains(&commitment));
             println!("Received share: (id) {:?}", enc_share.id);
         }
     }
