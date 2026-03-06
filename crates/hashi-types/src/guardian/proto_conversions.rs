@@ -458,10 +458,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         share_commitments: info
             .share_commitments
             .map(|v| pb::GuardianShareCommitments {
-                share_commitments: v
-                    .into_iter()
-                    .map(share_commitment_to_pb)
-                    .collect(),
+                share_commitments: v.into_iter().map(share_commitment_to_pb).collect(),
             }),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
