@@ -23,6 +23,7 @@ pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcResult;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::PublicDkgOutput;
+pub use crate::mpc::types::RetrievalProtocolType;
 pub use crate::mpc::types::RetrieveMessagesRequest;
 pub use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::RotationComplainContext;
@@ -1474,6 +1475,7 @@ impl MpcManager {
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
+                protocol_type: RetrievalProtocolType::Dkg,
             };
             let signers = certificate
                 .signers(&mgr.committee)
@@ -1535,6 +1537,7 @@ impl MpcManager {
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
+                protocol_type: RetrievalProtocolType::NonceGeneration,
             };
             let signers = certificate
                 .signers(&mgr.committee)
@@ -1675,6 +1678,7 @@ impl MpcManager {
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
+                protocol_type: RetrievalProtocolType::KeyRotation,
             };
             let signers = certificate.signers(&mgr.committee).map_err(|_| {
                 MpcError::ProtocolFailed(
@@ -5567,6 +5571,7 @@ mod tests {
         // Party requests the dealer's message
         let request = RetrieveMessagesRequest {
             dealer: dealer_address,
+            protocol_type: RetrievalProtocolType::Dkg,
         };
         let response = dealer_manager
             .handle_retrieve_messages_request(&request)
@@ -5588,6 +5593,7 @@ mod tests {
         // Party requests the dealer's message
         let request = RetrieveMessagesRequest {
             dealer: dealer_address,
+            protocol_type: RetrievalProtocolType::Dkg,
         };
         let result = dealer_manager.handle_retrieve_messages_request(&request);
 
@@ -6842,6 +6848,7 @@ mod tests {
         // Verify receiver can still serve the message via RetrieveMessagesRequest
         let retrieve_request = RetrieveMessagesRequest {
             dealer: dealer_addr,
+            protocol_type: RetrievalProtocolType::Dkg,
         };
         let retrieve_response = receiver_manager
             .handle_retrieve_messages_request(&retrieve_request)
@@ -9686,8 +9693,14 @@ mod tests {
         dealer_address: Address,
         expected_messages: &Messages,
     ) {
+        let protocol_type = match expected_messages {
+            Messages::Dkg(_) => RetrievalProtocolType::Dkg,
+            Messages::Rotation(_) => RetrievalProtocolType::KeyRotation,
+            Messages::NonceGeneration { .. } => RetrievalProtocolType::NonceGeneration,
+        };
         let request = RetrieveMessagesRequest {
             dealer: dealer_address,
+            protocol_type,
         };
         let response = manager.handle_retrieve_messages_request(&request).unwrap();
         assert_eq!(

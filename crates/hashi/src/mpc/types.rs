@@ -172,9 +172,17 @@ pub struct SendMessagesResponse {
     pub signature: BLS12381Signature,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RetrievalProtocolType {
+    Dkg,
+    KeyRotation,
+    NonceGeneration,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrieveMessagesRequest {
     pub dealer: Address,
+    pub protocol_type: RetrievalProtocolType,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

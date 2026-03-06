@@ -162,6 +162,7 @@ impl types::RetrieveMessagesRequest {
         proto::RetrieveMessagesRequest {
             epoch: Some(epoch),
             dealer: Some(self.dealer.to_string()),
+            protocol_type: Some(retrieval_protocol_type_to_proto(self.protocol_type) as i32),
         }
     }
 }
@@ -171,7 +172,36 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
 
     fn try_from(value: &proto::RetrieveMessagesRequest) -> Result<Self, Self::Error> {
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
-        Ok(Self { dealer })
+        let protocol_type = retrieval_protocol_type_from_proto(*required(
+            value.protocol_type.as_ref(),
+            "protocol_type",
+        )?)?;
+        Ok(Self {
+            dealer,
+            protocol_type,
+        })
+    }
+}
+
+fn retrieval_protocol_type_to_proto(pt: types::RetrievalProtocolType) -> proto::MpcProtocolType {
+    match pt {
+        types::RetrievalProtocolType::Dkg => proto::MpcProtocolType::Dkg,
+        types::RetrievalProtocolType::KeyRotation => proto::MpcProtocolType::KeyRotation,
+        types::RetrievalProtocolType::NonceGeneration => proto::MpcProtocolType::NonceGeneration,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn retrieval_protocol_type_from_proto(
+    value: i32,
+) -> Result<types::RetrievalProtocolType, TryFromProtoError> {
+    match proto::MpcProtocolType::try_from(value) {
+        Ok(proto::MpcProtocolType::Dkg) => Ok(types::RetrievalProtocolType::Dkg),
+        Ok(proto::MpcProtocolType::KeyRotation) => Ok(types::RetrievalProtocolType::KeyRotation),
+        Ok(proto::MpcProtocolType::NonceGeneration) => {
+            Ok(types::RetrievalProtocolType::NonceGeneration)
+        }
+        _ => Err(TryFromProtoError::missing("valid protocol_type")),
     }
 }
 

@@ -57,12 +57,23 @@ message SendMessagesResponse {
   optional bytes signature = 1;
 }
 
+// The type of MPC protocol phase.
+enum MpcProtocolType {
+  MPC_PROTOCOL_TYPE_UNSPECIFIED = 0;
+  MPC_PROTOCOL_TYPE_DKG = 1;
+  MPC_PROTOCOL_TYPE_KEY_ROTATION = 2;
+  MPC_PROTOCOL_TYPE_NONCE_GENERATION = 3;
+}
+
 message RetrieveMessagesRequest {
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
 
   // The hex-encoded Sui address of the dealer whose messages are requested.
   optional string dealer = 2;
+
+  // The protocol phase whose messages are being requested.
+  optional MpcProtocolType protocol_type = 3;
 }
 
 message RetrieveMessagesResponse {

@@ -1945,6 +1945,9 @@ pub struct RetrieveMessagesRequest {
     /// The hex-encoded Sui address of the dealer whose messages are requested.
     #[prost(string, optional, tag = "2")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
+    /// The protocol phase whose messages are being requested.
+    #[prost(enumeration = "MpcProtocolType", optional, tag = "3")]
+    pub protocol_type: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {
@@ -2051,6 +2054,39 @@ pub struct GetPartialSignaturesResponse {
     /// Partial signatures.
     #[prost(message, optional, tag = "1")]
     pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+}
+/// The type of MPC protocol phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MpcProtocolType {
+    Unspecified = 0,
+    Dkg = 1,
+    KeyRotation = 2,
+    NonceGeneration = 3,
+}
+impl MpcProtocolType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MPC_PROTOCOL_TYPE_UNSPECIFIED",
+            Self::Dkg => "MPC_PROTOCOL_TYPE_DKG",
+            Self::KeyRotation => "MPC_PROTOCOL_TYPE_KEY_ROTATION",
+            Self::NonceGeneration => "MPC_PROTOCOL_TYPE_NONCE_GENERATION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MPC_PROTOCOL_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "MPC_PROTOCOL_TYPE_DKG" => Some(Self::Dkg),
+            "MPC_PROTOCOL_TYPE_KEY_ROTATION" => Some(Self::KeyRotation),
+            "MPC_PROTOCOL_TYPE_NONCE_GENERATION" => Some(Self::NonceGeneration),
+            _ => None,
+        }
+    }
 }
 /// Generated client implementations.
 pub mod mpc_service_client {
