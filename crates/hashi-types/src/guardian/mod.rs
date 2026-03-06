@@ -352,10 +352,6 @@ impl OperatorInitRequest {
         share_commitments: ShareCommitments,
         network: Network,
     ) -> GuardianResult<Self> {
-        if share_commitments.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs("provide enough share commitments".into()));
-        }
-
         Ok(Self {
             s3_config,
             share_commitments,
@@ -578,7 +574,7 @@ impl LogMessage {
         }
     }
 
-    pub fn to_init_log(self) -> Option<InitLogMessage> {
+    pub fn into_init_log(self) -> Option<InitLogMessage> {
         match self {
             LogMessage::Init(init_message) => Some(*init_message),
             _ => None,
@@ -641,41 +637,42 @@ impl LogRecord {
         }
     }
 
-    pub fn verify(self, pub_key: Option<&GuardianPubKey>) -> GuardianResult<VerifiedLogRecord> {
+    pub fn verify(self, pub_key: &GuardianPubKey) -> GuardianResult<VerifiedLogRecord> {
         let session_id = self.session_id;
         let timestamp_ms = self.timestamp_ms;
         let message = self.message;
-        let signature = self.signature;
 
-        let message = match pub_key {
-            Some(pk) => {
-                if message.is_allowed_unsigned() {
-                    message
-                } else {
-                    let signature =
-                        signature.ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-                    GuardianSigned {
-                        data: message,
-                        timestamp_ms,
-                        signature,
-                    }
-                    .verify(pk)?
-                }
+        let message = if message.is_allowed_unsigned() {
+            message
+        } else {
+            let signature = self
+                .signature
+                .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
+            GuardianSigned {
+                data: message,
+                timestamp_ms,
+                signature,
             }
-            None => {
-                if !message.is_allowed_unsigned() {
-                    return Err(InvalidInputs(
-                        "missing guardian pubkey for signed log verification".into(),
-                    ));
-                }
-                message
-            }
+            .verify(pub_key)?
         };
 
         Ok(VerifiedLogRecord {
             session_id,
             timestamp_ms,
             message,
+        })
+    }
+
+    pub fn verify_unsigned(self) -> GuardianResult<VerifiedLogRecord> {
+        if !self.message.is_allowed_unsigned() {
+            return Err(InvalidInputs(
+                "expected unsigned log record but message requires a signature".into(),
+            ));
+        }
+        Ok(VerifiedLogRecord {
+            session_id: self.session_id,
+            timestamp_ms: self.timestamp_ms,
+            message: self.message,
         })
     }
 }

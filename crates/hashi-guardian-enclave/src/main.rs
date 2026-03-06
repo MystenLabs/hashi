@@ -582,9 +582,6 @@ impl Enclave {
     }
 
     pub fn set_share_commitments(&self, commitments: ShareCommitments) -> GuardianResult<()> {
-        if commitments.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs("Number of commitments does not match".into()));
-        }
         self.scratchpad
             .share_commitments
             .set(commitments)

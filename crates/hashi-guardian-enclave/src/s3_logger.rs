@@ -416,6 +416,7 @@ impl S3Logger {
         self.get_object_unsafe::<T>(key).await
     }
 
+    /// Note: Callers must set signing_pubkey to None only for unsigned messages.
     pub async fn get_verified_log_record(
         &self,
         key: &str,
@@ -426,7 +427,10 @@ impl S3Logger {
         if log.session_id != expected_session_id {
             return Err(S3Error(format!("log session_id mismatch for key {}", key)));
         }
-        log.verify(signing_pubkey)
+        match signing_pubkey {
+            Some(pk) => log.verify(pk),
+            None => log.verify_unsigned(),
+        }
     }
 
     pub async fn get_attestation(
@@ -437,7 +441,7 @@ impl S3Logger {
         self.get_verified_log_record(&key, session_id, None)
             .await?
             .message
-            .to_init_log()
+            .into_init_log()
             .and_then(|x| match x {
                 InitLogMessage::OIAttestationUnsigned {
                     attestation,
@@ -457,7 +461,7 @@ impl S3Logger {
         self.get_verified_log_record(&key, session_id, Some(signing_pubkey))
             .await?
             .message
-            .to_init_log()
+            .into_init_log()
             .and_then(|x| match x {
                 InitLogMessage::OIGuardianInfo(info) => Some(info),
                 _ => None,

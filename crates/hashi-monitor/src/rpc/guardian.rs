@@ -138,7 +138,7 @@ impl GuardianPollerCore {
                 .ok_or_else(|| anyhow::anyhow!("missing session signing pubkey"))?;
 
             let verified = log
-                .verify(Some(signing_pubkey))
+                .verify(signing_pubkey)
                 .with_context(|| "failed to verify guardian enclave signature")?;
 
             out.push(verified);

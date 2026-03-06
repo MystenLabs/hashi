@@ -71,6 +71,13 @@ pub type DigestBytes = Vec<u8>;
 
 impl ShareCommitments {
     pub fn new(commitments: Vec<ShareCommitment>) -> GuardianResult<Self> {
+        if commitments.len() != NUM_OF_SHARES {
+            return Err(InvalidInputs(format!(
+                "expected {} share commitments, got {}",
+                NUM_OF_SHARES,
+                commitments.len()
+            )));
+        }
         let mut map = BTreeMap::new();
         for commitment in commitments {
             if map.insert(commitment.id, commitment.digest).is_some() {

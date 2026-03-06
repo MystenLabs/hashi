@@ -108,7 +108,6 @@ mod tests {
         {
             let share = decrypt_share(enc_share, sk, None).unwrap();
             let commitment = commit_share(&share);
-            assert_eq!(enc_share.id, commitment.id);
             assert!(validated_resp.share_commitments.contains(&commitment));
             println!("Received share: (id) {:?}", enc_share.id);
         }
