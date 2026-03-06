@@ -332,6 +332,10 @@ impl OnchainState {
         self.state().hashi().config.withdrawal_fee_sui()
     }
 
+    pub fn withdrawal_minimum(&self) -> u64 {
+        self.state().hashi().config.withdrawal_minimum()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

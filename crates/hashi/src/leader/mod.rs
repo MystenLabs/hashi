@@ -12,6 +12,7 @@ use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
+use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
@@ -49,6 +50,7 @@ pub struct LeaderService {
     inner: Arc<Hashi>,
     deposit_retry_tracker: RetryTracker<DepositValidationErrorKind>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
+    withdrawal_commitment_retry_tracker: RetryTracker<WithdrawalCommitmentErrorKind>,
 }
 
 impl LeaderService {
@@ -57,6 +59,7 @@ impl LeaderService {
             inner: hashi,
             deposit_retry_tracker: RetryTracker::new(),
             withdrawal_approval_retry_tracker: RetryTracker::new(),
+            withdrawal_commitment_retry_tracker: RetryTracker::new(),
         }
     }
 
@@ -94,7 +97,8 @@ impl LeaderService {
             self.process_deposit_requests(checkpoint_timestamp_ms).await;
             self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms)
                 .await;
-            self.process_approved_withdrawal_requests().await;
+            self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
+                .await;
             self.process_unsigned_pending_withdrawals().await;
             self.process_signed_pending_withdrawals().await;
             self.check_delete_proposals(checkpoint_timestamp_ms).await;
@@ -514,7 +518,7 @@ impl LeaderService {
     // Step 2: Construct withdrawal tx for approved requests
     // ========================================================================
 
-    async fn process_approved_withdrawal_requests(&self) {
+    async fn process_approved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
         let mut approved: Vec<_> = self
             .inner
             .onchain_state()
@@ -524,22 +528,42 @@ impl LeaderService {
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
-        // TODO: process multiple at a time.
-        if let Some(request) = approved.first() {
-            self.process_approved_withdrawal_request(request).await;
+        let approved_ids: Vec<Address> = approved.iter().map(|r| r.id).collect();
+        self.withdrawal_commitment_retry_tracker
+            .prune(&approved_ids);
+
+        // Process the first approved request that isn't in backoff.
+        for request in &approved {
+            if self
+                .withdrawal_commitment_retry_tracker
+                .should_skip(&request.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+            self.process_approved_withdrawal_request(request, checkpoint_timestamp_ms)
+                .await;
+            break;
         }
     }
 
-    async fn process_approved_withdrawal_request(&self, request: &WithdrawalRequest) {
+    async fn process_approved_withdrawal_request(
+        &self,
+        request: &WithdrawalRequest,
+        checkpoint_timestamp_ms: u64,
+    ) {
         info!("Processing approved withdrawal request: {:?}", request.id);
 
         // Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
         let approval = match self.inner.build_withdrawal_tx_commitment(request).await {
-            Ok(approval) => approval,
+            Ok(approval) => {
+                self.withdrawal_commitment_retry_tracker.clear(&request.id);
+                approval
+            }
             Err(e) => {
-                error!(
-                    "Failed to build withdrawal approval for request {:?}: {e}",
-                    request.id
+                self.withdrawal_commitment_retry_tracker.record_failure(
+                    e.kind(),
+                    request.id,
+                    checkpoint_timestamp_ms,
                 );
                 return;
             }
