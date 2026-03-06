@@ -23,7 +23,8 @@ const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 //
 
 const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
-const WITHDRAWAL_FEE_KEY: vector<u8> = b"withdrawal_fee";
+const WITHDRAWAL_FEE_SUI_KEY: vector<u8> = b"withdrawal_fee_sui";
+const WITHDRAWAL_FEE_BTC_KEY: vector<u8> = b"withdrawal_fee_btc";
 const WITHDRAWAL_MINIMUM_KEY: vector<u8> = b"withdrawal_minimum";
 const PAUSED_KEY: vector<u8> = b"paused";
 const WITHDRAWAL_CANCELLATION_COOLDOWN_KEY: vector<u8> = b"withdrawal_cancellation_cooldown_ms";
@@ -65,12 +66,20 @@ public(package) fun set_deposit_fee(self: &mut Config, fee: u64) {
     self.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(fee))
 }
 
-public(package) fun withdrawal_fee(self: &Config): u64 {
-    self.get(WITHDRAWAL_FEE_KEY).as_u64()
+public(package) fun withdrawal_fee_sui(self: &Config): u64 {
+    self.get(WITHDRAWAL_FEE_SUI_KEY).as_u64()
 }
 
-public(package) fun set_withdrawal_fee(self: &mut Config, fee: u64) {
-    self.upsert(WITHDRAWAL_FEE_KEY, config_value::new_u64(fee))
+public(package) fun set_withdrawal_fee_sui(self: &mut Config, fee: u64) {
+    self.upsert(WITHDRAWAL_FEE_SUI_KEY, config_value::new_u64(fee))
+}
+
+public(package) fun withdrawal_fee_btc(self: &Config): u64 {
+    self.get(WITHDRAWAL_FEE_BTC_KEY).as_u64()
+}
+
+public(package) fun set_withdrawal_fee_btc(self: &mut Config, fee: u64) {
+    self.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(fee))
 }
 
 public(package) fun withdrawal_minimum(self: &Config): u64 {
@@ -147,7 +156,8 @@ public(package) fun create(): Config {
     // Set initial config values
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
     config.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(0));
-    config.upsert(WITHDRAWAL_FEE_KEY, config_value::new_u64(0));
+    config.upsert(WITHDRAWAL_FEE_SUI_KEY, config_value::new_u64(100_000_000)); // 0.1 SUI
+    config.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(500)); // 500 satoshis
     config.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
 

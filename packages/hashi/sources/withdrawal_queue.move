@@ -84,6 +84,7 @@ public(package) fun new_pending_withdrawal(
     inputs: vector<Utxo>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    withdrawal_fee_btc: u64,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -111,9 +112,7 @@ public(package) fun new_pending_withdrawal(
     request_count.do!(|request_index| {
         let request = requests.borrow(request_index);
         let output = outputs.borrow(request_index);
-        // TODO: once we start reducing user withdrawal amounts to accounts for fees, this needs to be adjusted
-        // https://linear.app/mysten-labs/issue/IOP-237/withdrawals-ensure-fees-are-taken-out-of-users-withdrawal-amount
-        assert!(request.btc_amount == output.amount);
+        assert!(request.btc_amount - withdrawal_fee_btc == output.amount);
         assert!(request.bitcoin_address == output.bitcoin_address);
     });
 

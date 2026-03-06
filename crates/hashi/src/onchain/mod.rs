@@ -324,6 +324,14 @@ impl OnchainState {
             .cloned()
     }
 
+    pub fn withdrawal_fee_btc(&self) -> u64 {
+        self.state().hashi().config.withdrawal_fee_btc()
+    }
+
+    pub fn withdrawal_fee_sui(&self) -> u64 {
+        self.state().hashi().config.withdrawal_fee_sui()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

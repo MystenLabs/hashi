@@ -90,7 +90,7 @@ public fun request_withdrawal(
     hashi.assert_unpaused();
 
     // Check that the fee is sufficient
-    assert!(hashi.config().withdrawal_fee() == fee.value());
+    assert!(hashi.config().withdrawal_fee_sui() == fee.value());
     hashi.treasury_mut().deposit_fee(fee);
 
     // check that the withdrawal amount is a minimum of X
@@ -183,11 +183,14 @@ entry fun commit_withdrawal_tx(
         request
     });
 
+    let withdrawal_fee_btc = hashi.config().withdrawal_fee_btc();
+
     let pending_withdrawal = hashi::withdrawal_queue::new_pending_withdrawal(
         requests,
         inputs,
         outputs,
         txid,
+        withdrawal_fee_btc,
         clock,
         r,
         ctx,

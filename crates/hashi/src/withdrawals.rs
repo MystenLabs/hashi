@@ -181,9 +181,11 @@ impl Hashi {
             .collect::<anyhow::Result<_>>()?;
 
         // 3. Verify each withdrawal request has a matching output
+        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
         for request in &requests {
+            let expected_amount = request.btc_amount - withdrawal_fee_btc;
             let has_matching_output = approval.outputs.iter().any(|output| {
-                output.amount == request.btc_amount
+                output.amount == expected_amount
                     && output.bitcoin_address == request.bitcoin_address
             });
             anyhow::ensure!(
@@ -199,7 +201,8 @@ impl Hashi {
             .iter()
             .filter(|output| {
                 !requests.iter().any(|r| {
-                    output.amount == r.btc_amount && output.bitcoin_address == r.bitcoin_address
+                    output.amount == r.btc_amount - withdrawal_fee_btc
+                        && output.bitcoin_address == r.bitcoin_address
                 })
             })
             .collect();
@@ -665,14 +668,14 @@ impl Hashi {
         // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
         let fee_rate = FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
 
-        let selection = self.select_utxos_for_withdrawal(
-            request.btc_amount,
-            &request.bitcoin_address,
-            fee_rate,
-        )?;
+        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
+        let output_amount = request.btc_amount - withdrawal_fee_btc;
+
+        let selection =
+            self.select_utxos_for_withdrawal(output_amount, &request.bitcoin_address, fee_rate)?;
 
         let mut outputs = vec![OutputUtxo {
-            amount: request.btc_amount,
+            amount: output_amount,
             bitcoin_address: request.bitcoin_address.clone(),
         }];
 

@@ -324,6 +324,22 @@ pub struct Config {
     pub upgrade_cap: Option<UpgradeCap>,
 }
 
+impl Config {
+    pub fn withdrawal_fee_btc(&self) -> u64 {
+        match self.config.get("withdrawal_fee_btc") {
+            Some(ConfigValue::U64(v)) => *v,
+            _ => 0,
+        }
+    }
+
+    pub fn withdrawal_fee_sui(&self) -> u64 {
+        match self.config.get("withdrawal_fee_sui") {
+            Some(ConfigValue::U64(v)) => *v,
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UpgradeCap {
     pub id: Address,

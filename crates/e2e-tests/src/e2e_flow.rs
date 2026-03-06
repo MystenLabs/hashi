@@ -507,8 +507,13 @@ mod tests {
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
                 .with_signer(user_key.clone());
+        let withdrawal_fee_sui = hashi.onchain_state().withdrawal_fee_sui();
         let withdrawal_request_id = withdrawal_executor
-            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes, 0)
+            .execute_create_withdrawal_request(
+                withdrawal_amount_sats,
+                destination_bytes,
+                withdrawal_fee_sui,
+            )
             .await?;
         info!("Withdrawal request created: {}", withdrawal_request_id);
 
@@ -540,11 +545,12 @@ mod tests {
             "Observed withdrawal Bitcoin txid in event: {}",
             withdrawal_txid
         );
+        let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
             &withdrawal_txid,
             &btc_destination,
-            Amount::from_sat(withdrawal_amount_sats),
+            Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc),
             Duration::from_secs(30),
         )
         .await?;
@@ -563,8 +569,13 @@ mod tests {
         let destination_bytes = extract_witness_program(&btc_destination)?;
         let mut executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(signer);
+        let withdrawal_fee_sui = hashi.onchain_state().withdrawal_fee_sui();
         executor
-            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes, 0)
+            .execute_create_withdrawal_request(
+                withdrawal_amount_sats,
+                destination_bytes,
+                withdrawal_fee_sui,
+            )
             .await?;
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
@@ -577,12 +588,13 @@ mod tests {
 
         drop(miner);
 
+        let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
         let withdrawal_txid = address_to_txid(&confirmed.txid);
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
             &withdrawal_txid,
             &btc_destination,
-            Amount::from_sat(withdrawal_amount_sats),
+            Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc),
             Duration::from_secs(30),
         )
         .await
