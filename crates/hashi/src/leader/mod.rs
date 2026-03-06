@@ -11,6 +11,7 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::WithdrawalApprovalErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
@@ -47,6 +48,7 @@ const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 pub struct LeaderService {
     inner: Arc<Hashi>,
     deposit_retry_tracker: RetryTracker<DepositValidationErrorKind>,
+    withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
 }
 
 impl LeaderService {
@@ -54,6 +56,7 @@ impl LeaderService {
         Self {
             inner: hashi,
             deposit_retry_tracker: RetryTracker::new(),
+            withdrawal_approval_retry_tracker: RetryTracker::new(),
         }
     }
 
@@ -89,7 +92,8 @@ impl LeaderService {
             }
 
             self.process_deposit_requests(checkpoint_timestamp_ms).await;
-            self.process_unapproved_withdrawal_requests().await;
+            self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms)
+                .await;
             self.process_approved_withdrawal_requests().await;
             self.process_unsigned_pending_withdrawals().await;
             self.process_signed_pending_withdrawals().await;
@@ -134,7 +138,8 @@ impl LeaderService {
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
-        self.deposit_retry_tracker.prune(&deposit_requests);
+        let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
+        self.deposit_retry_tracker.prune(&deposit_ids);
 
         debug!("Processing {} deposit requests", deposit_requests.len());
 
@@ -315,7 +320,7 @@ impl LeaderService {
     // Step 1: Approve unapproved withdrawal requests
     // ========================================================================
 
-    async fn process_unapproved_withdrawal_requests(&self) {
+    async fn process_unapproved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
         let mut unapproved: Vec<_> = self
             .inner
             .onchain_state()
@@ -325,6 +330,10 @@ impl LeaderService {
             .collect();
         unapproved.sort_by_key(|r| r.timestamp_ms);
 
+        let unapproved_ids: Vec<Address> = unapproved.iter().map(|r| r.id).collect();
+        self.withdrawal_approval_retry_tracker
+            .prune(&unapproved_ids);
+
         if unapproved.is_empty() {
             return;
         }
@@ -332,12 +341,23 @@ impl LeaderService {
         // Screen each request before approval — reject sanctioned addresses early
         let mut screened: Vec<&WithdrawalRequest> = Vec::new();
         for request in &unapproved {
+            if self
+                .withdrawal_approval_retry_tracker
+                .should_skip(&request.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+
             match self.inner.screen_withdrawal(request).await {
-                Ok(()) => screened.push(request),
+                Ok(()) => {
+                    self.withdrawal_approval_retry_tracker.clear(&request.id);
+                    screened.push(request);
+                }
                 Err(e) => {
-                    error!(
-                        "Withdrawal request {:?} failed AML screening, excluding from approval: {e}",
-                        request.id
+                    self.withdrawal_approval_retry_tracker.record_failure(
+                        e.kind(),
+                        request.id,
+                        checkpoint_timestamp_ms,
                     );
                 }
             }

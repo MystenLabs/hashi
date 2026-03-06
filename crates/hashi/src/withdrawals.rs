@@ -30,12 +30,14 @@ use std::time::Duration;
 use sui_sdk_types::Address;
 
 use crate::Hashi;
+use crate::leader::RetryPolicy;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
+use thiserror::Error;
 
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -166,6 +168,8 @@ impl Hashi {
 
         // 1b. Screen each withdrawal request for AML/sanctions
         for request in &requests {
+            // TODO: right now if one request fails AML screening, it blocks all of them.
+            // How should we deal with this?
             self.screen_withdrawal(request).await?;
         }
 
@@ -709,7 +713,7 @@ impl Hashi {
     pub(crate) async fn screen_withdrawal(
         &self,
         request: &WithdrawalRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WithdrawalApprovalError> {
         let Some(screener) = self.screener_client() else {
             tracing::debug!("AML checks skipped: no screener configured");
             return Ok(());
@@ -719,7 +723,9 @@ impl Hashi {
         let source_tx_hash = request.sui_tx_digest.to_string();
 
         // Destination: Bitcoin address (raw witness bytes -> bech32 string)
-        let destination_address = self.bitcoin_address_string_from_raw(&request.bitcoin_address)?;
+        let destination_address = self
+            .bitcoin_address_string_from_raw(&request.bitcoin_address)
+            .map_err(WithdrawalApprovalError::NeverRetry)?;
 
         let approved = screener
             .approve_withdrawal(
@@ -729,14 +735,14 @@ impl Hashi {
                 self.config.bitcoin_chain_id(),
             )
             .await
-            .map_err(|e| anyhow!("Screener service error: {e}"))?;
+            .map_err(|e| WithdrawalApprovalError::AmlServiceError(anyhow!(e)))?;
 
         if !approved {
-            anyhow::bail!(
+            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
                 "AML checks failed for withdrawal request {:?} to {}",
                 request.id,
                 destination_address,
-            );
+            )));
         }
 
         Ok(())
@@ -755,6 +761,50 @@ impl Hashi {
         let address = bitcoin::Address::from_script(&script, self.config.bitcoin_network())
             .map_err(|e| anyhow!("Failed to convert script to address: {e}"))?;
         Ok(address.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WithdrawalApprovalErrorKind {
+    AmlServiceError,
+    NeverRetry,
+}
+
+impl RetryPolicy for WithdrawalApprovalErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        match self {
+            Self::AmlServiceError => 30 * 1000,
+            Self::NeverRetry => 60 * 60 * 1000,
+        }
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        60 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        match self {
+            Self::AmlServiceError => u32::MAX,
+            Self::NeverRetry => 0,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WithdrawalApprovalError {
+    #[error("Screener service error: {0}")]
+    AmlServiceError(#[source] anyhow::Error),
+
+    #[error("Never retry: {0}")]
+    NeverRetry(#[source] anyhow::Error),
+}
+
+impl WithdrawalApprovalError {
+    pub fn kind(&self) -> WithdrawalApprovalErrorKind {
+        match self {
+            Self::AmlServiceError(_) => WithdrawalApprovalErrorKind::AmlServiceError,
+            Self::NeverRetry(_) => WithdrawalApprovalErrorKind::NeverRetry,
+        }
     }
 }
 
