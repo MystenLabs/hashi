@@ -156,7 +156,7 @@ public(package) fun create(): Config {
     // Set initial config values
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
     config.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(0));
-    config.upsert(WITHDRAWAL_FEE_SUI_KEY, config_value::new_u64(100_000_000)); // 0.1 SUI
+    config.upsert(WITHDRAWAL_FEE_SUI_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(500)); // 500 satoshis
     config.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
