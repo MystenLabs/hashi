@@ -60,7 +60,7 @@ pub struct UtxoSelection {
 
 /// The data that validators BLS-sign over to approve a single withdrawal request.
 #[derive(Clone, Debug, serde_derive::Serialize)]
-pub struct RequestApproval {
+pub struct WithdrawalRequestApproval {
     pub request_id: Address,
 }
 
@@ -91,9 +91,9 @@ pub struct WithdrawalConfirmation {
 impl Hashi {
     // --- Step 1: Request approval (lightweight) ---
 
-    pub fn validate_and_sign_request_approval(
+    pub fn validate_and_sign_withdrawal_request_approval(
         &self,
-        approval: &RequestApproval,
+        approval: &WithdrawalRequestApproval,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let request = self
             .onchain_state()

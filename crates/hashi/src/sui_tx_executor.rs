@@ -627,7 +627,7 @@ impl SuiTxExecutor {
     }
 
     /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
-    pub async fn execute_approve_requests(
+    pub async fn execute_approve_withdrawal_requests(
         &mut self,
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {

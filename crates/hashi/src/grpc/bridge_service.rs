@@ -8,17 +8,17 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
-use crate::withdrawals::RequestApproval;
+use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
-use hashi_types::proto::SignRequestApprovalRequest;
-use hashi_types::proto::SignRequestApprovalResponse;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalConfirmationResponse;
+use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
+use hashi_types::proto::SignWithdrawalRequestApprovalResponse;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTransactionResponse;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
@@ -59,18 +59,18 @@ impl BridgeService for HttpService {
     }
 
     /// Step 1: Validate and sign approval for a batch of unapproved withdrawal requests.
-    async fn sign_request_approval(
+    async fn sign_withdrawal_request_approval(
         &self,
-        request: Request<SignRequestApprovalRequest>,
-    ) -> Result<Response<SignRequestApprovalResponse>, Status> {
+        request: Request<SignWithdrawalRequestApprovalRequest>,
+    ) -> Result<Response<SignWithdrawalRequestApprovalResponse>, Status> {
         authenticate_caller(&request)?;
-        let approval = parse_request_approval(request.get_ref())
+        let approval = parse_withdrawal_request_approval(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let member_signature = self
             .inner
-            .validate_and_sign_request_approval(&approval)
+            .validate_and_sign_withdrawal_request_approval(&approval)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        Ok(Response::new(SignRequestApprovalResponse {
+        Ok(Response::new(SignWithdrawalRequestApprovalResponse {
             member_signature: Some(member_signature),
         }))
     }
@@ -189,9 +189,11 @@ fn parse_deposit_request(
     })
 }
 
-fn parse_request_approval(request: &SignRequestApprovalRequest) -> anyhow::Result<RequestApproval> {
+fn parse_withdrawal_request_approval(
+    request: &SignWithdrawalRequestApprovalRequest,
+) -> anyhow::Result<WithdrawalRequestApproval> {
     let request_id = parse_address(&request.request_id)?;
-    Ok(RequestApproval { request_id })
+    Ok(WithdrawalRequestApproval { request_id })
 }
 
 fn parse_withdrawal_tx_commitment(
