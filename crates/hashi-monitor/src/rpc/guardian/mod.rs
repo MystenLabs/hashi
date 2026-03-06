@@ -10,13 +10,12 @@ use crate::domain::now_unix_seconds;
 use anyhow::Context;
 use hashi_guardian_enclave::s3_logger::S3Logger;
 use hashi_types::guardian::GuardianPubKey;
-use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::guardian::S3Config;
-use hashi_types::guardian::UnixMillis;
+use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -30,13 +29,6 @@ use tracing::info;
 pub enum GuardianLogDir {
     Withdraw,
     Heartbeat,
-}
-
-/// A verified LogRecord. Has all the fields of a LogRecord except the signature.
-pub struct VerifiedLogRecord {
-    pub session_id: String,
-    pub timestamp_ms: UnixMillis,
-    pub message: LogMessage,
 }
 
 pub enum VerifiedWithdrawal {
@@ -149,17 +141,11 @@ impl GuardianPollerCore {
                 .get(&log.session_id)
                 .ok_or_else(|| anyhow::anyhow!("missing session signing pubkey"))?;
 
-            let timestamp_ms = log.timestamp_ms;
-            let session_id = log.session_id.clone();
-            let message = log
-                .verify(signing_pubkey)
+            let verified = log
+                .verify(Some(signing_pubkey))
                 .with_context(|| "failed to verify guardian enclave signature")?;
 
-            out.push(VerifiedLogRecord {
-                session_id,
-                timestamp_ms,
-                message,
-            });
+            out.push(verified);
         }
 
         Ok(out)
@@ -170,22 +156,7 @@ impl GuardianPollerCore {
             return Ok(());
         }
 
-        let init_key = InitLogMessage::attestation_object_key(session_id);
-        let log = self
-            .s3_client
-            .get_object::<LogRecord>(&init_key)
-            .await
-            .with_context(|| format!("failed to fetch init log at key={init_key}"))?;
-
-        let log = log
-            .message
-            .to_init_log()
-            .ok_or_else(|| anyhow::anyhow!("non-init log found"))?;
-
-        let (attestation, signing_pubkey) = log
-            .to_attestation_log()
-            .ok_or_else(|| anyhow::anyhow!("non-attestation log found"))?;
-
+        let (attestation, signing_pubkey) = self.s3_client.get_attestation(session_id).await?;
         verify_enclave_attestation(attestation)?;
 
         self.enclave_pub_keys

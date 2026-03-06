@@ -111,6 +111,14 @@ pub struct LogRecord {
     pub signature: Option<GuardianSignature>,
 }
 
+/// A verified log record where message authenticity has been checked.
+#[derive(Debug)]
+pub struct VerifiedLogRecord {
+    pub session_id: String,
+    pub timestamp_ms: UnixMillis,
+    pub message: LogMessage,
+}
+
 // ---------------------------------
 //    All requests and responses
 // ---------------------------------
@@ -508,14 +516,13 @@ impl InitLogMessage {
         )
     }
 
-    pub fn to_attestation_log(self) -> Option<(Attestation, GuardianPubKey)> {
-        match self {
-            InitLogMessage::OIAttestationUnsigned {
-                attestation,
-                signing_public_key,
-            } => Some((attestation, signing_public_key)),
-            _ => None,
-        }
+    pub fn guardian_info_object_key(session_id: &str) -> String {
+        format!(
+            "{}/{}-{}.json",
+            S3_DIR_INIT,
+            session_id,
+            Self::OI_GUARDIAN_INFO
+        )
     }
 }
 
@@ -636,19 +643,42 @@ impl LogRecord {
         }
     }
 
-    pub fn verify(self, pub_key: &GuardianPubKey) -> GuardianResult<LogMessage> {
-        if self.message.is_allowed_unsigned() {
-            return Ok(self.message);
-        }
-        let signature = self
-            .signature
-            .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-        GuardianSigned {
-            data: self.message,
-            timestamp_ms: self.timestamp_ms,
-            signature,
-        }
-        .verify(pub_key)
+    pub fn verify(self, pub_key: Option<&GuardianPubKey>) -> GuardianResult<VerifiedLogRecord> {
+        let session_id = self.session_id;
+        let timestamp_ms = self.timestamp_ms;
+        let message = self.message;
+        let signature = self.signature;
+
+        let message = match pub_key {
+            Some(pk) => {
+                if message.is_allowed_unsigned() {
+                    message
+                } else {
+                    let signature =
+                        signature.ok_or_else(|| InvalidInputs("missing log signature".into()))?;
+                    GuardianSigned {
+                        data: message,
+                        timestamp_ms,
+                        signature,
+                    }
+                    .verify(pk)?
+                }
+            }
+            None => {
+                if !message.is_allowed_unsigned() {
+                    return Err(InvalidInputs(
+                        "missing guardian pubkey for signed log verification".into(),
+                    ));
+                }
+                message
+            }
+        };
+
+        Ok(VerifiedLogRecord {
+            session_id,
+            timestamp_ms,
+            message,
+        })
     }
 }
 

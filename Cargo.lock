@@ -2689,6 +2689,7 @@ dependencies = [
  "e2e-tests",
  "hashi-guardian-enclave",
  "hashi-types",
+ "hex",
  "serde",
  "serde_yaml",
  "tempfile",
