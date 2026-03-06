@@ -6,7 +6,7 @@ pub mod proto_conversions;
 pub mod test_utils;
 pub mod time_utils;
 
-mod enclave_state;
+pub mod enclave_state;
 pub mod s3_utils;
 
 pub use enclave_state::CommitteeStore;
@@ -28,6 +28,7 @@ use crate::committee::CommitteeSignature;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::guardian::s3_utils::S3HourScopedDirectory;
 pub use bitcoin::Address as BitcoinAddress;
+use bitcoin::hex::DisplayHex;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
@@ -44,7 +45,6 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashSet;
 use std::time::Duration;
 // ---------------------------------
 //          Constants
@@ -62,6 +62,11 @@ pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 
 pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
+
+/// Canonical guardian session ID derived from the enclave signing public key.
+pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> String {
+    signing_pub_key.as_bytes().to_lower_hex_string()
+}
 
 // ---------------------------------
 //          Intents
@@ -111,6 +116,14 @@ pub struct LogRecord {
     pub signature: Option<GuardianSignature>,
 }
 
+/// A verified log record where message authenticity has been checked.
+#[derive(Debug)]
+pub struct VerifiedLogRecord {
+    pub session_id: String,
+    pub timestamp_ms: UnixMillis,
+    pub message: LogMessage,
+}
+
 // ---------------------------------
 //    All requests and responses
 // ---------------------------------
@@ -124,7 +137,7 @@ pub struct SetupNewKeyRequest {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: Vec<EncryptedShare>,
-    pub share_commitments: Vec<ShareCommitment>,
+    pub share_commitments: ShareCommitments,
 }
 
 /// Provides S3 API keys, share commitments and the BTC network to the enclave.
@@ -132,7 +145,7 @@ pub struct SetupNewKeyResponse {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
-    share_commitments: Vec<ShareCommitment>,
+    share_commitments: ShareCommitments,
     network: Network,
 }
 
@@ -170,7 +183,7 @@ pub struct GetGuardianInfoResponse {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
     /// Share commitments (if set). Used by KPs to check that right key will be used.
-    pub share_commitments: Option<Vec<ShareCommitment>>,
+    pub share_commitments: Option<ShareCommitments>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
@@ -239,14 +252,14 @@ pub enum InitLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WithdrawalLogMessage {
-    /// Immediate withdraw success
+    /// Immediate guardian success
     Success {
         txid: Txid,
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         response: StandardWithdrawalResponse,
     },
-    /// Immediate withdraw failure
+    /// Immediate guardian failure
     /// TODO: Any sensitivity concerns with logging the entire request permanently? (same for others)
     Failure {
         request_data: StandardWithdrawalRequestWire,
@@ -278,7 +291,7 @@ pub struct S3BucketInfo {
     pub region: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
     pub committee_threshold: u64,
@@ -336,18 +349,11 @@ impl SetupNewKeyRequest {
 impl OperatorInitRequest {
     pub fn new(
         s3_config: S3Config,
-        share_commitments: Vec<ShareCommitment>,
+        share_commitments: ShareCommitments,
         network: Network,
     ) -> GuardianResult<Self> {
         if share_commitments.len() != NUM_OF_SHARES {
             return Err(InvalidInputs("provide enough share commitments".into()));
-        }
-
-        let mut x = HashSet::new();
-        for c in &share_commitments {
-            if !x.insert(c.id) {
-                return Err(InvalidInputs("duplicate share id".into()));
-            }
         }
 
         Ok(Self {
@@ -361,7 +367,7 @@ impl OperatorInitRequest {
         &self.s3_config
     }
 
-    pub fn share_commitments(&self) -> &[ShareCommitment] {
+    pub fn share_commitments(&self) -> &ShareCommitments {
         &self.share_commitments
     }
 
@@ -369,7 +375,7 @@ impl OperatorInitRequest {
         self.network
     }
 
-    pub fn into_parts(self) -> (S3Config, Vec<ShareCommitment>, Network) {
+    pub fn into_parts(self) -> (S3Config, ShareCommitments, Network) {
         (self.s3_config, self.share_commitments, self.network)
     }
 }
@@ -499,14 +505,22 @@ impl InitLogMessage {
         format!("{}-{}.json", prefix, suffix)
     }
 
-    pub fn to_attestation_log(self) -> Option<(Attestation, GuardianPubKey)> {
-        match self {
-            InitLogMessage::OIAttestationUnsigned {
-                attestation,
-                signing_public_key,
-            } => Some((attestation, signing_public_key)),
-            _ => None,
-        }
+    pub fn attestation_object_key(session_id: &str) -> String {
+        format!(
+            "{}/{}-{}.json",
+            S3_DIR_INIT,
+            session_id,
+            Self::OI_ATTEST_UNSIGNED
+        )
+    }
+
+    pub fn guardian_info_object_key(session_id: &str) -> String {
+        format!(
+            "{}/{}-{}.json",
+            S3_DIR_INIT,
+            session_id,
+            Self::OI_GUARDIAN_INFO
+        )
     }
 }
 
@@ -627,19 +641,42 @@ impl LogRecord {
         }
     }
 
-    pub fn verify(self, pub_key: &GuardianPubKey) -> GuardianResult<LogMessage> {
-        if self.message.is_allowed_unsigned() {
-            return Ok(self.message);
-        }
-        let signature = self
-            .signature
-            .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-        GuardianSigned {
-            data: self.message,
-            timestamp_ms: self.timestamp_ms,
-            signature,
-        }
-        .verify(pub_key)
+    pub fn verify(self, pub_key: Option<&GuardianPubKey>) -> GuardianResult<VerifiedLogRecord> {
+        let session_id = self.session_id;
+        let timestamp_ms = self.timestamp_ms;
+        let message = self.message;
+        let signature = self.signature;
+
+        let message = match pub_key {
+            Some(pk) => {
+                if message.is_allowed_unsigned() {
+                    message
+                } else {
+                    let signature =
+                        signature.ok_or_else(|| InvalidInputs("missing log signature".into()))?;
+                    GuardianSigned {
+                        data: message,
+                        timestamp_ms,
+                        signature,
+                    }
+                    .verify(pk)?
+                }
+            }
+            None => {
+                if !message.is_allowed_unsigned() {
+                    return Err(InvalidInputs(
+                        "missing guardian pubkey for signed log verification".into(),
+                    ));
+                }
+                message
+            }
+        };
+
+        Ok(VerifiedLogRecord {
+            session_id,
+            timestamp_ms,
+            message,
+        })
     }
 }
 
@@ -830,7 +867,7 @@ mod tests {
         set_timestamp(&mut log, timestamp_ms);
 
         let key = log.object_key();
-        assert!(key.starts_with("withdraw/2023/11/14/22/session-c-999-success-"));
+        assert!(key.starts_with("guardian/2023/11/14/22/session-c-999-success-"));
         assert!(key.ends_with(".json"));
     }
 }

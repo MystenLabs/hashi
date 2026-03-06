@@ -2,6 +2,7 @@ use super::GuardianError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianResult;
 use serde::Serialize;
+use serde_derive::Deserialize;
 use std::collections::VecDeque;
 use std::num::NonZeroU16;
 
@@ -9,7 +10,7 @@ use std::num::NonZeroU16;
 ///
 /// `first_epoch` is the epoch corresponding to index 0 of an epoch-indexed vector,
 /// and `num_epochs` is the window capacity shared across components.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochWindow {
     pub first_epoch: u64,
     pub num_epochs: NonZeroU16,
@@ -35,7 +36,7 @@ pub struct ConsecutiveEpochStore<V> {
     entries: VecDeque<V>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ConsecutiveEpochStoreRepr<V> {
     pub window: EpochWindow,
     pub entries: Vec<V>,

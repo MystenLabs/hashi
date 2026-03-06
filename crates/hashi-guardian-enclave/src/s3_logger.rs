@@ -15,14 +15,20 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::Attestation;
 use hashi_types::guardian::GuardianError::S3Error;
+use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::VerifiedLogRecord;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
 
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 
+#[derive(Clone)]
 pub struct S3Logger {
     /// S3 config: bucket name, region, API keys
     config: S3Config,
@@ -60,6 +66,12 @@ impl S3Logger {
             client,
             config: config.clone(),
         }
+    }
+
+    pub async fn new_checked(config: &S3Config) -> GuardianResult<Self> {
+        let logger = Self::new(config).await;
+        logger.test_s3_connectivity().await?;
+        Ok(logger)
     }
 
     /// Construct an `S3Logger` from an already-configured S3 client.
@@ -402,6 +414,55 @@ impl S3Logger {
         }
 
         self.get_object_unsafe::<T>(key).await
+    }
+
+    pub async fn get_verified_log_record(
+        &self,
+        key: &str,
+        expected_session_id: &str,
+        signing_pubkey: Option<&GuardianPubKey>,
+    ) -> GuardianResult<VerifiedLogRecord> {
+        let log = self.get_object::<LogRecord>(key).await?;
+        if log.session_id != expected_session_id {
+            return Err(S3Error(format!("log session_id mismatch for key {}", key)));
+        }
+        log.verify(signing_pubkey)
+    }
+
+    pub async fn get_attestation(
+        &self,
+        session_id: &str,
+    ) -> GuardianResult<(Attestation, GuardianPubKey)> {
+        let key = InitLogMessage::attestation_object_key(session_id);
+        self.get_verified_log_record(&key, session_id, None)
+            .await?
+            .message
+            .to_init_log()
+            .and_then(|x| match x {
+                InitLogMessage::OIAttestationUnsigned {
+                    attestation,
+                    signing_public_key,
+                } => Some((attestation, signing_public_key)),
+                _ => None,
+            })
+            .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))
+    }
+
+    pub async fn get_guardian_info(
+        &self,
+        session_id: &str,
+        signing_pubkey: &GuardianPubKey,
+    ) -> GuardianResult<GuardianInfo> {
+        let key = InitLogMessage::guardian_info_object_key(session_id);
+        self.get_verified_log_record(&key, session_id, Some(signing_pubkey))
+            .await?
+            .message
+            .to_init_log()
+            .and_then(|x| match x {
+                InitLogMessage::OIGuardianInfo(info) => Some(info),
+                _ => None,
+            })
+            .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {}", key)))
     }
 }
 

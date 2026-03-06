@@ -26,6 +26,7 @@ use super::RateLimiter;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
+use super::ShareCommitments;
 use super::ShareID;
 use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
@@ -141,7 +142,16 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
 
         // State
         let state_pb = req.state.ok_or_else(|| missing("state"))?;
+        let state = ProvisionerInitState::try_from(state_pb)?;
 
+        Ok(ProvisionerInitRequest::new(encrypted_share, state))
+    }
+}
+
+impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
+    type Error = GuardianError;
+
+    fn try_from(state_pb: pb::ProvisionerInitState) -> Result<Self, Self::Error> {
         let epoch_window_pb = state_pb
             .epoch_window
             .ok_or_else(|| missing("epoch_window"))?;
@@ -169,15 +179,12 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         let hashi_btc_master_pubkey = XOnlyPublicKey::from_slice(master_pk_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e}")))?;
 
-        Ok(ProvisionerInitRequest::new(
-            encrypted_share,
-            ProvisionerInitState::new(
-                hashi_committees,
-                withdrawal_config,
-                withdrawal_state,
-                hashi_btc_master_pubkey,
-            )?,
-        ))
+        ProvisionerInitState::new(
+            hashi_committees,
+            withdrawal_config,
+            withdrawal_state,
+            hashi_btc_master_pubkey,
+        )
     }
 }
 
@@ -289,14 +296,15 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
+    let (s3_config, share_commitments, network) = r.into_parts();
     Ok(pb::OperatorInitRequest {
-        s3_config: Some(s3_config_to_pb(r.s3_config)),
-        share_commitments: r
-            .share_commitments
+        s3_config: Some(s3_config_to_pb(s3_config)),
+        share_commitments: share_commitments
+            .into_vec()
             .into_iter()
             .map(share_commitment_to_pb)
             .collect(),
-        network: Some(network_to_pb(r.network)?),
+        network: Some(network_to_pb(network)?),
     })
 }
 
@@ -389,19 +397,23 @@ fn pb_to_committee_signature(s: pb::CommitteeSignature) -> GuardianResult<(u64, 
     ))
 }
 
-fn pb_share_commitments_to_domain(
+pub fn pb_share_commitments_to_domain(
     commitments: &[pb::GuardianShareCommitment],
-) -> GuardianResult<Vec<ShareCommitment>> {
-    commitments
+) -> GuardianResult<ShareCommitments> {
+    let commitments = commitments
         .iter()
         .map(|c| {
-            let digest = c.digest.clone().ok_or_else(|| missing("digest"))?;
+            let digest_hex = c.digest_hex.clone().ok_or_else(|| missing("digest_hex"))?;
+            let digest = hex::decode(&digest_hex)
+                .map_err(|e| InvalidInputs(format!("invalid digest_hex: {e}")))?;
             Ok(ShareCommitment {
                 id: pb_to_share_id(c.id)?,
-                digest: digest.to_vec(),
+                digest,
             })
         })
-        .collect::<GuardianResult<Vec<_>>>()
+        .collect::<GuardianResult<Vec<_>>>()?;
+
+    ShareCommitments::new(commitments)
 }
 
 fn pb_to_s3_bucket_info(info: pb::S3BucketInfo) -> GuardianResult<super::S3BucketInfo> {
@@ -447,7 +459,11 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         share_commitments: info
             .share_commitments
             .map(|v| pb::GuardianShareCommitments {
-                share_commitments: v.into_iter().map(share_commitment_to_pb).collect(),
+                share_commitments: v
+                    .into_vec()
+                    .into_iter()
+                    .map(share_commitment_to_pb)
+                    .collect(),
             }),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
@@ -604,7 +620,7 @@ pub fn encrypted_share_to_pb(s: EncryptedShare) -> pb::GuardianShareEncrypted {
 pub fn share_commitment_to_pb(c: ShareCommitment) -> pb::GuardianShareCommitment {
     pb::GuardianShareCommitment {
         id: Some(share_id_to_pb(c.id)),
-        digest: Some(c.digest.into()),
+        digest_hex: Some(hex::encode(c.digest)),
     }
 }
 

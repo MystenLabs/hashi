@@ -1057,3 +1057,16 @@ impl From<&crate::committee::Committee> for Committee {
         }
     }
 }
+
+impl TryFrom<Committee> for crate::committee::Committee {
+    type Error = anyhow::Error;
+
+    fn try_from(c: Committee) -> Result<Self, Self::Error> {
+        let members = c
+            .members
+            .into_iter()
+            .map(crate::committee::CommitteeMember::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::committee::Committee::new(members, c.epoch))
+    }
+}

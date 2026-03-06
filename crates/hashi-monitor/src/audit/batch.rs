@@ -3,8 +3,8 @@ use crate::audit::AuditorCore;
 use crate::audit::log_findings;
 use crate::config::Config;
 use crate::domain::Cursors;
+use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
-use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -49,7 +49,7 @@ impl BatchAuditWindow {
 }
 
 impl AuditWindow for BatchAuditWindow {
-    fn in_window(&self, e: &WithdrawalEvent) -> bool {
+    fn in_window(&self, e: &MonitorWithdrawalEvent) -> bool {
         e.timestamp_secs >= self.user_start && e.timestamp_secs <= self.user_end
     }
 }
@@ -99,7 +99,7 @@ impl BatchAuditor {
         })
     }
 
-    pub fn ingest_batch(&mut self, events: Vec<WithdrawalEvent>) {
+    pub fn ingest_batch(&mut self, events: Vec<MonitorWithdrawalEvent>) {
         let errors = self.inner.ingest_batch(events);
         log_findings("batch", "ingest", &errors);
         if !errors.is_empty() {
