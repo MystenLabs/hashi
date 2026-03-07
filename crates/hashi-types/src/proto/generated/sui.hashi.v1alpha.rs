@@ -1984,6 +1984,9 @@ pub struct ComplainRequest {
     /// The complaint containing proof of invalid share.
     #[prost(message, optional, tag = "4")]
     pub complaint: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    /// The protocol phase this complaint is for.
+    #[prost(enumeration = "MpcProtocolType", optional, tag = "5")]
+    pub protocol_type: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RotationResponses {

@@ -83,13 +83,12 @@ impl types::SendMessagesRequest {
                     messages: rotation_messages_to_proto(messages),
                 })
             }
-            types::Messages::NonceGeneration {
-                batch_index,
-                message,
-            } => Messages::NonceMessage(proto::NonceMessage {
-                batch_index: Some(*batch_index),
-                message: Some(serialize_bcs(message)),
-            }),
+            types::Messages::NonceGeneration(nonce) => {
+                Messages::NonceMessage(proto::NonceMessage {
+                    batch_index: Some(nonce.batch_index),
+                    message: Some(serialize_bcs(&nonce.message)),
+                })
+            }
         };
         proto::SendMessagesRequest {
             epoch: Some(epoch),
@@ -117,10 +116,10 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
                     required(nonce.message.as_ref(), "nonce_message.message")?,
                     "nonce_message.message",
                 )?;
-                types::Messages::NonceGeneration {
+                types::Messages::NonceGeneration(types::NonceMessage {
                     batch_index,
                     message,
-                }
+                })
             }
             None => {
                 return Err(TryFromProtoError::missing("messages"));
@@ -162,7 +161,7 @@ impl types::RetrieveMessagesRequest {
         proto::RetrieveMessagesRequest {
             epoch: Some(epoch),
             dealer: Some(self.dealer.to_string()),
-            protocol_type: Some(retrieval_protocol_type_to_proto(self.protocol_type) as i32),
+            protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
         }
     }
 }
@@ -172,7 +171,7 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
 
     fn try_from(value: &proto::RetrieveMessagesRequest) -> Result<Self, Self::Error> {
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
-        let protocol_type = retrieval_protocol_type_from_proto(*required(
+        let protocol_type = mpc_protocol_type_from_proto(*required(
             value.protocol_type.as_ref(),
             "protocol_type",
         )?)?;
@@ -183,23 +182,23 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
     }
 }
 
-fn retrieval_protocol_type_to_proto(pt: types::RetrievalProtocolType) -> proto::MpcProtocolType {
+fn mpc_protocol_type_to_proto(pt: types::ProtocolTypeIndicator) -> proto::MpcProtocolType {
     match pt {
-        types::RetrievalProtocolType::Dkg => proto::MpcProtocolType::Dkg,
-        types::RetrievalProtocolType::KeyRotation => proto::MpcProtocolType::KeyRotation,
-        types::RetrievalProtocolType::NonceGeneration => proto::MpcProtocolType::NonceGeneration,
+        types::ProtocolTypeIndicator::Dkg => proto::MpcProtocolType::Dkg,
+        types::ProtocolTypeIndicator::KeyRotation => proto::MpcProtocolType::KeyRotation,
+        types::ProtocolTypeIndicator::NonceGeneration => proto::MpcProtocolType::NonceGeneration,
     }
 }
 
 #[allow(clippy::result_large_err)]
-fn retrieval_protocol_type_from_proto(
+fn mpc_protocol_type_from_proto(
     value: i32,
-) -> Result<types::RetrievalProtocolType, TryFromProtoError> {
+) -> Result<types::ProtocolTypeIndicator, TryFromProtoError> {
     match proto::MpcProtocolType::try_from(value) {
-        Ok(proto::MpcProtocolType::Dkg) => Ok(types::RetrievalProtocolType::Dkg),
-        Ok(proto::MpcProtocolType::KeyRotation) => Ok(types::RetrievalProtocolType::KeyRotation),
+        Ok(proto::MpcProtocolType::Dkg) => Ok(types::ProtocolTypeIndicator::Dkg),
+        Ok(proto::MpcProtocolType::KeyRotation) => Ok(types::ProtocolTypeIndicator::KeyRotation),
         Ok(proto::MpcProtocolType::NonceGeneration) => {
-            Ok(types::RetrievalProtocolType::NonceGeneration)
+            Ok(types::ProtocolTypeIndicator::NonceGeneration)
         }
         _ => Err(TryFromProtoError::missing("valid protocol_type")),
     }
@@ -219,13 +218,12 @@ impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse 
                     messages: rotation_messages_to_proto(messages),
                 })
             }
-            types::Messages::NonceGeneration {
-                batch_index,
-                message,
-            } => Messages::NonceMessage(proto::NonceMessage {
-                batch_index: Some(*batch_index),
-                message: Some(serialize_bcs(message)),
-            }),
+            types::Messages::NonceGeneration(nonce) => {
+                Messages::NonceMessage(proto::NonceMessage {
+                    batch_index: Some(nonce.batch_index),
+                    message: Some(serialize_bcs(&nonce.message)),
+                })
+            }
         };
         Self {
             messages: Some(messages),
@@ -252,10 +250,10 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
                     required(nonce.message.as_ref(), "nonce_message.message")?,
                     "nonce_message.message",
                 )?;
-                types::Messages::NonceGeneration {
+                types::Messages::NonceGeneration(types::NonceMessage {
                     batch_index,
                     message,
-                }
+                })
             }
             None => {
                 return Err(TryFromProtoError::missing("messages"));
@@ -276,6 +274,7 @@ impl types::ComplainRequest {
             dealer: Some(self.dealer.to_string()),
             share_index: self.share_index.map(|idx| idx.get() as u32),
             complaint: Some(serialize_bcs(&self.complaint)),
+            protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
         }
     }
 }
@@ -296,10 +295,13 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
             required(value.complaint.as_ref(), "complaint")?,
             "complaint",
         )?;
+        let protocol_type =
+            mpc_protocol_type_from_proto(required(value.protocol_type, "protocol_type")?)?;
         Ok(Self {
             dealer,
             share_index,
             complaint,
+            protocol_type,
         })
     }
 }

@@ -102,6 +102,9 @@ message ComplainRequest {
 
   // The complaint containing proof of invalid share.
   optional sui.rpc.v2.Bcs complaint = 4;
+
+  // The protocol phase this complaint is for.
+  optional MpcProtocolType protocol_type = 5;
 }
 
 message RotationResponses {

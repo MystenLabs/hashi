@@ -26,6 +26,11 @@ use sui_sdk_types::Digest;
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 pub type MessageHash = Digest;
 pub type RotationMessages = BTreeMap<ShareIndex, avss::Message>;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NonceMessage {
+    pub batch_index: u32,
+    pub message: batch_avss::Message,
+}
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
@@ -156,10 +161,17 @@ pub struct GetPublicDkgOutputResponse {
 pub enum Messages {
     Dkg(avss::Message),
     Rotation(RotationMessages),
-    NonceGeneration {
-        batch_index: u32,
-        message: batch_avss::Message,
-    },
+    NonceGeneration(NonceMessage),
+}
+
+impl Messages {
+    pub fn protocol_type(&self) -> ProtocolTypeIndicator {
+        match self {
+            Messages::Dkg(_) => ProtocolTypeIndicator::Dkg,
+            Messages::Rotation(_) => ProtocolTypeIndicator::KeyRotation,
+            Messages::NonceGeneration(_) => ProtocolTypeIndicator::NonceGeneration,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -173,7 +185,7 @@ pub struct SendMessagesResponse {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum RetrievalProtocolType {
+pub enum ProtocolTypeIndicator {
     Dkg,
     KeyRotation,
     NonceGeneration,
@@ -182,7 +194,7 @@ pub enum RetrievalProtocolType {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrieveMessagesRequest {
     pub dealer: Address,
-    pub protocol_type: RetrievalProtocolType,
+    pub protocol_type: ProtocolTypeIndicator,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,6 +207,7 @@ pub struct ComplainRequest {
     pub dealer: Address,
     pub share_index: Option<ShareIndex>, // None for DKG
     pub complaint: complaint::Complaint,
+    pub protocol_type: ProtocolTypeIndicator,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
