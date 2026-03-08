@@ -484,17 +484,13 @@ impl MpcManager {
                 e
             );
         }
-        // Clear nonce outputs accumulated by the RPC handler during the dealer
-        // phase. The handler's `try_sign_nonce_message` stores outputs for
-        // whichever dealer messages arrived, which is non-deterministic across
-        // nodes. The party phase below re-derives outputs from certified on-chain
-        // certificates, ensuring all nodes use the same deterministic set.
-        {
-            let mut mgr = mpc_manager.write().unwrap();
-            mgr.dealer_nonce_outputs.clear();
-        }
-        Self::run_as_nonce_party(mpc_manager, p2p_channel, tob_channel).await?;
+        let certified = Self::run_as_nonce_party(mpc_manager, p2p_channel, tob_channel).await?;
         let mut mgr = mpc_manager.write().unwrap();
+        // Keep only the outputs selected by the party phase. The RPC handler's
+        // `try_sign_nonce_message` may have inserted additional outputs
+        // concurrently — discard them so all nodes use the same deterministic set.
+        mgr.dealer_nonce_outputs
+            .retain(|addr, _| certified.contains(addr));
         Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
             .into_values()
             .collect())
@@ -963,7 +959,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> MpcResult<()> {
+    ) -> MpcResult<HashSet<Address>> {
         let required_weight = {
             let mgr = mpc_manager.read().unwrap();
             2 * mgr.dkg_config.max_faulty + 1
@@ -1080,7 +1076,7 @@ impl MpcManager {
             dealer_weight_sum += dealer_weight as u32;
             certified_dealers.insert(dealer);
         }
-        Ok(())
+        Ok(certified_dealers)
     }
 
     fn create_dealer_message(
