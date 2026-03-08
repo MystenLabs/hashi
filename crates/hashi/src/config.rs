@@ -342,6 +342,7 @@ impl Config {
 
 /// Relevant Onchain Ids for the hashi protocol.
 #[derive(Debug, Clone, Copy, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct HashiIds {
     /// The original package id of the `hashi` package.
     pub package_id: Address,
