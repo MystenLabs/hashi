@@ -2736,6 +2736,7 @@ dependencies = [
  "ed25519-dalek",
  "fastcrypto",
  "fastcrypto-tbls",
+ "hex",
  "hpke",
  "k256",
  "miniscript 13.0.0",

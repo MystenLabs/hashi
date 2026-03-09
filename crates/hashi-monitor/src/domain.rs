@@ -27,7 +27,7 @@ pub fn now_unix_seconds() -> UnixSeconds {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WithdrawalEvent {
+pub struct MonitorWithdrawalEvent {
     /// Who produced the event?
     pub event_type: WithdrawalEventType,
 
@@ -104,6 +104,6 @@ impl Cursors {
 
 /// Outcome of a Guardian or Sui poll
 pub enum PollOutcome {
-    CursorAdvanced(Vec<WithdrawalEvent>),
+    CursorAdvanced(Vec<MonitorWithdrawalEvent>),
     CursorUnmoved,
 }

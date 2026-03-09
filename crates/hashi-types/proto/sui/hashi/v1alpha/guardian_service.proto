@@ -101,7 +101,7 @@ message GuardianShareEncrypted {
 // Commitment to a secret share.
 message GuardianShareCommitment {
   GuardianShareID id = 1;
-  optional bytes digest = 2;
+  optional string digest_hex = 2;
 }
 
 // Unsigned response payload.
