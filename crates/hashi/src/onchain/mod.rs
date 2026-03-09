@@ -226,6 +226,11 @@ impl OnchainState {
         self.state().hashi.committees.epoch()
     }
 
+    /// Returns the MPC public key bytes.
+    pub fn mpc_public_key(&self) -> Vec<u8> {
+        self.state().hashi.committees.mpc_public_key().to_vec()
+    }
+
     /// Returns all active proposals.
     pub fn proposals(&self) -> Vec<types::Proposal> {
         self.state()

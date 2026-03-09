@@ -186,6 +186,31 @@ impl HashiClient {
         self.onchain_state.committee_members()
     }
 
+    /// Fetch the MPC public key bytes from on-chain state
+    pub fn fetch_mpc_public_key(&self) -> Vec<u8> {
+        self.onchain_state.mpc_public_key()
+    }
+
+    /// Fetch pending deposit requests
+    pub fn fetch_deposit_requests(&self) -> Vec<crate::onchain::types::DepositRequest> {
+        self.onchain_state.deposit_requests()
+    }
+
+    /// Fetch pending withdrawal requests
+    pub fn fetch_withdrawal_requests(&self) -> Vec<crate::onchain::types::WithdrawalRequest> {
+        self.onchain_state.withdrawal_requests()
+    }
+
+    /// Fetch committed/signed withdrawals
+    pub fn fetch_pending_withdrawals(&self) -> Vec<crate::onchain::types::PendingWithdrawal> {
+        self.onchain_state.pending_withdrawals()
+    }
+
+    /// Fetch the withdrawal fee in SUI
+    pub fn fetch_withdrawal_fee_sui(&self) -> u64 {
+        self.onchain_state.withdrawal_fee_sui()
+    }
+
     // ========================================================================
     // Transaction builders (proposal/governance)
     // ========================================================================

@@ -43,6 +43,30 @@ pub struct CliGlobalOpts {
     #[clap(long, short = 'k', env = "HASHI_KEYPAIR")]
     pub keypair: Option<std::path::PathBuf>,
 
+    /// Bitcoin RPC URL (overrides config file)
+    #[clap(long, env = "BTC_RPC_URL")]
+    pub btc_rpc_url: Option<String>,
+
+    /// Bitcoin RPC username (overrides config file)
+    #[clap(long, env = "BTC_RPC_USER")]
+    pub btc_rpc_user: Option<String>,
+
+    /// Bitcoin RPC password (overrides config file)
+    #[clap(long, env = "BTC_RPC_PASSWORD")]
+    pub btc_rpc_password: Option<String>,
+
+    /// Bitcoin network: regtest, testnet, or mainnet (overrides config file)
+    #[clap(long, env = "BTC_NETWORK")]
+    pub btc_network: Option<String>,
+
+    /// Path to Bitcoin private key file in WIF format (overrides config file)
+    #[clap(long, env = "BTC_PRIVATE_KEY")]
+    pub btc_private_key: Option<std::path::PathBuf>,
+
+    /// Disable automatic localnet discovery
+    #[clap(long)]
+    pub no_localnet: bool,
+
     /// Enable verbose output
     #[clap(long, short)]
     pub verbose: bool,
@@ -187,6 +211,95 @@ pub enum ConfigCommands {
     OnChain,
 }
 
+#[derive(Subcommand)]
+pub enum DepositCommands {
+    /// Generate a Taproot deposit address from the on-chain MPC public key
+    GenerateAddress {
+        /// Sui address that will receive hBTC (used as derivation path)
+        #[clap(long)]
+        recipient: Option<String>,
+    },
+
+    /// Send BTC from the configured wallet to the deposit address
+    SendBtc {
+        /// Amount of BTC to deposit (in satoshis)
+        #[clap(long)]
+        amount: u64,
+
+        /// Sui address that will receive hBTC
+        #[clap(long)]
+        recipient: Option<String>,
+    },
+
+    /// Submit a deposit request on Sui with existing UTXO info
+    Request {
+        /// Bitcoin transaction ID containing the deposit
+        #[clap(long)]
+        txid: String,
+
+        /// Output index in the transaction
+        #[clap(long)]
+        vout: u32,
+
+        /// Amount deposited (in satoshis)
+        #[clap(long)]
+        amount: u64,
+
+        /// Sui address that will receive hBTC
+        #[clap(long)]
+        recipient: Option<String>,
+    },
+
+    /// Combined flow: send BTC, mine blocks (if localnet), then create request
+    Execute {
+        /// Amount of BTC to deposit (in satoshis)
+        #[clap(long)]
+        amount: u64,
+
+        /// Sui address that will receive hBTC
+        #[clap(long)]
+        recipient: Option<String>,
+    },
+
+    /// Show the status of a deposit request
+    Status {
+        /// The deposit request object ID
+        request_id: String,
+    },
+
+    /// List deposit requests
+    List,
+}
+
+#[derive(Subcommand)]
+pub enum WithdrawCommands {
+    /// Submit a withdrawal request on Sui
+    Request {
+        /// Amount to withdraw (in satoshis)
+        #[clap(long)]
+        amount: u64,
+
+        /// Bitcoin address to receive the withdrawal
+        #[clap(long)]
+        btc_address: String,
+    },
+
+    /// Cancel a pending withdrawal request
+    Cancel {
+        /// The withdrawal request object ID
+        request_id: String,
+    },
+
+    /// Show the status of a withdrawal request
+    Status {
+        /// The withdrawal request object ID
+        request_id: String,
+    },
+
+    /// List withdrawal requests
+    List,
+}
+
 /// Transaction options passed to commands
 pub struct TxOptions {
     /// Gas budget - None means estimate via dry-run
@@ -294,11 +407,22 @@ pub enum CliCommand {
     Proposal { action: ProposalCommands },
     Committee { action: CommitteeCommands },
     Config { action: ConfigCommands },
+    Deposit { action: DepositCommands },
+    Withdraw { action: WithdrawCommands },
 }
 
 /// Run a CLI command
 pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()> {
+    crate::init_crypto_provider();
     init_tracing(opts.verbose);
+
+    let btc_overrides = config::BitcoinOverrides {
+        rpc_url: opts.btc_rpc_url,
+        rpc_user: opts.btc_rpc_user,
+        rpc_password: opts.btc_rpc_password,
+        network: opts.btc_network,
+        private_key: opts.btc_private_key,
+    };
 
     let config = config::CliConfig::load(
         opts.config.as_deref(),
@@ -306,6 +430,8 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         opts.package_id,
         opts.hashi_object_id,
         opts.keypair,
+        btc_overrides,
+        opts.no_localnet,
     )?;
 
     let tx_opts = TxOptions {
@@ -389,6 +515,12 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 commands::config::show_onchain_config(&config).await?;
             }
         },
+        CliCommand::Deposit { action } => {
+            commands::deposit::run(action, &config, &tx_opts).await?;
+        }
+        CliCommand::Withdraw { action } => {
+            commands::withdraw::run(action, &config, &tx_opts).await?;
+        }
     }
 
     Ok(())
@@ -460,6 +592,7 @@ pub fn complete_step(msg: &str) {
 
 /// Run the `publish` command – build, publish, and initialise the Hashi package.
 pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
+    crate::init_crypto_provider();
     init_tracing(opts.verbose);
 
     // Load signer

@@ -30,10 +30,18 @@ pub mod display {
 
     /// Format a timestamp in human-readable form
     pub fn format_timestamp(timestamp_ms: u64) -> String {
-        use std::time::Duration;
-        use std::time::UNIX_EPOCH;
-        let datetime = UNIX_EPOCH + Duration::from_millis(timestamp_ms);
-        format!("{:?}", datetime)
+        use time::OffsetDateTime;
+
+        let dt = OffsetDateTime::from_unix_timestamp((timestamp_ms / 1000) as i64)
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02} UTC",
+            dt.year(),
+            dt.month() as u8,
+            dt.day(),
+            dt.hour(),
+            dt.minute()
+        )
     }
 
     /// Format proposal type for display (from on-chain type)

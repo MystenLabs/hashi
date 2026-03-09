@@ -30,7 +30,7 @@ const WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 // TODO: Tune based on production workload.
 const BATCH_SIZE_PER_WEIGHT: u16 = 10;
 
-fn init_crypto_provider() {
+pub(crate) fn init_crypto_provider() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();

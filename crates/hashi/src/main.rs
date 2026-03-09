@@ -63,6 +63,24 @@ enum Commands {
         #[clap(flatten)]
         register_opts: hashi::cli::RegisterOpts,
     },
+
+    /// Deposit BTC into the Hashi bridge
+    Deposit {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::DepositCommands,
+    },
+
+    /// Withdraw BTC from the Hashi bridge
+    Withdraw {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::WithdrawCommands,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +100,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
         Commands::Register { register_opts } => hashi::cli::run_register(register_opts).await,
+        Commands::Deposit { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Deposit { action }).await
+        }
+        Commands::Withdraw { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Withdraw { action }).await
+        }
     }
 }
 
