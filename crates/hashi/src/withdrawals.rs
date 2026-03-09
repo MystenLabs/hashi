@@ -93,26 +93,30 @@ pub struct WithdrawalConfirmation {
 impl Hashi {
     // --- Step 1: Request approval (lightweight) ---
 
-    pub fn validate_and_sign_withdrawal_request_approval(
+    pub async fn validate_and_sign_withdrawal_request_approval(
         &self,
         approval: &WithdrawalRequestApproval,
-    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+    ) -> Result<hashi_types::proto::MemberSignature, WithdrawalApprovalError> {
         let request = self
             .onchain_state()
             .withdrawal_request(&approval.request_id)
             .ok_or_else(|| {
-                anyhow!(
+                WithdrawalApprovalError::NeverRetry(anyhow!(
                     "Withdrawal request {} not found in queue",
                     approval.request_id
-                )
+                ))
             })?;
-        anyhow::ensure!(
-            !request.approved,
-            "Withdrawal request {} is already approved",
-            approval.request_id
-        );
+        if request.approved {
+            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+                "Withdrawal request {} is already approved",
+                approval.request_id
+            )));
+        }
+
+        self.screen_withdrawal(&request).await?;
 
         self.sign_message_proto(&approval)
+            .map_err(WithdrawalApprovalError::NeverRetry)
     }
 
     // --- Step 2: Construction approval (with UTXO selection) ---
@@ -165,13 +169,6 @@ impl Hashi {
                 Ok(request)
             })
             .collect::<anyhow::Result<_>>()?;
-
-        // 1b. Screen each withdrawal request for AML/sanctions
-        for request in &requests {
-            // TODO: right now if one request fails AML screening, it blocks all of them.
-            // How should we deal with this?
-            self.screen_withdrawal(request).await?;
-        }
 
         // 2. Verify each selected UTXO exists and collect full UTXO data
         let selected_utxos: Vec<Utxo> = approval

@@ -342,37 +342,6 @@ impl LeaderService {
             return;
         }
 
-        // Screen each request before approval — reject sanctioned addresses early
-        let mut screened: Vec<&WithdrawalRequest> = Vec::new();
-        for request in &unapproved {
-            if self
-                .withdrawal_approval_retry_tracker
-                .should_skip(&request.id, checkpoint_timestamp_ms)
-            {
-                continue;
-            }
-
-            match self.inner.screen_withdrawal(request).await {
-                Ok(()) => {
-                    self.withdrawal_approval_retry_tracker.clear(&request.id);
-                    screened.push(request);
-                }
-                Err(e) => {
-                    self.withdrawal_approval_retry_tracker.record_failure(
-                        e.kind(),
-                        request.id,
-                        checkpoint_timestamp_ms,
-                    );
-                }
-            }
-        }
-
-        if screened.is_empty() {
-            return;
-        }
-
-        info!("Approving {} withdrawal requests", screened.len());
-
         let this_validator_address = self
             .inner
             .config
@@ -391,32 +360,46 @@ impl LeaderService {
             .current_committee()
             .expect("No current committee");
 
-        // Collect a per-request BLS certificate for each screened request.
+        // Collect a per-request BLS certificate for each unapproved request.
         // Validators independently validate each request (including sanctions checks),
-        // so a single bad request only blocks itself, not the whole batch.
         let mut certified: Vec<(Address, CommitteeSignature)> = Vec::new();
-        for request in &screened {
+        for request in &unapproved {
+            if self
+                .withdrawal_approval_retry_tracker
+                .should_skip(&request.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+
             let approval = WithdrawalRequestApproval {
                 request_id: request.id,
             };
 
-            // Validate and sign locally first
+            // Validate, screen, and sign locally first
             let local_sig = match self
                 .inner
                 .validate_and_sign_withdrawal_request_approval(&approval)
+                .await
             {
-                Ok(sig) => match parse_member_signature(sig) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(
-                            "Failed to parse local approval signature for {:?}: {e}",
-                            request.id
-                        );
-                        continue;
+                Ok(sig) => {
+                    self.withdrawal_approval_retry_tracker.clear(&request.id);
+                    match parse_member_signature(sig) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!(
+                                "Failed to parse local approval signature for {:?}: {e}",
+                                request.id
+                            );
+                            continue;
+                        }
                     }
-                },
+                }
                 Err(e) => {
-                    error!("Local approval validation failed for {:?}: {e}", request.id);
+                    self.withdrawal_approval_retry_tracker.record_failure(
+                        e.kind(),
+                        request.id,
+                        checkpoint_timestamp_ms,
+                    );
                     continue;
                 }
             };

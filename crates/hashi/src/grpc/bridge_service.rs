@@ -69,6 +69,7 @@ impl BridgeService for HttpService {
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_request_approval(&approval)
+            .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         Ok(Response::new(SignWithdrawalRequestApprovalResponse {
             member_signature: Some(member_signature),
