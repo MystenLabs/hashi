@@ -469,7 +469,6 @@ impl MpcManager {
             let mut mgr = mpc_manager.write().unwrap();
             mgr.dealer_nonce_outputs.clear();
             mgr.nonce_messages.clear();
-            mgr.dealer_outputs.clear();
             mgr.complaints_to_process.clear();
             mgr.message_responses.clear();
             mgr.complaint_responses.clear();
