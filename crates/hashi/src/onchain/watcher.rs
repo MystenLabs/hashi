@@ -40,6 +40,8 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
             .finish(),
     ]);
 
+    let mut rescrape_state = false;
+
     loop {
         let mut subscription = match client
             .subscription_client()
@@ -52,17 +54,36 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
             Ok(subscription) => subscription,
             Err(e) => {
                 tracing::warn!("error trying to subscribe to checkpoints: {e}");
+                rescrape_state = true;
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
         }
         .into_inner();
 
+        // Rescrape the chain state in the event our subscription broken
+        if rescrape_state {
+            match super::scrape_hashi(client.clone(), state.hashi_id()).await {
+                Ok((checkpoint_info, hashi)) => {
+                    state.replace_hashi_state(hashi);
+                    state.update_latest_checkpoint_info(checkpoint_info);
+                }
+                Err(e) => {
+                    tracing::warn!("error trying to rescrape hashi's state: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+
+            rescrape_state = false;
+        }
+
         while let Some(item) = subscription.next().await {
             let checkpoint = match item {
                 Ok(checkpoint) => checkpoint,
                 Err(e) => {
                     tracing::warn!("error in checkpoint stream: {e}");
+                    rescrape_state = true;
                     break;
                 }
             };

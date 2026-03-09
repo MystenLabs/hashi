@@ -79,9 +79,7 @@ struct Inner {
     /// The checkpoint information that this state is recent to
     checkpoint: watch::Sender<CheckpointInfo>,
     state: RwLock<State>,
-    #[allow(unused)]
     tls_private_key: Option<ed25519_dalek::SigningKey>,
-    #[allow(unused)]
     grpc_max_decoding_message_size: Option<usize>,
 }
 
@@ -180,6 +178,20 @@ impl OnchainState {
 
     fn update_latest_checkpoint_info(&self, info: CheckpointInfo) {
         self.0.checkpoint.send_replace(info);
+    }
+
+    /// Apply committee config from `Inner` to the given hashi state and replace the current
+    /// state in a single write lock acquisition.
+    fn replace_hashi_state(&self, mut hashi: types::Hashi) {
+        if let Some(tls_private_key) = &self.0.tls_private_key {
+            hashi
+                .committees
+                .set_tls_private_key(tls_private_key.clone());
+        }
+        if let Some(limit) = self.0.grpc_max_decoding_message_size {
+            hashi.committees.set_grpc_max_decoding_message_size(limit);
+        }
+        self.state_mut().hashi = hashi;
     }
 
     fn add_package_version(&self, version: u64, package_id: Address) {
