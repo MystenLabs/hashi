@@ -96,6 +96,10 @@ public fun request_withdrawal(
     // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());
 
+    // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
+    let addr_len = bitcoin_address.length();
+    assert!(addr_len == 20 || addr_len == 32);
+
     let request = withdrawal_request(btc.into_balance(), bitcoin_address, clock, ctx);
     request.emit_withdrawal_requested();
     hashi.withdrawal_queue_mut().insert_request(request);

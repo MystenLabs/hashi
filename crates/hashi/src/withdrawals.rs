@@ -664,28 +664,6 @@ impl Hashi {
         &self,
         request: &WithdrawalRequest,
     ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
-        let withdrawal_minimum = self.onchain_state().withdrawal_minimum();
-        if request.btc_amount < withdrawal_minimum {
-            return Err(WithdrawalCommitmentError::NeverRetry(anyhow!(
-                "Withdrawal amount {} sats is below minimum {} sats",
-                request.btc_amount,
-                withdrawal_minimum,
-            )));
-        }
-
-        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
-        if request.btc_amount <= withdrawal_fee_btc {
-            return Err(WithdrawalCommitmentError::NeverRetry(anyhow!(
-                "Withdrawal amount {} sats is not greater than fee {} sats",
-                request.btc_amount,
-                withdrawal_fee_btc,
-            )));
-        }
-
-        // Validate bitcoin address is a supported witness program length
-        output_weight_for_address(&request.bitcoin_address)
-            .map_err(WithdrawalCommitmentError::NeverRetry)?;
-
         // Fetch current fee rate from the Bitcoin node
         let kyoto_fee_rate = self
             .btc_monitor()
@@ -695,6 +673,7 @@ impl Hashi {
         // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
         let fee_rate = FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
 
+        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
         let output_amount = request.btc_amount - withdrawal_fee_btc;
 
         let selection = self
@@ -711,11 +690,11 @@ impl Hashi {
             let hashi_pubkey = self.get_hashi_pubkey();
             let change_address = self
                 .get_deposit_address(&hashi_pubkey, None)
-                .map_err(WithdrawalCommitmentError::NeverRetry)?;
+                .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
             outputs.push(OutputUtxo {
                 amount: change_amount,
                 bitcoin_address: witness_program_from_address(&change_address)
-                    .map_err(WithdrawalCommitmentError::NeverRetry)?,
+                    .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?,
             });
         }
 
@@ -724,7 +703,7 @@ impl Hashi {
 
         let tx = self
             .build_unsigned_withdrawal_tx(&selection.selected_utxos, &outputs)
-            .map_err(WithdrawalCommitmentError::NeverRetry)?;
+            .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
         let txid_bytes: [u8; 32] = tx.compute_txid().to_byte_array();
         let txid = Address::new(txid_bytes);
 
@@ -800,10 +779,7 @@ pub enum WithdrawalApprovalErrorKind {
 
 impl RetryPolicy for WithdrawalApprovalErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
-        match self {
-            Self::AmlServiceError => 30 * 1000,
-            Self::NeverRetry => 60 * 60 * 1000,
-        }
+        30 * 1000
     }
 
     fn max_delay_ms(self) -> u64 {
@@ -838,17 +814,14 @@ impl WithdrawalApprovalError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalCommitmentErrorKind {
+    BtcTxBuildFailed,
     FeeEstimateFailed,
     UtxoSelectionFailed,
-    NeverRetry,
 }
 
 impl RetryPolicy for WithdrawalCommitmentErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
-        match self {
-            Self::FeeEstimateFailed | Self::UtxoSelectionFailed => 30 * 1000,
-            Self::NeverRetry => 60 * 60 * 1000,
-        }
+        30 * 1000
     }
 
     fn max_delay_ms(self) -> u64 {
@@ -856,31 +829,28 @@ impl RetryPolicy for WithdrawalCommitmentErrorKind {
     }
 
     fn max_retries(self) -> u32 {
-        match self {
-            Self::FeeEstimateFailed | Self::UtxoSelectionFailed => u32::MAX,
-            Self::NeverRetry => 0,
-        }
+        u32::MAX
     }
 }
 
 #[derive(Debug, Error)]
 pub enum WithdrawalCommitmentError {
+    #[error("BTC tx build failed: {0}")]
+    BtcTxBuildFailed(#[source] anyhow::Error),
+
     #[error("Fee estimate failed: {0}")]
     FeeEstimateFailed(#[source] anyhow::Error),
 
     #[error("UTXO selection failed: {0}")]
     UtxoSelectionFailed(#[source] anyhow::Error),
-
-    #[error("Never retry: {0}")]
-    NeverRetry(#[source] anyhow::Error),
 }
 
 impl WithdrawalCommitmentError {
     pub fn kind(&self) -> WithdrawalCommitmentErrorKind {
         match self {
+            Self::BtcTxBuildFailed(_) => WithdrawalCommitmentErrorKind::BtcTxBuildFailed,
             Self::FeeEstimateFailed(_) => WithdrawalCommitmentErrorKind::FeeEstimateFailed,
             Self::UtxoSelectionFailed(_) => WithdrawalCommitmentErrorKind::UtxoSelectionFailed,
-            Self::NeverRetry(_) => WithdrawalCommitmentErrorKind::NeverRetry,
         }
     }
 }
