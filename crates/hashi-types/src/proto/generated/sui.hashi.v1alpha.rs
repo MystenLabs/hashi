@@ -1070,8 +1070,8 @@ pub struct GuardianShareEncrypted {
 pub struct GuardianShareCommitment {
     #[prost(message, optional, tag = "1")]
     pub id: ::core::option::Option<GuardianShareId>,
-    #[prost(bytes = "bytes", optional, tag = "2")]
-    pub digest: ::core::option::Option<::prost::bytes::Bytes>,
+    #[prost(string, optional, tag = "2")]
+    pub digest_hex: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Unsigned response payload.
 #[derive(Clone, PartialEq, ::prost::Message)]

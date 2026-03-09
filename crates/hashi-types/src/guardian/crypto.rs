@@ -23,6 +23,7 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 use tracing::info;
 // ---------------------------------
@@ -63,7 +64,67 @@ pub struct ShareCommitment {
     pub digest: DigestBytes,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShareCommitments(BTreeMap<ShareID, DigestBytes>);
+
 pub type DigestBytes = Vec<u8>;
+
+impl ShareCommitments {
+    pub fn new(commitments: Vec<ShareCommitment>) -> GuardianResult<Self> {
+        if commitments.len() != NUM_OF_SHARES {
+            return Err(InvalidInputs(format!(
+                "expected {} share commitments, got {}",
+                NUM_OF_SHARES,
+                commitments.len()
+            )));
+        }
+        let mut map = BTreeMap::new();
+        for commitment in commitments {
+            if map.insert(commitment.id, commitment.digest).is_some() {
+                return Err(InvalidInputs("duplicate share id".into()));
+            }
+        }
+        Ok(Self(map))
+    }
+
+    pub fn from_shares(shares: &[Share]) -> GuardianResult<Self> {
+        Self::new(shares.iter().map(commit_share).collect())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, commitment: &ShareCommitment) -> bool {
+        self.0
+            .get(&commitment.id)
+            .is_some_and(|digest| digest == &commitment.digest)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = ShareCommitment> + '_ {
+        self.0.iter().map(|(id, digest)| ShareCommitment {
+            id: *id,
+            digest: digest.clone(),
+        })
+    }
+}
+
+impl IntoIterator for ShareCommitments {
+    type Item = ShareCommitment;
+    type IntoIter = std::vec::IntoIter<ShareCommitment>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0
+            .into_iter()
+            .map(|(id, digest)| ShareCommitment { id, digest })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Ciphertext {

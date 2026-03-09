@@ -10,8 +10,8 @@
 //!     - Currently we also report orphan E1 findings when they fall in the user window.
 
 use crate::domain::Cursors;
+use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
-use crate::domain::WithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -31,7 +31,7 @@ use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
 pub trait AuditWindow {
-    fn in_window(&self, e: &WithdrawalEvent) -> bool;
+    fn in_window(&self, e: &MonitorWithdrawalEvent) -> bool;
 }
 
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorError]) {
@@ -68,7 +68,7 @@ impl AuditorCore {
         })
     }
 
-    pub fn ingest(&mut self, event: WithdrawalEvent) -> Option<MonitorError> {
+    pub fn ingest(&mut self, event: MonitorWithdrawalEvent) -> Option<MonitorError> {
         let wid = event.wid;
         match self.pending.entry(wid) {
             Entry::Occupied(mut entry) => {
@@ -83,7 +83,7 @@ impl AuditorCore {
         None
     }
 
-    pub fn ingest_batch(&mut self, events: Vec<WithdrawalEvent>) -> Vec<MonitorError> {
+    pub fn ingest_batch(&mut self, events: Vec<MonitorWithdrawalEvent>) -> Vec<MonitorError> {
         let mut errors = Vec::new();
         for event in events {
             if let Some(e) = self.ingest(event) {

@@ -1,9 +1,10 @@
 use anyhow::Result;
-use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::Txid;
+use hashi_guardian_enclave::HEARTBEAT_INTERVAL;
+use hashi_guardian_enclave::MAX_HEARTBEAT_FAILURES;
 use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
@@ -79,7 +80,7 @@ pub struct Scratchpad {
     /// TODO: Investigate if it can be moved to std::sync::Mutex
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// The share commitments
-    pub share_commitments: OnceLock<Vec<ShareCommitment>>,
+    pub share_commitments: OnceLock<ShareCommitments>,
     /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
@@ -94,10 +95,6 @@ pub struct EphemeralKeyPairs {
     pub signing_keys: GuardianSignKeyPair,
     pub encryption_keys: GuardianEncKeyPair,
 }
-
-// TODO: Leave as consts or make them configurable?
-const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
-const MAX_HEARTBEAT_FAILURES: u32 = 5;
 
 /// Enclave initialization.
 /// SETUP_MODE=true: only get_attestation, operator_init and setup_new_key are enabled.
@@ -532,7 +529,7 @@ impl Enclave {
 
     /// A unique session ID for the current enclave session.
     pub fn s3_session_id(&self) -> String {
-        self.signing_pubkey().as_bytes().to_lower_hex_string()
+        session_id_from_signing_pubkey(&self.signing_pubkey())
     }
 
     async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
@@ -577,17 +574,14 @@ impl Enclave {
         &self.scratchpad.shares
     }
 
-    pub fn share_commitments(&self) -> GuardianResult<&Vec<ShareCommitment>> {
+    pub fn share_commitments(&self) -> GuardianResult<&ShareCommitments> {
         self.scratchpad
             .share_commitments
             .get()
             .ok_or(InvalidInputs("Share commitments not set".into()))
     }
 
-    pub fn set_share_commitments(&self, commitments: Vec<ShareCommitment>) -> GuardianResult<()> {
-        if commitments.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs("Number of commitments does not match".into()));
-        }
+    pub fn set_share_commitments(&self, commitments: ShareCommitments) -> GuardianResult<()> {
         self.scratchpad
             .share_commitments
             .set(commitments)
@@ -655,21 +649,23 @@ pub fn mock_logger() -> S3Logger {
 #[cfg(test)]
 pub struct OperatorInitTestArgs {
     pub network: Network,
-    pub commitments: Vec<ShareCommitment>,
+    pub commitments: ShareCommitments,
     pub s3_logger: S3Logger,
 }
 
 #[cfg(test)]
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
-        let dummy = ShareCommitment {
-            id: std::num::NonZeroU16::new(1).unwrap(),
-            digest: vec![],
-        };
+        let commitments = (1..=NUM_OF_SHARES)
+            .map(|id| ShareCommitment {
+                id: std::num::NonZeroU16::new(id as u16).unwrap(),
+                digest: vec![],
+            })
+            .collect();
 
         Self {
             network: Network::Regtest,
-            commitments: vec![dummy; NUM_OF_SHARES],
+            commitments: ShareCommitments::new(commitments).unwrap(),
             s3_logger: mock_logger(),
         }
     }
@@ -682,7 +678,7 @@ impl OperatorInitTestArgs {
         self
     }
 
-    pub fn with_commitments(mut self, commitments: Vec<ShareCommitment>) -> Self {
+    pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
         self.commitments = commitments;
         self
     }

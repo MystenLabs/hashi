@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use time::PrimitiveDateTime;
 use time::Time;
 
-const SECONDS_PER_HOUR: UnixSeconds = 60 * 60;
+pub const SECONDS_PER_HOUR: UnixSeconds = 60 * 60;
 const DIR_WRITES_COMPLETION_DELAY: Duration = Duration::from_mins(10);
 
 type Year = i32;
@@ -49,7 +49,7 @@ impl S3HourScopedDirectory {
 
     /// The time at which writes to current S3 directory finish.
     /// DIR_WRITES_COMPLETION_DELAY accounts for any in-flight retries and clock skew.
-    pub fn completion_time(&self) -> UnixSeconds {
+    pub fn write_completion_time(&self) -> UnixSeconds {
         self.next_dir()
             .to_unix_seconds()
             .saturating_add(DIR_WRITES_COMPLETION_DELAY.as_secs())
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(dir.to_string(), "withdraw/1970/01/01/00/");
         assert_eq!(dir.to_unix_seconds(), 0);
         assert_eq!(
-            dir.completion_time(),
+            dir.write_completion_time(),
             3_600 + DIR_WRITES_COMPLETION_DELAY.as_secs()
         );
 
