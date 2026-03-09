@@ -547,9 +547,6 @@ async fn scrape_hashi(
             .ok_or_else(|| anyhow!("response missing X_SUI_EPOCH header"))?,
     };
 
-    // Extract initial shared version from owner
-    let initial_shared_version = response.get_ref().object().owner().version();
-
     let move_types::Hashi {
         id,
         committees,
@@ -593,7 +590,6 @@ async fn scrape_hashi(
         checkpoint_info,
         types::Hashi {
             id,
-            initial_shared_version,
             committees: committee_set,
             config: convert_move_config(config),
             treasury,
