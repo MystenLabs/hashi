@@ -25,6 +25,27 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Subcommand)]
+enum KeygenCommands {
+    /// Generate a Sui Ed25519 keypair using `sui keytool`
+    Sui {
+        /// Output directory for the keypair file
+        #[clap(long, default_value = ".hashi/keys")]
+        output: std::path::PathBuf,
+    },
+
+    /// Generate a Bitcoin secp256k1 keypair
+    Btc {
+        /// Output path for the WIF key file
+        #[clap(long, default_value = ".hashi/keys/btc.wif")]
+        output: std::path::PathBuf,
+
+        /// Bitcoin network for WIF encoding
+        #[clap(long, default_value = "regtest")]
+        network: String,
+    },
+}
+
 /// Shared options for localnet subcommands.
 #[derive(Args)]
 struct LocalnetOpts {
@@ -71,6 +92,12 @@ enum Commands {
 
         #[command(flatten)]
         opts: LocalnetOpts,
+    },
+
+    /// Generate cryptographic keypairs
+    Keygen {
+        #[command(subcommand)]
+        action: KeygenCommands,
     },
 }
 
@@ -135,10 +162,11 @@ async fn main() -> Result<()> {
             num_validators,
             opts,
         } => cmd_start(num_validators, &opts.data_dir).await,
-        Commands::Stop { opts } => cmd_stop(&opts.data_dir),
+        Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
         Commands::Mine { blocks, opts } => cmd_mine(blocks, &opts.data_dir),
+        Commands::Keygen { action } => cmd_keygen(action),
     }
 }
 
@@ -154,18 +182,20 @@ async fn cmd_start(num_validators: usize, data_dir: &Path) -> Result<()> {
         print_warning("Found stale state file, cleaning up...");
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .with_target(false)
-        .init();
+    if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_target(false)
+            .init();
+    }
 
-    print_info(&format!(
-        "Starting localnet with {} validators...",
+    use std::io::Write;
+    print!(
+        "{} Starting localnet with {} validators...",
+        "ℹ".blue().bold(),
         num_validators
-    ));
+    );
+    std::io::stdout().flush().ok();
 
     let test_networks = TestNetworksBuilder::new()
         .with_nodes(num_validators)
@@ -189,7 +219,13 @@ async fn cmd_start(num_validators: usize, data_dir: &Path) -> Result<()> {
     };
     state.save(data_dir)?;
 
-    print_success("Localnet started successfully!");
+    // Overwrite the "ℹ Starting..." line with a checkmark
+    print!("\r{}", " ".repeat(60));
+    println!(
+        "\r{} Localnet started with {} validators",
+        "✓".green().bold(),
+        num_validators
+    );
     println!();
     print_connection_details(&state);
 
@@ -206,7 +242,7 @@ async fn cmd_start(num_validators: usize, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stop(data_dir: &Path) -> Result<()> {
+async fn cmd_stop(data_dir: &Path) -> Result<()> {
     let state = LocalnetState::load(data_dir)?;
 
     if !state.is_alive() {
@@ -223,7 +259,7 @@ fn cmd_stop(data_dir: &Path) -> Result<()> {
 
     // Wait briefly for process to exit
     for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         if nix::sys::signal::kill(pid, None).is_err() {
             break;
         }
@@ -293,6 +329,103 @@ fn cmd_mine(blocks: u64, data_dir: &Path) -> Result<()> {
     ));
 
     Ok(())
+}
+
+fn cmd_keygen(action: KeygenCommands) -> Result<()> {
+    match action {
+        KeygenCommands::Sui { output } => {
+            print_info("Generating Sui Ed25519 keypair via `sui keytool`...");
+
+            std::fs::create_dir_all(&output).with_context(|| {
+                format!("Failed to create output directory {}", output.display())
+            })?;
+
+            let cmd_output = std::process::Command::new("sui")
+                .args(["keytool", "generate", "ed25519", "--json"])
+                .current_dir(&output)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .context(
+                    "Failed to run `sui keytool`. Is the `sui` binary installed and in PATH?",
+                )?;
+
+            if !cmd_output.status.success() {
+                let stderr = String::from_utf8_lossy(&cmd_output.stderr);
+                anyhow::bail!("`sui keytool generate` failed: {}", stderr);
+            }
+
+            let stdout = String::from_utf8_lossy(&cmd_output.stdout);
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                let address = json
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                print_success(&format!("Sui keypair generated for address {}", address));
+                if let Some(path) = json.get("filePath").and_then(|v| v.as_str()) {
+                    print_info(&format!("Key file: {}", output.join(path).display()));
+                }
+            } else {
+                print_success("Sui keypair generated.");
+            }
+
+            Ok(())
+        }
+        KeygenCommands::Btc { output, network } => {
+            use bitcoin::secp256k1::Secp256k1;
+            use bitcoin::secp256k1::rand::thread_rng;
+
+            let btc_network = match network.as_str() {
+                "mainnet" => bitcoin::Network::Bitcoin,
+                "testnet" => bitcoin::Network::Testnet,
+                "regtest" => bitcoin::Network::Regtest,
+                other => anyhow::bail!(
+                    "Unknown Bitcoin network: {}. Use mainnet, testnet, or regtest",
+                    other
+                ),
+            };
+
+            print_info(&format!(
+                "Generating Bitcoin secp256k1 keypair for {}...",
+                network
+            ));
+
+            let secp = Secp256k1::new();
+            let (secret_key, public_key) = secp.generate_keypair(&mut thread_rng());
+            let private_key = bitcoin::PrivateKey::new(secret_key, btc_network);
+
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+            }
+
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&output)
+                    .with_context(|| format!("Failed to create key file {}", output.display()))?;
+                file.write_all(private_key.to_wif().as_bytes())
+                    .with_context(|| format!("Failed to write key to {}", output.display()))?;
+            }
+
+            let address =
+                bitcoin::Address::p2wpkh(&bitcoin::CompressedPublicKey(public_key), btc_network);
+
+            print_success(&format!(
+                "Private key (WIF) written to {}",
+                output.display()
+            ));
+            print_info(&format!("Public key: {}", public_key));
+            print_info(&format!("Address (P2WPKH): {}", address));
+
+            Ok(())
+        }
+    }
 }
 
 fn print_connection_details(state: &LocalnetState) {

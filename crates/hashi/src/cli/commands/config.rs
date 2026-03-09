@@ -88,6 +88,30 @@ pub fn show_config(config: &CliConfig) -> Result<()> {
         );
     }
 
+    if let Some(ref btc) = config.bitcoin {
+        println!();
+        println!("  {}", "[bitcoin]".bold().dimmed());
+        if let Some(ref url) = btc.rpc_url {
+            println!("  {} {}", "RPC URL:".bold(), url.cyan());
+        }
+        if let Some(ref user) = btc.rpc_user {
+            println!("  {} {}", "RPC User:".bold(), user);
+        }
+        if btc.rpc_password.is_some() {
+            println!("  {} {}", "RPC Password:".bold(), "***".dimmed());
+        }
+        if let Some(ref network) = btc.network {
+            println!("  {} {}", "Network:".bold(), network);
+        }
+        if let Some(ref key_path) = btc.private_key_path {
+            println!(
+                "  {} {}",
+                "Private Key:".bold(),
+                key_path.display().to_string().green()
+            );
+        }
+    }
+
     println!("{}", "━".repeat(50).dimmed());
 
     // Validation

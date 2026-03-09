@@ -144,6 +144,22 @@ impl BtcRpcAuth {
     }
 }
 
+/// Parse a human-readable network name into a [`Network`].
+///
+/// Recognised values: `"mainnet"`, `"testnet"`, `"regtest"`.
+/// Returns [`Network::Regtest`] when `name` is `None` or unrecognised.
+pub fn parse_btc_network(name: Option<&str>) -> Network {
+    match name {
+        Some("mainnet") => Network::Bitcoin,
+        Some("testnet") => Network::Testnet,
+        Some("regtest") | None => Network::Regtest,
+        Some(other) => {
+            tracing::warn!("Unknown BTC network '{}', defaulting to regtest", other);
+            Network::Regtest
+        }
+    }
+}
+
 pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
     let hash = BlockHash::from_str(chain_id).ok()?;
 

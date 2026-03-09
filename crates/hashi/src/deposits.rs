@@ -6,12 +6,39 @@ use anyhow::anyhow;
 use bitcoin::ScriptBuf;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::XOnlyPublicKey;
+use fastcrypto::groups::secp256k1::ProjectivePoint;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
+
+/// Derive a deposit address from a compressed MPC public key (33-byte ProjectivePoint),
+/// an optional derivation path, and the target Bitcoin network.
+pub fn derive_deposit_address(
+    mpc_key: &ProjectivePoint,
+    derivation_path: Option<&sui_sdk_types::Address>,
+    btc_network: bitcoin::Network,
+) -> anyhow::Result<bitcoin::Address> {
+    let xonly = if let Some(path) = derivation_path {
+        let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+            mpc_key,
+            &path.into_inner(),
+        );
+        XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")?
+    } else {
+        let schnorr_pk = SchnorrPublicKey::try_from(mpc_key)
+            .context("Failed to convert MPC key to schnorr key")?;
+        XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())
+            .context("Failed to parse x-only key")?
+    };
+
+    Ok(bitcoin_utils::single_key_taproot_script_path_address(
+        &xonly,
+        btc_network,
+    ))
+}
 
 impl Hashi {
     pub async fn validate_and_sign_deposit_confirmation(

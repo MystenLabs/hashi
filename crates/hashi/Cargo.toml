@@ -70,6 +70,7 @@ bcs.workspace = true
 rand.workspace = true
 tap.workspace = true
 backon.workspace = true
+time = "0.3"
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

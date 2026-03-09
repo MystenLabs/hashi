@@ -131,7 +131,7 @@ impl TestNetworksBuilder {
             .prefix("hashi-test-env-")
             .tempdir()?;
 
-        println!("test env: {}", dir.path().display());
+        tracing::info!("test env: {}", dir.path().display());
 
         let bitcoin_node = self.bitcoin_builder.dir(dir.as_ref()).build().await?;
 
@@ -166,7 +166,7 @@ impl TestNetworksBuilder {
             bitcoin_node,
         };
 
-        println!("rpc url: {}", test_networks.sui_network().rpc_url);
+        tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
         Ok(test_networks)
     }
