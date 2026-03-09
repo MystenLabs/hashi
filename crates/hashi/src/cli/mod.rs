@@ -445,6 +445,19 @@ pub fn print_warning(msg: &str) {
     println!("{} {}", "⚠".yellow().bold(), msg);
 }
 
+/// Print an in-progress status line (no newline) that can be overwritten.
+pub fn print_step(msg: &str) {
+    use std::io::Write;
+    print!("\r\x1b[2K{} {}", "ℹ".blue().bold(), msg);
+    let _ = std::io::stdout().flush();
+}
+
+/// Overwrite the current status line with a success message.
+pub fn complete_step(msg: &str) {
+    print!("\r\x1b[2K");
+    println!("{} {}", "✓".green().bold(), msg);
+}
+
 /// Run the `publish` command – build, publish, and initialise the Hashi package.
 pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     init_tracing(opts.verbose);

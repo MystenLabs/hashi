@@ -897,6 +897,17 @@ pub async fn build_register_or_update_validator_tx(
         .await
         .ok();
     let registering = onchain_member.is_none();
+    if onchain_member.is_none() {
+        tracing::info!(
+            %validator_address,
+            "Validator not found on-chain, will register"
+        );
+    } else {
+        tracing::info!(
+            %validator_address,
+            "Validator already registered, will update metadata"
+        );
+    }
 
     let mut builder = TransactionBuilder::new();
     let mut has_calls = false;
