@@ -78,7 +78,6 @@ pub struct Committee {
     epoch: u64,
     members: Vec<CommitteeMember>,
     address_to_index: HashMap<Address, usize>,
-    // TODO: move_types::Committee's total_weight has type u16. Align the two.
     total_weight: u64,
 }
 
