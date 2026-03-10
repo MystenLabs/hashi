@@ -515,6 +515,7 @@ mod tests {
 
         let test_networks = TestNetworksBuilder::new()
             .with_nodes(num_nodes)
+            .with_full_voting_power()
             .build()
             .await?;
 
@@ -642,6 +643,7 @@ mod tests {
 
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
+            .with_full_voting_power()
             .build()
             .await?;
 
