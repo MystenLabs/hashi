@@ -39,6 +39,7 @@ use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::HashToGroupElement;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::ecies_v1::PublicKey;
 use fastcrypto_tbls::nodes::Node;
@@ -143,6 +144,33 @@ impl MpcManager {
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
+        let my_pk = PublicKey::<EncryptionGroupElement>::from_private_key(&encryption_key);
+        let committee_pk = &dkg_config
+            .nodes
+            .node_id_to_node(party_id as PartyId)
+            .expect("party_id not in nodes")
+            .pk;
+        let keys_match =
+            my_pk.as_element().to_byte_array() == committee_pk.as_element().to_byte_array();
+        tracing::info!(
+            epoch,
+            party_id,
+            address = %address,
+            threshold,
+            total_weight,
+            max_faulty,
+            num_nodes = dkg_config.nodes.num_nodes(),
+            encryption_keys_match = keys_match,
+            my_encryption_pk = hex::encode(my_pk.as_element().to_byte_array()),
+            committee_encryption_pk = hex::encode(committee_pk.as_element().to_byte_array()),
+            "MpcManager initialized"
+        );
+        if !keys_match {
+            tracing::error!(
+                "Encryption key mismatch: config private key derives a different public key \
+                 from what is registered on-chain for this node."
+            );
+        }
         let (source_epoch, previous_committee) = if committee_set.pending_epoch_change().is_some() {
             // Live reconfig
             let source = committee_set.epoch();
