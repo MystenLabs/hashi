@@ -655,7 +655,6 @@ async fn scrape_treasury(
 ) -> Result<types::Treasury> {
     let mut treasury_caps: BTreeMap<TypeTag, types::TreasuryCap> = BTreeMap::new();
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
-    let mut coins: BTreeMap<TypeTag, types::Coin> = BTreeMap::new();
 
     let mut stream = client
         .list_dynamic_fields(
@@ -683,8 +682,6 @@ async fn scrape_treasury(
             types::MetadataCap::try_from_contents(&type_tag, contents)
         {
             metadata_caps.insert(metadata_cap.coin_type.clone(), metadata_cap);
-        } else if let Some(coin) = types::Coin::try_from_contents(&type_tag, contents) {
-            coins.insert(coin.coin_type.clone(), coin);
         } else {
             tracing::warn!("unknown type stored in treasury");
         }
@@ -694,7 +691,6 @@ async fn scrape_treasury(
         id: treasury.objects.id,
         treasury_caps,
         metadata_caps,
-        coins,
     })
 }
 

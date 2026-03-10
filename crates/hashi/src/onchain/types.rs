@@ -472,7 +472,6 @@ pub struct Treasury {
     pub id: Address,
     pub treasury_caps: BTreeMap<TypeTag, TreasuryCap>,
     pub metadata_caps: BTreeMap<TypeTag, MetadataCap>,
-    pub coins: BTreeMap<TypeTag, Coin>,
 }
 
 #[derive(Debug)]

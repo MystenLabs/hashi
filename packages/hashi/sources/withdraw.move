@@ -91,7 +91,7 @@ public fun request_withdrawal(
 
     // Check that the fee is sufficient
     assert!(hashi.config().withdrawal_fee_sui() == fee.value());
-    hashi.treasury_mut().deposit_fee(fee);
+    sui::coin::send_funds(fee, hashi.id().to_address());
 
     // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());

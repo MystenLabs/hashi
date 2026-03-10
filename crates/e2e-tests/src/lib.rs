@@ -575,7 +575,6 @@ mod tests {
         assert_eq!(state.state().hashi().committees.members().len(), 1);
         assert_eq!(state.state().hashi().treasury.treasury_caps.len(), 1);
         assert_eq!(state.state().hashi().treasury.metadata_caps.len(), 1);
-        assert!(state.state().hashi().treasury.coins.is_empty());
 
         // Validate subscribing to checkpoints functions
         let ckpt = state.latest_checkpoint_height();
