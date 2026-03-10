@@ -1,0 +1,17 @@
+{
+  "name": "hashi-frontend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "codegen": "sui-ts-codegen generate"
+  },
+  "packageManager": "pnpm@10.29.2",
+  "dependencies": {
+    "@mysten/sui": "^2.6.0"
+  },
+  "devDependencies": {
+    "@mysten/codegen": "^0.8.2",
+    "typescript": "^5.9.3"
+  }
+}

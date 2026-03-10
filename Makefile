@@ -73,3 +73,7 @@ clean-all: clean ## Clean all generated files, including those ignored by Git. F
 help: ## Show this help
 	@echo "Available targets:"
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+.PHONY: codegen
+codegen: ## Generate TypeScript code from Move contracts
+	pnpm --dir frontend codegen
