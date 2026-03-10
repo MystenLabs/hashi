@@ -41,7 +41,11 @@ mod tests {
 
     async fn setup_test_networks() -> Result<TestNetworks> {
         info!("Setting up test networks...");
-        let networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_full_voting_power()
+            .build()
+            .await?;
 
         info!("Test networks initialized");
         info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
@@ -660,6 +664,7 @@ mod tests {
         // Use batch_size_per_weight=1 for small batches (~3 presigs each).
         let networks = TestNetworksBuilder::new()
             .with_nodes(4)
+            .with_full_voting_power()
             .with_batch_size_per_weight(1)
             .build()
             .await?;
