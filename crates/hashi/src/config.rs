@@ -135,6 +135,13 @@ pub struct Config {
     /// When not set, AML screening is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screener_endpoint: Option<String>,
+
+    /// Maximum gRPC decoding message size in bytes.
+    ///
+    /// Defaults to 16 MiB if not specified. Tonic's built-in default is 4 MiB,
+    /// which is too small for large MPC round messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grpc_max_decoding_message_size: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -305,6 +312,11 @@ impl Config {
 
     pub fn screener_endpoint(&self) -> Option<&str> {
         self.screener_endpoint.as_deref()
+    }
+
+    pub fn grpc_max_decoding_message_size(&self) -> usize {
+        self.grpc_max_decoding_message_size
+            .unwrap_or(16 * 1024 * 1024)
     }
 
     // Creates a new config suitable for testing. In particular this config will:

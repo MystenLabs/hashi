@@ -47,6 +47,7 @@ pub struct CommitteeSet {
     committees: BTreeMap<u64, Committee>,
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
+    grpc_max_decoding_message_size: Option<usize>,
     clients: BTreeMap<Address, Client>,
 }
 
@@ -62,6 +63,7 @@ impl CommitteeSet {
             committees_id,
             committees: BTreeMap::new(),
             tls_private_key: None,
+            grpc_max_decoding_message_size: None,
             clients: BTreeMap::new(),
         }
     }
@@ -119,6 +121,12 @@ impl CommitteeSet {
         self
     }
 
+    pub fn set_grpc_max_decoding_message_size(&mut self, limit: usize) -> &mut Self {
+        self.grpc_max_decoding_message_size = Some(limit);
+        self.update_all_clients();
+        self
+    }
+
     pub fn set_members(&mut self, members: BTreeMap<Address, MemberInfo>) -> &mut Self {
         self.tls_public_key_to_address = members
             .values()
@@ -151,9 +159,12 @@ impl CommitteeSet {
                 } else {
                     crate::tls::make_client_config(tls_public_key)
                 };
-                let client = Client::new(endpoint_url, tls_config)
+                let mut client = Client::new(endpoint_url, tls_config)
                     .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
                     .ok()?;
+                if let Some(limit) = self.grpc_max_decoding_message_size {
+                    client = client.max_decoding_message_size(limit);
+                }
                 Some((validator, client))
             })
             .collect();
@@ -187,9 +198,12 @@ impl CommitteeSet {
             } else {
                 crate::tls::make_client_config(tls_public_key)
             };
-            if let Ok(client) = Client::new(endpoint_url, tls_config)
+            if let Ok(mut client) = Client::new(endpoint_url, tls_config)
                 .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
             {
+                if let Some(limit) = self.grpc_max_decoding_message_size {
+                    client = client.max_decoding_message_size(limit);
+                }
                 self.clients.insert(validator, client);
             }
         }

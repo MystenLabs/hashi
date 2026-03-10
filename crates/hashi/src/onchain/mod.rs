@@ -79,6 +79,10 @@ struct Inner {
     /// The checkpoint information that this state is recent to
     checkpoint: watch::Sender<CheckpointInfo>,
     state: RwLock<State>,
+    #[allow(unused)]
+    tls_private_key: Option<ed25519_dalek::SigningKey>,
+    #[allow(unused)]
+    grpc_max_decoding_message_size: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -99,12 +103,22 @@ impl OnchainState {
         sui_rpc_url: &str,
         ids: HashiIds,
         tls_private_key: Option<ed25519_dalek::SigningKey>,
+        grpc_max_decoding_message_size: Option<usize>,
     ) -> Result<(Self, Service)> {
         let client = Client::new(sui_rpc_url)?;
 
         let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
-        if let Some(tls_private_key) = tls_private_key {
-            state.hashi.committees.set_tls_private_key(tls_private_key);
+        if let Some(tls_private_key) = &tls_private_key {
+            state
+                .hashi
+                .committees
+                .set_tls_private_key(tls_private_key.clone());
+        }
+        if let Some(limit) = grpc_max_decoding_message_size {
+            state
+                .hashi
+                .committees
+                .set_grpc_max_decoding_message_size(limit);
         }
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -115,6 +129,8 @@ impl OnchainState {
             sender,
             checkpoint,
             state: RwLock::new(state),
+            tls_private_key,
+            grpc_max_decoding_message_size,
         }
         .pipe(Arc::new)
         .pipe(Self);
