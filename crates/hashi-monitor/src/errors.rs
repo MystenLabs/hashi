@@ -1,5 +1,5 @@
-use crate::domain::MonitorWithdrawalEvent;
-use crate::domain::WithdrawalEventType;
+use crate::domain::MonitorEvent;
+use crate::domain::MonitorEventType;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use std::fmt;
 
@@ -8,12 +8,12 @@ use std::fmt;
 pub enum MonitorError {
     InvalidEventAdded(String),
     EventOccurredAfterDeadline {
-        event: MonitorWithdrawalEvent,
+        event: MonitorEvent,
         deadline: UnixSeconds,
         occurred_at: UnixSeconds, // same as event.timestamp
     },
     ExpectedEventMissing {
-        event_type: WithdrawalEventType,
+        event_type: MonitorEventType,
         deadline: UnixSeconds,
         cursor: UnixSeconds,
     },

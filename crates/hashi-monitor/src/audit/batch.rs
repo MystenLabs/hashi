@@ -3,7 +3,7 @@ use crate::audit::AuditorCore;
 use crate::audit::log_findings;
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
@@ -49,8 +49,8 @@ impl BatchAuditWindow {
 }
 
 impl AuditWindow for BatchAuditWindow {
-    fn in_window(&self, e: &MonitorWithdrawalEvent) -> bool {
-        e.timestamp_secs >= self.user_start && e.timestamp_secs <= self.user_end
+    fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
+        timestamp_secs >= self.user_start && timestamp_secs <= self.user_end
     }
 }
 
@@ -99,7 +99,7 @@ impl BatchAuditor {
         })
     }
 
-    pub fn ingest_batch(&mut self, events: Vec<MonitorWithdrawalEvent>) {
+    pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
         let errors = self.inner.ingest_batch(events);
         log_findings("batch", "ingest", &errors);
         if !errors.is_empty() {
@@ -185,26 +185,17 @@ impl BatchAuditor {
             self.violation_found = true;
         }
 
-        // Identify the earliest incomplete guardian-anchored state machine (to signal when to start next)
-        let mut verified_up_to = self.inner.get_guardian_cursor();
-        for sm in self.inner.pending.values() {
-            if !sm.is_in_audit_window(&self.audit_window) || sm.is_valid() {
-                continue;
-            }
+        let progress = self.inner.progress_watermarks(&self.audit_window);
 
-            // Guardian timeline is authoritative for deciding next batch boundary.
-            if let Some(e2) = sm.get(WithdrawalEventType::E2GuardianApproved) {
-                verified_up_to = verified_up_to.min(e2.timestamp_secs);
-            } else {
-                tracing::warn!(
-                    wid = sm.wid(),
-                    "in-window withdrawal missing guardian anchor; skipping in verified_up_to computation"
-                );
-            }
-        }
+        tracing::info!(
+            verified_up_to_withdrawals = progress.verified_up_to_withdrawals,
+            verified_up_to_deposits = progress.verified_up_to_deposits,
+            next_start = progress.restart_start,
+            "batch progress watermarks"
+        );
 
         if !self.violation_found {
-            tracing::info!("audit passed. run next audit at {verified_up_to}");
+            tracing::info!("audit passed. run next audit at {}", progress.restart_start);
         } else {
             tracing::warn!("audit produced findings: see logs");
         }

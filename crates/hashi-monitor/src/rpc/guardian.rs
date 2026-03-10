@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
@@ -191,10 +192,10 @@ impl GuardianWithdrawalsPoller {
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
             .filter_map(|e| match e {
-                VerifiedWithdrawal::Success(event) => Some(event),
+                VerifiedWithdrawal::Success(event) => Some(MonitorEvent::Withdrawal(event)),
                 VerifiedWithdrawal::Failure => None,
             })
-            .collect::<Vec<MonitorWithdrawalEvent>>();
+            .collect::<Vec<MonitorEvent>>();
 
         self.0.advance_cursor();
         Ok(PollOutcome::CursorAdvanced(withdrawal_events))

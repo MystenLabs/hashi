@@ -5,13 +5,12 @@ use crate::audit::AuditorCore;
 use crate::audit::log_findings;
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
-// TODO: Move to config
 // TODO: Consider switching to a streaming API
 /// The frequency at which we poll sui, guardian and btc RPC
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -34,8 +33,8 @@ pub struct ContinuousAuditor {
 }
 
 impl AuditWindow for ContinuousAuditWindow {
-    fn in_window(&self, e: &MonitorWithdrawalEvent) -> bool {
-        e.timestamp_secs >= self.user_start
+    fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
+        timestamp_secs >= self.user_start
     }
 }
 
@@ -74,7 +73,7 @@ impl ContinuousAuditor {
         })
     }
 
-    pub fn ingest_batch(&mut self, events: Vec<MonitorWithdrawalEvent>) {
+    pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
         let errors = self.inner.ingest_batch(events);
         log_findings("continuous", "ingest", &errors);
     }
@@ -107,6 +106,16 @@ impl ContinuousAuditor {
 
         // Garbage collect
         self.inner.garbage_collect(&self.window);
+
+        let progress = self.inner.progress_watermarks(&self.window);
+        tracing::info!(
+            guardian_cursor = self.inner.get_guardian_cursor(),
+            sui_cursor = self.inner.get_sui_cursor(),
+            verified_up_to_withdrawals = progress.verified_up_to_withdrawals,
+            verified_up_to_deposits = progress.verified_up_to_deposits,
+            restart_start = progress.restart_start,
+            "continuous progress checkpoint"
+        );
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {

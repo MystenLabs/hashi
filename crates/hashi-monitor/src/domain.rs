@@ -8,7 +8,7 @@
 //! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 //!
-//! TODO: Track IOP-203 which plans to add a check in Sui: match the withdrawal destination & amount that a user inputs with that in E_hashi.
+//! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
 use std::time::SystemTime;
@@ -24,6 +24,18 @@ pub fn now_unix_seconds() -> UnixSeconds {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MonitorEvent {
+    Withdrawal(MonitorWithdrawalEvent),
+    Deposit(MonitorDepositEvent),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
+pub enum MonitorEventType {
+    Withdrawal(WithdrawalEventType),
+    Deposit(DepositEventType),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,14 +55,29 @@ pub struct MonitorWithdrawalEvent {
 
 /// Event source or type.
 /// Note: Make sure WithdrawalEventType::NON_TERMINAL_EVENTS and TERMINAL_EVENT are up-to-date.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
 pub enum WithdrawalEventType {
-    /// E_hashi
+    /// E_hashi (WithdrawalPickedForProcessingEvent on sui)
     E1HashiApproved,
-    /// E_guardian
+    /// E_guardian (NormalWithdrawalSuccess on s3)
     E2GuardianApproved,
     /// E_btc
     E3BtcConfirmed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonitorDepositEvent {
+    pub event_type: DepositEventType,
+    pub timestamp_secs: UnixSeconds,
+    pub btc_txid: Txid,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
+pub enum DepositEventType {
+    /// deposit confirmed event on btc
+    E1BtcConfirmed,
+    /// DepositConfirmedEvent on Sui
+    E2HashiDeposited,
 }
 
 impl WithdrawalEventType {
@@ -104,6 +131,6 @@ impl Cursors {
 
 /// Outcome of a Guardian or Sui poll
 pub enum PollOutcome {
-    CursorAdvanced(Vec<MonitorWithdrawalEvent>),
+    CursorAdvanced(Vec<MonitorEvent>),
     CursorUnmoved,
 }

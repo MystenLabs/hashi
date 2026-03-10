@@ -3,6 +3,10 @@
 use crate::audit::AuditWindow;
 use crate::config::Config;
 use crate::domain::Cursors;
+use crate::domain::DepositEventType;
+use crate::domain::MonitorDepositEvent;
+use crate::domain::MonitorEvent;
+use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
@@ -28,7 +32,7 @@ use hashi_types::guardian::time_utils::UnixSeconds;
 ///     - Invalid: |violations()| > 0,
 ///     - Pending: neither valid nor invalid.
 pub struct WithdrawalStateMachine {
-    /// the set of events we have seen until now related to this withdrawal
+    /// the set of non-zero events we have seen until now related to this withdrawal.
     seen_events: Vec<MonitorWithdrawalEvent>,
     /// an entry (e, t) in expected_events signals that we are expecting to hear e by time t
     expected_events: Vec<(WithdrawalEventType, UnixSeconds)>,
@@ -47,6 +51,7 @@ pub enum BtcFetchOutcome {
 }
 
 impl WithdrawalStateMachine {
+    /// Note: Initialization ensures that the state machine has at least one event.
     pub fn new(event: MonitorWithdrawalEvent, cfg: &Config) -> Self {
         let mut sm = Self {
             seen_events: Vec::new(),
@@ -79,10 +84,6 @@ impl WithdrawalStateMachine {
             .any(|(event, _)| *event == event_type)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.seen_events.is_empty()
-    }
-
     /// Is the withdrawal valid? Put differently, has it passed all the checks?
     ///
     /// Note: Callers must ensure is_in_audit_window() is true before calling this function.
@@ -90,17 +91,15 @@ impl WithdrawalStateMachine {
     /// This means that (Out, Pending/Invalid) withdrawals may never get garbage collected.
     /// But such cases are likely few as they only get created for a short lookback or lookahead period.
     pub fn is_valid(&self) -> bool {
-        !self.is_empty() && self.expected_events.is_empty()
+        self.expected_events.is_empty()
     }
 
     // TODO: If we fully move to strict guardian-led audits, this can be relaxed to only include
     // withdrawals with guardian E2 in the user window.
     pub fn is_in_audit_window(&self, window: &impl AuditWindow) -> bool {
-        self.seen_events.iter().any(|e| window.in_window(e))
-    }
-
-    pub fn earliest_event_time(&self) -> Option<UnixSeconds> {
-        self.seen_events.iter().map(|e| e.timestamp_secs).min()
+        self.seen_events
+            .iter()
+            .any(|e| window.in_window(e.timestamp_secs))
     }
 
     /// `add_event` adds an event e and checks the following. Let e's neighbors be [e.predecessor(), e.successor()].
@@ -139,7 +138,7 @@ impl WithdrawalStateMachine {
         for (src, deadline) in self.expected_events.iter() {
             if *src == new_event.event_type && *deadline < new_event.timestamp_secs {
                 return Err(EventOccurredAfterDeadline {
-                    event: new_event.clone(),
+                    event: MonitorEvent::Withdrawal(new_event.clone()),
                     deadline: *deadline,
                     occurred_at: new_event.timestamp_secs,
                 });
@@ -230,13 +229,123 @@ impl WithdrawalStateMachine {
             };
             if *deadline <= cursor {
                 out.push(ExpectedEventMissing {
-                    event_type: *event_type,
+                    event_type: MonitorEventType::Withdrawal(*event_type),
                     deadline: *deadline,
                     cursor,
                 });
             }
         }
         out
+    }
+}
+
+/// Deposit State Machine. Unlike withdrawal state machine, here we only listen for a sui event,
+/// which in turn triggers a lookup for a specific btc event. So we simplify the struct & its impl's.
+pub struct DepositStateMachine {
+    /// The hashi deposit event
+    hashi_deposit_event: MonitorDepositEvent,
+    /// None initially and Some post BTC event find
+    btc_event: Option<MonitorDepositEvent>,
+    btc_event_expected_at: UnixSeconds,
+    btc_checked_at: Option<UnixSeconds>,
+}
+
+impl DepositStateMachine {
+    pub fn new(event: MonitorDepositEvent, cfg: &Config) -> Self {
+        if event.event_type != DepositEventType::E2HashiDeposited {
+            panic!("unexpected event type");
+        }
+        // btc confirmation is a predecessor event => we set the deadline to now (+skew).
+        let t_btc_expected = event.timestamp_secs + cfg.clock_skew;
+        Self {
+            hashi_deposit_event: event,
+            btc_event: None,
+            btc_event_expected_at: t_btc_expected,
+            btc_checked_at: None,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.btc_event.is_some()
+    }
+
+    pub fn btc_txid(&self) -> Txid {
+        self.hashi_deposit_event.btc_txid
+    }
+
+    pub fn hashi_deposit_event(&self) -> &MonitorDepositEvent {
+        &self.hashi_deposit_event
+    }
+
+    pub fn expects_btc_event(&self) -> bool {
+        self.btc_event.is_none()
+    }
+
+    pub fn try_fetch_btc_tx(
+        &mut self,
+        btc_rpc_client: &BtcRpcClient,
+    ) -> anyhow::Result<BtcFetchOutcome> {
+        if !self.expects_btc_event() {
+            return Ok(BtcFetchOutcome::NotExpected);
+        }
+
+        let deadline = self.btc_event_expected_at;
+        let btc_txid = self.hashi_deposit_event.btc_txid;
+        let cur_time = now_unix_seconds();
+
+        match btc_rpc_client.lookup_confirmation(btc_txid) {
+            Ok(Some(block_time)) => {
+                self.btc_checked_at = Some(cur_time);
+                let e_btc = MonitorDepositEvent {
+                    event_type: DepositEventType::E1BtcConfirmed,
+                    btc_txid,
+                    timestamp_secs: block_time,
+                };
+
+                let mut response = None;
+                if deadline < block_time {
+                    response = Some(EventOccurredAfterDeadline {
+                        event: MonitorEvent::Deposit(e_btc.clone()),
+                        deadline,
+                        occurred_at: block_time,
+                    });
+                }
+                self.btc_event = Some(e_btc);
+                Ok(BtcFetchOutcome::Confirmed(response))
+            }
+            Ok(None) => {
+                self.btc_checked_at = Some(cur_time);
+                Ok(BtcFetchOutcome::Unconfirmed)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn violations(&self) -> Vec<MonitorError> {
+        if self.btc_event.is_some() {
+            // btc event found => no violations!
+            return Vec::new();
+        };
+
+        // btc event not yet found
+        let Some(cursor) = self.btc_checked_at else {
+            tracing::warn!(
+                txid = %self.hashi_deposit_event.btc_txid,
+                "callers should avoid this branch by calling try_fetch_btc_tx before violations"
+            );
+            return Vec::new();
+        };
+
+        let deadline = self.btc_event_expected_at;
+        if deadline > cursor {
+            return Vec::new();
+        }
+
+        vec![ExpectedEventMissing {
+            event_type: MonitorEventType::Deposit(DepositEventType::E1BtcConfirmed),
+            deadline,
+            cursor,
+        }]
     }
 }
 
@@ -256,8 +365,8 @@ mod tests {
     }
 
     impl AuditWindow for TestWindow {
-        fn in_window(&self, e: &MonitorWithdrawalEvent) -> bool {
-            e.timestamp_secs >= self.start && e.timestamp_secs <= self.end
+        fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
+            timestamp_secs >= self.start && timestamp_secs <= self.end
         }
     }
 
@@ -293,6 +402,14 @@ mod tests {
         MonitorWithdrawalEvent {
             event_type: source,
             wid,
+            timestamp_secs: timestamp,
+            btc_txid: txid(fill),
+        }
+    }
+
+    fn deposit_event(timestamp: UnixSeconds, fill: u8) -> MonitorDepositEvent {
+        MonitorDepositEvent {
+            event_type: DepositEventType::E2HashiDeposited,
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
         }
@@ -370,7 +487,7 @@ mod tests {
         assert_eq!(
             err,
             EventOccurredAfterDeadline {
-                event,
+                event: MonitorEvent::Withdrawal(event),
                 deadline: 200,
                 occurred_at: 201,
             }
@@ -399,7 +516,7 @@ mod tests {
         assert_eq!(
             violations[0],
             ExpectedEventMissing {
-                event_type: WithdrawalEventType::E2GuardianApproved,
+                event_type: MonitorEventType::Withdrawal(WithdrawalEventType::E2GuardianApproved),
                 deadline: 200,
                 cursor: 200,
             }
@@ -446,5 +563,28 @@ mod tests {
         };
 
         assert!(sm.is_in_audit_window(&window));
+    }
+
+    #[test]
+    fn deposit_violations_wait_for_btc_check() {
+        let cfg = cfg();
+        let mut sm = DepositStateMachine::new(deposit_event(100, 8), &cfg);
+
+        assert!(sm.violations().is_empty());
+
+        sm.btc_checked_at = Some(109);
+        assert!(sm.violations().is_empty());
+
+        sm.btc_checked_at = Some(110);
+        let violations = sm.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0],
+            ExpectedEventMissing {
+                event_type: MonitorEventType::Deposit(DepositEventType::E1BtcConfirmed),
+                deadline: 110,
+                cursor: 110,
+            }
+        );
     }
 }
