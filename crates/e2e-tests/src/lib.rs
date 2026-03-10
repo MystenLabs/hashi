@@ -126,6 +126,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_full_voting_power(mut self) -> Self {
+        self.hashi_builder = self.hashi_builder.with_full_voting_power();
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")
@@ -615,6 +620,7 @@ mod tests {
 
         let test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
+            .with_full_voting_power()
             .build()
             .await?;
         let nodes = test_networks.hashi_network().nodes();
