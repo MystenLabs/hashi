@@ -4,9 +4,13 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
 
 use axum::http;
+use base64ct::Encoding;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
+use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto::traits::ToFromBytes;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
 use sui_sdk_types::TypeTag;
@@ -14,6 +18,7 @@ use sui_sdk_types::TypeTag;
 use crate::grpc::Client;
 use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
+use hashi_types::utils::Base64;
 
 #[derive(Debug)]
 pub struct Hashi {
@@ -28,7 +33,6 @@ pub struct Hashi {
     pub tob_id: Address,
 }
 
-#[derive(Debug)]
 pub struct CommitteeSet {
     /// Id of the `Bag` containing the validator info structs
     members_id: Address,
@@ -48,6 +52,45 @@ pub struct CommitteeSet {
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
     clients: BTreeMap<Address, Client>,
+}
+
+impl fmt::Debug for CommitteeSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Render tls_public_key_to_address with base64 keys
+        let tls_key_map: BTreeMap<String, &Address> = self
+            .tls_public_key_to_address
+            .iter()
+            .map(|(k, v)| (base64ct::Base64::encode_string(k), v))
+            .collect();
+
+        // Render tls_private_key as redacted with public key
+        let tls_private_key_display = self.tls_private_key.as_ref().map(|key| {
+            format!(
+                "<redacted, public_key: {}>",
+                base64ct::Base64::encode_string(key.verifying_key().as_bytes())
+            )
+        });
+
+        f.debug_struct("CommitteeSet")
+            .field("members_id", &self.members_id)
+            .field("members", &self.members)
+            .field("tls_public_key_to_address", &tls_key_map)
+            .field("epoch", &self.epoch)
+            .field("pending_epoch_change", &self.pending_epoch_change)
+            .field(
+                "mpc_public_key",
+                &Base64("MpcPublicKey", &self.mpc_public_key),
+            )
+            .field("committees_id", &self.committees_id)
+            .field("committees", &self.committees)
+            .field("tls_private_key", &tls_private_key_display)
+            .field(
+                "grpc_max_decoding_message_size",
+                &self.grpc_max_decoding_message_size,
+            )
+            .field("clients", &format_args!("<{} clients>", self.clients.len()))
+            .finish()
+    }
 }
 
 impl CommitteeSet {
@@ -249,7 +292,7 @@ impl CommitteeSet {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MemberInfo {
     /// Sui Validator Address of this node
     pub validator_address: Address,
@@ -285,6 +328,38 @@ pub struct MemberInfo {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Option<EncryptionPublicKey>,
+}
+
+impl fmt::Debug for MemberInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let encryption_key_bytes = self
+            .next_epoch_encryption_public_key
+            .as_ref()
+            .map(|k| k.as_element().to_byte_array());
+
+        f.debug_struct("MemberInfo")
+            .field("validator_address", &self.validator_address)
+            .field("operator_address", &self.operator_address)
+            .field(
+                "next_epoch_public_key",
+                &Base64("BLS12381PublicKey", self.next_epoch_public_key.as_bytes()),
+            )
+            .field("endpoint_url", &self.endpoint_url)
+            .field(
+                "tls_public_key",
+                &self
+                    .tls_public_key
+                    .as_ref()
+                    .map(|k| Base64("Ed25519PublicKey", k.as_bytes())),
+            )
+            .field(
+                "next_epoch_encryption_public_key",
+                &encryption_key_bytes
+                    .as_ref()
+                    .map(|b| Base64("EncryptionPublicKey", b.as_slice())),
+            )
+            .finish()
+    }
 }
 
 impl MemberInfo {

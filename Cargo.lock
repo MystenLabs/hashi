@@ -2728,6 +2728,7 @@ name = "hashi-types"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64ct",
  "bcs",
  "bitcoin",
  "blake2",

@@ -63,7 +63,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
         }
         .into_inner();
 
-        // Rescrape the chain state in the event our subscription broken
+        // Rescrape the chain state in the event our subscription broke
         if rescrape_state {
             match super::scrape_hashi(client.clone(), state.hashi_id()).await {
                 Ok((checkpoint_info, hashi)) => {

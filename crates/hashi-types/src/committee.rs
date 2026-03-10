@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+use std::fmt;
+
 use fastcrypto::bls12381::BLS_PRIVATE_KEY_LENGTH;
 use fastcrypto::bls12381::min_pk;
 pub use fastcrypto::bls12381::min_pk::BLS12381AggregateSignature;
 pub use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::AggregateAuthenticator;
 use fastcrypto::traits::AllowedRng;
 use fastcrypto::traits::KeyPair;
@@ -11,7 +15,6 @@ use fastcrypto::traits::ToFromBytes;
 use fastcrypto::traits::VerifyingKey;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -82,13 +85,35 @@ pub struct Committee {
     total_weight: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct CommitteeMember {
     address: Address,
     public_key: BLS12381PublicKey,
     encryption_public_key: EncryptionPublicKey,
     weight: u64,
 }
+
+impl fmt::Debug for CommitteeMember {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommitteeMember")
+            .field("address", &self.address)
+            .field(
+                "public_key",
+                &Base64("BLS12381PublicKey", self.public_key.as_bytes()),
+            )
+            .field(
+                "encryption_public_key",
+                &Base64(
+                    "EncryptionPublicKey",
+                    &self.encryption_public_key.as_element().to_byte_array(),
+                ),
+            )
+            .field("weight", &self.weight)
+            .finish()
+    }
+}
+
+use crate::utils::Base64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberSignature {
