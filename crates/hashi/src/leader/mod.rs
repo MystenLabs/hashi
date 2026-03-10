@@ -383,16 +383,7 @@ impl LeaderService {
             {
                 Ok(sig) => {
                     self.withdrawal_approval_retry_tracker.clear(&request.id);
-                    match parse_member_signature(sig) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!(
-                                "Failed to parse local approval signature for {:?}: {e}",
-                                request.id
-                            );
-                            continue;
-                        }
-                    }
+                    parse_member_signature(sig).unwrap()
                 }
                 Err(e) => {
                     self.withdrawal_approval_retry_tracker.record_failure(
@@ -428,6 +419,11 @@ impl LeaderService {
             let weight = aggregator.weight();
             let required_weight = certificate_threshold(committee.total_weight());
             if weight < required_weight {
+                self.withdrawal_approval_retry_tracker.record_failure(
+                    WithdrawalApprovalErrorKind::FailedQuorum,
+                    request.id,
+                    checkpoint_timestamp_ms,
+                );
                 error!(
                     "Insufficient approval signatures for {:?}: weight {weight} < {required_weight}",
                     request.id
@@ -536,7 +532,7 @@ impl LeaderService {
     ) {
         info!("Processing approved withdrawal request: {:?}", request.id);
 
-        // Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
+        // Build the withdrawal tx commitment
         let approval = match self.inner.build_withdrawal_tx_commitment(request).await {
             Ok(approval) => {
                 self.withdrawal_commitment_retry_tracker.clear(&request.id);
@@ -552,13 +548,12 @@ impl LeaderService {
             }
         };
 
-        // 3. Fan out to committee for BLS signatures over the construction message
+        // Fan out to committee for BLS signatures over the commitment message
         let members = self
             .inner
             .onchain_state()
             .current_committee_members()
             .expect("No current committee members");
-
         let proto_request = approval.to_proto();
         let mut signatures: Vec<MemberSignature> = Vec::new();
         for member in &members {
@@ -587,6 +582,11 @@ impl LeaderService {
         let weight = signature_aggregator.weight();
         let required_weight = certificate_threshold(committee.total_weight());
         if weight < required_weight {
+            self.withdrawal_commitment_retry_tracker.record_failure(
+                WithdrawalCommitmentErrorKind::FailedQuorum,
+                request.id,
+                checkpoint_timestamp_ms,
+            );
             error!(
                 "Insufficient withdrawal approval signatures for request {:?}: weight {weight} < {required_weight}",
                 request.id

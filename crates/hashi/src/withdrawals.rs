@@ -771,6 +771,7 @@ impl Hashi {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalApprovalErrorKind {
     AmlServiceError,
+    FailedQuorum,
     NeverRetry,
 }
 
@@ -785,7 +786,7 @@ impl RetryPolicy for WithdrawalApprovalErrorKind {
 
     fn max_retries(self) -> u32 {
         match self {
-            Self::AmlServiceError => u32::MAX,
+            Self::AmlServiceError | Self::FailedQuorum => u32::MAX,
             Self::NeverRetry => 0,
         }
     }
@@ -812,6 +813,7 @@ impl WithdrawalApprovalError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalCommitmentErrorKind {
     BtcTxBuildFailed,
+    FailedQuorum,
     FeeEstimateFailed,
     UtxoSelectionFailed,
 }
