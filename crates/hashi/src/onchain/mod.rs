@@ -694,6 +694,26 @@ async fn scrape_treasury(
     })
 }
 
+pub(super) async fn fetch_treasury_cap(
+    client: &mut Client,
+    treasury_cap_id: Address,
+) -> Result<types::TreasuryCap> {
+    let response =
+        client
+            .ledger_client()
+            .get_object(GetObjectRequest::new(&treasury_cap_id).with_read_mask(
+                FieldMask::from_paths([Object::path_builder().contents().finish()]),
+            ))
+            .await?;
+
+    let object = response.into_inner();
+    let type_tag = object.object().contents().name().parse()?;
+    let contents = object.object().contents().value();
+
+    types::TreasuryCap::try_from_contents(&type_tag, contents)
+        .ok_or_else(|| anyhow!("failed to parse TreasuryCap from object {treasury_cap_id}"))
+}
+
 async fn scrape_all_member_info(
     client: Client,
     member_info_id: Address,
