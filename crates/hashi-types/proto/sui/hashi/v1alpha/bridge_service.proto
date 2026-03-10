@@ -12,7 +12,7 @@ service BridgeService {
   // Sign a deposit confirmation, confirming that bitcoin has been deposited into hashi
   rpc SignDepositConfirmation(SignDepositConfirmationRequest) returns (SignDepositConfirmationResponse);
   // Step 1: Sign approval for a batch of unapproved withdrawal requests.
-  rpc SignRequestApproval(SignRequestApprovalRequest) returns (SignRequestApprovalResponse);
+  rpc SignWithdrawalRequestApproval(SignWithdrawalRequestApprovalRequest) returns (SignWithdrawalRequestApprovalResponse);
   // Step 2: Sign approval for a proposed withdrawal transaction construction,
   // confirming that the validator agrees the bitcoin transaction is valid.
   rpc SignWithdrawalTxConstruction(SignWithdrawalTxConstructionRequest) returns (SignWithdrawalTxConstructionResponse);
@@ -82,13 +82,13 @@ message SignDepositConfirmationResponse {
   MemberSignature member_signature = 1;
 }
 
-// Maps to crate::withdrawals::RequestApproval
-message SignRequestApprovalRequest {
+// Maps to crate::withdrawals::WithdrawalRequestApproval
+message SignWithdrawalRequestApprovalRequest {
   // Withdrawal request id to approve (32 bytes).
   bytes request_id = 1;
 }
 
-message SignRequestApprovalResponse {
+message SignWithdrawalRequestApprovalResponse {
   MemberSignature member_signature = 1;
 }
 

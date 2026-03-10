@@ -367,6 +367,13 @@ impl Config {
             _ => 0,
         }
     }
+
+    pub fn withdrawal_minimum(&self) -> u64 {
+        match self.config.get("withdrawal_minimum") {
+            Some(ConfigValue::U64(v)) => *v,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug)]
