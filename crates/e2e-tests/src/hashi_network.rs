@@ -273,10 +273,7 @@ impl HashiNetworkBuilder {
                 crate::bitcoin_node::RPC_PASSWORD.into(),
             ));
             config.bitcoin_trusted_peers = Some(vec![bitcoin.p2p_address()]);
-            // Bitcoin regtest chain id, from https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki
-            config.bitcoin_chain_id = Some(
-                "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206".to_string(),
-            );
+            config.bitcoin_chain_id = Some(hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string());
             config.sui_chain_id = service_info.chain_id.clone();
             config.screener_endpoint = Some(screener_endpoint.clone());
             config.db = Some(dir.join(validator_address.to_string()));

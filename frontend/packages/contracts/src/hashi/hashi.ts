@@ -34,57 +34,40 @@ export const Hashi = new MoveStruct({
     tob: bag.Bag,
   },
 });
-export interface RegisterBtcArguments {
-  self: RawTransactionArgument<string>;
-  coinRegistry: RawTransactionArgument<string>;
-}
-export interface RegisterBtcOptions {
-  package?: string;
-  arguments:
-    | RegisterBtcArguments
-    | [
-        self: RawTransactionArgument<string>,
-        coinRegistry: RawTransactionArgument<string>,
-      ];
-}
-export function registerBtc(options: RegisterBtcOptions) {
-  const packageAddress = options.package ?? "@local-pkg/hashi";
-  const argumentsTypes = [null, null] satisfies (string | null)[];
-  const parameterNames = ["self", "coinRegistry"];
-  return (tx: Transaction) =>
-    tx.moveCall({
-      package: packageAddress,
-      module: "hashi",
-      function: "register_btc",
-      arguments: normalizeMoveArguments(
-        options.arguments,
-        argumentsTypes,
-        parameterNames,
-      ),
-    });
-}
-export interface RegisterUpgradeCapArguments {
+export interface FinishPublishArguments {
   self: RawTransactionArgument<string>;
   upgradeCap: RawTransactionArgument<string>;
+  bitcoinChainId: RawTransactionArgument<string>;
+  coinRegistry: RawTransactionArgument<string>;
 }
-export interface RegisterUpgradeCapOptions {
+export interface FinishPublishOptions {
   package?: string;
   arguments:
-    | RegisterUpgradeCapArguments
+    | FinishPublishArguments
     | [
         self: RawTransactionArgument<string>,
         upgradeCap: RawTransactionArgument<string>,
+        bitcoinChainId: RawTransactionArgument<string>,
+        coinRegistry: RawTransactionArgument<string>,
       ];
 }
-export function registerUpgradeCap(options: RegisterUpgradeCapOptions) {
+export function finishPublish(options: FinishPublishOptions) {
   const packageAddress = options.package ?? "@local-pkg/hashi";
-  const argumentsTypes = [null, null] satisfies (string | null)[];
-  const parameterNames = ["self", "upgradeCap"];
+  const argumentsTypes = [null, null, "address", null] satisfies (
+    | string
+    | null
+  )[];
+  const parameterNames = [
+    "self",
+    "upgradeCap",
+    "bitcoinChainId",
+    "coinRegistry",
+  ];
   return (tx: Transaction) =>
     tx.moveCall({
       package: packageAddress,
       module: "hashi",
-      function: "register_upgrade_cap",
+      function: "finish_publish",
       arguments: normalizeMoveArguments(
         options.arguments,
         argumentsTypes,

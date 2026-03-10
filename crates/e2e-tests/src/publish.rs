@@ -18,5 +18,6 @@ pub async fn publish(
         environment: Some("testnet"),
     };
     let compiled = hashi::publish::build_package(&params)?;
-    hashi::publish::publish_and_init(client, private_key, compiled).await
+    let bitcoin_chain_id = hashi::constants::BITCOIN_REGTEST_CHAIN_ID;
+    hashi::publish::publish_and_init(client, private_key, compiled, bitcoin_chain_id).await
 }

@@ -22,6 +22,7 @@ const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 // Config Key's
 //
 
+const BITCOIN_CHAIN_ID_KEY: vector<u8> = b"bitcoin_chain_id";
 const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
 const WITHDRAWAL_FEE_SUI_KEY: vector<u8> = b"withdrawal_fee_sui";
 const WITHDRAWAL_FEE_BTC_KEY: vector<u8> = b"withdrawal_fee_btc";
@@ -56,6 +57,14 @@ fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
 #[allow(implicit_const_copy)]
 public(package) fun assert_version_enabled(self: &Config) {
     assert!(self.enabled_versions.contains(&PACKAGE_VERSION), EVersionDisabled);
+}
+
+public(package) fun bitcoin_chain_id(self: &Config): address {
+    self.get(BITCOIN_CHAIN_ID_KEY).as_address()
+}
+
+public(package) fun set_bitcoin_chain_id(self: &mut Config, bitcoin_chain_id: address) {
+    self.upsert(BITCOIN_CHAIN_ID_KEY, config_value::new_address(bitcoin_chain_id))
 }
 
 public(package) fun deposit_fee(self: &Config): u64 {

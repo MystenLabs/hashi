@@ -164,14 +164,9 @@ pub fn parse_btc_network(name: Option<&str>) -> anyhow::Result<Network> {
 pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
     let hash = BlockHash::from_str(chain_id).ok()?;
 
-    [
-        Network::Bitcoin,
-        Network::Testnet4,
-        Network::Signet,
-        Network::Regtest,
-    ]
-    .into_iter()
-    .find(|&net| genesis_block(net).block_hash() == hash)
+    [Network::Bitcoin, Network::Testnet4, Network::Regtest]
+        .into_iter()
+        .find(|&net| genesis_block(net).block_hash() == hash)
 }
 
 #[cfg(test)]
@@ -180,22 +175,19 @@ mod tests {
 
     #[test]
     fn test_mainnet_genesis_mapping() {
-        let mainnet_id = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
-        let network = network_from_chain_id(mainnet_id);
+        let network = network_from_chain_id(crate::constants::BITCOIN_MAINNET_CHAIN_ID);
         assert_eq!(network, Some(Network::Bitcoin));
     }
 
     #[test]
     fn test_testnet4_genesis_mapping() {
-        let testnet4_id = "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043";
-        let network = network_from_chain_id(testnet4_id);
+        let network = network_from_chain_id(crate::constants::BITCOIN_TESTNET4_CHAIN_ID);
         assert_eq!(network, Some(Network::Testnet4));
     }
 
     #[test]
     fn test_regtest_genesis_mapping() {
-        let mainnet_id = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
-        let network = network_from_chain_id(mainnet_id);
+        let network = network_from_chain_id(crate::constants::BITCOIN_REGTEST_CHAIN_ID);
         assert_eq!(network, Some(Network::Regtest));
     }
 }

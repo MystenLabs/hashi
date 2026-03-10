@@ -21,7 +21,10 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 
+use crate::btc_monitor::config::BlockHash;
+use crate::btc_monitor::config::network_from_chain_id;
 use crate::config::HashiIds;
+use bitcoin::hashes::Hash as _;
 
 /// Well-known Sui CoinRegistry shared object address (0xc).
 const COIN_REGISTRY_OBJECT_ID: Address = Address::from_static("0xc");
@@ -95,15 +98,25 @@ pub fn build_package(params: &BuildParams<'_>) -> Result<sui_sdk_types::Publish>
 /// Executes two transactions:
 ///
 /// 1. **Publish** – publishes the modules, transfers the `UpgradeCap` to the sender.
-/// 2. **Init** – calls `hashi::register_btc` and `hashi::register_upgrade_cap`.
+/// 2. **Init** – calls `hashi::finish_publish` to register BTC, the upgrade cap,
+///    and set the bitcoin chain ID.
 ///
 /// Returns the [`HashiIds`] (package ID + Hashi shared-object ID) on success.
 pub async fn publish_and_init(
     client: &mut Client,
     signer: &Ed25519PrivateKey,
     publish: sui_sdk_types::Publish,
+    bitcoin_chain_id: &str,
 ) -> Result<HashiIds> {
     let sender = signer.public_key().derive_address();
+
+    // Validate and convert bitcoin_chain_id to a Move-compatible address.
+    anyhow::ensure!(
+        network_from_chain_id(bitcoin_chain_id).is_some(),
+        "unrecognized bitcoin chain id: {bitcoin_chain_id}"
+    );
+    let block_hash = BlockHash::from_str(bitcoin_chain_id)?;
+    let bitcoin_chain_id_addr = Address::new(*block_hash.as_byte_array());
 
     // ── Transaction 1: Publish ──────────────────────────────────────────
     let mut builder = TransactionBuilder::new();
@@ -172,7 +185,7 @@ pub async fn publish_and_init(
         .object_id()
         .parse::<Address>()?;
 
-    // ── Transaction 2: Init (register BTC + upgrade cap) ────────────────
+    // ── Transaction 2: Init (finish_publish) ─────────────────────────────
     let mut builder = TransactionBuilder::new();
     builder.set_sender(sender);
 
@@ -181,28 +194,26 @@ pub async fn publish_and_init(
             .as_shared()
             .with_mutable(true),
     );
+    let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
+    let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let coin_registry_arg = builder.object(
         ObjectInput::new(COIN_REGISTRY_OBJECT_ID)
             .as_shared()
             .with_mutable(true),
     );
-    let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
 
     builder.move_call(
         Function::new(
             package_id,
             Identifier::from_static("hashi"),
-            Identifier::from_static("register_btc"),
+            Identifier::from_static("finish_publish"),
         ),
-        vec![hashi_arg, coin_registry_arg],
-    );
-    builder.move_call(
-        Function::new(
-            package_id,
-            Identifier::from_static("hashi"),
-            Identifier::from_static("register_upgrade_cap"),
-        ),
-        vec![hashi_arg, upgrade_cap_arg],
+        vec![
+            hashi_arg,
+            upgrade_cap_arg,
+            bitcoin_chain_id_arg,
+            coin_registry_arg,
+        ],
     );
 
     let transaction = builder.build(client).await?;
@@ -220,7 +231,7 @@ pub async fn publish_and_init(
 
     anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "init transaction failed (register_btc / register_upgrade_cap)"
+        "init transaction failed (finish_publish)"
     );
 
     Ok(HashiIds {

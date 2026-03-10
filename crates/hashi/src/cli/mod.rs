@@ -334,6 +334,10 @@ pub struct PublishOpts {
     #[clap(long)]
     pub sui_client_config: Option<std::path::PathBuf>,
 
+    /// Bitcoin chain ID (genesis block hash) to store on-chain
+    #[clap(long)]
+    pub bitcoin_chain_id: String,
+
     /// Enable verbose output
     #[clap(long, short)]
     pub verbose: bool,
@@ -612,7 +616,9 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
 
     // Publish + init
     print_info("Publishing and initializing ...");
-    let ids = crate::publish::publish_and_init(&mut client, &signer, compiled).await?;
+    let ids =
+        crate::publish::publish_and_init(&mut client, &signer, compiled, &opts.bitcoin_chain_id)
+            .await?;
     print_success(&format!("package_id:      {}", ids.package_id));
     print_success(&format!("hashi_object_id: {}", ids.hashi_object_id));
 

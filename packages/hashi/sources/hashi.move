@@ -54,22 +54,14 @@ public(package) fun assert_not_reconfiguring(self: &Hashi) {
     assert!(self.committee_set().has_committee(self.committee_set().epoch()));
 }
 
-entry fun register_btc(
-    self: &mut Hashi,
-    coin_registry: &mut sui::coin_registry::CoinRegistry,
-    ctx: &mut TxContext,
-) {
-    self.config.assert_version_enabled();
-
-    let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
-    self.treasury.register_treasury_cap(treasury_cap);
-    self.treasury.register_metadata_cap(metadata_cap);
-}
-
-entry fun register_upgrade_cap(
+// Function that needs to be called immediately after publishing to finalize
+// some input parameters, register BTC and the package's UpgradeCap.
+entry fun finish_publish(
     self: &mut Hashi,
     upgrade_cap: sui::package::UpgradeCap,
-    _ctx: &mut TxContext,
+    bitcoin_chain_id: address,
+    coin_registry: &mut sui::coin_registry::CoinRegistry,
+    ctx: &mut TxContext,
 ) {
     self.config.assert_version_enabled();
 
@@ -78,6 +70,11 @@ entry fun register_upgrade_cap(
     assert!(upgrade_cap.package() == this_package_id);
 
     self.config_mut().set_upgrade_cap(upgrade_cap);
+    self.config_mut().set_bitcoin_chain_id(bitcoin_chain_id);
+
+    let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
+    self.treasury.register_treasury_cap(treasury_cap);
+    self.treasury.register_metadata_cap(metadata_cap);
 }
 
 public(package) fun id(self: &Hashi): &UID {

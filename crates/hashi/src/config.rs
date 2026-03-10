@@ -245,7 +245,7 @@ impl Config {
     pub fn bitcoin_chain_id(&self) -> &str {
         self.bitcoin_chain_id
             .as_deref()
-            .unwrap_or("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
+            .unwrap_or(crate::constants::BITCOIN_MAINNET_CHAIN_ID)
     }
 
     pub fn bitcoin_network(&self) -> crate::btc_monitor::config::Network {
