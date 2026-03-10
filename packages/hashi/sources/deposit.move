@@ -15,7 +15,7 @@ public fun deposit(
 
     // Check that the fee is sufficient
     assert!(hashi.config().deposit_fee() == fee.value());
-    hashi.treasury_mut().deposit_fee(fee);
+    sui::coin::send_funds(fee, hashi.id().to_address());
 
     // Check that the UTXO isn't already active or previously spent (replay protection)
     assert!(!hashi.utxo_pool().is_spent_or_active(request.utxo().id()));

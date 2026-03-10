@@ -80,6 +80,10 @@ entry fun register_upgrade_cap(
     self.config_mut().set_upgrade_cap(upgrade_cap);
 }
 
+public(package) fun id(self: &Hashi): &UID {
+    &self.id
+}
+
 public(package) fun config(self: &Hashi): &Config {
     &self.config
 }
