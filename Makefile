@@ -8,7 +8,7 @@ check-fmt: ## Check code formatting
 	buf format --diff --exit-code
 
 .PHONY: fmt
-fmt: fmt-rust fmt-buf fmt-move ## Format all code (Rust, protobuf, and Move)
+fmt: fmt-rust fmt-buf fmt-move fmt-frontend ## Format all code (Rust, protobuf, Move, and TypeScript)
 
 .PHONY: fmt-rust
 fmt-rust: ## Format Rust code
@@ -24,6 +24,14 @@ fmt-move: ## Format Move code
 	prettier-move -w packages/*/sources/**/*.move
 	prettier-move -w packages/*/tests/*.move
 	prettier-move -w packages/*/tests/**/*.move
+
+.PHONY: fmt-frontend
+fmt-frontend: ## Format TypeScript code
+	pnpm --dir frontend fmt
+
+.PHONY: check-fmt-frontend
+check-fmt-frontend: ## Check TypeScript code formatting
+	pnpm --dir frontend check-fmt
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint

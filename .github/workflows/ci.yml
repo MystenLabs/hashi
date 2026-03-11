@@ -68,37 +68,7 @@ jobs:
           bitcoind --version
 
       - name: Install Sui Binary
-        run: |
-          # Get latest testnet release that has ubuntu binary available
-          echo "Detecting latest Sui testnet version with ubuntu binary..."
-          SUI_VERSION=$(curl -s https://api.github.com/repos/MystenLabs/sui/releases | \
-            jq -r '.[] | select(.tag_name | startswith("testnet-")) |
-                   select(.assets[].name | contains("ubuntu-x86_64")) |
-                   .tag_name' | head -n 1)
-
-          if [ -z "$SUI_VERSION" ]; then
-            echo "Failed to detect testnet version, falling back to testnet-v1.63.1"
-            SUI_VERSION="testnet-v1.63.1"
-          fi
-
-          echo "Installing Sui binary ${SUI_VERSION}..."
-
-          wget https://sui-releases.s3-accelerate.amazonaws.com/${SUI_VERSION}/sui || {
-            echo "Failed to download Sui ${SUI_VERSION}"
-            exit 1
-          }
-
-          # Move sui binary to PATH
-          echo "Installing Sui binary..."
-          sudo chmod +x sui
-          sudo mv sui /usr/local/bin/
-
-          # Verify installation
-          echo "Verifying Sui installation..."
-          sui --version
-
-          # Export SUI_BINARY for tests
-          echo "SUI_BINARY=/usr/local/bin/sui" >> $GITHUB_ENV
+        run: .github/scripts/install-sui.sh
 
       - name: Run tests
         run: |

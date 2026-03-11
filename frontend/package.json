@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "codegen": "sui-ts-codegen generate"
+    "codegen": "sui-ts-codegen generate && pnpm fmt",
+    "fmt": "prettier --write 'src/**/*.ts' '*.ts'",
+    "check-fmt": "prettier --check 'src/**/*.ts' '*.ts'"
   },
   "packageManager": "pnpm@10.29.2",
   "dependencies": {
@@ -12,6 +14,7 @@
   },
   "devDependencies": {
     "@mysten/codegen": "^0.8.2",
+    "prettier": "^3.8.1",
     "typescript": "^5.9.3"
   }
 }
