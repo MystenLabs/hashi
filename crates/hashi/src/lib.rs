@@ -253,6 +253,33 @@ impl Hashi {
         )?)
     }
 
+    /// Verify the Sui RPC endpoint is on the expected chain.
+    async fn verify_sui_chain_id(&self) -> anyhow::Result<()> {
+        use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+
+        let sui_rpc_url = self.config.sui_rpc.as_deref().unwrap();
+        let mut client = sui_rpc::Client::new(sui_rpc_url)?;
+
+        let service_info = client
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+
+        let rpc_chain_id = service_info.chain_id();
+
+        let expected = self.config.sui_chain_id();
+
+        anyhow::ensure!(
+            rpc_chain_id == expected,
+            "Sui chain ID mismatch: local config has {expected}, \
+             but RPC endpoint reports {rpc_chain_id}"
+        );
+
+        tracing::info!("Sui chain ID verified: {expected}");
+        Ok(())
+    }
+
     /// Verify the local config's `bitcoin_chain_id` matches the value stored on-chain.
     fn verify_bitcoin_chain_id(&self) -> anyhow::Result<()> {
         use bitcoin::hashes::Hash as _;
@@ -358,6 +385,9 @@ impl Hashi {
         self.screener_client
             .set(screener)
             .map_err(|_| anyhow!("Screener client already initialized"))?;
+
+        // Verify Sui RPC is on the expected chain before loading any state.
+        self.verify_sui_chain_id().await?;
 
         // Initialize
         let onchain_service = self.initialize_onchain_state().await?;
