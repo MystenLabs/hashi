@@ -30,12 +30,14 @@ use std::time::Duration;
 use sui_sdk_types::Address;
 
 use crate::Hashi;
+use crate::leader::RetryPolicy;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
+use thiserror::Error;
 
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -60,7 +62,7 @@ pub struct UtxoSelection {
 
 /// The data that validators BLS-sign over to approve a single withdrawal request.
 #[derive(Clone, Debug, serde_derive::Serialize)]
-pub struct RequestApproval {
+pub struct WithdrawalRequestApproval {
     pub request_id: Address,
 }
 
@@ -91,26 +93,30 @@ pub struct WithdrawalConfirmation {
 impl Hashi {
     // --- Step 1: Request approval (lightweight) ---
 
-    pub fn validate_and_sign_request_approval(
+    pub async fn validate_and_sign_withdrawal_request_approval(
         &self,
-        approval: &RequestApproval,
-    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        approval: &WithdrawalRequestApproval,
+    ) -> Result<hashi_types::proto::MemberSignature, WithdrawalApprovalError> {
         let request = self
             .onchain_state()
             .withdrawal_request(&approval.request_id)
             .ok_or_else(|| {
-                anyhow!(
+                WithdrawalApprovalError::NeverRetry(anyhow!(
                     "Withdrawal request {} not found in queue",
                     approval.request_id
-                )
+                ))
             })?;
-        anyhow::ensure!(
-            !request.approved,
-            "Withdrawal request {} is already approved",
-            approval.request_id
-        );
+        if request.approved {
+            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+                "Withdrawal request {} is already approved",
+                approval.request_id
+            )));
+        }
+
+        self.screen_withdrawal(&request).await?;
 
         self.sign_message_proto(&approval)
+            .map_err(WithdrawalApprovalError::NeverRetry)
     }
 
     // --- Step 2: Construction approval (with UTXO selection) ---
@@ -163,11 +169,6 @@ impl Hashi {
                 Ok(request)
             })
             .collect::<anyhow::Result<_>>()?;
-
-        // 1b. Screen each withdrawal request for AML/sanctions
-        for request in &requests {
-            self.screen_withdrawal(request).await?;
-        }
 
         // 2. Verify each selected UTXO exists and collect full UTXO data
         let selected_utxos: Vec<Utxo> = approval
@@ -659,20 +660,22 @@ impl Hashi {
     pub async fn build_withdrawal_tx_commitment(
         &self,
         request: &WithdrawalRequest,
-    ) -> anyhow::Result<WithdrawalTxCommitment> {
+    ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
         // Fetch current fee rate from the Bitcoin node
         let kyoto_fee_rate = self
             .btc_monitor()
             .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
-            .await?;
+            .await
+            .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
         // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
         let fee_rate = FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
 
         let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
         let output_amount = request.btc_amount - withdrawal_fee_btc;
 
-        let selection =
-            self.select_utxos_for_withdrawal(output_amount, &request.bitcoin_address, fee_rate)?;
+        let selection = self
+            .select_utxos_for_withdrawal(output_amount, &request.bitcoin_address, fee_rate)
+            .map_err(WithdrawalCommitmentError::UtxoSelectionFailed)?;
 
         let mut outputs = vec![OutputUtxo {
             amount: output_amount,
@@ -682,17 +685,22 @@ impl Hashi {
         // Add change output back to hashi root pubkey if selection produced change
         if let Some(change_amount) = selection.change {
             let hashi_pubkey = self.get_hashi_pubkey();
-            let change_address = self.get_deposit_address(&hashi_pubkey, None)?;
+            let change_address = self
+                .get_deposit_address(&hashi_pubkey, None)
+                .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
             outputs.push(OutputUtxo {
                 amount: change_amount,
-                bitcoin_address: witness_program_from_address(&change_address)?,
+                bitcoin_address: witness_program_from_address(&change_address)
+                    .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?,
             });
         }
 
         let request_ids = vec![request.id];
         let utxo_ids: Vec<UtxoId> = selection.selected_utxos.iter().map(|u| u.id).collect();
 
-        let tx = self.build_unsigned_withdrawal_tx(&selection.selected_utxos, &outputs)?;
+        let tx = self
+            .build_unsigned_withdrawal_tx(&selection.selected_utxos, &outputs)
+            .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
         let txid_bytes: [u8; 32] = tx.compute_txid().to_byte_array();
         let txid = Address::new(txid_bytes);
 
@@ -709,7 +717,7 @@ impl Hashi {
     pub(crate) async fn screen_withdrawal(
         &self,
         request: &WithdrawalRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WithdrawalApprovalError> {
         let Some(screener) = self.screener_client() else {
             tracing::debug!("AML checks skipped: no screener configured");
             return Ok(());
@@ -719,7 +727,9 @@ impl Hashi {
         let source_tx_hash = request.sui_tx_digest.to_string();
 
         // Destination: Bitcoin address (raw witness bytes -> bech32 string)
-        let destination_address = self.bitcoin_address_string_from_raw(&request.bitcoin_address)?;
+        let destination_address = self
+            .bitcoin_address_string_from_raw(&request.bitcoin_address)
+            .map_err(WithdrawalApprovalError::NeverRetry)?;
 
         let approved = screener
             .approve_withdrawal(
@@ -729,14 +739,14 @@ impl Hashi {
                 self.config.bitcoin_chain_id(),
             )
             .await
-            .map_err(|e| anyhow!("Screener service error: {e}"))?;
+            .map_err(|e| WithdrawalApprovalError::AmlServiceError(anyhow!(e)))?;
 
         if !approved {
-            anyhow::bail!(
+            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
                 "AML checks failed for withdrawal request {:?} to {}",
                 request.id,
                 destination_address,
-            );
+            )));
         }
 
         Ok(())
@@ -755,6 +765,92 @@ impl Hashi {
         let address = bitcoin::Address::from_script(&script, self.config.bitcoin_network())
             .map_err(|e| anyhow!("Failed to convert script to address: {e}"))?;
         Ok(address.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WithdrawalApprovalErrorKind {
+    AmlServiceError,
+    FailedQuorum,
+    NeverRetry,
+}
+
+impl RetryPolicy for WithdrawalApprovalErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        30 * 1000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        60 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        match self {
+            Self::AmlServiceError | Self::FailedQuorum => u32::MAX,
+            Self::NeverRetry => 0,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WithdrawalApprovalError {
+    #[error("Screener service error: {0}")]
+    AmlServiceError(#[source] anyhow::Error),
+
+    #[error("Never retry: {0}")]
+    NeverRetry(#[source] anyhow::Error),
+}
+
+impl WithdrawalApprovalError {
+    pub fn kind(&self) -> WithdrawalApprovalErrorKind {
+        match self {
+            Self::AmlServiceError(_) => WithdrawalApprovalErrorKind::AmlServiceError,
+            Self::NeverRetry(_) => WithdrawalApprovalErrorKind::NeverRetry,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WithdrawalCommitmentErrorKind {
+    BtcTxBuildFailed,
+    FailedQuorum,
+    FeeEstimateFailed,
+    UtxoSelectionFailed,
+}
+
+impl RetryPolicy for WithdrawalCommitmentErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        30 * 1000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        60 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        u32::MAX
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WithdrawalCommitmentError {
+    #[error("BTC tx build failed: {0}")]
+    BtcTxBuildFailed(#[source] anyhow::Error),
+
+    #[error("Fee estimate failed: {0}")]
+    FeeEstimateFailed(#[source] anyhow::Error),
+
+    #[error("UTXO selection failed: {0}")]
+    UtxoSelectionFailed(#[source] anyhow::Error),
+}
+
+impl WithdrawalCommitmentError {
+    pub fn kind(&self) -> WithdrawalCommitmentErrorKind {
+        match self {
+            Self::BtcTxBuildFailed(_) => WithdrawalCommitmentErrorKind::BtcTxBuildFailed,
+            Self::FeeEstimateFailed(_) => WithdrawalCommitmentErrorKind::FeeEstimateFailed,
+            Self::UtxoSelectionFailed(_) => WithdrawalCommitmentErrorKind::UtxoSelectionFailed,
+        }
     }
 }
 

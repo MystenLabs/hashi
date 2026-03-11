@@ -4,7 +4,8 @@ use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::Txid;
 use hashi_guardian_enclave::HEARTBEAT_INTERVAL;
-use hashi_guardian_enclave::MAX_HEARTBEAT_FAILURES;
+use hashi_guardian_enclave::HEARTBEAT_RETRY_INTERVAL;
+use hashi_guardian_enclave::MAX_HEARTBEAT_FAILURES_INTERVAL;
 use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
@@ -131,8 +132,8 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
-    let heartbeat_future =
-        HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES).run(HEARTBEAT_INTERVAL);
+    let heartbeat_future = HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES_INTERVAL)
+        .run(HEARTBEAT_INTERVAL, HEARTBEAT_RETRY_INTERVAL);
 
     tokio::select! {
         res = server_future => {

@@ -91,10 +91,14 @@ public fun request_withdrawal(
 
     // Check that the fee is sufficient
     assert!(hashi.config().withdrawal_fee_sui() == fee.value());
-    hashi.treasury_mut().deposit_fee(fee);
+    sui::coin::send_funds(fee, hashi.id().to_address());
 
     // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());
+
+    // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
+    let addr_len = bitcoin_address.length();
+    assert!(addr_len == 20 || addr_len == 32);
 
     let request = withdrawal_request(btc.into_balance(), bitcoin_address, clock, ctx);
     request.emit_withdrawal_requested();

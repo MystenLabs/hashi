@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
 use futures::StreamExt;
+use hashi_types::move_types::BurnEvent;
+use hashi_types::move_types::MintEvent;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -40,6 +42,8 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
             .finish(),
     ]);
 
+    let mut rescrape_state = false;
+
     loop {
         let mut subscription = match client
             .subscription_client()
@@ -52,17 +56,36 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
             Ok(subscription) => subscription,
             Err(e) => {
                 tracing::warn!("error trying to subscribe to checkpoints: {e}");
+                rescrape_state = true;
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
         }
         .into_inner();
 
+        // Rescrape the chain state in the event our subscription broke
+        if rescrape_state {
+            match super::scrape_hashi(client.clone(), state.hashi_id()).await {
+                Ok((checkpoint_info, hashi)) => {
+                    state.replace_hashi_state(hashi);
+                    state.update_latest_checkpoint_info(checkpoint_info);
+                }
+                Err(e) => {
+                    tracing::warn!("error trying to rescrape hashi's state: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+
+            rescrape_state = false;
+        }
+
         while let Some(item) = subscription.next().await {
             let checkpoint = match item {
                 Ok(checkpoint) => checkpoint,
                 Err(e) => {
                     tracing::warn!("error in checkpoint stream: {e}");
+                    rescrape_state = true;
                     break;
                 }
             };
@@ -104,7 +127,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
                 }
             }
 
-            handle_events(&client, &state, &events).await;
+            handle_events(&mut client, &state, &events).await;
 
             // Finally update the latest checkpoint info
             state.update_latest_checkpoint_info(CheckpointInfo {
@@ -116,7 +139,7 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
     }
 }
 
-async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEvent]) {
+async fn handle_events(client: &mut Client, state: &OnchainState, events: &[HashiEvent]) {
     if events.is_empty() {
         return;
     }
@@ -172,27 +195,9 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 );
                 // TODO notify
             }
-            HashiEvent::MintEvent(mint) => {
-                if let Some(treasury) = state
-                    .state_mut()
-                    .hashi
-                    .treasury
-                    .treasury_caps
-                    .get_mut(&mint.coin_type)
-                {
-                    treasury.supply += mint.amount;
-                }
-            }
-            HashiEvent::BurnEvent(burn) => {
-                if let Some(treasury) = state
-                    .state_mut()
-                    .hashi
-                    .treasury
-                    .treasury_caps
-                    .get_mut(&burn.coin_type)
-                {
-                    treasury.supply -= burn.amount;
-                }
+            HashiEvent::MintEvent(MintEvent { coin_type, .. })
+            | HashiEvent::BurnEvent(BurnEvent { coin_type, .. }) => {
+                refresh_treasury_cap_supply(client, state, coin_type).await;
             }
             HashiEvent::DepositRequestedEvent(deposit_requested_event) => {
                 let deposit_request = DepositRequest {
@@ -390,6 +395,38 @@ async fn handle_events(client: &Client, state: &OnchainState, events: &[HashiEve
                 state.notify(Notification::ValidatorInfoUpdated(validator));
             }
             Err(e) => tracing::error!("unable to query validator {validator}'s info: {e}"),
+        }
+    }
+}
+
+async fn refresh_treasury_cap_supply(
+    client: &mut Client,
+    state: &OnchainState,
+    coin_type: &TypeTag,
+) {
+    let treasury_cap_id = state
+        .state()
+        .hashi
+        .treasury
+        .treasury_caps
+        .get(coin_type)
+        .map(|tc| tc.id);
+
+    let Some(id) = treasury_cap_id else {
+        return;
+    };
+
+    match super::fetch_treasury_cap(client, id).await {
+        Ok(treasury_cap) => {
+            state
+                .state_mut()
+                .hashi
+                .treasury
+                .treasury_caps
+                .insert(coin_type.clone(), treasury_cap);
+        }
+        Err(e) => {
+            tracing::error!("failed to fetch treasury cap for {coin_type}: {e}");
         }
     }
 }

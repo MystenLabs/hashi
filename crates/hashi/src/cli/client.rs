@@ -87,9 +87,10 @@ impl HashiClient {
         // Dropping the service immediately aborts the background watcher task, so the
         // OnchainState will have the initial scraped state but won't receive live updates.
         // This is fine for CLI commands for now.
-        let (onchain_state, _service) = OnchainState::new(&config.sui_rpc_url, hashi_ids, None)
-            .await
-            .context("Failed to initialize on-chain state")?;
+        let (onchain_state, _service) =
+            OnchainState::new(&config.sui_rpc_url, hashi_ids, None, None)
+                .await
+                .context("Failed to initialize on-chain state")?;
 
         // Try to create executor if keypair is available
         let executor = match config.load_keypair()? {

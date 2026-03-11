@@ -60,15 +60,15 @@ pub struct SignDepositConfirmationResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
-/// Maps to crate::withdrawals::RequestApproval
+/// Maps to crate::withdrawals::WithdrawalRequestApproval
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SignRequestApprovalRequest {
+pub struct SignWithdrawalRequestApprovalRequest {
     /// Withdrawal request id to approve (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub request_id: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SignRequestApprovalResponse {
+pub struct SignWithdrawalRequestApprovalResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
@@ -292,11 +292,11 @@ pub mod bridge_service_client {
             self.inner.unary(req, path, codec).await
         }
         /// Step 1: Sign approval for a batch of unapproved withdrawal requests.
-        pub async fn sign_request_approval(
+        pub async fn sign_withdrawal_request_approval(
             &mut self,
-            request: impl tonic::IntoRequest<super::SignRequestApprovalRequest>,
+            request: impl tonic::IntoRequest<super::SignWithdrawalRequestApprovalRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignRequestApprovalResponse>,
+            tonic::Response<super::SignWithdrawalRequestApprovalResponse>,
             tonic::Status,
         > {
             self.inner
@@ -309,14 +309,14 @@ pub mod bridge_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.BridgeService/SignRequestApproval",
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalRequestApproval",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
                         "sui.hashi.v1alpha.BridgeService",
-                        "SignRequestApproval",
+                        "SignWithdrawalRequestApproval",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -474,11 +474,11 @@ pub mod bridge_service_server {
             tonic::Status,
         >;
         /// Step 1: Sign approval for a batch of unapproved withdrawal requests.
-        async fn sign_request_approval(
+        async fn sign_withdrawal_request_approval(
             &self,
-            request: tonic::Request<super::SignRequestApprovalRequest>,
+            request: tonic::Request<super::SignWithdrawalRequestApprovalRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignRequestApprovalResponse>,
+            tonic::Response<super::SignWithdrawalRequestApprovalResponse>,
             tonic::Status,
         >;
         /// Step 2: Sign approval for a proposed withdrawal transaction construction,
@@ -688,25 +688,33 @@ pub mod bridge_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.BridgeService/SignRequestApproval" => {
+                "/sui.hashi.v1alpha.BridgeService/SignWithdrawalRequestApproval" => {
                     #[allow(non_camel_case_types)]
-                    struct SignRequestApprovalSvc<T: BridgeService>(pub Arc<T>);
+                    struct SignWithdrawalRequestApprovalSvc<T: BridgeService>(
+                        pub Arc<T>,
+                    );
                     impl<
                         T: BridgeService,
-                    > tonic::server::UnaryService<super::SignRequestApprovalRequest>
-                    for SignRequestApprovalSvc<T> {
-                        type Response = super::SignRequestApprovalResponse;
+                    > tonic::server::UnaryService<
+                        super::SignWithdrawalRequestApprovalRequest,
+                    > for SignWithdrawalRequestApprovalSvc<T> {
+                        type Response = super::SignWithdrawalRequestApprovalResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::SignRequestApprovalRequest>,
+                            request: tonic::Request<
+                                super::SignWithdrawalRequestApprovalRequest,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as BridgeService>::sign_request_approval(&inner, request)
+                                <T as BridgeService>::sign_withdrawal_request_approval(
+                                        &inner,
+                                        request,
+                                    )
                                     .await
                             };
                             Box::pin(fut)
@@ -718,7 +726,7 @@ pub mod bridge_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = SignRequestApprovalSvc(inner);
+                        let method = SignWithdrawalRequestApprovalSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

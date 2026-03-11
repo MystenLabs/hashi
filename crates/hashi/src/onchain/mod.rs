@@ -79,6 +79,8 @@ struct Inner {
     /// The checkpoint information that this state is recent to
     checkpoint: watch::Sender<CheckpointInfo>,
     state: RwLock<State>,
+    tls_private_key: Option<ed25519_dalek::SigningKey>,
+    grpc_max_decoding_message_size: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -99,12 +101,22 @@ impl OnchainState {
         sui_rpc_url: &str,
         ids: HashiIds,
         tls_private_key: Option<ed25519_dalek::SigningKey>,
+        grpc_max_decoding_message_size: Option<usize>,
     ) -> Result<(Self, Service)> {
         let client = Client::new(sui_rpc_url)?;
 
         let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
-        if let Some(tls_private_key) = tls_private_key {
-            state.hashi.committees.set_tls_private_key(tls_private_key);
+        if let Some(tls_private_key) = &tls_private_key {
+            state
+                .hashi
+                .committees
+                .set_tls_private_key(tls_private_key.clone());
+        }
+        if let Some(limit) = grpc_max_decoding_message_size {
+            state
+                .hashi
+                .committees
+                .set_grpc_max_decoding_message_size(limit);
         }
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -115,6 +127,8 @@ impl OnchainState {
             sender,
             checkpoint,
             state: RwLock::new(state),
+            tls_private_key,
+            grpc_max_decoding_message_size,
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -164,6 +178,20 @@ impl OnchainState {
 
     fn update_latest_checkpoint_info(&self, info: CheckpointInfo) {
         self.0.checkpoint.send_replace(info);
+    }
+
+    /// Apply committee config from `Inner` to the given hashi state and replace the current
+    /// state in a single write lock acquisition.
+    fn replace_hashi_state(&self, mut hashi: types::Hashi) {
+        if let Some(tls_private_key) = &self.0.tls_private_key {
+            hashi
+                .committees
+                .set_tls_private_key(tls_private_key.clone());
+        }
+        if let Some(limit) = self.0.grpc_max_decoding_message_size {
+            hashi.committees.set_grpc_max_decoding_message_size(limit);
+        }
+        self.state_mut().hashi = hashi;
     }
 
     fn add_package_version(&self, version: u64, package_id: Address) {
@@ -330,6 +358,10 @@ impl OnchainState {
 
     pub fn withdrawal_fee_sui(&self) -> u64 {
         self.state().hashi().config.withdrawal_fee_sui()
+    }
+
+    pub fn withdrawal_minimum(&self) -> u64 {
+        self.state().hashi().config.withdrawal_minimum()
     }
 
     pub fn bridge_service_client(
@@ -531,9 +563,6 @@ async fn scrape_hashi(
             .ok_or_else(|| anyhow!("response missing X_SUI_EPOCH header"))?,
     };
 
-    // Extract initial shared version from owner
-    let initial_shared_version = response.get_ref().object().owner().version();
-
     let move_types::Hashi {
         id,
         committees,
@@ -577,7 +606,6 @@ async fn scrape_hashi(
         checkpoint_info,
         types::Hashi {
             id,
-            initial_shared_version,
             committees: committee_set,
             config: convert_move_config(config),
             treasury,
@@ -627,7 +655,6 @@ async fn scrape_treasury(
 ) -> Result<types::Treasury> {
     let mut treasury_caps: BTreeMap<TypeTag, types::TreasuryCap> = BTreeMap::new();
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
-    let mut coins: BTreeMap<TypeTag, types::Coin> = BTreeMap::new();
 
     let mut stream = client
         .list_dynamic_fields(
@@ -655,8 +682,6 @@ async fn scrape_treasury(
             types::MetadataCap::try_from_contents(&type_tag, contents)
         {
             metadata_caps.insert(metadata_cap.coin_type.clone(), metadata_cap);
-        } else if let Some(coin) = types::Coin::try_from_contents(&type_tag, contents) {
-            coins.insert(coin.coin_type.clone(), coin);
         } else {
             tracing::warn!("unknown type stored in treasury");
         }
@@ -666,8 +691,27 @@ async fn scrape_treasury(
         id: treasury.objects.id,
         treasury_caps,
         metadata_caps,
-        coins,
     })
+}
+
+pub(super) async fn fetch_treasury_cap(
+    client: &mut Client,
+    treasury_cap_id: Address,
+) -> Result<types::TreasuryCap> {
+    let response =
+        client
+            .ledger_client()
+            .get_object(GetObjectRequest::new(&treasury_cap_id).with_read_mask(
+                FieldMask::from_paths([Object::path_builder().contents().finish()]),
+            ))
+            .await?;
+
+    let object = response.into_inner();
+    let type_tag = object.object().contents().name().parse()?;
+    let contents = object.object().contents().value();
+
+    types::TreasuryCap::try_from_contents(&type_tag, contents)
+        .ok_or_else(|| anyhow!("failed to parse TreasuryCap from object {treasury_cap_id}"))
 }
 
 async fn scrape_all_member_info(

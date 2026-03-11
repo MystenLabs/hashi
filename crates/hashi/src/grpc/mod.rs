@@ -38,10 +38,13 @@ impl HttpService {
 
     pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
+            let max_decoding_message_size = self.inner.config.grpc_max_decoding_message_size();
             let bridge_service =
-                hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone());
+                hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone())
+                    .max_decoding_message_size(max_decoding_message_size);
             let mpc_service =
-                hashi_types::proto::mpc_service_server::MpcServiceServer::new(self.clone());
+                hashi_types::proto::mpc_service_server::MpcServiceServer::new(self.clone())
+                    .max_decoding_message_size(max_decoding_message_size);
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 

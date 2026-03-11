@@ -202,6 +202,8 @@ pub struct HashiNetworkBuilder {
     /// `None` means all `num_nodes` are active (default).
     pub num_initially_active_nodes: Option<usize>,
     pub test_batch_size_per_weight: Option<u16>,
+    /// `None` means full Sui voting power weights (no reduction).
+    pub test_weight_divisor: Option<u16>,
 }
 
 impl HashiNetworkBuilder {
@@ -210,6 +212,7 @@ impl HashiNetworkBuilder {
             num_nodes: 1,
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
+            test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
         }
     }
 
@@ -225,6 +228,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_batch_size_per_weight(mut self, batch_size_per_weight: u16) -> Self {
         self.test_batch_size_per_weight = Some(batch_size_per_weight);
+        self
+    }
+
+    pub fn with_full_voting_power(mut self) -> Self {
+        self.test_weight_divisor = None;
         self
     }
 
@@ -253,7 +261,7 @@ impl HashiNetworkBuilder {
         let mut configs = Vec::with_capacity(self.num_nodes);
         for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
             let mut config = HashiConfig::new_for_testing();
-            config.test_weight_divisor = Some(TEST_WEIGHT_DIVISOR);
+            config.test_weight_divisor = self.test_weight_divisor;
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);

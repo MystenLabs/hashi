@@ -426,7 +426,7 @@ pub struct DealerFlowData {
     pub recipients: Vec<Address>,
     pub messages_hash: DealerMessagesHash,
     pub my_signature: MemberSignature,
-    pub required_weight: u16,
+    pub required_weight: u64,
     pub committee: Committee,
 }
 

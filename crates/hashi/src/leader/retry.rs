@@ -1,4 +1,3 @@
-use crate::onchain::types::DepositRequest;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -46,12 +45,12 @@ where
         }
     }
 
-    pub(super) fn prune(&self, deposit_requests: &[DepositRequest]) {
-        let request_ids: HashSet<Address> = deposit_requests.iter().map(|r| r.id).collect();
+    pub(super) fn prune(&self, active_ids: &[Address]) {
+        let active: HashSet<Address> = active_ids.iter().copied().collect();
         self.state
             .lock()
             .unwrap()
-            .retain(|request_id, _| request_ids.contains(request_id));
+            .retain(|request_id, _| active.contains(request_id));
     }
 
     pub(super) fn should_skip(&self, request_id: &Address, checkpoint_timestamp_ms: u64) -> bool {

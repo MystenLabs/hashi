@@ -23,7 +23,6 @@ use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
-use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use hashi_types::committee::BLS12381Signature;
@@ -264,23 +263,30 @@ impl MpcService {
                 self.setup_key_rotation(epoch)?;
                 self.run_key_rotation(epoch).await
             }
-            _ => self.run_dkg().await,
+            _ => self.run_dkg(epoch).await,
         }
     }
 
-    async fn run_dkg(&self) -> anyhow::Result<DkgOutput> {
+    async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
-        let (epoch, committee) = get_epoch_and_committee(&onchain_state)?;
+        let committee = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&target_epoch)
+            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {target_epoch}"))?
+            .clone();
         let mpc_manager = self
             .inner
             .mpc_manager()
             .expect("MpcManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
+        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
-            epoch,
+            target_epoch,
             None,
             signer,
             committee,
@@ -545,7 +551,7 @@ impl MpcService {
                 return;
             }
             let result = if run_dkg {
-                self.run_dkg().await
+                self.run_dkg(target_epoch).await
             } else {
                 self.run_key_rotation(target_epoch).await
             };
@@ -808,16 +814,4 @@ impl MpcService {
             .finish()
             .map_err(|e| anyhow::anyhow!("failed to finalize certificate: {e}"))
     }
-}
-
-fn get_epoch_and_committee(onchain_state: &OnchainState) -> anyhow::Result<(u64, Committee)> {
-    let state = onchain_state.state();
-    let epoch = state.hashi().committees.epoch();
-    let committee = state
-        .hashi()
-        .committees
-        .current_committee()
-        .ok_or_else(|| anyhow::anyhow!("No current committee"))?
-        .clone();
-    Ok((epoch, committee))
 }

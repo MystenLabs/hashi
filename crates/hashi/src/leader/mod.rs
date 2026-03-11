@@ -11,7 +11,9 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
-use crate::withdrawals::RequestApproval;
+use crate::withdrawals::WithdrawalApprovalErrorKind;
+use crate::withdrawals::WithdrawalCommitmentErrorKind;
+use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
 use bitcoin::hashes::Hash;
@@ -26,8 +28,8 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::SignDepositConfirmationRequest;
-use hashi_types::proto::SignRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
+use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
@@ -47,6 +49,8 @@ const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 pub struct LeaderService {
     inner: Arc<Hashi>,
     deposit_retry_tracker: RetryTracker<DepositValidationErrorKind>,
+    withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
+    withdrawal_commitment_retry_tracker: RetryTracker<WithdrawalCommitmentErrorKind>,
 }
 
 impl LeaderService {
@@ -54,6 +58,8 @@ impl LeaderService {
         Self {
             inner: hashi,
             deposit_retry_tracker: RetryTracker::new(),
+            withdrawal_approval_retry_tracker: RetryTracker::new(),
+            withdrawal_commitment_retry_tracker: RetryTracker::new(),
         }
     }
 
@@ -89,8 +95,10 @@ impl LeaderService {
             }
 
             self.process_deposit_requests(checkpoint_timestamp_ms).await;
-            self.process_unapproved_requests().await;
-            self.process_approved_requests().await;
+            self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms)
+                .await;
+            self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
+                .await;
             self.process_unsigned_pending_withdrawals().await;
             self.process_signed_pending_withdrawals().await;
             self.check_delete_proposals(checkpoint_timestamp_ms).await;
@@ -134,7 +142,8 @@ impl LeaderService {
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
-        self.deposit_retry_tracker.prune(&deposit_requests);
+        let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
+        self.deposit_retry_tracker.prune(&deposit_ids);
 
         debug!("Processing {} deposit requests", deposit_requests.len());
 
@@ -315,7 +324,7 @@ impl LeaderService {
     // Step 1: Approve unapproved withdrawal requests
     // ========================================================================
 
-    async fn process_unapproved_requests(&self) {
+    async fn process_unapproved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
         let mut unapproved: Vec<_> = self
             .inner
             .onchain_state()
@@ -325,29 +334,13 @@ impl LeaderService {
             .collect();
         unapproved.sort_by_key(|r| r.timestamp_ms);
 
+        let unapproved_ids: Vec<Address> = unapproved.iter().map(|r| r.id).collect();
+        self.withdrawal_approval_retry_tracker
+            .prune(&unapproved_ids);
+
         if unapproved.is_empty() {
             return;
         }
-
-        // Screen each request before approval — reject sanctioned addresses early
-        let mut screened: Vec<&WithdrawalRequest> = Vec::new();
-        for request in &unapproved {
-            match self.inner.screen_withdrawal(request).await {
-                Ok(()) => screened.push(request),
-                Err(e) => {
-                    error!(
-                        "Withdrawal request {:?} failed AML screening, excluding from approval: {e}",
-                        request.id
-                    );
-                }
-            }
-        }
-
-        if screened.is_empty() {
-            return;
-        }
-
-        info!("Approving {} withdrawal requests", screened.len());
 
         let this_validator_address = self
             .inner
@@ -367,29 +360,37 @@ impl LeaderService {
             .current_committee()
             .expect("No current committee");
 
-        // Collect a per-request BLS certificate for each screened request.
+        // Collect a per-request BLS certificate for each unapproved request.
         // Validators independently validate each request (including sanctions checks),
-        // so a single bad request only blocks itself, not the whole batch.
         let mut certified: Vec<(Address, CommitteeSignature)> = Vec::new();
-        for request in &screened {
-            let approval = RequestApproval {
+        for request in &unapproved {
+            if self
+                .withdrawal_approval_retry_tracker
+                .should_skip(&request.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+
+            let approval = WithdrawalRequestApproval {
                 request_id: request.id,
             };
 
-            // Validate and sign locally first
-            let local_sig = match self.inner.validate_and_sign_request_approval(&approval) {
-                Ok(sig) => match parse_member_signature(sig) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(
-                            "Failed to parse local approval signature for {:?}: {e}",
-                            request.id
-                        );
-                        continue;
-                    }
-                },
+            // Validate, screen, and sign locally first
+            let local_sig = match self
+                .inner
+                .validate_and_sign_withdrawal_request_approval(&approval)
+                .await
+            {
+                Ok(sig) => {
+                    self.withdrawal_approval_retry_tracker.clear(&request.id);
+                    parse_member_signature(sig).unwrap()
+                }
                 Err(e) => {
-                    error!("Local approval validation failed for {:?}: {e}", request.id);
+                    self.withdrawal_approval_retry_tracker.record_failure(
+                        e.kind(),
+                        request.id,
+                        checkpoint_timestamp_ms,
+                    );
                     continue;
                 }
             };
@@ -401,7 +402,7 @@ impl LeaderService {
                     continue;
                 }
                 if let Some(signature) = self
-                    .request_approval_signature(proto_request.clone(), member)
+                    .request_withdrawal_approval_signature(proto_request.clone(), member)
                     .await
                 {
                     signatures.push(signature);
@@ -418,6 +419,11 @@ impl LeaderService {
             let weight = aggregator.weight();
             let required_weight = certificate_threshold(committee.total_weight());
             if weight < required_weight {
+                self.withdrawal_approval_retry_tracker.record_failure(
+                    WithdrawalApprovalErrorKind::FailedQuorum,
+                    request.id,
+                    checkpoint_timestamp_ms,
+                );
                 error!(
                     "Insufficient approval signatures for {:?}: weight {weight} < {required_weight}",
                     request.id
@@ -445,10 +451,11 @@ impl LeaderService {
         // Submit all certified approvals in a single PTB.
         // On failure (e.g. a request was canceled mid-flight), remove the
         // offending request and retry until we succeed or run out of requests.
-        self.submit_approve_requests_with_retry(certified).await;
+        self.submit_approve_withdrawal_requests_with_retry(certified)
+            .await;
     }
 
-    async fn submit_approve_requests_with_retry(
+    async fn submit_approve_withdrawal_requests_with_retry(
         &self,
         mut certified: Vec<(Address, CommitteeSignature)>,
     ) {
@@ -456,7 +463,7 @@ impl LeaderService {
             let approvals: Vec<(Address, &CommitteeSignature)> =
                 certified.iter().map(|(id, cert)| (*id, cert)).collect();
 
-            match self.submit_approve_requests(&approvals).await {
+            match self.submit_approve_withdrawal_requests(&approvals).await {
                 Ok(()) => return,
                 Err(e) => {
                     let err_msg = format!("{e}");
@@ -490,7 +497,7 @@ impl LeaderService {
     // Step 2: Construct withdrawal tx for approved requests
     // ========================================================================
 
-    async fn process_approved_requests(&self) {
+    async fn process_approved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
         let mut approved: Vec<_> = self
             .inner
             .onchain_state()
@@ -500,34 +507,53 @@ impl LeaderService {
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
-        // TODO: process multiple at a time.
-        if let Some(request) = approved.first() {
-            self.process_approved_request(request).await;
+        let approved_ids: Vec<Address> = approved.iter().map(|r| r.id).collect();
+        self.withdrawal_commitment_retry_tracker
+            .prune(&approved_ids);
+
+        // Process the first approved request that isn't in backoff.
+        for request in &approved {
+            if self
+                .withdrawal_commitment_retry_tracker
+                .should_skip(&request.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+            self.process_approved_withdrawal_request(request, checkpoint_timestamp_ms)
+                .await;
+            break;
         }
     }
 
-    async fn process_approved_request(&self, request: &WithdrawalRequest) {
+    async fn process_approved_withdrawal_request(
+        &self,
+        request: &WithdrawalRequest,
+        checkpoint_timestamp_ms: u64,
+    ) {
         info!("Processing approved withdrawal request: {:?}", request.id);
 
-        // Build the withdrawal approval (craft unsigned BTC tx, select UTXOs, etc.)
+        // Build the withdrawal tx commitment
         let approval = match self.inner.build_withdrawal_tx_commitment(request).await {
-            Ok(approval) => approval,
+            Ok(approval) => {
+                self.withdrawal_commitment_retry_tracker.clear(&request.id);
+                approval
+            }
             Err(e) => {
-                error!(
-                    "Failed to build withdrawal approval for request {:?}: {e}",
-                    request.id
+                self.withdrawal_commitment_retry_tracker.record_failure(
+                    e.kind(),
+                    request.id,
+                    checkpoint_timestamp_ms,
                 );
                 return;
             }
         };
 
-        // 3. Fan out to committee for BLS signatures over the construction message
+        // Fan out to committee for BLS signatures over the commitment message
         let members = self
             .inner
             .onchain_state()
             .current_committee_members()
             .expect("No current committee members");
-
         let proto_request = approval.to_proto();
         let mut signatures: Vec<MemberSignature> = Vec::new();
         for member in &members {
@@ -556,6 +582,11 @@ impl LeaderService {
         let weight = signature_aggregator.weight();
         let required_weight = certificate_threshold(committee.total_weight());
         if weight < required_weight {
+            self.withdrawal_commitment_retry_tracker.record_failure(
+                WithdrawalCommitmentErrorKind::FailedQuorum,
+                request.id,
+                checkpoint_timestamp_ms,
+            );
             error!(
                 "Insufficient withdrawal approval signatures for request {:?}: weight {weight} < {required_weight}",
                 request.id
@@ -738,7 +769,8 @@ impl LeaderService {
                 );
             }
             Ok(TxStatus::NotFound) => {
-                self.rebuild_and_broadcast(pending, txid).await;
+                self.rebuild_and_broadcast_withdrawal_btc_tx(pending, txid)
+                    .await;
             }
             Err(e) => {
                 error!(
@@ -751,7 +783,11 @@ impl LeaderService {
 
     /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
     /// data (stored witness signatures) and broadcast it to the Bitcoin network.
-    async fn rebuild_and_broadcast(&self, pending: &PendingWithdrawal, txid: bitcoin::Txid) {
+    async fn rebuild_and_broadcast_withdrawal_btc_tx(
+        &self,
+        pending: &PendingWithdrawal,
+        txid: bitcoin::Txid,
+    ) {
         warn!(
             "Withdrawal tx {} not found for {:?}, re-broadcasting from on-chain signatures",
             txid, pending.id
@@ -959,14 +995,14 @@ impl LeaderService {
             .ok()
     }
 
-    async fn request_approval_signature(
+    async fn request_withdrawal_approval_signature(
         &self,
-        proto_request: SignRequestApprovalRequest,
+        proto_request: SignWithdrawalRequestApprovalRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
         trace!(
-            "Requesting request approval signature from {}",
+            "Requesting withdrawal request approval signature from {}",
             validator_address
         );
 
@@ -983,18 +1019,18 @@ impl LeaderService {
             })?;
 
         let response = rpc_client
-            .sign_request_approval(proto_request.clone())
+            .sign_withdrawal_request_approval(proto_request.clone())
             .await
             .inspect_err(|e| {
                 error!(
-                    "Failed to get request approval signature from {}: {e}",
+                    "Failed to get withdrawal request approval signature from {}: {e}",
                     validator_address
                 );
             })
             .ok()?;
 
         trace!(
-            "Retrieved request approval signature from {}",
+            "Retrieved withdrawal request approval signature from {}",
             validator_address
         );
 
@@ -1005,7 +1041,7 @@ impl LeaderService {
             .and_then(parse_member_signature)
             .inspect_err(|e| {
                 error!(
-                    "Failed to parse member signature from request approval response from {}: {e}",
+                    "Failed to parse member signature from withdrawal request approval response from {}: {e}",
                     validator_address
                 );
             })
@@ -1204,7 +1240,7 @@ impl LeaderService {
             .ok()
     }
 
-    async fn submit_approve_requests(
+    async fn submit_approve_withdrawal_requests(
         &self,
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
@@ -1214,7 +1250,9 @@ impl LeaderService {
         );
 
         let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-        executor.execute_approve_requests(approvals).await
+        executor
+            .execute_approve_withdrawal_requests(approvals)
+            .await
     }
 
     async fn submit_commit_withdrawal_tx(
@@ -1303,9 +1341,9 @@ fn parse_member_signature(
     Ok(MemberSignature::new(epoch, address, signature))
 }
 
-impl RequestApproval {
-    fn to_proto(&self) -> SignRequestApprovalRequest {
-        SignRequestApprovalRequest {
+impl WithdrawalRequestApproval {
+    fn to_proto(&self) -> SignWithdrawalRequestApprovalRequest {
+        SignWithdrawalRequestApprovalRequest {
             request_id: self.request_id.as_bytes().to_vec().into(),
         }
     }

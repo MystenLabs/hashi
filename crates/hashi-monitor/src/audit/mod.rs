@@ -72,13 +72,13 @@ pub struct AuditorCore {
 }
 
 impl AuditorCore {
-    pub async fn new(cfg: Config, cursors: Cursors) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &Config, cursors: Cursors) -> anyhow::Result<Self> {
         Ok(Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::new(&cfg, cursors.guardian).await?,
-            btc_client: BtcRpcClient::new(&cfg)?,
+            guardian_poller: GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?,
+            btc_client: BtcRpcClient::new(cfg)?,
             sui_cursor: cursors.sui,
         })
     }

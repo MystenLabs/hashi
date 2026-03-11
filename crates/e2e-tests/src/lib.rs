@@ -126,6 +126,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_full_voting_power(mut self) -> Self {
+        self.hashi_builder = self.hashi_builder.with_full_voting_power();
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")
@@ -568,13 +573,13 @@ mod tests {
         let sui_rpc_url = &test_networks.sui_network().rpc_url;
         let ids = test_networks.hashi_network().ids();
 
-        let (state, _service) = hashi::onchain::OnchainState::new(sui_rpc_url, ids, None).await?;
+        let (state, _service) =
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
         assert_eq!(state.state().hashi().treasury.treasury_caps.len(), 1);
         assert_eq!(state.state().hashi().treasury.metadata_caps.len(), 1);
-        assert!(state.state().hashi().treasury.coins.is_empty());
 
         // Validate subscribing to checkpoints functions
         let ckpt = state.latest_checkpoint_height();
@@ -614,6 +619,7 @@ mod tests {
 
         let test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
+            .with_full_voting_power()
             .build()
             .await?;
         let nodes = test_networks.hashi_network().nodes();

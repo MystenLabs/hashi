@@ -11,9 +11,14 @@ clap.workspace = true
 hashi-types = { path = "../hashi-types" }
 # enclave imported for s3 logger
 hashi-guardian-enclave = { path = "../hashi-guardian-enclave" }
+hex.workspace = true
+hpke = "0.12.0"
+k256 = "0.13"
+rand.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

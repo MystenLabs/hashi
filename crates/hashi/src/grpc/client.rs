@@ -25,10 +25,13 @@ use hashi_types::proto::mpc_service_client::MpcServiceClient;
 type Result<T, E = tonic::Status> = std::result::Result<T, E>;
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct Client {
     uri: http::Uri,
     channel: Channel,
+    max_decoding_message_size: usize,
 }
 
 impl Client {
@@ -54,7 +57,16 @@ impl Client {
             .http2_keep_alive_interval(Duration::from_secs(5))
             .connect_lazy();
 
-        Ok(Self { uri, channel })
+        Ok(Self {
+            uri,
+            channel,
+            max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+        })
+    }
+
+    pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+        self.max_decoding_message_size = limit;
+        self
     }
 
     pub fn new_no_auth<T>(uri: T) -> Result<Self>
@@ -71,10 +83,12 @@ impl Client {
 
     pub fn bridge_service_client(&self) -> BridgeServiceClient<Channel> {
         BridgeServiceClient::new(self.channel.clone())
+            .max_decoding_message_size(self.max_decoding_message_size)
     }
 
     pub fn mpc_service_client(&self) -> MpcServiceClient<Channel> {
         MpcServiceClient::new(self.channel.clone())
+            .max_decoding_message_size(self.max_decoding_message_size)
     }
 
     pub async fn get_service_info(&self) -> Result<Response<GetServiceInfoResponse>> {
