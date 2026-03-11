@@ -17,10 +17,31 @@ use sui_http::middleware::callback::ResponseHandler;
 
 #[derive(Clone)]
 pub struct Metrics {
+    // RPC metrics
     inflight_requests: IntGaugeVec,
     requests: IntCounterVec,
     request_latency: HistogramVec,
+
     pub screener_enabled: IntGauge,
+
+    // General Sui metrics
+    sui_epoch: IntGauge,
+    latest_checkpoint_height: IntGauge,
+    latest_checkpoint_timestamp_ms: IntGauge,
+
+    // Hashi Onchain state metrics
+    epoch: IntGauge,
+    reconfig_in_progress: IntGauge,
+    paused: IntGauge,
+    deposit_queue_size: IntGauge,
+    withdrawal_queue_size: IntGaugeVec,
+    withdrawal_queue_value: IntGaugeVec,
+    utxo_pool_size: IntGauge,
+    utxo_pool_value: IntGauge,
+    proposals: IntGaugeVec,
+    num_consumed_presigs: IntGauge,
+    treasury_supply: IntGaugeVec,
+    package_version_enabled: IntGaugeVec,
 }
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
@@ -62,6 +83,208 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+
+            epoch: register_int_gauge_with_registry!(
+                "hashi_epoch",
+                "current hashi epoch",
+                registry,
+            )
+            .unwrap(),
+            sui_epoch: register_int_gauge_with_registry!(
+                "hashi_sui_epoch",
+                "current sui epoch from latest checkpoint",
+                registry,
+            )
+            .unwrap(),
+            reconfig_in_progress: register_int_gauge_with_registry!(
+                "hashi_reconfig_in_progress",
+                "whether a reconfiguration is in progress (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            paused: register_int_gauge_with_registry!(
+                "hashi_paused",
+                "whether the system is paused (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            latest_checkpoint_height: register_int_gauge_with_registry!(
+                "hashi_latest_checkpoint_height",
+                "latest processed sui checkpoint height",
+                registry,
+            )
+            .unwrap(),
+            latest_checkpoint_timestamp_ms: register_int_gauge_with_registry!(
+                "hashi_latest_checkpoint_timestamp_ms",
+                "timestamp of latest processed checkpoint in ms",
+                registry,
+            )
+            .unwrap(),
+            deposit_queue_size: register_int_gauge_with_registry!(
+                "hashi_deposit_queue_size",
+                "number of pending deposit requests",
+                registry,
+            )
+            .unwrap(),
+            withdrawal_queue_size: register_int_gauge_vec_with_registry!(
+                "hashi_withdrawal_queue_size",
+                "number of withdrawal requests by status",
+                &["status"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_queue_value: register_int_gauge_vec_with_registry!(
+                "hashi_withdrawal_queue_value",
+                "total value of withdrawal requests by status and coin type in satoshis",
+                &["status", "coin_type"],
+                registry,
+            )
+            .unwrap(),
+            utxo_pool_size: register_int_gauge_with_registry!(
+                "hashi_utxo_pool_size",
+                "number of active utxos",
+                registry,
+            )
+            .unwrap(),
+            utxo_pool_value: register_int_gauge_with_registry!(
+                "hashi_utxo_pool_value",
+                "total value of active utxos in satoshis",
+                registry,
+            )
+            .unwrap(),
+            proposals: register_int_gauge_vec_with_registry!(
+                "hashi_proposals",
+                "number of active proposals by type",
+                &["type"],
+                registry,
+            )
+            .unwrap(),
+            num_consumed_presigs: register_int_gauge_with_registry!(
+                "hashi_num_consumed_presigs",
+                "number of consumed presignatures",
+                registry,
+            )
+            .unwrap(),
+            treasury_supply: register_int_gauge_vec_with_registry!(
+                "hashi_treasury_supply",
+                "supply of each treasury cap by coin type",
+                &["coin_type"],
+                registry,
+            )
+            .unwrap(),
+            package_version_enabled: register_int_gauge_vec_with_registry!(
+                "hashi_package_version_enabled",
+                "enabled package versions (1 = enabled)",
+                &["version", "package_id"],
+                registry,
+            )
+            .unwrap(),
+        }
+    }
+
+    pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
+        self.latest_checkpoint_height
+            .set(state.latest_checkpoint_height() as i64);
+        self.latest_checkpoint_timestamp_ms
+            .set(state.latest_checkpoint_timestamp_ms() as i64);
+        self.sui_epoch.set(state.latest_checkpoint_epoch() as i64);
+
+        let guard = state.state();
+        let hashi = guard.hashi();
+
+        self.epoch.set(hashi.committees.epoch() as i64);
+        self.reconfig_in_progress
+            .set(if hashi.committees.pending_epoch_change().is_some() {
+                1
+            } else {
+                0
+            });
+        self.paused.set(if hashi.config.paused() { 1 } else { 0 });
+        self.deposit_queue_size
+            .set(hashi.deposit_queue.requests().len() as i64);
+        let (requested, approved) = hashi
+            .withdrawal_queue
+            .requests()
+            .values()
+            .partition::<Vec<_>, _>(|r| !r.approved);
+        let (signed, pending): (Vec<_>, Vec<_>) = hashi
+            .withdrawal_queue
+            .pending_withdrawals()
+            .values()
+            .partition(|w| w.signatures.is_some());
+        self.withdrawal_queue_size
+            .with_label_values(&["requested"])
+            .set(requested.len() as i64);
+        self.withdrawal_queue_value
+            .with_label_values(&["requested", "BTC"])
+            .set(requested.iter().map(|r| r.btc_amount).sum::<u64>() as i64);
+        self.withdrawal_queue_size
+            .with_label_values(&["approved"])
+            .set(approved.len() as i64);
+        self.withdrawal_queue_value
+            .with_label_values(&["approved", "BTC"])
+            .set(approved.iter().map(|r| r.btc_amount).sum::<u64>() as i64);
+        self.withdrawal_queue_size
+            .with_label_values(&["pending"])
+            .set(pending.len() as i64);
+        self.withdrawal_queue_value
+            .with_label_values(&["pending", "BTC"])
+            .set(
+                pending
+                    .iter()
+                    .flat_map(|w| &w.requests)
+                    .map(|r| r.btc_amount)
+                    .sum::<u64>() as i64,
+            );
+        self.withdrawal_queue_size
+            .with_label_values(&["signed"])
+            .set(signed.len() as i64);
+        self.withdrawal_queue_value
+            .with_label_values(&["signed", "BTC"])
+            .set(
+                signed
+                    .iter()
+                    .flat_map(|w| &w.requests)
+                    .map(|r| r.btc_amount)
+                    .sum::<u64>() as i64,
+            );
+        let active_utxos = hashi.utxo_pool.active_utxos();
+        self.utxo_pool_size.set(active_utxos.len() as i64);
+        self.utxo_pool_value
+            .set(active_utxos.values().map(|u| u.amount).sum::<u64>() as i64);
+        {
+            use crate::onchain::types::ProposalType;
+            let mut counts = std::collections::HashMap::<&str, i64>::new();
+            for proposal in hashi.proposals.proposals().values() {
+                *counts.entry(proposal.proposal_type.as_str()).or_default() += 1;
+            }
+            for label in ProposalType::all_labels() {
+                self.proposals
+                    .with_label_values(&[label])
+                    .set(*counts.get(label).unwrap_or(&0));
+            }
+        }
+        self.num_consumed_presigs
+            .set(hashi.withdrawal_queue.num_consumed_presigs() as i64);
+        for (type_tag, cap) in &hashi.treasury.treasury_caps {
+            if let sui_sdk_types::TypeTag::Struct(struct_tag) = type_tag {
+                self.treasury_supply
+                    .with_label_values(&[struct_tag.name().as_str()])
+                    .set(cap.supply as i64);
+            }
+        }
+
+        self.package_version_enabled.reset();
+        for version in &hashi.config.enabled_versions {
+            let version_str = version.to_string();
+            let package_id_str = guard
+                .package_versions()
+                .get(version)
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            self.package_version_enabled
+                .with_label_values(&[&version_str, &package_id_str])
+                .set(1);
         }
     }
 }
@@ -226,11 +449,15 @@ pub fn uptime_metric(
     version: &'static str,
     sui_chain_id: &str,
     bitcoin_chain_id: &str,
+    package_id: &str,
+    hashi_object_id: &str,
 ) -> Box<dyn prometheus::core::Collector> {
     let opts = prometheus::opts!("uptime", "uptime of the node service in seconds")
         .variable_label("version")
         .variable_label("sui_chain_id")
-        .variable_label("bitcoin_chain_id");
+        .variable_label("bitcoin_chain_id")
+        .variable_label("package_id")
+        .variable_label("hashi_object_id");
 
     let start_time = std::time::Instant::now();
     let uptime = move || start_time.elapsed().as_secs();
@@ -238,7 +465,13 @@ pub fn uptime_metric(
         opts,
         prometheus_closure_metric::ValueType::Counter,
         uptime,
-        &[version, sui_chain_id, bitcoin_chain_id],
+        &[
+            version,
+            sui_chain_id,
+            bitcoin_chain_id,
+            package_id,
+            hashi_object_id,
+        ],
     )
     .unwrap();
 

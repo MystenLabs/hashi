@@ -340,7 +340,7 @@ impl Hashi {
         );
 
         anyhow::ensure!(
-            message.request_ids == pending.request_ids,
+            message.request_ids == pending.request_ids(),
             "Request IDs mismatch for PendingWithdrawal {}",
             message.withdrawal_id
         );

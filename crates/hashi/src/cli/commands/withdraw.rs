@@ -172,7 +172,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     // Check committed/signed pending withdrawals
     else if let Some(pw) = pending_withdrawals
         .iter()
-        .find(|p| p.request_ids.contains(&req_addr))
+        .find(|p| p.request_ids().contains(&req_addr))
     {
         let txid_bytes: [u8; 32] = pw.id.into();
         let txid = bitcoin::Txid::from_byte_array(txid_bytes);
@@ -287,7 +287,7 @@ async fn list(config: &CliConfig) -> Result<()> {
                     "  txid: {}  status: {}  requests: {}",
                     &txid.to_string()[..16],
                     status,
-                    pw.request_ids.len()
+                    pw.request_ids().len()
                 );
             }
         }

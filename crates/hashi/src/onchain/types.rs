@@ -420,6 +420,28 @@ pub enum ProposalType {
     Unknown(String),
 }
 
+impl ProposalType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ProposalType::UpdateDepositFee => "update_deposit_fee",
+            ProposalType::EnableVersion => "enable_version",
+            ProposalType::DisableVersion => "disable_version",
+            ProposalType::Upgrade => "upgrade",
+            ProposalType::Unknown(_) => "unknown",
+        }
+    }
+
+    pub fn all_labels() -> &'static [&'static str] {
+        &[
+            "update_deposit_fee",
+            "enable_version",
+            "disable_version",
+            "upgrade",
+            "unknown",
+        ]
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub config: BTreeMap<String, ConfigValue>,
@@ -447,6 +469,10 @@ impl Config {
             Some(ConfigValue::U64(v)) => *v,
             _ => 0,
         }
+    }
+
+    pub fn paused(&self) -> bool {
+        matches!(self.config.get("paused"), Some(ConfigValue::Bool(true)))
     }
 }
 
@@ -533,15 +559,31 @@ pub struct WithdrawalRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+pub struct WithdrawalRequestInfo {
+    pub id: Address,
+    pub btc_amount: u64,
+    pub bitcoin_address: Vec<u8>,
+    pub timestamp_ms: u64,
+    pub requester_address: Address,
+    pub sui_tx_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
 pub struct PendingWithdrawal {
     pub id: Address,
     pub txid: Address,
-    pub request_ids: Vec<Address>,
+    pub requests: Vec<WithdrawalRequestInfo>,
     pub inputs: Vec<Utxo>,
     pub outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
+}
+
+impl PendingWithdrawal {
+    pub fn request_ids(&self) -> Vec<Address> {
+        self.requests.iter().map(|r| r.id).collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]

@@ -102,6 +102,7 @@ impl OnchainState {
         ids: HashiIds,
         tls_private_key: Option<ed25519_dalek::SigningKey>,
         grpc_max_decoding_message_size: Option<usize>,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Service)> {
         let client = Client::new(sui_rpc_url)?;
 
@@ -135,7 +136,7 @@ impl OnchainState {
 
         let watcher_state = state.clone();
         let service = Service::new().spawn_aborting(async move {
-            watcher::watcher(client, watcher_state).await;
+            watcher::watcher(client, watcher_state, metrics).await;
             Ok(())
         });
 
@@ -1063,7 +1064,10 @@ async fn scrape_pending_withdrawals(
                  signatures,
                  ..
              }| {
-                let request_ids = requests.into_iter().map(|r| r.id).collect();
+                let requests = requests
+                    .into_iter()
+                    .map(convert_move_withdrawal_request_info)
+                    .collect();
                 let inputs = inputs.into_iter().map(convert_move_utxo).collect();
                 let outputs = outputs
                     .into_iter()
@@ -1077,7 +1081,7 @@ async fn scrape_pending_withdrawals(
                     types::PendingWithdrawal {
                         id,
                         txid,
-                        request_ids,
+                        requests,
                         inputs,
                         outputs,
                         timestamp_ms,
@@ -1105,6 +1109,80 @@ fn convert_move_utxo(
         amount,
         derivation_path,
     }
+}
+
+fn convert_move_withdrawal_request_info(
+    info: move_types::WithdrawalRequestInfo,
+) -> types::WithdrawalRequestInfo {
+    types::WithdrawalRequestInfo {
+        id: info.id,
+        btc_amount: info.btc_amount,
+        bitcoin_address: info.bitcoin_address,
+        timestamp_ms: info.timestamp_ms,
+        requester_address: info.requester_address,
+        sui_tx_digest: info.sui_tx_digest,
+    }
+}
+
+fn convert_move_pending_withdrawal(
+    move_types::PendingWithdrawal {
+        id,
+        txid,
+        requests,
+        inputs,
+        outputs,
+        timestamp_ms,
+        randomness,
+        signatures,
+        ..
+    }: move_types::PendingWithdrawal,
+) -> types::PendingWithdrawal {
+    types::PendingWithdrawal {
+        id,
+        txid,
+        requests: requests
+            .into_iter()
+            .map(convert_move_withdrawal_request_info)
+            .collect(),
+        inputs: inputs.into_iter().map(convert_move_utxo).collect(),
+        outputs: outputs
+            .into_iter()
+            .map(|o| types::OutputUtxo {
+                amount: o.amount,
+                bitcoin_address: o.bitcoin_address,
+            })
+            .collect(),
+        timestamp_ms,
+        randomness,
+        signatures,
+    }
+}
+
+pub(super) async fn fetch_pending_withdrawal(
+    client: &mut Client,
+    pending_withdrawals_id: Address,
+    pending_id: Address,
+) -> Result<types::PendingWithdrawal> {
+    let field_id = pending_withdrawals_id
+        .derive_dynamic_child_id(&TypeTag::Address, &pending_id.to_bcs().unwrap());
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().contents().finish(),
+            ])),
+        )
+        .await?;
+
+    let field: move_types::Field<Address, move_types::PendingWithdrawal> = response
+        .into_inner()
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| anyhow!("failed to deserialize PendingWithdrawal: {e}"))?;
+
+    Ok(convert_move_pending_withdrawal(field.value))
 }
 
 async fn scrape_utxo_pool(

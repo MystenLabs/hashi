@@ -197,6 +197,7 @@ impl Hashi {
             self.config.hashi_ids(),
             self.config.tls_private_key().ok(),
             Some(self.config.grpc_max_decoding_message_size()),
+            Some(self.metrics.clone()),
         )
         .await?;
         self.onchain_state

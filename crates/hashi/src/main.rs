@@ -132,11 +132,14 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
         .unwrap()
         .unwrap_or_default();
 
+    let hashi_ids = config.hashi_ids();
     prometheus::default_registry()
         .register(hashi::metrics::uptime_metric(
             VERSION,
             config.sui_chain_id(),
             config.bitcoin_chain_id(),
+            &hashi_ids.package_id.to_string(),
+            &hashi_ids.hashi_object_id.to_string(),
         ))
         .unwrap();
 

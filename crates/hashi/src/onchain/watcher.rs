@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use hashi_types::move_types::BurnEvent;
@@ -12,18 +13,18 @@ use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
 use sui_sdk_types::TypeTag;
 
+use crate::metrics::Metrics;
 use crate::onchain::CheckpointInfo;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
 use crate::onchain::scrape_member_info;
 use crate::onchain::types::DepositRequest;
-use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
 use hashi_types::move_types::HashiEvent;
 
-pub async fn watcher(mut client: Client, state: OnchainState) {
+pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
         Checkpoint::path_builder().summary().timestamp(),
@@ -69,6 +70,9 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
                 Ok((checkpoint_info, hashi)) => {
                     state.replace_hashi_state(hashi);
                     state.update_latest_checkpoint_info(checkpoint_info);
+                    if let Some(metrics) = &metrics {
+                        metrics.update_onchain_state(&state);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("error trying to rescrape hashi's state: {e}");
@@ -135,6 +139,10 @@ pub async fn watcher(mut client: Client, state: OnchainState) {
                 timestamp_ms,
                 epoch,
             });
+
+            if let Some(metrics) = &metrics {
+                metrics.update_onchain_state(&state);
+            }
         }
     }
 }
@@ -271,44 +279,43 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 }
             }
             HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
-                let mut state = state.state_mut();
-
                 // Remove requests from the queue
-                for request_id in &event.request_ids {
-                    state.hashi.withdrawal_queue.requests.remove(request_id);
+                {
+                    let mut state = state.state_mut();
+                    for request_id in &event.request_ids {
+                        state.hashi.withdrawal_queue.requests.remove(request_id);
+                    }
                 }
 
-                // Add to pending withdrawals
-                let pending = PendingWithdrawal {
-                    id: event.pending_id,
-                    txid: event.txid,
-                    request_ids: event.request_ids.clone(),
-                    inputs: event
-                        .inputs
-                        .iter()
-                        .map(|u| super::types::Utxo {
-                            id: u.id.into(),
-                            amount: u.amount,
-                            derivation_path: u.derivation_path,
-                        })
-                        .collect(),
-                    outputs: event
-                        .outputs
-                        .iter()
-                        .map(|o| super::types::OutputUtxo {
-                            amount: o.amount,
-                            bitcoin_address: o.bitcoin_address.clone(),
-                        })
-                        .collect(),
-                    timestamp_ms: event.timestamp_ms,
-                    randomness: event.randomness.clone(),
-                    signatures: None,
-                };
-                state
-                    .hashi
+                // Fetch the full pending withdrawal from chain
+                let pending_withdrawals_id = state
+                    .state()
+                    .hashi()
                     .withdrawal_queue
-                    .pending_withdrawals
-                    .insert(pending.id, pending);
+                    .pending_withdrawals_id()
+                    .to_owned();
+                match super::fetch_pending_withdrawal(
+                    client,
+                    pending_withdrawals_id,
+                    event.pending_id,
+                )
+                .await
+                {
+                    Ok(pending) => {
+                        state
+                            .state_mut()
+                            .hashi
+                            .withdrawal_queue
+                            .pending_withdrawals
+                            .insert(pending.id, pending);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to fetch pending withdrawal {}: {e}",
+                            event.pending_id
+                        );
+                    }
+                }
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 let mut state = state.state_mut();

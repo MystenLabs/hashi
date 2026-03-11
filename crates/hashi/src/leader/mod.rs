@@ -660,7 +660,7 @@ impl LeaderService {
         // 3. Build the WithdrawalTxSigning and get BLS certificate via fan-out
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: pending.id,
-            request_ids: pending.request_ids.clone(),
+            request_ids: pending.request_ids(),
             signatures: witness_signatures.clone(),
         };
 
@@ -714,7 +714,7 @@ impl LeaderService {
         if let Err(e) = self
             .submit_sign_withdrawal(
                 &pending.id,
-                &pending.request_ids,
+                &pending.request_ids(),
                 &witness_signatures,
                 signed.committee_signature(),
             )
