@@ -33,6 +33,7 @@ pub fn load_ed25519_private_key(path_or_pem: &str) -> anyhow::Result<Ed25519Priv
 /// Supported formats:
 /// - DER-encoded binary file
 /// - PEM-encoded text file
+/// - Sui keystore JSON (array of base64 strings with scheme byte prefix)
 pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519PrivateKey> {
     let contents = std::fs::read(path)?;
 
@@ -41,11 +42,28 @@ pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519
         return Ok(pk);
     }
 
-    // Try PEM format
-    if let Ok(contents_str) = std::str::from_utf8(&contents)
-        && let Ok(pk) = Ed25519PrivateKey::from_pem(contents_str)
-    {
-        return Ok(pk);
+    if let Ok(contents_str) = std::str::from_utf8(&contents) {
+        // Try PEM format
+        if let Ok(pk) = Ed25519PrivateKey::from_pem(contents_str) {
+            return Ok(pk);
+        }
+
+        // Try Sui keystore JSON format: ["base64key1", "base64key2", ...]
+        // Each key is base64-encoded with a leading scheme byte (0x00 = Ed25519).
+        if let Ok(keys) = serde_json::from_str::<Vec<String>>(contents_str.trim()) {
+            for encoded in &keys {
+                let Ok(bytes) = <base64ct::Base64 as base64ct::Encoding>::decode_vec(encoded)
+                else {
+                    continue;
+                };
+                if bytes.first() == Some(&0x00)
+                    && let Ok(raw) =
+                        <&[u8] as TryInto<[u8; 32]>>::try_into(bytes.get(1..).unwrap_or_default())
+                {
+                    return Ok(Ed25519PrivateKey::new(raw));
+                }
+            }
+        }
     }
 
     anyhow::bail!("unsupported key format in '{}'", path.display())
