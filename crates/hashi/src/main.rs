@@ -81,6 +81,15 @@ enum Commands {
         #[clap(subcommand)]
         action: hashi::cli::WithdrawCommands,
     },
+
+    /// Check hBTC balance for a Sui address
+    Balance {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        /// Sui address to query
+        address: String,
+    },
 }
 
 #[tokio::main]
@@ -105,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Withdraw { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Withdraw { action }).await
+        }
+        Commands::Balance { cli_opts, address } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Balance { address }).await
         }
     }
 }

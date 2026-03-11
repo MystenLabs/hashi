@@ -211,9 +211,10 @@ pub enum ConfigCommands {
 pub enum DepositCommands {
     /// Generate a Taproot deposit address from the on-chain MPC public key
     GenerateAddress {
-        /// Sui address that will receive hBTC (used as derivation path)
+        /// Sui address that will receive hBTC (used as derivation path).
+        /// Use empty string for the change address (no recipient).
         #[clap(long)]
-        recipient: Option<String>,
+        recipient: String,
     },
 
     /// Submit a deposit request on Sui with existing UTXO info
@@ -383,6 +384,7 @@ pub enum CliCommand {
     Config { action: ConfigCommands },
     Deposit { action: DepositCommands },
     Withdraw { action: WithdrawCommands },
+    Balance { address: String },
 }
 
 /// Run a CLI command
@@ -493,6 +495,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         }
         CliCommand::Withdraw { action } => {
             commands::withdraw::run(action, &config, &tx_opts).await?;
+        }
+        CliCommand::Balance { address } => {
+            commands::balance::run(&config, &address).await?;
         }
     }
 

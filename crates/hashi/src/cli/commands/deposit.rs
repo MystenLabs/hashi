@@ -17,7 +17,7 @@ use crate::cli::types::display;
 pub async fn run(action: DepositCommands, config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     match action {
         DepositCommands::GenerateAddress { recipient } => {
-            generate_address(config, recipient.as_deref()).await
+            generate_address(config, &recipient).await
         }
         DepositCommands::Request {
             txid,
@@ -68,7 +68,7 @@ pub fn cli_derive_deposit_address(
     crate::deposits::derive_deposit_address(&mpc_key, recipient, btc_network)
 }
 
-async fn generate_address(config: &CliConfig, recipient: Option<&str>) -> Result<()> {
+async fn generate_address(config: &CliConfig, recipient: &str) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let mpc_pubkey = client.fetch_mpc_public_key();
@@ -76,10 +76,16 @@ async fn generate_address(config: &CliConfig, recipient: Option<&str>) -> Result
         anyhow::bail!("MPC public key not available on-chain. Has the committee completed DKG?");
     }
 
-    let recipient_addr = recipient
-        .map(|r| r.parse::<sui_sdk_types::Address>())
-        .transpose()
-        .context("Invalid recipient Sui address")?;
+    let is_change = recipient.is_empty();
+    let recipient_addr = if is_change {
+        None
+    } else {
+        Some(
+            recipient
+                .parse::<sui_sdk_types::Address>()
+                .context("Invalid recipient Sui address")?,
+        )
+    };
 
     let btc_network = crate::btc_monitor::config::parse_btc_network(
         config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
@@ -87,12 +93,18 @@ async fn generate_address(config: &CliConfig, recipient: Option<&str>) -> Result
 
     let address = cli_derive_deposit_address(&mpc_pubkey, recipient_addr.as_ref(), btc_network)?;
 
-    println!("\n{}", "Deposit Address".bold());
+    let title = if is_change {
+        "Deposit Address (Change Address)"
+    } else {
+        "Deposit Address"
+    };
+
+    println!("\n{}", title.bold());
     println!("{}", "━".repeat(50).dimmed());
     println!("  {} {}", "Address:".bold(), address.to_string().green());
     println!("  {} {:?}", "Network:".bold(), btc_network);
-    if let Some(r) = recipient {
-        println!("  {} {}", "hBTC Recipient:".bold(), r);
+    if !is_change {
+        println!("  {} {}", "hBTC Recipient:".bold(), recipient);
     }
     println!("{}", "━".repeat(50).dimmed());
 

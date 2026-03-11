@@ -62,6 +62,10 @@ enum Commands {
         #[clap(long, default_value = "4")]
         num_validators: usize,
 
+        /// Enable verbose tracing output
+        #[clap(long, short)]
+        verbose: bool,
+
         #[command(flatten)]
         opts: LocalnetOpts,
     },
@@ -203,8 +207,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start {
             num_validators,
+            verbose,
             opts,
-        } => cmd_start(num_validators, &opts.data_dir).await,
+        } => cmd_start(num_validators, verbose, &opts.data_dir).await,
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
@@ -228,7 +233,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_start(num_validators: usize, data_dir: &Path) -> Result<()> {
+async fn cmd_start(num_validators: usize, verbose: bool, data_dir: &Path) -> Result<()> {
     // Check for existing running instance
     if let Ok(state) = LocalnetState::load(data_dir) {
         if state.is_alive() {
@@ -240,10 +245,16 @@ async fn cmd_start(num_validators: usize, data_dir: &Path) -> Result<()> {
         print_warning("Found stale state file, cleaning up...");
     }
 
+    let default_level = if verbose {
+        tracing::level_filters::LevelFilter::INFO
+    } else {
+        tracing::level_filters::LevelFilter::OFF
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::OFF.into())
+                .with_default_directive(default_level.into())
                 .from_env_lossy(),
         )
         .with_target(false)
