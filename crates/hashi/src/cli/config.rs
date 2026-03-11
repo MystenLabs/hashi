@@ -25,7 +25,7 @@ pub struct BitcoinConfig {
     /// RPC authentication password
     pub rpc_password: Option<String>,
 
-    /// Bitcoin network: "regtest", "testnet", or "mainnet"
+    /// Bitcoin network: "regtest", "testnet4", or "mainnet"
     pub network: Option<String>,
 
     /// Path to a WIF-encoded private key file for BTC operations
@@ -60,7 +60,8 @@ fn default_sui_rpc_url() -> String {
     "https://fullnode.mainnet.sui.io:443".to_string()
 }
 
-const DEFAULT_LOCALNET_DIR: &str = ".hashi/localnet";
+/// Default path for the CLI config file written by `hashi-localnet start`.
+const DEFAULT_CONFIG_PATH: &str = ".hashi/localnet/hashi-cli.toml";
 
 impl Default for CliConfig {
     fn default() -> Self {
@@ -88,9 +89,8 @@ pub struct BitcoinOverrides {
 impl CliConfig {
     /// Load configuration from file and CLI overrides.
     ///
-    /// When `no_localnet` is false and no explicit config is provided, checks
-    /// for a running localnet at `.hashi/localnet/state.json` and auto-populates
-    /// connection details from it.
+    /// When no explicit config path is provided, checks for a default config
+    /// file at `.hashi/localnet/hashi-cli.toml` (written by `hashi-localnet start`).
     pub fn load(
         config_path: Option<&Path>,
         sui_rpc_url: Option<String>,
@@ -98,18 +98,15 @@ impl CliConfig {
         hashi_object_id: Option<String>,
         keypair_path: Option<PathBuf>,
         btc_overrides: BitcoinOverrides,
-        no_localnet: bool,
     ) -> Result<Self> {
+        let default_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let mut config = if let Some(path) = config_path {
             Self::load_from_file(path)?
+        } else if default_path.exists() {
+            Self::load_from_file(&default_path)?
         } else {
             Self::default()
         };
-
-        // Auto-discover running localnet when no explicit config is provided
-        if !no_localnet && config_path.is_none() {
-            config.try_apply_localnet_state();
-        }
 
         // Apply CLI overrides (these always win)
         if let Some(url) = sui_rpc_url {
@@ -146,66 +143,6 @@ impl CliConfig {
 
         toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))
-    }
-
-    /// Try to auto-populate config from a running localnet state file.
-    ///
-    /// The state file is written by the `hashi-localnet` binary (in the
-    /// `e2e-tests` crate). We deserialize just the fields we need here.
-    fn try_apply_localnet_state(&mut self) {
-        let state_path = PathBuf::from(DEFAULT_LOCALNET_DIR).join("state.json");
-        let Ok(contents) = std::fs::read_to_string(&state_path) else {
-            return;
-        };
-
-        #[derive(Deserialize)]
-        struct LocalnetState {
-            pid: u32,
-            sui_rpc_url: String,
-            btc_rpc_url: String,
-            btc_rpc_user: String,
-            btc_rpc_password: String,
-            package_id: String,
-            hashi_object_id: String,
-            funded_sui_keypair_path: Option<String>,
-            btc_network: Option<String>,
-        }
-
-        let Ok(state) = serde_json::from_str::<LocalnetState>(&contents) else {
-            return;
-        };
-
-        // Check if the process is still alive using `kill -0`
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &state.pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !alive {
-            return;
-        }
-
-        tracing::debug!("Auto-discovered running localnet (pid {})", state.pid);
-
-        self.sui_rpc_url = state.sui_rpc_url;
-        if let Ok(addr) = Address::from_hex(&state.package_id) {
-            self.package_id = Some(addr);
-        }
-        if let Ok(addr) = Address::from_hex(&state.hashi_object_id) {
-            self.hashi_object_id = Some(addr);
-        }
-        if let Some(ref keypair_path) = state.funded_sui_keypair_path {
-            self.keypair_path = Some(PathBuf::from(keypair_path));
-        }
-
-        self.bitcoin = Some(BitcoinConfig {
-            rpc_url: Some(state.btc_rpc_url),
-            rpc_user: Some(state.btc_rpc_user),
-            rpc_password: Some(state.btc_rpc_password),
-            network: state.btc_network,
-            private_key_path: None,
-        });
     }
 
     fn apply_btc_overrides(&mut self, overrides: BitcoinOverrides) {
@@ -255,9 +192,8 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
 # This is the main Hashi shared object that holds state
 # hashi_object_id = "0x..."
 
-# Path to your keypair file for signing transactions
-# Supports: Sui keystore format, or raw private key
-# keypair_path = "/path/to/keypair.json"
+# Path to your keypair file for signing transactions (PEM or DER format)
+# keypair_path = "/path/to/keypair.pem"
 
 # Optional: Specific gas coin to use for transactions
 # If not specified, the CLI will select an available SUI coin
@@ -329,15 +265,8 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
             _ => bitcoincore_rpc::Auth::None,
         };
 
-        // Append /wallet/test for Bitcoin Core v28+ which no longer auto-selects
-        // a wallet on the base endpoint.
-        let wallet_url = if url.contains("/wallet/") {
-            url.clone()
-        } else {
-            format!("{}/wallet/test", url)
-        };
-        let client = bitcoincore_rpc::Client::new(&wallet_url, auth)
-            .with_context(|| format!("Failed to connect to Bitcoin RPC at {}", wallet_url))?;
+        let client = bitcoincore_rpc::Client::new(url, auth)
+            .with_context(|| format!("Failed to connect to Bitcoin RPC at {}", url))?;
         Ok(Some(client))
     }
 

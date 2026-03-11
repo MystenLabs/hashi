@@ -854,7 +854,7 @@ impl WithdrawalCommitmentError {
     }
 }
 
-fn witness_program_from_address(address: &BitcoinAddress) -> anyhow::Result<Vec<u8>> {
+pub fn witness_program_from_address(address: &BitcoinAddress) -> anyhow::Result<Vec<u8>> {
     let script = address.script_pubkey();
     let bytes = script.as_bytes();
     match bytes {

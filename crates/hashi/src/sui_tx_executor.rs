@@ -808,6 +808,51 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Execute `withdraw::cancel_withdrawal` to cancel a pending withdrawal request.
+    ///
+    /// The Move function returns a `Coin<BTC>` which is transferred back to the sender.
+    pub async fn execute_cancel_withdrawal(
+        &mut self,
+        withdrawal_id: &Address,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let request_id_arg = builder.pure(withdrawal_id);
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        let refunded_coin = builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("cancel_withdrawal"),
+            ),
+            vec![hashi_arg, request_id_arg, clock_arg],
+        );
+
+        // Transfer the refunded Coin<BTC> back to the sender
+        let sender = self.signer.public_key().derive_address();
+        let sender_arg = builder.pure(&sender);
+        builder.transfer_objects(vec![refunded_coin], sender_arg);
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "cancel_withdrawal failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
     /// Execute `withdraw::confirm_withdrawal` to finalize a withdrawal on-chain.
     ///
     /// The Move function expects:

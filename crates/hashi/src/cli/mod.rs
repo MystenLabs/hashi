@@ -55,17 +55,13 @@ pub struct CliGlobalOpts {
     #[clap(long, env = "BTC_RPC_PASSWORD")]
     pub btc_rpc_password: Option<String>,
 
-    /// Bitcoin network: regtest, testnet, or mainnet (overrides config file)
+    /// Bitcoin network: regtest, testnet4, or mainnet (overrides config file)
     #[clap(long, env = "BTC_NETWORK")]
     pub btc_network: Option<String>,
 
     /// Path to Bitcoin private key file in WIF format (overrides config file)
     #[clap(long, env = "BTC_PRIVATE_KEY")]
     pub btc_private_key: Option<std::path::PathBuf>,
-
-    /// Disable automatic localnet discovery
-    #[clap(long)]
-    pub no_localnet: bool,
 
     /// Enable verbose output
     #[clap(long, short)]
@@ -220,17 +216,6 @@ pub enum DepositCommands {
         recipient: Option<String>,
     },
 
-    /// Send BTC from the configured wallet to the deposit address
-    SendBtc {
-        /// Amount of BTC to deposit (in satoshis)
-        #[clap(long)]
-        amount: u64,
-
-        /// Sui address that will receive hBTC
-        #[clap(long)]
-        recipient: Option<String>,
-    },
-
     /// Submit a deposit request on Sui with existing UTXO info
     Request {
         /// Bitcoin transaction ID containing the deposit
@@ -242,17 +227,6 @@ pub enum DepositCommands {
         vout: u32,
 
         /// Amount deposited (in satoshis)
-        #[clap(long)]
-        amount: u64,
-
-        /// Sui address that will receive hBTC
-        #[clap(long)]
-        recipient: Option<String>,
-    },
-
-    /// Combined flow: send BTC, mine blocks (if localnet), then create request
-    Execute {
-        /// Amount of BTC to deposit (in satoshis)
         #[clap(long)]
         amount: u64,
 
@@ -431,7 +405,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         opts.hashi_object_id,
         opts.keypair,
         btc_overrides,
-        opts.no_localnet,
     )?;
 
     let tx_opts = TxOptions {

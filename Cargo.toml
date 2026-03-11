@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+default-members = ["crates/hashi"]
 
 [workspace.dependencies]
 # sui sdk crates
@@ -65,6 +66,7 @@ backon = "1"
 test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
+jiff = "0.2"
 
 # fastcrypto
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "8101176" }

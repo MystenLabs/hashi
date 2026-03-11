@@ -19,27 +19,19 @@ pub async fn run(action: DepositCommands, config: &CliConfig, tx_opts: &TxOption
         DepositCommands::GenerateAddress { recipient } => {
             generate_address(config, recipient.as_deref()).await
         }
-        DepositCommands::SendBtc { amount, recipient } => {
-            send_btc(config, amount, recipient.as_deref())
-                .await
-                .map(|_| ())
-        }
         DepositCommands::Request {
             txid,
             vout,
             amount,
             recipient,
         } => request(config, tx_opts, &txid, vout, amount, recipient.as_deref()).await,
-        DepositCommands::Execute { amount, recipient } => {
-            execute(config, tx_opts, amount, recipient.as_deref()).await
-        }
         DepositCommands::Status { request_id } => status(config, &request_id).await,
         DepositCommands::List => list(config).await,
     }
 }
 
 /// Parse raw on-chain MPC public key bytes and derive the deposit address.
-fn cli_derive_deposit_address(
+pub fn cli_derive_deposit_address(
     mpc_pubkey_bytes: &[u8],
     recipient: Option<&sui_sdk_types::Address>,
     btc_network: bitcoin::Network,
@@ -91,7 +83,7 @@ async fn generate_address(config: &CliConfig, recipient: Option<&str>) -> Result
 
     let btc_network = crate::btc_monitor::config::parse_btc_network(
         config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
-    );
+    )?;
 
     let address = cli_derive_deposit_address(&mpc_pubkey, recipient_addr.as_ref(), btc_network)?;
 
@@ -105,70 +97,6 @@ async fn generate_address(config: &CliConfig, recipient: Option<&str>) -> Result
     println!("{}", "━".repeat(50).dimmed());
 
     Ok(())
-}
-
-/// Send BTC to the deposit address. Returns the (txid, vout).
-async fn send_btc(
-    config: &CliConfig,
-    amount: u64,
-    recipient: Option<&str>,
-) -> Result<(bitcoin::Txid, u32)> {
-    let client = HashiClient::new(config).await?;
-
-    let mpc_pubkey = client.fetch_mpc_public_key();
-    if mpc_pubkey.is_empty() {
-        anyhow::bail!("MPC public key not available on-chain.");
-    }
-
-    let recipient_addr = recipient
-        .map(|r| r.parse::<sui_sdk_types::Address>())
-        .transpose()
-        .context("Invalid recipient Sui address")?;
-
-    let btc_network = crate::btc_monitor::config::parse_btc_network(
-        config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
-    );
-
-    let deposit_address =
-        cli_derive_deposit_address(&mpc_pubkey, recipient_addr.as_ref(), btc_network)?;
-
-    print_info(&format!(
-        "Sending {} sats to deposit address {}",
-        amount, deposit_address
-    ));
-
-    let btc_rpc = config.require_btc_rpc_client()?;
-
-    use bitcoincore_rpc::RpcApi;
-    let txid = btc_rpc.send_to_address(
-        &deposit_address,
-        bitcoin::Amount::from_sat(amount),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-
-    print_success(&format!("BTC sent! txid: {}", txid));
-
-    // Find the vout
-    let tx = btc_rpc.get_raw_transaction(&txid, None)?;
-    let vout = tx
-        .output
-        .iter()
-        .position(|output| {
-            output.value == bitcoin::Amount::from_sat(amount)
-                && output.script_pubkey == deposit_address.script_pubkey()
-        })
-        .context("Could not find matching output in transaction")? as u32;
-
-    println!("  {} {}", "txid:".bold(), txid);
-    println!("  {} {}", "vout:".bold(), vout);
-    println!("  {} {} sats", "amount:".bold(), amount);
-
-    Ok((txid, vout))
 }
 
 async fn request(
@@ -208,15 +136,8 @@ async fn request(
     let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
 
-    let mut txid_bytes: [u8; 32] = hex::decode(txid)
-        .context("Invalid txid hex")?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("txid must be 32 bytes (64 hex chars)"))?;
-    // Bitcoin displays txids in reversed byte order. The on-chain storage and
-    // validator code use bitcoin::Txid::from_byte_array which expects internal
-    // (reversed) order, so we must reverse the display-order hex bytes.
-    txid_bytes.reverse();
-    let txid_address = sui_sdk_types::Address::new(txid_bytes);
+    let parsed_txid: bitcoin::Txid = txid.parse().context("Invalid txid")?;
+    let txid_address = sui_sdk_types::Address::new(parsed_txid.to_byte_array());
 
     print_info("Submitting deposit request on Sui...");
 
@@ -225,32 +146,6 @@ async fn request(
         .await?;
 
     print_success(&format!("Deposit request created: {}", request_id));
-
-    Ok(())
-}
-
-async fn execute(
-    config: &CliConfig,
-    _tx_opts: &TxOptions,
-    amount: u64,
-    recipient: Option<&str>,
-) -> Result<()> {
-    print_info("Executing combined deposit flow...");
-
-    // Step 1: Send BTC
-    let (txid, vout) = send_btc(config, amount, recipient).await?;
-
-    // Step 2: Mine blocks if localnet is detected
-    if let Some(btc_client) = config.btc_rpc_client()? {
-        print_info("Bitcoin RPC available, mining 10 blocks...");
-        use bitcoincore_rpc::RpcApi;
-        let addr = btc_client.get_new_address(None, None)?.assume_checked();
-        btc_client.generate_to_address(10, &addr)?;
-        print_success("Mined 10 blocks");
-    }
-
-    // Step 3: Submit the deposit request on Sui
-    request(config, _tx_opts, &txid.to_string(), vout, amount, recipient).await?;
 
     Ok(())
 }
@@ -274,8 +169,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         return Ok(());
     };
 
-    let mut txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
-    txid_bytes.reverse();
+    let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
     let txid = bitcoin::Txid::from_byte_array(txid_bytes);
     println!(
         "  {} {}",
@@ -334,14 +228,14 @@ async fn list(config: &CliConfig) -> Result<()> {
             "Requested".bold()
         );
         for dep in &deposits {
-            let mut txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
-            txid_bytes.reverse();
-            let txid_hex = hex::encode(txid_bytes);
+            let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
+            let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+            let txid_str = txid.to_string();
             println!(
                 "  {:<20} {:<14} {}:{:<3} {:<10} {}",
                 display::format_address(&dep.id),
                 dep.utxo.amount,
-                &txid_hex[..8],
+                &txid_str[..8],
                 dep.utxo.id.vout,
                 "Pending".yellow(),
                 display::format_timestamp(dep.timestamp_ms)

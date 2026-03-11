@@ -29,6 +29,7 @@ futures.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 clap.workspace = true
 colored.workspace = true
+rand.workspace = true
 nix = { version = "0.26.4", features = ["signal"] }
 tracing-subscriber.workspace = true
 
@@ -38,5 +39,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 fastcrypto-tbls.workspace = true
-rand.workspace = true
 tracing-subscriber.workspace = true

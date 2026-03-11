@@ -12,6 +12,7 @@ use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::cli::types::display;
+use crate::withdrawals::witness_program_from_address;
 
 pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     match action {
@@ -22,18 +23,6 @@ pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptio
         WithdrawCommands::Cancel { request_id } => cancel(config, tx_opts, &request_id).await,
         WithdrawCommands::Status { request_id } => status(config, &request_id).await,
         WithdrawCommands::List => list(config).await,
-    }
-}
-
-fn extract_witness_program(address: &bitcoin::Address) -> Result<Vec<u8>> {
-    let script = address.script_pubkey();
-    let bytes = script.as_bytes();
-    match bytes {
-        [0x00, 0x14, rest @ ..] if rest.len() == 20 => Ok(rest.to_vec()),
-        [0x51, 0x20, rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
-        _ => anyhow::bail!(
-            "Unsupported script pubkey for withdrawal: {script}. Use a P2WPKH or P2TR address."
-        ),
     }
 }
 
@@ -57,13 +46,13 @@ async fn request(
     // Parse the BTC destination address and verify it matches the configured network
     let btc_network = crate::btc_monitor::config::parse_btc_network(
         config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
-    );
+    )?;
     let btc_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
         btc_address.parse().context("Invalid Bitcoin address")?;
     let btc_addr = btc_addr
         .require_network(btc_network)
         .context("Withdrawal address does not match the configured Bitcoin network")?;
-    let destination_bytes = extract_witness_program(&btc_addr)?;
+    let destination_bytes = witness_program_from_address(&btc_addr)?;
 
     // Get withdrawal fee from on-chain state
     let client_for_fee = HashiClient::new(config).await?;
@@ -106,36 +95,8 @@ async fn cancel(config: &CliConfig, _tx_opts: &TxOptions, request_id: &str) -> R
     let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
 
-    use crate::sui_tx_executor::SUI_CLOCK_OBJECT_ID;
-    use sui_sdk_types::Identifier;
-    use sui_transaction_builder::Function;
-    use sui_transaction_builder::ObjectInput;
-    use sui_transaction_builder::TransactionBuilder;
-
-    let mut builder = TransactionBuilder::new();
-    let hashi_arg = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    let clock_arg = builder.object(
-        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-            .as_shared()
-            .with_mutable(false),
-    );
-    let request_id_arg = builder.pure(&req_addr);
-
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("withdraw"),
-            Identifier::from_static("cancel_withdrawal"),
-        ),
-        vec![hashi_arg, request_id_arg, clock_arg],
-    );
-
     print_info("Cancelling withdrawal...");
-    executor.execute(builder).await?;
+    executor.execute_cancel_withdrawal(&req_addr).await?;
     print_success("Withdrawal cancelled.");
 
     Ok(())

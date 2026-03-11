@@ -297,8 +297,16 @@ impl HashiNetworkBuilder {
             let node_handle = HashiNodeHandle::new(config)?;
             nodes.push(node_handle);
         }
-        // Start only the active nodes
-        for node in &mut nodes[..initially_active] {
+        // Start only the active nodes.
+        // Stagger startup so each validator's Kyoto light client finishes its
+        // initial compact-filter-header sync before the next one connects to
+        // the same bitcoind P2P peer. Without this delay all Kyoto instances
+        // race on CFilter headers, triggering peer bans and crashes on regtest
+        // (which has no DNS seeds for recovery).
+        for (i, node) in nodes[..initially_active].iter_mut().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
             node.start().await?;
             debug!(
                 "Created Hashi node {} at listen: {}, endpoint: {}, metrics: {}",
