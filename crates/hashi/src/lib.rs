@@ -253,7 +253,58 @@ impl Hashi {
         )?)
     }
 
+    /// Verify the local config's `bitcoin_chain_id` matches the value stored on-chain.
+    fn verify_bitcoin_chain_id(&self) -> anyhow::Result<()> {
+        use bitcoin::hashes::Hash as _;
+        use std::str::FromStr;
+
+        let onchain_chain_id = self
+            .onchain_state()
+            .state()
+            .hashi()
+            .config
+            .bitcoin_chain_id()
+            .ok_or_else(|| anyhow!("bitcoin_chain_id not found in on-chain config"))?;
+
+        let local_chain_id = self.config.bitcoin_chain_id();
+        let block_hash = btc_monitor::config::BlockHash::from_str(local_chain_id)?;
+        let local_addr = sui_sdk_types::Address::new(*block_hash.as_byte_array());
+
+        anyhow::ensure!(
+            local_addr == onchain_chain_id,
+            "bitcoin chain ID mismatch: local config has {local_chain_id}, \
+             but on-chain value is {onchain_chain_id}"
+        );
+
+        tracing::info!("Bitcoin chain ID verified: {local_chain_id}");
+        Ok(())
+    }
+
+    /// Verify the connected bitcoind is on the expected network.
+    fn verify_bitcoind_network(&self) -> anyhow::Result<()> {
+        use bitcoincore_rpc::RpcApi;
+
+        let rpc = bitcoincore_rpc::Client::new(
+            self.config.bitcoin_rpc(),
+            self.config.bitcoin_rpc_auth(),
+        )?;
+
+        let info = rpc.get_blockchain_info()?;
+        let expected = self.config.bitcoin_network();
+
+        anyhow::ensure!(
+            info.chain == expected,
+            "bitcoind network mismatch: expected {expected:?}, but node reports {:?}",
+            info.chain
+        );
+
+        tracing::info!("Bitcoind network verified: {expected:?}");
+        Ok(())
+    }
+
     fn initialize_btc_monitor(&self) -> anyhow::Result<Service> {
+        self.verify_bitcoind_network()?;
+
         let monitor_config = crate::btc_monitor::config::MonitorConfig::builder()
             .network(self.config.bitcoin_network())
             .confirmation_threshold(self.config.bitcoin_confirmation_threshold())
@@ -310,6 +361,9 @@ impl Hashi {
 
         // Initialize
         let onchain_service = self.initialize_onchain_state().await?;
+
+        // Verify the local bitcoin_chain_id matches the on-chain value.
+        self.verify_bitcoin_chain_id()?;
 
         // Sweep any SUI in the configured account to AB to enable parallelization of txns
         sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)

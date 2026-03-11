@@ -474,6 +474,13 @@ impl Config {
     pub fn paused(&self) -> bool {
         matches!(self.config.get("paused"), Some(ConfigValue::Bool(true)))
     }
+
+    pub fn bitcoin_chain_id(&self) -> Option<Address> {
+        match self.config.get("bitcoin_chain_id") {
+            Some(ConfigValue::Address(v)) => Some(*v),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
