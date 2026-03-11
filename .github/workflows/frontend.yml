@@ -29,6 +29,6 @@ jobs:
 
       - name: Codegen check
         run: |
-          rm -rf frontend/src/contracts
+          rm -rf frontend/packages/contracts/src
           make codegen
           make is-dirty

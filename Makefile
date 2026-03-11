@@ -27,11 +27,11 @@ fmt-move: ## Format Move code
 
 .PHONY: fmt-frontend
 fmt-frontend: ## Format TypeScript code
-	pnpm --dir frontend fmt
+	pnpm --dir frontend --filter @hashi/contracts fmt
 
 .PHONY: check-fmt-frontend
 check-fmt-frontend: ## Check TypeScript code formatting
-	pnpm --dir frontend check-fmt
+	pnpm --dir frontend --filter @hashi/contracts check-fmt
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint
@@ -84,4 +84,4 @@ help: ## Show this help
 
 .PHONY: codegen
 codegen: ## Generate TypeScript code from Move contracts
-	pnpm --dir frontend codegen
+	pnpm --dir frontend --filter @hashi/contracts codegen

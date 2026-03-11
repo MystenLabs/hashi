@@ -1,11 +1,11 @@
 import type { SuiCodegenConfig } from "@mysten/codegen";
 
 const config: SuiCodegenConfig = {
-  output: "./src/contracts",
+  output: "./src",
   packages: [
     {
       package: "@local-pkg/hashi",
-      path: "../packages/hashi",
+      path: "../../../packages/hashi",
     },
   ],
 };

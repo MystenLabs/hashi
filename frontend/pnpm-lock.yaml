@@ -6,7 +6,9 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  packages/contracts:
     dependencies:
       '@mysten/sui':
         specifier: ^2.6.0
