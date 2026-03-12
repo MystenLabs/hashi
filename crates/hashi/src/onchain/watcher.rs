@@ -328,6 +328,39 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     pending.signatures = Some(event.signatures.clone());
                 }
             }
+            HashiEvent::CpfpSubmittedEvent(event) => {
+                // Re-fetch the full pending withdrawal from chain to get
+                // the complete CpfpInfo (including the Schnorr signature
+                // which is not included in the event).
+                let pending_withdrawals_id = state
+                    .state()
+                    .hashi()
+                    .withdrawal_queue
+                    .pending_withdrawals_id()
+                    .to_owned();
+                match super::fetch_pending_withdrawal(
+                    client,
+                    pending_withdrawals_id,
+                    event.pending_id,
+                )
+                .await
+                {
+                    Ok(pending) => {
+                        state
+                            .state_mut()
+                            .hashi
+                            .withdrawal_queue
+                            .pending_withdrawals
+                            .insert(pending.id, pending);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to fetch pending withdrawal {} after CPFP: {e}",
+                            event.pending_id
+                        );
+                    }
+                }
+            }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
                 let mut state = state.state_mut();
 

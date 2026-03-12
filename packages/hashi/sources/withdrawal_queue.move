@@ -227,11 +227,12 @@ public(package) fun submit_cpfp_info(
     assert!(pending.signatures.is_some(), EParentTxNotSigned);
     assert!(pending.cpfp_info.is_none(), ECpfpAlreadySubmitted);
     assert!(pending.change_output.is_some(), ENoChangeOutputForCpfp);
-    pending.cpfp_info = option::some(CpfpInfo {
-        txid: cpfp_txid,
-        change_amount: cpfp_change_amount,
-        signature: cpfp_signature,
-    });
+    pending.cpfp_info =
+        option::some(CpfpInfo {
+            txid: cpfp_txid,
+            change_amount: cpfp_change_amount,
+            signature: cpfp_signature,
+        });
     emit_cpfp_submitted(pending);
 }
 
@@ -353,7 +354,10 @@ public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
             // No CPFP: change UTXO is from the parent tx.
             let change = self.change_output.borrow();
             let change_vout = (self.withdrawal_outputs.length() as u32);
-            (option::some(hashi::utxo::utxo_id(self.txid, change_vout)), option::some(change.amount))
+            (
+                option::some(hashi::utxo::utxo_id(self.txid, change_vout)),
+                option::some(change.amount),
+            )
         }
     } else {
         (option::none(), option::none())

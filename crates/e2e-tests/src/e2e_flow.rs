@@ -8,6 +8,7 @@ mod tests {
     use bitcoincore_rpc::RpcApi;
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
+    use hashi_types::move_types::CpfpSubmittedEvent;
     use hashi_types::move_types::DepositConfirmedEvent;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
     use std::sync::Arc;
@@ -793,6 +794,258 @@ mod tests {
             withdrawal_amount_sats,
         )
         .await?;
+        Ok(())
+    }
+
+    async fn wait_for_cpfp_submitted(
+        sui_client: &mut sui_rpc::Client,
+        timeout: Duration,
+    ) -> Result<CpfpSubmittedEvent> {
+        info!("Waiting for CpfpSubmittedEvent...");
+
+        let start = std::time::Instant::now();
+        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
+            .transactions()
+            .events()
+            .events()
+            .contents()
+            .finish()]);
+        let mut subscription = sui_client
+            .subscription_client()
+            .subscribe_checkpoints(
+                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+            )
+            .await?
+            .into_inner();
+
+        while let Some(item) = subscription.next().await {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for CpfpSubmittedEvent after {:?}",
+                    timeout
+                ));
+            }
+
+            let checkpoint = match item {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {}", e);
+                    continue;
+                }
+            };
+
+            debug!(
+                "Received checkpoint {}, checking for CpfpSubmittedEvent...",
+                checkpoint.cursor()
+            );
+
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    let event_type = event.contents().name();
+
+                    if event_type.contains("CpfpSubmittedEvent") {
+                        match CpfpSubmittedEvent::from_bcs(event.contents().value()) {
+                            Ok(event_data) => {
+                                info!(
+                                    "CPFP submitted! pending_id={}, parent_txid={}, cpfp_txid={}, change_amount={}",
+                                    event_data.pending_id,
+                                    event_data.parent_txid,
+                                    event_data.cpfp_txid,
+                                    event_data.cpfp_change_amount
+                                );
+                                return Ok(event_data);
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse CpfpSubmittedEvent: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
+    }
+
+    /// Test that CPFP automatically triggers for a stuck (unconfirmed) withdrawal.
+    ///
+    /// Flow:
+    /// 1. Deposit BTC so Hashi has UTXOs
+    /// 2. Request a withdrawal — the parent tx enters the mempool
+    /// 3. Do NOT mine BTC blocks, so the parent stays unconfirmed
+    /// 4. Wait for CpfpSubmittedEvent — proves the leader auto-detected the stuck tx
+    ///    and performed the full CPFP flow (MPC sign child, BLS certify, store on-chain)
+    /// 5. Mine blocks to confirm both parent and child
+    /// 6. Wait for WithdrawalConfirmedEvent and verify the change UTXO uses the child's txid
+    #[tokio::test]
+    async fn test_cpfp_auto_triggers_for_stuck_withdrawal() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting CPFP Auto-Trigger E2E Test ===");
+
+        // Setup with low CPFP trigger threshold (5 seconds)
+        let mut networks = {
+            info!("Setting up test networks with cpfp_trigger_after_ms=5000...");
+            let networks = TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_cpfp_trigger_after_ms(5_000)
+                .build()
+                .await?;
+
+            info!("Test networks initialized");
+            info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
+            info!("  - Bitcoin RPC: {}", networks.bitcoin_node.rpc_url());
+            info!("  - Hashi nodes: {}", networks.hashi_network.nodes().len());
+
+            info!("Waiting for MPC key to be ready...");
+            networks.hashi_network.nodes()[0]
+                .wait_for_mpc_key(Duration::from_secs(60))
+                .await?;
+            info!("MPC key ready");
+
+            networks
+        };
+
+        // Step 1: Deposit enough sats for withdrawal + change + CPFP fees
+        let deposit_amount_sats = 50_000u64;
+        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hbtc_balance = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(
+            hbtc_balance, deposit_amount_sats,
+            "Expected deposited hBTC amount"
+        );
+
+        // Step 2: Request withdrawal — parent tx will be signed and broadcast
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap();
+        let withdrawal_amount_sats = 20_000u64;
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+        info!(
+            "Requesting withdrawal of {} sats to {}",
+            withdrawal_amount_sats, btc_destination
+        );
+
+        let mut withdrawal_executor =
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+                .with_signer(user_key.clone());
+        let withdrawal_fee_sui = hashi.onchain_state().withdrawal_fee_sui();
+        let withdrawal_request_id = withdrawal_executor
+            .execute_create_withdrawal_request(
+                withdrawal_amount_sats,
+                destination_bytes,
+                withdrawal_fee_sui,
+            )
+            .await?;
+        info!("Withdrawal request created: {}", withdrawal_request_id);
+
+        // Step 3: Do NOT mine BTC blocks — parent tx stays in mempool (unconfirmed).
+        // The leader will detect it's been unconfirmed for >5s and trigger CPFP.
+        info!("Not mining BTC blocks — waiting for CPFP to trigger automatically...");
+
+        // Step 4: Wait for CpfpSubmittedEvent on Sui
+        let cpfp_event =
+            wait_for_cpfp_submitted(&mut networks.sui_network.client, Duration::from_secs(180))
+                .await?;
+        info!(
+            "CPFP submitted on-chain! cpfp_txid={}, change_amount={}",
+            cpfp_event.cpfp_txid, cpfp_event.cpfp_change_amount
+        );
+
+        // Step 5: Now mine blocks to confirm both parent and child txs
+        info!("Mining blocks to confirm parent and CPFP child transactions...");
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+
+        // Step 6: Wait for WithdrawalConfirmedEvent
+        let confirmed_event = wait_for_withdrawal_confirmation(
+            &mut networks.sui_network.client,
+            Duration::from_secs(60),
+        )
+        .await?;
+        info!("Withdrawal confirmed on Sui");
+
+        drop(miner);
+
+        // Step 7: Verify the change UTXO uses the CPFP child's txid (not the parent's)
+        if let Some(ref change_utxo_id) = confirmed_event.change_utxo_id {
+            let change_txid = change_utxo_id.txid;
+            info!(
+                "Change UTXO txid: {}, CPFP child txid: {}",
+                change_txid, cpfp_event.cpfp_txid
+            );
+            assert_eq!(
+                change_txid, cpfp_event.cpfp_txid,
+                "Change UTXO should reference the CPFP child's txid, not the parent's"
+            );
+            assert_eq!(
+                change_utxo_id.vout, 0,
+                "CPFP child's change output should be at vout 0"
+            );
+        } else {
+            panic!("Expected change UTXO in WithdrawalConfirmedEvent after CPFP");
+        }
+
+        // Step 8: Verify hBTC balance decreased correctly
+        let hbtc_balance_after = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        let expected_remaining = deposit_amount_sats - withdrawal_amount_sats;
+        assert_eq!(
+            hbtc_balance_after, expected_remaining,
+            "Expected remaining hBTC after withdrawal"
+        );
+
+        // Step 9: Verify both parent and child transactions are confirmed on Bitcoin
+        let parent_txid = address_to_txid(&cpfp_event.parent_txid);
+        let cpfp_child_txid = address_to_txid(&cpfp_event.cpfp_txid);
+        let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
+
+        // Verify parent tx is confirmed and pays the correct amount to destination
+        let parent_tx_info = networks
+            .bitcoin_node
+            .rpc_client()
+            .get_raw_transaction_info(&parent_txid, None)?;
+        assert!(
+            parent_tx_info.confirmations.unwrap_or(0) > 0,
+            "Parent withdrawal tx should be confirmed"
+        );
+
+        // Verify parent tx pays the correct amount to the destination
+        let parent_tx = networks
+            .bitcoin_node
+            .rpc_client()
+            .get_raw_transaction(&parent_txid, None)?;
+        let pays_destination = parent_tx.output.iter().any(|output| {
+            output.value == Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc)
+                && output.script_pubkey == btc_destination.script_pubkey()
+        });
+        assert!(
+            pays_destination,
+            "Parent tx should pay {} sats to {}",
+            withdrawal_amount_sats - withdrawal_fee_btc,
+            btc_destination
+        );
+
+        // Verify CPFP child tx is confirmed
+        let cpfp_tx_info = networks
+            .bitcoin_node
+            .rpc_client()
+            .get_raw_transaction_info(&cpfp_child_txid, None)?;
+        assert!(
+            cpfp_tx_info.confirmations.unwrap_or(0) > 0,
+            "CPFP child tx should be confirmed"
+        );
+
+        info!("=== CPFP Auto-Trigger E2E Test Passed ===");
         Ok(())
     }
 }

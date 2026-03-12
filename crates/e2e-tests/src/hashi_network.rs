@@ -204,6 +204,8 @@ pub struct HashiNetworkBuilder {
     pub test_batch_size_per_weight: Option<u16>,
     /// `None` means full Sui voting power weights (no reduction).
     pub test_weight_divisor: Option<u16>,
+    /// Override CPFP trigger threshold (milliseconds).
+    pub cpfp_trigger_after_ms: Option<u64>,
 }
 
 impl HashiNetworkBuilder {
@@ -213,6 +215,7 @@ impl HashiNetworkBuilder {
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
+            cpfp_trigger_after_ms: None,
         }
     }
 
@@ -233,6 +236,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_full_voting_power(mut self) -> Self {
         self.test_weight_divisor = None;
+        self
+    }
+
+    pub fn with_cpfp_trigger_after_ms(mut self, ms: u64) -> Self {
+        self.cpfp_trigger_after_ms = Some(ms);
         self
     }
 
@@ -263,6 +271,7 @@ impl HashiNetworkBuilder {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = self.test_weight_divisor;
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
+            config.cpfp_trigger_after_ms = self.cpfp_trigger_after_ms;
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

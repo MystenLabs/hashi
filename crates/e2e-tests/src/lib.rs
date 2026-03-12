@@ -131,6 +131,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_cpfp_trigger_after_ms(mut self, ms: u64) -> Self {
+        self.hashi_builder = self.hashi_builder.with_cpfp_trigger_after_ms(ms);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")

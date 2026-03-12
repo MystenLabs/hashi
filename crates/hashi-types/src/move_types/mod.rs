@@ -442,6 +442,7 @@ pub enum HashiEvent {
     WithdrawalPickedForProcessingEvent(WithdrawalPickedForProcessingEvent),
     WithdrawalSignedEvent(WithdrawalSignedEvent),
     WithdrawalConfirmedEvent(WithdrawalConfirmedEvent),
+    CpfpSubmittedEvent(CpfpSubmittedEvent),
     UtxoSpentEvent(UtxoSpentEvent),
     SpentUtxoDeletedEvent(SpentUtxoDeletedEvent),
     StartReconfigEvent(StartReconfigEvent),
@@ -506,6 +507,7 @@ impl HashiEvent {
             WithdrawalConfirmedEvent::MODULE_NAME => {
                 WithdrawalConfirmedEvent::from_bcs(bcs.value())?.into()
             }
+            CpfpSubmittedEvent::MODULE_NAME => CpfpSubmittedEvent::from_bcs(bcs.value())?.into(),
             UtxoSpentEvent::MODULE_NAME => UtxoSpentEvent::from_bcs(bcs.value())?.into(),
             SpentUtxoDeletedEvent::MODULE_NAME => {
                 SpentUtxoDeletedEvent::from_bcs(bcs.value())?.into()
@@ -949,6 +951,25 @@ impl MoveType for WithdrawalConfirmedEvent {
 impl From<WithdrawalConfirmedEvent> for HashiEvent {
     fn from(value: WithdrawalConfirmedEvent) -> Self {
         Self::WithdrawalConfirmedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct CpfpSubmittedEvent {
+    pub pending_id: Address,
+    pub parent_txid: Address,
+    pub cpfp_txid: Address,
+    pub cpfp_change_amount: u64,
+}
+
+impl MoveType for CpfpSubmittedEvent {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "CpfpSubmittedEvent";
+}
+
+impl From<CpfpSubmittedEvent> for HashiEvent {
+    fn from(value: CpfpSubmittedEvent) -> Self {
+        Self::CpfpSubmittedEvent(value)
     }
 }
 

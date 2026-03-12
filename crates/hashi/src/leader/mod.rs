@@ -793,7 +793,7 @@ impl LeaderService {
             Ok(TxStatus::NotFound) => {
                 if pending.cpfp_info.is_some() {
                     // CPFP child was submitted but not found, rebuild and rebroadcast both
-                    self.broadcast_cpfp_package(pending, None).await;
+                    self.broadcast_cpfp_package(pending, None, None).await;
                 } else {
                     self.rebuild_and_broadcast_withdrawal_btc_tx(pending, txid)
                         .await;
@@ -902,7 +902,13 @@ impl LeaderService {
         );
 
         // Step 3: Broadcast the package (parent + child)
-        self.broadcast_cpfp_package(pending, Some(&cpfp_tx)).await;
+        // Pass the signature directly since pending.cpfp_info hasn't been updated yet.
+        self.broadcast_cpfp_package(
+            pending,
+            Some(&cpfp_tx),
+            Some(cpfp_signature.to_byte_array().as_ref()),
+        )
+        .await;
     }
 
     /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
@@ -1098,10 +1104,13 @@ impl LeaderService {
     /// Broadcast parent and CPFP child transactions.
     /// If `unsigned_cpfp_tx` is provided (first-time broadcast after signing), uses it directly.
     /// Otherwise, rebuilds the unsigned CPFP child from on-chain data.
+    /// If `cpfp_signature` is provided, uses it directly for witness construction;
+    /// otherwise reads the signature from `pending.cpfp_info`.
     async fn broadcast_cpfp_package(
         &self,
         pending: &PendingWithdrawal,
         unsigned_cpfp_tx: Option<&bitcoin::Transaction>,
+        cpfp_signature: Option<&[u8]>,
     ) {
         // Broadcast the parent (may already be in mempool)
         match self.rebuild_signed_tx_from_onchain(pending) {
@@ -1130,7 +1139,17 @@ impl LeaderService {
         };
 
         // Sign and broadcast
-        let signed_cpfp = match self.rebuild_signed_cpfp_tx(pending, &unsigned) {
+        let sig = match cpfp_signature {
+            Some(sig) => sig.to_vec(),
+            None => match pending.cpfp_info.as_ref() {
+                Some(info) => info.signature.clone(),
+                None => {
+                    error!("No CPFP signature available for broadcast");
+                    return;
+                }
+            },
+        };
+        let signed_cpfp = match self.sign_cpfp_tx_with_witness(&unsigned, &sig) {
             Ok(tx) => tx,
             Err(e) => {
                 error!("Failed to build signed CPFP child tx: {e}");
@@ -1191,21 +1210,14 @@ impl LeaderService {
         ))
     }
 
-    /// Add witness to an unsigned CPFP child tx using the on-chain signature.
-    fn rebuild_signed_cpfp_tx(
+    /// Add witness to an unsigned CPFP child tx using the provided Schnorr signature.
+    fn sign_cpfp_tx_with_witness(
         &self,
-        pending: &PendingWithdrawal,
         unsigned_cpfp_tx: &bitcoin::Transaction,
+        signature: &[u8],
     ) -> anyhow::Result<bitcoin::Transaction> {
-        let cpfp_info = pending
-            .cpfp_info
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No CPFP info"))?;
-
         let mut tx = unsigned_cpfp_tx.clone();
-        tx.input[0].witness = self
-            .inner
-            .build_taproot_witness(&cpfp_info.signature, None)?;
+        tx.input[0].witness = self.inner.build_taproot_witness(signature, None)?;
         Ok(tx)
     }
 

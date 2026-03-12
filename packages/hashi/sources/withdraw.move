@@ -273,12 +273,14 @@ entry fun sign_cpfp(
         .verify_certificate(cpfp_message, cert, threshold)
         .into_message();
 
-    hashi.withdrawal_queue_mut().submit_cpfp_info(
-        pending_withdrawal_id,
-        cpfp_txid,
-        cpfp_change_amount,
-        cpfp_signature,
-    );
+    hashi
+        .withdrawal_queue_mut()
+        .submit_cpfp_info(
+            pending_withdrawal_id,
+            cpfp_txid,
+            cpfp_change_amount,
+            cpfp_signature,
+        );
 }
 
 entry fun confirm_withdrawal(
