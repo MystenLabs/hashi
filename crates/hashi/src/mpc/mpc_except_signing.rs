@@ -511,7 +511,8 @@ impl MpcManager {
                 e
             );
         }
-        let certified = Self::run_as_nonce_party(mpc_manager, p2p_channel, tob_channel).await?;
+        let certified =
+            Self::run_as_nonce_party(mpc_manager, batch_index, p2p_channel, tob_channel).await?;
         let mut mgr = mpc_manager.write().unwrap();
         // Keep only the outputs selected by the party phase. The RPC handler's
         // `try_sign_nonce_message` may have inserted additional outputs
@@ -988,6 +989,7 @@ impl MpcManager {
 
     async fn run_as_nonce_party(
         mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<HashSet<Address>> {
@@ -1034,18 +1036,12 @@ impl MpcManager {
                 }
             }
             let needs_retrieval = {
-                let mgr = mpc_manager.read().unwrap();
-                match mgr.nonce_messages.get(&dealer) {
-                    None => true,
-                    Some(stored_msg) => {
-                        compute_messages_hash(&Messages::NonceGeneration(stored_msg.clone()))
-                            != message.messages_hash
-                    }
-                }
+                let mut mgr = mpc_manager.write().unwrap();
+                mgr.needs_nonce_retrieval(dealer, batch_index, &message.messages_hash)
             };
             if needs_retrieval {
                 tracing::info!(
-                    "Nonce certificate from dealer {:?} received but message missing or hash mismatch, retrieving from signers",
+                    "Nonce message for dealer {:?} not found in memory or DB, retrieving from signers",
                     &dealer
                 );
                 Self::retrieve_nonce_message(mpc_manager, message, &nonce_cert, p2p_channel)
@@ -1157,6 +1153,39 @@ impl MpcManager {
             &nonce.message,
         ) {
             tracing::error!("Failed to persist nonce message for dealer {dealer:?}: {e}");
+        }
+    }
+
+    fn needs_nonce_retrieval(
+        &mut self,
+        dealer: Address,
+        batch_index: u32,
+        expected_hash: &MessageHash,
+    ) -> bool {
+        if let Some(stored) = self.nonce_messages.get(&dealer) {
+            return compute_messages_hash(&Messages::NonceGeneration(stored.clone()))
+                != *expected_hash;
+        }
+        let found_in_db = self
+            .public_messages_store
+            .list_nonce_messages(batch_index)
+            .ok()
+            .and_then(|msgs| {
+                msgs.into_iter()
+                    .find(|(addr, _)| *addr == dealer)
+                    .map(|(_, msg)| msg)
+            });
+        if let Some(db_msg) = found_in_db {
+            let nonce = NonceMessage {
+                batch_index,
+                message: db_msg,
+            };
+            let hash_mismatch =
+                compute_messages_hash(&Messages::NonceGeneration(nonce.clone())) != *expected_hash;
+            self.nonce_messages.insert(dealer, nonce);
+            hash_mismatch
+        } else {
+            true
         }
     }
 
@@ -1474,9 +1503,9 @@ impl MpcManager {
                 .is_signer(&mgr.address, &mgr.committee)
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
-                tracing::error!(
-                    "Self in certificate signers but message not available for dealer {:?}. \
-                     Possible DB corruption — recovering from other signers.",
+                tracing::warn!(
+                    "Self in certificate signers but DKG message not in memory or DB for dealer {:?} \
+                     — retrieving from other signers",
                     message.dealer_address
                 );
             }
@@ -1536,9 +1565,9 @@ impl MpcManager {
                 .is_signer(&mgr.address, &mgr.committee)
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
-                tracing::error!(
-                    "Self in certificate signers but nonce message not available for dealer {:?}. \
-                     Possible DB corruption — recovering from other signers.",
+                tracing::warn!(
+                    "Self in certificate signers but nonce message not in memory or DB for dealer {:?} \
+                     — retrieving from other signers",
                     message.dealer_address
                 );
             }
@@ -1679,9 +1708,9 @@ impl MpcManager {
                 .is_signer(&mgr.address, &mgr.committee)
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
-                tracing::error!(
-                    "Self in certificate signers but rotation messages not available for dealer {:?}. \
-                     Possible DB corruption — recovering from other signers.",
+                tracing::warn!(
+                    "Self in certificate signers but rotation message not in memory or DB for dealer {:?} \
+                     — retrieving from other signers",
                     message.dealer_address
                 );
             }
@@ -3704,6 +3733,7 @@ mod tests {
     struct InMemoryPublicMessagesStore {
         stored: HashMap<Address, avss::Message>,
         rotation_stored: HashMap<Address, RotationMessages>,
+        nonce_stored: HashMap<(u32, Address), batch_avss::Message>,
     }
 
     impl InMemoryPublicMessagesStore {
@@ -3711,6 +3741,7 @@ mod tests {
             Self {
                 stored: HashMap::new(),
                 rotation_stored: HashMap::new(),
+                nonce_stored: HashMap::new(),
             }
         }
     }
@@ -3768,18 +3799,25 @@ mod tests {
 
         fn store_nonce_message(
             &mut self,
-            _batch_index: u32,
-            _dealer: &Address,
-            _message: &batch_avss::Message,
+            batch_index: u32,
+            dealer: &Address,
+            message: &batch_avss::Message,
         ) -> anyhow::Result<()> {
+            self.nonce_stored
+                .insert((batch_index, *dealer), message.clone());
             Ok(())
         }
 
         fn list_nonce_messages(
             &self,
-            _batch_index: u32,
+            batch_index: u32,
         ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-            Ok(vec![])
+            Ok(self
+                .nonce_stored
+                .iter()
+                .filter(|((bi, _), _)| *bi == batch_index)
+                .map(|((_, addr), msg)| (*addr, msg.clone()))
+                .collect())
         }
     }
 
@@ -10318,7 +10356,7 @@ mod tests {
         MpcManager::run_as_nonce_dealer(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
             .await
             .unwrap();
-        MpcManager::run_as_nonce_party(&test_manager, &mock_p2p, &mut mock_tob)
+        MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
             .await
             .unwrap();
 
@@ -10337,6 +10375,98 @@ mod tests {
                 .keys()
                 .any(|k| matches!(k, ComplaintsToProcessKey::NonceGeneration(_))),
             "Should have no nonce complaints after successful run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_as_nonce_party_loads_from_store_after_restart() {
+        let mut rng = rand::thread_rng();
+        let weights: [u16; 4] = [1, 1, 1, 1];
+        let num_validators = weights.len();
+        let setup = TestSetup::with_weights(&weights);
+        let batch_index = 0u32;
+
+        // Create validator 0 with InMemoryPublicMessagesStore so nonce messages persist.
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| {
+                if i == 0 {
+                    setup.create_manager_with_store(i, Box::new(InMemoryPublicMessagesStore::new()))
+                } else {
+                    setup.create_manager(i)
+                }
+            })
+            .collect();
+
+        // Phase 1: Create nonce dealer messages
+        let dealer_messages: Vec<NonceMessage> = (0..num_validators)
+            .map(|i| create_nonce_dealer_message(&setup, i, batch_index, &mut rng))
+            .collect();
+
+        // Phase 2: All validators process all dealer messages and collect certificates
+        let mut certificates = Vec::new();
+        for (dealer_idx, nonce_msg) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_idx);
+            let messages = Messages::NonceGeneration(nonce_msg.clone());
+
+            let mut signatures = Vec::new();
+            for manager in managers.iter_mut() {
+                let response = send_and_assert_ok(manager, dealer_addr, &messages);
+                let sig = MemberSignature::new(
+                    manager.dkg_config.epoch,
+                    manager.address,
+                    response.signature,
+                );
+                signatures.push(sig);
+            }
+
+            let cert =
+                create_test_certificate(setup.committee(), &messages, dealer_addr, signatures)
+                    .unwrap();
+            certificates.push(CertificateV1::NonceGeneration { batch_index, cert });
+        }
+
+        // Phase 3: Simulate restart — clear validator 0's in-memory nonce state
+        // but keep the store intact (simulates restart where DB persists).
+        let mut test_manager = managers.remove(0);
+        let required_weight = 2 * test_manager.dkg_config.max_faulty + 1;
+        test_manager.nonce_messages.clear();
+        test_manager.dealer_nonce_outputs.clear();
+        test_manager.message_responses.clear();
+
+        // Create mock P2P that has NO managers — to verify no P2P retrieval occurs.
+        let mock_p2p = MockP2PChannel::new(HashMap::new(), setup.address(0));
+
+        // Feed all certificates through TOB.
+        let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        // run_as_nonce_party should succeed by loading messages from the store,
+        // not from P2P (which would fail since mock_p2p has no managers).
+        let certified =
+            MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
+                .await
+                .unwrap();
+
+        let mgr = test_manager.read().unwrap();
+        assert!(
+            certified.len() >= required_weight as usize,
+            "Should have certified at least {} dealers, got {}",
+            required_weight,
+            certified.len()
+        );
+        assert!(
+            mgr.dealer_nonce_outputs.len() >= required_weight as usize,
+            "Should have at least {} nonce outputs from store, got {}",
+            required_weight,
+            mgr.dealer_nonce_outputs.len()
+        );
+        // The in-memory cache should have been repopulated from the store
+        // (at least for the certified dealers).
+        assert!(
+            mgr.nonce_messages.len() >= required_weight as usize,
+            "At least {} nonce messages should be repopulated from store, got {}",
+            required_weight,
+            mgr.nonce_messages.len()
         );
     }
 
@@ -10502,7 +10632,7 @@ mod tests {
         MpcManager::run_as_nonce_dealer(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
             .await
             .unwrap();
-        MpcManager::run_as_nonce_party(&test_manager, &mock_p2p, &mut mock_tob)
+        MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
             .await
             .unwrap();
 
