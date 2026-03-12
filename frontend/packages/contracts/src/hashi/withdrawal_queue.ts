@@ -52,7 +52,8 @@ export const PendingWithdrawal = new MoveStruct({
     txid: bcs.Address,
     requests: bcs.vector(WithdrawalRequestInfo),
     inputs: bcs.vector(utxo.Utxo),
-    outputs: bcs.vector(OutputUtxo),
+    withdrawal_outputs: bcs.vector(OutputUtxo),
+    change_output: bcs.option(OutputUtxo),
     timestamp_ms: bcs.u64(),
     randomness: bcs.vector(bcs.u8()),
     signatures: bcs.option(bcs.vector(bcs.vector(bcs.u8()))),
@@ -82,7 +83,8 @@ export const WithdrawalPickedForProcessingEvent = new MoveStruct({
     txid: bcs.Address,
     request_ids: bcs.vector(bcs.Address),
     inputs: bcs.vector(utxo.UtxoInfo),
-    outputs: bcs.vector(OutputUtxo),
+    withdrawal_outputs: bcs.vector(OutputUtxo),
+    change_output: bcs.option(OutputUtxo),
     timestamp_ms: bcs.u64(),
     randomness: bcs.vector(bcs.u8()),
   },
@@ -100,6 +102,8 @@ export const WithdrawalConfirmedEvent = new MoveStruct({
   fields: {
     pending_id: bcs.Address,
     txid: bcs.Address,
+    change_utxo_id: bcs.option(utxo.UtxoId),
+    change_utxo_amount: bcs.option(bcs.u64()),
   },
 });
 export const WithdrawalCancelledEvent = new MoveStruct({
