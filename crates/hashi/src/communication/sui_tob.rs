@@ -161,11 +161,22 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         }
     }
 
-    fn existing_certificate_weight(&self) -> u32 {
-        self.seen_dealers
-            .iter()
-            .filter_map(|dealer| self.committee.weight_of(dealer).ok())
-            .map(|w| w as u32)
-            .sum()
+    async fn certified_dealers(&mut self) -> Vec<Address> {
+        if let Ok(all_certs) = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            &self.committee,
+        )
+        .await
+        {
+            for (dealer, cert) in all_certs {
+                if !self.seen_dealers.contains(&dealer) {
+                    self.seen_dealers.insert(dealer);
+                    self.pending_certs.push_back(cert);
+                }
+            }
+        }
+        self.seen_dealers.iter().copied().collect()
     }
 }

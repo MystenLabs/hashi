@@ -294,7 +294,7 @@ impl MpcService {
             signer,
             committee,
         );
-        let output = MpcManager::run(&mpc_manager, &p2p_channel, &mut tob_channel)
+        let output = MpcManager::run_dkg(&mpc_manager, &p2p_channel, &mut tob_channel)
             .await
             .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
         Ok(output)

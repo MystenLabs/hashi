@@ -85,8 +85,6 @@ where
     /// Receive the next message in the total order
     async fn receive(&mut self) -> ChannelResult<M>;
 
-    /// The total weight of certificates already available on the channel
-    fn existing_certificate_weight(&self) -> u32 {
-        0
-    }
+    /// Fetch existing certificates and return the dealer addresses.
+    async fn certified_dealers(&mut self) -> Vec<Address>;
 }

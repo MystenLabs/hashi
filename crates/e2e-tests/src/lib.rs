@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_dkg_completes() -> Result<()> {
+    async fn test_dkg() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         let test_networks = TestNetworksBuilder::new()

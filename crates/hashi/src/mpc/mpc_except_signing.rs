@@ -423,16 +423,24 @@ impl MpcManager {
     }
 
     // TODO: Consider making dealer and party flows concurrent
-    pub async fn run(
+    pub async fn run_dkg(
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<DkgOutput> {
-        let threshold = {
+        let certified = tob_channel.certified_dealers().await;
+        let (certified_weight, threshold) = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.dkg_config.threshold
+            let weight: u16 = certified
+                .iter()
+                .filter_map(|d| {
+                    let party_id = mgr.committee.index_of(d)? as u16;
+                    mgr.dkg_config.nodes.weight_of(party_id).ok()
+                })
+                .sum();
+            (weight, mgr.dkg_config.threshold)
         };
-        if tob_channel.existing_certificate_weight() < threshold as u32
+        if certified_weight < threshold
             && let Err(e) = Self::run_as_dealer(mpc_manager, p2p_channel, tob_channel).await
         {
             tracing::error!("Dealer phase failed: {}. Continuing as party only.", e);
@@ -463,21 +471,38 @@ impl MpcManager {
                 }
             }
         }
-        if is_member_of_previous_committee {
-            // TODO(Optimization): Skip dealer phase if enough rotation certificates already exist.
-            if let Err(e) = Self::run_key_rotation_as_dealer(
+        if is_member_of_previous_committee
+            && {
+                let certified = ordered_broadcast_channel.certified_dealers().await;
+                let mgr = mpc_manager.read().unwrap();
+                let prev_committee = mgr.previous_committee.as_ref().expect(
+                    "previous_committee must be set when is_member_of_previous_committee is true",
+                );
+                let prev_nodes = mgr.previous_nodes.as_ref().expect(
+                    "previous_nodes must be set when is_member_of_previous_committee is true",
+                );
+                let certified_share_count: usize = certified
+                    .iter()
+                    .filter_map(|d| {
+                        let party_id = prev_committee.index_of(d)? as u16;
+                        prev_nodes.share_ids_of(party_id).ok()
+                    })
+                    .map(|ids| ids.len())
+                    .sum();
+                certified_share_count < previous.threshold as usize
+            }
+            && let Err(e) = Self::run_key_rotation_as_dealer(
                 mpc_manager,
                 &previous,
                 p2p_channel,
                 ordered_broadcast_channel,
             )
             .await
-            {
-                tracing::error!(
-                    "Rotation dealer phase failed: {}. Continuing as party only.",
-                    e
-                );
-            }
+        {
+            tracing::error!(
+                "Rotation dealer phase failed: {}. Continuing as party only.",
+                e
+            );
         }
         Self::run_key_rotation_as_party(
             mpc_manager,
@@ -3206,9 +3231,9 @@ mod tests {
     struct MockOrderedBroadcastChannel {
         certificates: std::sync::Mutex<std::collections::VecDeque<CertificateV1>>,
         published: std::sync::Mutex<Vec<CertificateV1>>,
-        /// Override for existing_certificate_weight().
-        /// If set, returns this value instead of the pending message count.
-        override_existing_weight: Option<u32>,
+        /// Override for certified_dealers().
+        /// If set, returns these addresses instead of extracting from certificates.
+        override_certified_dealers: Option<Vec<Address>>,
         /// If set, publish() will fail with this error message.
         fail_on_publish: Option<String>,
     }
@@ -3218,13 +3243,13 @@ mod tests {
             Self {
                 certificates: std::sync::Mutex::new(certificates.into()),
                 published: std::sync::Mutex::new(Vec::new()),
-                override_existing_weight: None,
+                override_certified_dealers: None,
                 fail_on_publish: None,
             }
         }
 
-        fn with_override_weight(mut self, weight: u32) -> Self {
-            self.override_existing_weight = Some(weight);
+        fn with_override_certified_dealers(mut self, dealers: Vec<Address>) -> Self {
+            self.override_certified_dealers = Some(dealers);
             self
         }
 
@@ -3268,10 +3293,16 @@ mod tests {
                 })
         }
 
-        fn existing_certificate_weight(&self) -> u32 {
-            // Use override if set, otherwise approximate with pending certificate count.
-            self.override_existing_weight
-                .unwrap_or_else(|| self.certificates.lock().unwrap().len() as u32)
+        async fn certified_dealers(&mut self) -> Vec<Address> {
+            if let Some(ref dealers) = self.override_certified_dealers {
+                return dealers.clone();
+            }
+            self.certificates
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.dealer_address())
+                .collect()
         }
     }
 
@@ -3597,6 +3628,10 @@ mod tests {
             } else {
                 unreachable!()
             }
+        }
+
+        async fn certified_dealers(&mut self) -> Vec<Address> {
+            vec![]
         }
     }
 
@@ -4314,10 +4349,10 @@ mod tests {
 
         // All certificates are from dealers 1-4 (not dealer 0)
         // Override weight to 0 so dealer phase runs, but provide enough certs for party to complete
-        let mut mock_tob =
-            MockOrderedBroadcastChannel::new(setup.certificates).with_override_weight(0);
+        let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates)
+            .with_override_certified_dealers(vec![]);
 
-        let output = MpcManager::run(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
+        let output = MpcManager::run_dkg(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
             .await
             .unwrap();
 
@@ -4339,7 +4374,7 @@ mod tests {
         // With 4 certificates and threshold = 2, existing_weight = 4 >= 2, dealer skips
         let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates);
 
-        let output = MpcManager::run(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
+        let output = MpcManager::run_dkg(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
             .await
             .unwrap();
 
@@ -4362,10 +4397,10 @@ mod tests {
         // All certificates are from dealers 1-4 (not dealer 0)
         // Override weight to 0 so dealer phase runs, but make publish fail
         let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates)
-            .with_override_weight(0)
+            .with_override_certified_dealers(vec![])
             .with_fail_on_publish("simulated publish failure");
 
-        let output = MpcManager::run(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
+        let output = MpcManager::run_dkg(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
             .await
             .unwrap();
 
@@ -7918,6 +7953,101 @@ mod tests {
             }
             _ => panic!("Expected rotation certificate"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_key_rotation_skips_dealer_phase() {
+        let mut rng = rand::thread_rng();
+        let rotation_setup = RotationTestSetup::new();
+        // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+
+        // Create test_manager (validator 0, weight=3) with memory store
+        let (mut test_manager, test_dkg_output, _) =
+            rotation_setup.create_rotation_dealer_with_memory_store(0);
+        let test_addr = rotation_setup.setup.address(0);
+        test_manager.source_epoch = rotation_setup.setup.epoch();
+        test_manager.previous_output = Some(test_dkg_output.clone());
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        // Create other managers for MockP2PChannel (validators 1-4)
+        let mut other_managers_map = HashMap::new();
+        for i in 1..5 {
+            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager.previous_output = Some(output);
+            other_managers_map.insert(rotation_setup.setup.address(i), manager);
+        }
+        let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+        // Create rotation certificates from validators 2 (weight=4) and 3 (weight=1).
+        // Combined 5 share indices >= threshold (4) for the party phase.
+        let mut rotation_certificates = Vec::new();
+        {
+            let mut other_managers = mock_p2p.managers.lock().unwrap();
+            for &validator_idx in &[2, 3] {
+                let addr = rotation_setup.setup.address(validator_idx);
+
+                let (rotation_messages, own_sig, epoch) = {
+                    let manager = other_managers.get_mut(&addr).unwrap();
+                    let prev_output = manager.previous_output.clone().unwrap();
+                    let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
+                    let rotation_messages = Messages::Rotation(msgs.clone());
+                    manager.rotation_messages.insert(addr, msgs);
+                    let own_sig = manager
+                        .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
+                        .unwrap();
+                    (rotation_messages, own_sig, manager.dkg_config.epoch)
+                };
+
+                // Get a second signature from validator 1
+                let signer_addr = rotation_setup.setup.address(1);
+                let signer_sig = {
+                    let signer = other_managers.get_mut(&signer_addr).unwrap();
+                    let signer_prev = signer.previous_output.clone().unwrap();
+                    if let Messages::Rotation(ref msgs) = rotation_messages {
+                        signer.rotation_messages.insert(addr, msgs.clone());
+                    }
+                    signer
+                        .try_sign_rotation_messages(&signer_prev, addr, &rotation_messages)
+                        .unwrap()
+                };
+
+                let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
+                let signer_member_sig = MemberSignature::new(epoch, signer_addr, signer_sig);
+                let cert = create_rotation_test_certificate(
+                    rotation_setup.setup.committee(),
+                    &rotation_messages,
+                    addr,
+                    vec![own_member_sig, signer_member_sig],
+                )
+                .unwrap();
+                rotation_certificates.push(CertificateV1::Rotation(cert));
+            }
+        }
+
+        // 2 certs from validators 2 (weight=4) and 3 (weight=1).
+        // certified_dealers() returns their addresses; run_key_rotation computes
+        // weight using previous_committee: 4+1 = 5 >= threshold (4), so dealer skips.
+        let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
+
+        let new_output = MpcManager::run_key_rotation(
+            &test_manager,
+            &rotation_setup.certificates(),
+            &mock_p2p,
+            &mut mock_tob,
+        )
+        .await
+        .unwrap();
+
+        // Verify dealer did NOT publish (skipped)
+        assert_eq!(
+            mock_tob.published_count(),
+            0,
+            "Rotation dealer should be skipped when existing_weight >= threshold"
+        );
+
+        // Verify rotation completed successfully via party phase only
+        assert_eq!(new_output.key_shares.shares.len(), 3);
+        assert_eq!(new_output.public_key, test_dkg_output.public_key);
     }
 
     #[tokio::test]

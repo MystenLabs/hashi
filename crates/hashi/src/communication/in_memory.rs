@@ -77,6 +77,10 @@ where
             tokio::time::sleep(Duration::from_millis(RECEIVE_POLL_INTERVAL_MS)).await;
         }
     }
+
+    async fn certified_dealers(&mut self) -> Vec<Address> {
+        vec![]
+    }
 }
 
 impl<M> InMemoryOrderedBroadcastChannel<M>
