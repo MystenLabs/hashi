@@ -2,8 +2,6 @@
 
 FROM stagex/pallet-rust@sha256:84621c4c29330c8a969489671d46227a0a43f52cdae243f5b91e95781dbfe5ed AS pallet-rust
 FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
-FROM stagex/core-filesystem@sha256:da28831927652291b0fa573092fd41c8c96ca181ea224df7bff40e1833c3db13 AS core-filesystem
-
 #
 # Deps stage: fetch and compile external dependencies (cached until Cargo.toml/Cargo.lock change)
 #
@@ -49,8 +47,15 @@ RUN find crates/ -name "*.rs" -exec touch {} +
 RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
 
 #
-# Package stage: minimal runtime image
+# Package stage: runtime image with debug tools
 #
-FROM core-filesystem
-COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi /usr/bin/hashi
-ENTRYPOINT ["/usr/bin/hashi"]
+FROM debian:bullseye-slim
+
+RUN apt-get update && apt-get -y --no-install-recommends install \
+    ca-certificates curl \
+    iputils-ping netcat-openbsd procps dnsutils \
+    iproute2 tcpdump strace vim-tiny \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi /opt/hashi/bin/hashi
+ENTRYPOINT ["/opt/hashi/bin/hashi"]
