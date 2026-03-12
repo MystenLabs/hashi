@@ -574,7 +574,8 @@ pub struct PendingWithdrawal {
     pub txid: Address,
     pub requests: Vec<WithdrawalRequestInfo>,
     pub inputs: Vec<Utxo>,
-    pub outputs: Vec<OutputUtxo>,
+    pub withdrawal_outputs: Vec<OutputUtxo>,
+    pub change_output: Option<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
@@ -583,6 +584,14 @@ pub struct PendingWithdrawal {
 impl PendingWithdrawal {
     pub fn request_ids(&self) -> Vec<Address> {
         self.requests.iter().map(|r| r.id).collect()
+    }
+
+    pub fn all_outputs(&self) -> Vec<OutputUtxo> {
+        let mut outputs = self.withdrawal_outputs.clone();
+        if let Some(ref change) = self.change_output {
+            outputs.push(change.clone());
+        }
+        outputs
     }
 }
 

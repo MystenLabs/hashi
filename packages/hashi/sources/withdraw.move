@@ -258,11 +258,15 @@ entry fun confirm_withdrawal(
 
     let withdrawal = hashi.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
 
-    // TODO create and insert new UTXO for change if it hasn't already been
-    // inserted
-
     withdrawal.emit_withdrawal_confirmed();
-    withdrawal.destroy_pending_withdrawal();
+    let change_utxo = withdrawal.destroy_pending_withdrawal();
+
+    // Insert the change UTXO back into the active pool
+    if (change_utxo.is_some()) {
+        hashi.utxo_pool_mut().insert_active(change_utxo.destroy_some());
+    } else {
+        change_utxo.destroy_none();
+    };
 }
 
 public fun cancel_withdrawal(

@@ -1,6 +1,6 @@
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, utxo::{Utxo, UtxoInfo}};
+use hashi::{btc::BTC, utxo::{Utxo, UtxoId, UtxoInfo}};
 use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
 
 const NUMBER_OF_RANDOM_BYTES: u16 = 32;
@@ -36,7 +36,8 @@ public struct PendingWithdrawal has store {
     txid: address,
     requests: vector<WithdrawalRequestInfo>,
     inputs: vector<Utxo>,
-    outputs: vector<OutputUtxo>,
+    withdrawal_outputs: vector<OutputUtxo>,
+    change_output: Option<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
     signatures: Option<vector<vector<u8>>>,
@@ -82,7 +83,7 @@ public(package) fun withdrawal_request(
 public(package) fun new_pending_withdrawal(
     requests: vector<WithdrawalRequestInfo>,
     inputs: vector<Utxo>,
-    outputs: vector<OutputUtxo>,
+    mut outputs: vector<OutputUtxo>,
     txid: address,
     withdrawal_fee_btc: u64,
     clock: &Clock,
@@ -120,6 +121,13 @@ public(package) fun new_pending_withdrawal(
     // storing the pubkey on chain.
     // https://linear.app/mysten-labs/issue/IOP-226/dkg-commit-mpc-public-key-onchain-and-read-from-there
 
+    // Extract the trailing change output if present.
+    let change_output = if (output_count == request_count + 1) {
+        option::some(outputs.pop_back())
+    } else {
+        option::none()
+    };
+
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(NUMBER_OF_RANDOM_BYTES);
 
@@ -128,7 +136,8 @@ public(package) fun new_pending_withdrawal(
         txid,
         requests,
         inputs,
-        outputs,
+        withdrawal_outputs: outputs,
+        change_output,
         timestamp_ms: clock.timestamp_ms(),
         randomness,
         signatures: option::none(),
@@ -216,14 +225,15 @@ public(package) fun request_into_parts(
     (info, btc)
 }
 
-// TODO return the change UTXO?
-public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal) {
+/// Destroy a pending withdrawal, returning the change UTXO if one exists.
+public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<Utxo> {
     let PendingWithdrawal {
         id: _,
-        txid: _,
+        txid,
         requests: _,
         inputs,
-        outputs: _,
+        withdrawal_outputs,
+        change_output,
         timestamp_ms: _,
         randomness: _,
         signatures: _,
@@ -232,6 +242,18 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal) {
     inputs.destroy!(|utxo| {
         utxo.delete();
     });
+
+    // In case of a change output, insert the change UTXO back into the active UTXO pool.
+    if (change_output.is_some()) {
+        let change = change_output.destroy_some();
+        // Change output is always the last output in the BTC transaction,
+        let change_vout = (withdrawal_outputs.length() as u32);
+        let change_utxo_id = hashi::utxo::utxo_id(txid, change_vout);
+        option::some(hashi::utxo::utxo(change_utxo_id, change.amount, option::none()))
+    } else {
+        change_output.destroy_none();
+        option::none()
+    }
 }
 
 public(package) fun emit_withdrawal_requested(self: &WithdrawalRequest) {
@@ -257,7 +279,8 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdraw
         txid: self.txid,
         request_ids: self.requests.map_ref!(|info| info.id),
         inputs: self.inputs.map_ref!(|u| u.to_info()),
-        outputs: self.outputs,
+        withdrawal_outputs: self.withdrawal_outputs,
+        change_output: self.change_output,
         timestamp_ms: self.timestamp_ms,
         randomness: self.randomness,
     });
@@ -272,9 +295,19 @@ public(package) fun emit_withdrawal_signed(self: &PendingWithdrawal) {
 }
 
 public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
+    let (change_utxo_id, change_utxo_amount) = if (self.change_output.is_some()) {
+        let change = self.change_output.borrow();
+        let change_vout = (self.withdrawal_outputs.length() as u32);
+        (option::some(hashi::utxo::utxo_id(self.txid, change_vout)), option::some(change.amount))
+    } else {
+        (option::none(), option::none())
+    };
+
     sui::event::emit(WithdrawalConfirmedEvent {
         pending_id: self.id,
         txid: self.txid,
+        change_utxo_id,
+        change_utxo_amount,
     });
 }
 
@@ -290,7 +323,8 @@ public(package) fun emit_withdrawal_cancelled(self: &WithdrawalRequest) {
 public(package) fun new_pending_withdrawal_for_testing(
     requests: vector<WithdrawalRequestInfo>,
     inputs: vector<Utxo>,
-    outputs: vector<OutputUtxo>,
+    withdrawal_outputs: vector<OutputUtxo>,
+    change_output: Option<OutputUtxo>,
     txid: address,
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
@@ -300,7 +334,8 @@ public(package) fun new_pending_withdrawal_for_testing(
         txid,
         requests,
         inputs,
-        outputs,
+        withdrawal_outputs,
+        change_output,
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signatures: option::none(),
@@ -309,6 +344,10 @@ public(package) fun new_pending_withdrawal_for_testing(
 
 public(package) fun pending_withdrawal_id(self: &PendingWithdrawal): address {
     self.id
+}
+
+public(package) fun txid(self: &PendingWithdrawal): address {
+    self.txid
 }
 
 public(package) fun requester_address(self: &WithdrawalRequest): address {
@@ -345,7 +384,8 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
     txid: address,
     request_ids: vector<address>,
     inputs: vector<UtxoInfo>,
-    outputs: vector<OutputUtxo>,
+    withdrawal_outputs: vector<OutputUtxo>,
+    change_output: Option<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
 }
@@ -359,6 +399,8 @@ public struct WithdrawalSignedEvent has copy, drop {
 public struct WithdrawalConfirmedEvent has copy, drop {
     pending_id: address,
     txid: address,
+    change_utxo_id: Option<UtxoId>,
+    change_utxo_amount: Option<u64>,
 }
 
 public struct WithdrawalCancelledEvent has copy, drop {

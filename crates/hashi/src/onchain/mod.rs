@@ -1058,24 +1058,28 @@ async fn scrape_pending_withdrawals(
                  id,
                  requests,
                  inputs,
-                 outputs,
+                 withdrawal_outputs,
+                 change_output,
                  timestamp_ms,
                  randomness,
                  signatures,
-                 ..
              }| {
                 let requests = requests
                     .into_iter()
                     .map(convert_move_withdrawal_request_info)
                     .collect();
                 let inputs = inputs.into_iter().map(convert_move_utxo).collect();
-                let outputs = outputs
+                let withdrawal_outputs = withdrawal_outputs
                     .into_iter()
                     .map(|o| types::OutputUtxo {
                         amount: o.amount,
                         bitcoin_address: o.bitcoin_address,
                     })
                     .collect();
+                let change_output = change_output.map(|o| types::OutputUtxo {
+                    amount: o.amount,
+                    bitcoin_address: o.bitcoin_address,
+                });
                 (
                     id,
                     types::PendingWithdrawal {
@@ -1083,7 +1087,8 @@ async fn scrape_pending_withdrawals(
                         txid,
                         requests,
                         inputs,
-                        outputs,
+                        withdrawal_outputs,
+                        change_output,
                         timestamp_ms,
                         randomness,
                         signatures,
@@ -1130,13 +1135,17 @@ fn convert_move_pending_withdrawal(
         txid,
         requests,
         inputs,
-        outputs,
+        withdrawal_outputs,
+        change_output,
         timestamp_ms,
         randomness,
         signatures,
-        ..
     }: move_types::PendingWithdrawal,
 ) -> types::PendingWithdrawal {
+    let convert_output = |o: move_types::OutputUtxo| types::OutputUtxo {
+        amount: o.amount,
+        bitcoin_address: o.bitcoin_address,
+    };
     types::PendingWithdrawal {
         id,
         txid,
@@ -1145,13 +1154,8 @@ fn convert_move_pending_withdrawal(
             .map(convert_move_withdrawal_request_info)
             .collect(),
         inputs: inputs.into_iter().map(convert_move_utxo).collect(),
-        outputs: outputs
-            .into_iter()
-            .map(|o| types::OutputUtxo {
-                amount: o.amount,
-                bitcoin_address: o.bitcoin_address,
-            })
-            .collect(),
+        withdrawal_outputs: withdrawal_outputs.into_iter().map(convert_output).collect(),
+        change_output: change_output.map(convert_output),
         timestamp_ms,
         randomness,
         signatures,

@@ -353,7 +353,7 @@ impl Hashi {
             message.withdrawal_id
         );
 
-        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
+        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &pending.inputs)?;
         let hashi_pubkey = self.get_hashi_pubkey();
 
@@ -444,7 +444,7 @@ impl Hashi {
             })?;
 
         // Rebuild the unsigned BTC tx and verify the txid matches
-        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.outputs)?;
+        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
         let expected_txid = Address::new(tx.compute_txid().to_byte_array());
         anyhow::ensure!(
             pending.txid == expected_txid,

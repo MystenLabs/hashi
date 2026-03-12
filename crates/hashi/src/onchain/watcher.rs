@@ -329,8 +329,22 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
+                let mut state = state.state_mut();
+
+                // If a change UTXO was created, add it to the active pool.
+                if let (Some(change_utxo_id), Some(change_amount)) =
+                    (event.change_utxo_id, event.change_utxo_amount)
+                {
+                    let utxo_id = change_utxo_id.into();
+                    let utxo = super::types::Utxo {
+                        id: utxo_id,
+                        amount: change_amount,
+                        derivation_path: None,
+                    };
+                    state.hashi.utxo_pool.active_utxos.insert(utxo_id, utxo);
+                }
+
                 state
-                    .state_mut()
                     .hashi
                     .withdrawal_queue
                     .pending_withdrawals

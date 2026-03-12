@@ -239,7 +239,8 @@ pub struct PendingWithdrawal {
     pub txid: Address,
     pub requests: Vec<WithdrawalRequestInfo>,
     pub inputs: Vec<Utxo>,
-    pub outputs: Vec<OutputUtxo>,
+    pub withdrawal_outputs: Vec<OutputUtxo>,
+    pub change_output: Option<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
@@ -888,7 +889,8 @@ pub struct WithdrawalPickedForProcessingEvent {
     pub txid: Address,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<UtxoInfo>,
-    pub outputs: Vec<OutputUtxo>,
+    pub withdrawal_outputs: Vec<OutputUtxo>,
+    pub change_output: Option<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
 }
@@ -926,6 +928,8 @@ impl From<WithdrawalSignedEvent> for HashiEvent {
 pub struct WithdrawalConfirmedEvent {
     pub pending_id: Address,
     pub txid: Address,
+    pub change_utxo_id: Option<UtxoId>,
+    pub change_utxo_amount: Option<u64>,
 }
 
 impl MoveType for WithdrawalConfirmedEvent {

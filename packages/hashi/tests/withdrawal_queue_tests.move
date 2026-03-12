@@ -75,6 +75,7 @@ fun setup_pending_withdrawal(
         vector[info],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
+        option::none(),
         txid,
         clock,
         ctx,
@@ -173,9 +174,10 @@ fun test_pending_withdrawal_insert_and_remove() {
 
     let pending_id = setup_pending_withdrawal(&mut queue, &clock, 50_000, @0xDEAD, ctx);
 
-    // Remove and destroy
+    // Remove and destroy — no change output expected
     let pending = queue.remove_pending_withdrawal(pending_id);
-    pending.destroy_pending_withdrawal();
+    let change_utxo = pending.destroy_pending_withdrawal();
+    change_utxo.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -195,7 +197,8 @@ fun test_sign_pending_withdrawal() {
 
     // Remove and destroy
     let pending = queue.remove_pending_withdrawal(pending_id);
-    pending.destroy_pending_withdrawal();
+    let change_utxo = pending.destroy_pending_withdrawal();
+    change_utxo.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -226,6 +229,7 @@ fun test_full_withdrawal_queue_lifecycle() {
         vector[info],
         vector[test_utxo],
         vector[make_test_output(30_000)],
+        option::none(),
         @0xBBBB,
         &clock,
         ctx,
@@ -238,7 +242,92 @@ fun test_full_withdrawal_queue_lifecycle() {
 
     // Step 5: Confirm — remove and destroy
     let pending = queue.remove_pending_withdrawal(pending_id);
-    pending.destroy_pending_withdrawal();
+    let change_utxo = pending.destroy_pending_withdrawal();
+    change_utxo.destroy_none();
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+// ======== Change output tests ========
+
+#[test]
+fun test_pending_withdrawal_with_change_output() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let btc_amount = 50_000u64;
+    let change_amount = 49_000u64;
+    let txid = @0xCAFE;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let utxo_id = utxo::utxo_id(txid, 0);
+    // Input UTXO is larger than withdrawal amount (100k > 50k, leaving 49k change + 1k fee)
+    let test_utxo = utxo::utxo(utxo_id, 100_000, option::none());
+
+    let change_output = make_test_output(change_amount);
+
+    let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(btc_amount)],
+        option::some(change_output),
+        txid,
+        &clock,
+        ctx,
+    );
+    let pending_id = pending.pending_withdrawal_id();
+    queue.insert_pending_withdrawal(pending);
+
+    // Remove and destroy — should return a change UTXO
+    let pending = queue.remove_pending_withdrawal(pending_id);
+    let change_utxo = pending.destroy_pending_withdrawal();
+    assert!(change_utxo.is_some());
+
+    let utxo = change_utxo.destroy_some();
+    // Change vout = number of user outputs = 1
+    let expected_utxo_id = utxo::utxo_id(txid, 1);
+    assert!(utxo.id() == expected_utxo_id);
+    assert!(utxo.amount() == change_amount);
+    assert!(utxo.derivation_path().is_none());
+    utxo.delete();
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_pending_withdrawal_without_change_output() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let btc_amount = 50_000u64;
+    let txid = @0xDEAD;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let utxo_id = utxo::utxo_id(txid, 0);
+    // Input UTXO exactly matches withdrawal amount (no change)
+    let test_utxo = utxo::utxo(utxo_id, btc_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(btc_amount)],
+        option::none(),
+        txid,
+        &clock,
+        ctx,
+    );
+    let pending_id = pending.pending_withdrawal_id();
+    queue.insert_pending_withdrawal(pending);
+
+    // Remove and destroy — should return None
+    let pending = queue.remove_pending_withdrawal(pending_id);
+    let change_utxo = pending.destroy_pending_withdrawal();
+    assert!(change_utxo.is_none());
+    change_utxo.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
