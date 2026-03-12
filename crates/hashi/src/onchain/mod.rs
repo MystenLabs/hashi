@@ -370,6 +370,10 @@ impl OnchainState {
         self.state().hashi().config.withdrawal_minimum()
     }
 
+    pub fn bitcoin_confirmation_threshold(&self) -> u32 {
+        self.state().hashi().config.bitcoin_confirmation_threshold()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

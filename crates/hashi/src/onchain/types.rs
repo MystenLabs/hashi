@@ -481,6 +481,13 @@ impl Config {
             _ => None,
         }
     }
+
+    pub fn bitcoin_confirmation_threshold(&self) -> u32 {
+        match self.config.get("bitcoin_confirmation_threshold") {
+            Some(ConfigValue::U64(v)) => u32::try_from(*v).unwrap_or(u32::MAX),
+            _ => 6,
+        }
+    }
 }
 
 #[derive(Debug)]

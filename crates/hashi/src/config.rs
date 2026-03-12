@@ -103,9 +103,6 @@ pub struct Config {
     pub bitcoin_rpc_auth: Option<crate::btc_monitor::config::BtcRpcAuth>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bitcoin_confirmation_threshold: Option<u32>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_start_height: Option<u32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -256,10 +253,6 @@ impl Config {
         self.bitcoin_rpc
             .as_deref()
             .unwrap_or("http://localhost:8332")
-    }
-
-    pub fn bitcoin_confirmation_threshold(&self) -> u32 {
-        self.bitcoin_confirmation_threshold.unwrap_or(6)
     }
 
     pub fn bitcoin_start_height(&self) -> u32 {

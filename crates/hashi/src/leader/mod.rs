@@ -741,7 +741,7 @@ impl LeaderService {
     /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
     /// enough BTC confirmations are reached.
     async fn handle_signed_withdrawal(&self, pending: &PendingWithdrawal) {
-        let confirmation_threshold = self.inner.config.bitcoin_confirmation_threshold();
+        let confirmation_threshold = self.inner.onchain_state().bitcoin_confirmation_threshold();
         let txid = bitcoin::Txid::from_byte_array(pending.txid.into());
 
         match self.inner.btc_monitor().get_transaction_status(txid).await {

@@ -27,6 +27,7 @@ const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
 const WITHDRAWAL_FEE_SUI_KEY: vector<u8> = b"withdrawal_fee_sui";
 const WITHDRAWAL_FEE_BTC_KEY: vector<u8> = b"withdrawal_fee_btc";
 const WITHDRAWAL_MINIMUM_KEY: vector<u8> = b"withdrawal_minimum";
+const BITCOIN_CONFIRMATION_THRESHOLD_KEY: vector<u8> = b"bitcoin_confirmation_threshold";
 const PAUSED_KEY: vector<u8> = b"paused";
 const WITHDRAWAL_CANCELLATION_COOLDOWN_KEY: vector<u8> = b"withdrawal_cancellation_cooldown_ms";
 
@@ -99,6 +100,17 @@ public(package) fun set_withdrawal_minimum(self: &mut Config, fee: u64) {
     self.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(fee))
 }
 
+public(package) fun bitcoin_confirmation_threshold(self: &Config): u64 {
+    self.get(BITCOIN_CONFIRMATION_THRESHOLD_KEY).as_u64()
+}
+
+public(package) fun set_bitcoin_confirmation_threshold(self: &mut Config, confirmations: u64) {
+    self.upsert(
+        BITCOIN_CONFIRMATION_THRESHOLD_KEY,
+        config_value::new_u64(confirmations),
+    )
+}
+
 public(package) fun paused(self: &Config): bool {
     self.get(PAUSED_KEY).as_bool()
 }
@@ -168,6 +180,7 @@ public(package) fun create(): Config {
     config.upsert(WITHDRAWAL_FEE_SUI_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(500)); // 500 satoshis
     config.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(0));
+    config.upsert(BITCOIN_CONFIRMATION_THRESHOLD_KEY, config_value::new_u64(6));
     config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
 
     config
