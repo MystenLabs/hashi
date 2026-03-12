@@ -791,7 +791,12 @@ impl MpcService {
                     })
                     .await
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("RPC timed out")));
-                    (address, result)
+                    (
+                        address,
+                        result.and_then(|opt| {
+                            opt.ok_or_else(|| anyhow::anyhow!("signature not ready"))
+                        }),
+                    )
                 }
             });
             let results = join_all(futures).await;

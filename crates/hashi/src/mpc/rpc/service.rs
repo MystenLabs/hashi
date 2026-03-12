@@ -112,13 +112,9 @@ impl MpcService for HttpService {
         let epoch = external_request
             .epoch
             .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
-        let signature = self
-            .get_reconfig_signature(epoch)
-            .ok_or_else(|| Status::not_found("signature not ready for this epoch"))?;
+        let signature = self.get_reconfig_signature(epoch).map(Into::into);
         Ok(tonic::Response::new(
-            GetReconfigCompletionSignatureResponse {
-                signature: Some(signature.into()),
-            },
+            GetReconfigCompletionSignatureResponse { signature },
         ))
     }
 

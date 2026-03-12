@@ -163,16 +163,12 @@ impl Client {
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
-    pub async fn get_reconfig_completion_signature(&self, epoch: u64) -> Result<Vec<u8>> {
+    pub async fn get_reconfig_completion_signature(&self, epoch: u64) -> Result<Option<Vec<u8>>> {
         let request = GetReconfigCompletionSignatureRequest { epoch: Some(epoch) };
         let response = self
             .mpc_service_client()
             .get_reconfig_completion_signature(request)
             .await?;
-        response
-            .into_inner()
-            .signature
-            .map(|b| b.to_vec())
-            .ok_or_else(|| tonic::Status::internal("response missing signature field"))
+        Ok(response.into_inner().signature.map(|b| b.to_vec()))
     }
 }
