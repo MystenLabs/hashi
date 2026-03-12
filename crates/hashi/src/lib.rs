@@ -410,16 +410,7 @@ impl Hashi {
         }
 
         if self.is_in_current_committee() {
-            let epoch = self.onchain_state().epoch();
-            let mpc_manager = self
-                .create_mpc_manager(epoch, mpc::types::ProtocolType::Dkg)
-                .map_err(|e| {
-                    tracing::error!("Failed to create MpcManager: {e}");
-                    e
-                })?;
-            self.mpc_manager
-                .set(Arc::new(RwLock::new(mpc_manager)))
-                .map_err(|_| anyhow!("MpcManager already set"))?;
+            tracing::info!("Node is in the current committee; MPC service will recover state");
         } else if self.onchain_state().epoch() == 0
             && self.onchain_state().current_committee().is_none()
         {

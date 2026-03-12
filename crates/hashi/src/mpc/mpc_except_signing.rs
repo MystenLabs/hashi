@@ -247,7 +247,8 @@ impl MpcManager {
             }
             return Err(MpcError::InvalidMessage {
                 sender,
-                reason: "Message previously rejected due to invalid shares".to_string(),
+                reason: "Message previously received but no valid response was produced"
+                    .to_string(),
             });
         }
         let signature = match &request.messages {
@@ -6844,8 +6845,8 @@ mod tests {
             MpcError::InvalidMessage { sender, reason } => {
                 assert_eq!(sender, dealer_addr);
                 assert!(
-                    reason.contains("previously rejected"),
-                    "Second call should indicate message was previously rejected, got: {}",
+                    reason.contains("previously received but no valid response"),
+                    "Second call should indicate message was previously received with no valid response, got: {}",
                     reason
                 );
             }

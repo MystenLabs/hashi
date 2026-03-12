@@ -263,7 +263,10 @@ impl MpcService {
                 self.setup_key_rotation(epoch)?;
                 self.run_key_rotation(epoch).await
             }
-            _ => self.run_dkg(epoch).await,
+            _ => {
+                self.setup_initial_dkg(epoch)?;
+                self.run_dkg(epoch).await
+            }
         }
     }
 
