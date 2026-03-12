@@ -1067,6 +1067,7 @@ async fn scrape_pending_withdrawals(
                  timestamp_ms,
                  randomness,
                  signatures,
+                 cpfp_info,
              }| {
                 let requests = requests
                     .into_iter()
@@ -1084,6 +1085,11 @@ async fn scrape_pending_withdrawals(
                     amount: o.amount,
                     bitcoin_address: o.bitcoin_address,
                 });
+                let cpfp_info = cpfp_info.map(|c| types::CpfpInfo {
+                    txid: c.txid,
+                    change_amount: c.change_amount,
+                    signature: c.signature,
+                });
                 (
                     id,
                     types::PendingWithdrawal {
@@ -1096,6 +1102,7 @@ async fn scrape_pending_withdrawals(
                         timestamp_ms,
                         randomness,
                         signatures,
+                        cpfp_info,
                     },
                 )
             },
@@ -1144,6 +1151,7 @@ fn convert_move_pending_withdrawal(
         timestamp_ms,
         randomness,
         signatures,
+        cpfp_info,
     }: move_types::PendingWithdrawal,
 ) -> types::PendingWithdrawal {
     let convert_output = |o: move_types::OutputUtxo| types::OutputUtxo {
@@ -1163,6 +1171,11 @@ fn convert_move_pending_withdrawal(
         timestamp_ms,
         randomness,
         signatures,
+        cpfp_info: cpfp_info.map(|c| types::CpfpInfo {
+            txid: c.txid,
+            change_amount: c.change_amount,
+            signature: c.signature,
+        }),
     }
 }
 

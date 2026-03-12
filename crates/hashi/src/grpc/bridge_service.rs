@@ -1,4 +1,5 @@
 use anyhow::Context;
+use bitcoin::hashes::Hash;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use tonic::Request;
 use tonic::Response;
@@ -8,11 +9,16 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
+use crate::withdrawals::CpfpTxSigning;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
+use hashi_types::proto::SignCpfpTransactionRequest;
+use hashi_types::proto::SignCpfpTransactionResponse;
+use hashi_types::proto::SignCpfpTxSigningRequest;
+use hashi_types::proto::SignCpfpTxSigningResponse;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
@@ -155,6 +161,50 @@ impl BridgeService for HttpService {
             member_signature: Some(member_signature),
         }))
     }
+
+    async fn sign_cpfp_transaction(
+        &self,
+        request: Request<SignCpfpTransactionRequest>,
+    ) -> Result<Response<SignCpfpTransactionResponse>, Status> {
+        authenticate_caller(&request)?;
+        let pending_withdrawal_id = Address::from_bytes(&request.get_ref().pending_withdrawal_id)
+            .map_err(|e| {
+            Status::invalid_argument(format!("invalid pending_withdrawal_id: {e}"))
+        })?;
+        tracing::info!("sign_cpfp_transaction called for {pending_withdrawal_id}");
+        let (cpfp_tx, signature, child_fee) = self
+            .inner
+            .validate_and_sign_cpfp_tx(&pending_withdrawal_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("sign_cpfp_transaction failed: {e}");
+                Status::failed_precondition(e.to_string())
+            })?;
+        let cpfp_txid = cpfp_tx.compute_txid().to_byte_array().to_vec();
+        tracing::info!("sign_cpfp_transaction succeeded for {pending_withdrawal_id}");
+        Ok(Response::new(SignCpfpTransactionResponse {
+            signature: signature.to_byte_array().to_vec().into(),
+            cpfp_txid: cpfp_txid.into(),
+            child_fee,
+        }))
+    }
+
+    async fn sign_cpfp_tx_signing(
+        &self,
+        request: Request<SignCpfpTxSigningRequest>,
+    ) -> Result<Response<SignCpfpTxSigningResponse>, Status> {
+        authenticate_caller(&request)?;
+        let req = request.get_ref();
+        let message =
+            parse_cpfp_tx_signing(req).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let member_signature = self
+            .inner
+            .validate_and_sign_cpfp_tx_signing(&message)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        Ok(Response::new(SignCpfpTxSigningResponse {
+            member_signature: Some(member_signature),
+        }))
+    }
 }
 
 fn authenticate_caller<T>(request: &Request<T>) -> Result<Address, Status> {
@@ -254,6 +304,17 @@ fn parse_withdrawal_tx_signing(
         withdrawal_id,
         request_ids,
         signatures,
+    })
+}
+
+fn parse_cpfp_tx_signing(request: &SignCpfpTxSigningRequest) -> anyhow::Result<CpfpTxSigning> {
+    let pending_withdrawal_id = parse_address(&request.pending_withdrawal_id)?;
+    let cpfp_txid = parse_address(&request.cpfp_txid)?;
+    Ok(CpfpTxSigning {
+        pending_withdrawal_id,
+        cpfp_txid,
+        cpfp_change_amount: request.cpfp_change_amount,
+        cpfp_signature: request.cpfp_signature.to_vec(),
     })
 }
 

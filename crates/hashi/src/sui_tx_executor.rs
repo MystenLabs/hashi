@@ -808,6 +808,58 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Execute `withdraw::sign_cpfp` to store CPFP child transaction data on-chain.
+    pub async fn execute_sign_cpfp(
+        &mut self,
+        pending_withdrawal_id: &Address,
+        cpfp_txid: &Address,
+        cpfp_change_amount: u64,
+        cpfp_signature: &[u8],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let pending_withdrawal_id_arg = builder.pure(pending_withdrawal_id);
+        let cpfp_txid_arg = builder.pure(cpfp_txid);
+        let cpfp_change_amount_arg = builder.pure(&cpfp_change_amount);
+        let cpfp_signature_arg = builder.pure(&cpfp_signature.to_vec());
+        let epoch_arg = builder.pure(&cert.epoch());
+        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("sign_cpfp"),
+            ),
+            vec![
+                hashi_arg,
+                pending_withdrawal_id_arg,
+                cpfp_txid_arg,
+                cpfp_change_amount_arg,
+                cpfp_signature_arg,
+                epoch_arg,
+                signature_arg,
+                signers_bitmap_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "sign_cpfp failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
     /// Execute `withdraw::cancel_withdrawal` to cancel a pending withdrawal request.
     ///
     /// The Move function returns a `Coin<BTC>` which is transferred back to the sender.

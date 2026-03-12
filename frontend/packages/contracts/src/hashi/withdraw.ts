@@ -43,6 +43,15 @@ export const WithdrawalConfirmationMessage = new MoveStruct({
     withdrawal_id: bcs.Address,
   },
 });
+export const CpfpSignedMessage = new MoveStruct({
+  name: `${$moduleName}::CpfpSignedMessage`,
+  fields: {
+    pending_withdrawal_id: bcs.Address,
+    cpfp_txid: bcs.Address,
+    cpfp_change_amount: bcs.u64(),
+    cpfp_signature: bcs.vector(bcs.u8()),
+  },
+});
 export interface RequestWithdrawalArguments {
   hashi: RawTransactionArgument<string>;
   btc: RawTransactionArgument<string>;
@@ -238,6 +247,66 @@ export function signWithdrawal(options: SignWithdrawalOptions) {
       package: packageAddress,
       module: "withdraw",
       function: "sign_withdrawal",
+      arguments: normalizeMoveArguments(
+        options.arguments,
+        argumentsTypes,
+        parameterNames,
+      ),
+    });
+}
+export interface SignCpfpArguments {
+  hashi: RawTransactionArgument<string>;
+  pendingWithdrawalId: RawTransactionArgument<string>;
+  cpfpTxid: RawTransactionArgument<string>;
+  cpfpChangeAmount: RawTransactionArgument<number | bigint>;
+  cpfpSignature: RawTransactionArgument<number[]>;
+  epoch: RawTransactionArgument<number | bigint>;
+  signature: RawTransactionArgument<number[]>;
+  signersBitmap: RawTransactionArgument<number[]>;
+}
+export interface SignCpfpOptions {
+  package?: string;
+  arguments:
+    | SignCpfpArguments
+    | [
+        hashi: RawTransactionArgument<string>,
+        pendingWithdrawalId: RawTransactionArgument<string>,
+        cpfpTxid: RawTransactionArgument<string>,
+        cpfpChangeAmount: RawTransactionArgument<number | bigint>,
+        cpfpSignature: RawTransactionArgument<number[]>,
+        epoch: RawTransactionArgument<number | bigint>,
+        signature: RawTransactionArgument<number[]>,
+        signersBitmap: RawTransactionArgument<number[]>,
+      ];
+}
+/** Store CPFP child transaction data on a pending withdrawal. */
+export function signCpfp(options: SignCpfpOptions) {
+  const packageAddress = options.package ?? "@local-pkg/hashi";
+  const argumentsTypes = [
+    null,
+    "address",
+    "address",
+    "u64",
+    "vector<u8>",
+    "u64",
+    "vector<u8>",
+    "vector<u8>",
+  ] satisfies (string | null)[];
+  const parameterNames = [
+    "hashi",
+    "pendingWithdrawalId",
+    "cpfpTxid",
+    "cpfpChangeAmount",
+    "cpfpSignature",
+    "epoch",
+    "signature",
+    "signersBitmap",
+  ];
+  return (tx: Transaction) =>
+    tx.moveCall({
+      package: packageAddress,
+      module: "withdraw",
+      function: "sign_cpfp",
       arguments: normalizeMoveArguments(
         options.arguments,
         argumentsTypes,

@@ -7,6 +7,12 @@ const NUMBER_OF_RANDOM_BYTES: u16 = 32;
 
 #[error]
 const ERequestNotApproved: vector<u8> = b"Withdrawal request has not been approved";
+#[error]
+const EParentTxNotSigned: vector<u8> = b"Parent tx not yet signed";
+#[error]
+const ECpfpAlreadySubmitted: vector<u8> = b"CPFP already submitted";
+#[error]
+const ENoChangeOutputForCpfp: vector<u8> = b"No change output for CPFP";
 
 public struct WithdrawalRequestQueue has store {
     requests: Bag,
@@ -41,6 +47,17 @@ public struct PendingWithdrawal has store {
     timestamp_ms: u64,
     randomness: vector<u8>,
     signatures: Option<vector<vector<u8>>>,
+    cpfp_info: Option<CpfpInfo>,
+}
+
+/// CPFP (Child-Pays-For-Parent) data for a fee-bumped withdrawal.
+public struct CpfpInfo has copy, drop, store {
+    /// Bitcoin txid of the CPFP child transaction.
+    txid: address,
+    /// Amount of the child's single change output (in satoshis).
+    change_amount: u64,
+    /// Schnorr witness signature for the child transaction's single input.
+    signature: vector<u8>,
 }
 
 public struct OutputUtxo has copy, drop, store {
@@ -141,6 +158,7 @@ public(package) fun new_pending_withdrawal(
         timestamp_ms: clock.timestamp_ms(),
         randomness,
         signatures: option::none(),
+        cpfp_info: option::none(),
     }
 }
 
@@ -198,6 +216,25 @@ public(package) fun sign_pending_withdrawal(
     emit_withdrawal_signed(pending);
 }
 
+public(package) fun submit_cpfp_info(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
+    cpfp_txid: address,
+    cpfp_change_amount: u64,
+    cpfp_signature: vector<u8>,
+) {
+    let pending: &mut PendingWithdrawal = self.pending_withdrawals.borrow_mut(withdrawal_id);
+    assert!(pending.signatures.is_some(), EParentTxNotSigned);
+    assert!(pending.cpfp_info.is_none(), ECpfpAlreadySubmitted);
+    assert!(pending.change_output.is_some(), ENoChangeOutputForCpfp);
+    pending.cpfp_info = option::some(CpfpInfo {
+        txid: cpfp_txid,
+        change_amount: cpfp_change_amount,
+        signature: cpfp_signature,
+    });
+    emit_cpfp_submitted(pending);
+}
+
 public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
     WithdrawalRequestQueue {
         requests: sui::bag::new(ctx),
@@ -226,6 +263,7 @@ public(package) fun request_into_parts(
 }
 
 /// Destroy a pending withdrawal, returning the change UTXO if one exists.
+/// If CPFP was performed, returns the child's change UTXO instead of the parent's.
 public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<Utxo> {
     let PendingWithdrawal {
         id: _,
@@ -237,6 +275,7 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<
         timestamp_ms: _,
         randomness: _,
         signatures: _,
+        cpfp_info,
     } = self;
 
     inputs.destroy!(|utxo| {
@@ -245,13 +284,23 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<
 
     // In case of a change output, insert the change UTXO back into the active UTXO pool.
     if (change_output.is_some()) {
-        let change = change_output.destroy_some();
-        // Change output is always the last output in the BTC transaction,
-        let change_vout = (withdrawal_outputs.length() as u32);
-        let change_utxo_id = hashi::utxo::utxo_id(txid, change_vout);
-        option::some(hashi::utxo::utxo(change_utxo_id, change.amount, option::none()))
+        let _change = change_output.destroy_some();
+        if (cpfp_info.is_some()) {
+            // CPFP was performed: the parent's change output was spent by the child tx.
+            // Return the child's change output (vout=0) instead.
+            let cpfp = cpfp_info.destroy_some();
+            let cpfp_utxo_id = hashi::utxo::utxo_id(cpfp.txid, 0);
+            option::some(hashi::utxo::utxo(cpfp_utxo_id, cpfp.change_amount, option::none()))
+        } else {
+            cpfp_info.destroy_none();
+            // No CPFP: return the parent's change output as before.
+            let change_vout = (withdrawal_outputs.length() as u32);
+            let change_utxo_id = hashi::utxo::utxo_id(txid, change_vout);
+            option::some(hashi::utxo::utxo(change_utxo_id, _change.amount, option::none()))
+        }
     } else {
         change_output.destroy_none();
+        cpfp_info.destroy_none();
         option::none()
     }
 }
@@ -296,9 +345,16 @@ public(package) fun emit_withdrawal_signed(self: &PendingWithdrawal) {
 
 public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
     let (change_utxo_id, change_utxo_amount) = if (self.change_output.is_some()) {
-        let change = self.change_output.borrow();
-        let change_vout = (self.withdrawal_outputs.length() as u32);
-        (option::some(hashi::utxo::utxo_id(self.txid, change_vout)), option::some(change.amount))
+        if (self.cpfp_info.is_some()) {
+            // CPFP was performed: the effective change UTXO is from the child tx.
+            let cpfp = self.cpfp_info.borrow();
+            (option::some(hashi::utxo::utxo_id(cpfp.txid, 0)), option::some(cpfp.change_amount))
+        } else {
+            // No CPFP: change UTXO is from the parent tx.
+            let change = self.change_output.borrow();
+            let change_vout = (self.withdrawal_outputs.length() as u32);
+            (option::some(hashi::utxo::utxo_id(self.txid, change_vout)), option::some(change.amount))
+        }
     } else {
         (option::none(), option::none())
     };
@@ -308,6 +364,16 @@ public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
         txid: self.txid,
         change_utxo_id,
         change_utxo_amount,
+    });
+}
+
+fun emit_cpfp_submitted(pending: &PendingWithdrawal) {
+    let cpfp = pending.cpfp_info.borrow();
+    sui::event::emit(CpfpSubmittedEvent {
+        pending_id: pending.id,
+        parent_txid: pending.txid,
+        cpfp_txid: cpfp.txid,
+        cpfp_change_amount: cpfp.change_amount,
     });
 }
 
@@ -339,6 +405,7 @@ public(package) fun new_pending_withdrawal_for_testing(
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signatures: option::none(),
+        cpfp_info: option::none(),
     }
 }
 
@@ -407,4 +474,11 @@ public struct WithdrawalCancelledEvent has copy, drop {
     request_id: address,
     requester_address: address,
     btc_amount: u64,
+}
+
+public struct CpfpSubmittedEvent has copy, drop {
+    pending_id: address,
+    parent_txid: address,
+    cpfp_txid: address,
+    cpfp_change_amount: u64,
 }

@@ -4,7 +4,6 @@ use bdk_coin_select::ChangePolicy;
 use bdk_coin_select::CoinSelector;
 use bdk_coin_select::DrainWeights;
 use bdk_coin_select::FeeRate;
-use bdk_coin_select::TR_DUST_RELAY_MIN_VALUE;
 use bdk_coin_select::Target;
 use bdk_coin_select::TargetFee;
 use bdk_coin_select::TargetOutputs;
@@ -88,6 +87,15 @@ pub struct WithdrawalTxSigning {
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalConfirmation {
     pub withdrawal_id: Address,
+}
+
+/// The data that validators BLS-sign over to store CPFP witness signature on-chain.
+#[derive(Clone, Debug, serde_derive::Serialize)]
+pub struct CpfpTxSigning {
+    pub pending_withdrawal_id: Address,
+    pub cpfp_txid: Address,
+    pub cpfp_change_amount: u64,
+    pub cpfp_signature: Vec<u8>,
 }
 
 impl Hashi {
@@ -270,13 +278,18 @@ impl Hashi {
             );
         }
 
-        // 5b. Validate change output is above dust threshold
+        // 5b. Validate change output exists and is above minimum CPFP threshold
+        let min_change = self.config.min_cpfp_change_sats();
+        anyhow::ensure!(
+            !non_request_outputs.is_empty(),
+            "Withdrawal transaction must have a change output for CPFP-ability"
+        );
         if let Some(change_output) = non_request_outputs.first() {
             anyhow::ensure!(
-                change_output.amount >= TR_DUST_RELAY_MIN_VALUE,
-                "Change output {} sats is below dust threshold {} sats",
+                change_output.amount >= min_change,
+                "Change output {} sats is below minimum CPFP threshold {} sats",
                 change_output.amount,
-                TR_DUST_RELAY_MIN_VALUE
+                min_change
             );
         }
 
@@ -381,6 +394,88 @@ impl Hashi {
                 .verify(sighash, &sig)
                 .map_err(|e| anyhow!("Signature verification failed for input {i}: {e}"))?;
         }
+
+        self.sign_message_proto(message)
+    }
+
+    // --- CPFP BLS signing ---
+
+    /// Validate and BLS-sign a CPFP witness signature for on-chain storage.
+    pub fn validate_and_sign_cpfp_tx_signing(
+        &self,
+        message: &CpfpTxSigning,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let pending = self
+            .onchain_state()
+            .pending_withdrawal(&message.pending_withdrawal_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "PendingWithdrawal {} not found on-chain",
+                    message.pending_withdrawal_id
+                )
+            })?;
+
+        anyhow::ensure!(
+            pending.signatures.is_some(),
+            "PendingWithdrawal {} has not been signed yet (parent tx not ready)",
+            message.pending_withdrawal_id
+        );
+
+        anyhow::ensure!(
+            pending.cpfp_info.is_none(),
+            "CPFP already submitted for PendingWithdrawal {}",
+            message.pending_withdrawal_id
+        );
+
+        anyhow::ensure!(
+            pending.change_output.is_some(),
+            "PendingWithdrawal {} has no change output for CPFP",
+            message.pending_withdrawal_id
+        );
+
+        // Verify the CPFP signature against the expected sighash
+        let change_output = pending.change_output.as_ref().unwrap();
+        // Build the unsigned CPFP tx to verify the txid and signature
+        // We need the txid to match what's claimed in the message
+        let cpfp_input = bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array(pending.txid.into()),
+                vout: pending.withdrawal_outputs.len() as u32,
+            },
+            script_sig: bitcoin::ScriptBuf::default(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::default(),
+        };
+        let cpfp_output = bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(message.cpfp_change_amount),
+            script_pubkey: script_pubkey_from_raw_address(&change_output.bitcoin_address)?,
+        };
+        let cpfp_tx = bitcoin_utils::construct_tx(vec![cpfp_input], vec![cpfp_output]);
+        let expected_txid = Address::new(cpfp_tx.compute_txid().to_byte_array());
+        anyhow::ensure!(
+            message.cpfp_txid == expected_txid,
+            "CPFP txid mismatch: message has {:?}, computed {:?}",
+            message.cpfp_txid,
+            expected_txid
+        );
+
+        // Verify the Schnorr signature
+        let sighash = self.cpfp_signing_message(&cpfp_tx, change_output)?;
+        let sig_arr: &[u8; 64] = message
+            .cpfp_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("CPFP signature is not 64 bytes"))?;
+        let sig = SchnorrSignature::from_byte_array(sig_arr)
+            .map_err(|e| anyhow!("Invalid CPFP Schnorr signature: {e}"))?;
+
+        let hashi_pubkey = self.get_hashi_pubkey();
+        let pubkey = self.deposit_pubkey(&hashi_pubkey, None)?;
+        let schnorr_pk = SchnorrPublicKey::from_byte_array(&pubkey.serialize())
+            .map_err(|e| anyhow!("Failed to convert hashi pubkey: {e}"))?;
+        schnorr_pk
+            .verify(&sighash, &sig)
+            .map_err(|e| anyhow!("CPFP signature verification failed: {e}"))?;
 
         self.sign_message_proto(message)
     }
@@ -547,6 +642,9 @@ impl Hashi {
 
     /// Select UTXOs for a withdrawal using Branch-and-Bound with LowestFee metric,
     /// falling back to greedy selection if BnB finds no solution.
+    ///
+    /// Always produces a change output >= `min_cpfp_change_sats` to guarantee
+    /// CPFP-ability for fee bumping stuck transactions.
     pub fn select_utxos_for_withdrawal(
         &self,
         withdrawal_amount: u64,
@@ -556,6 +654,7 @@ impl Hashi {
         let active_utxos = self.onchain_state().active_utxos();
         anyhow::ensure!(!active_utxos.is_empty(), "No active UTXOs available");
 
+        let min_change = self.config.min_cpfp_change_sats();
         let recipient_output_weight = output_weight_for_address(recipient_address)?;
         let long_term_fee_rate = FeeRate::from_sat_per_vb(LONG_TERM_FEE_RATE_SAT_PER_VB);
 
@@ -576,12 +675,8 @@ impl Hashi {
             },
         };
 
-        let change_policy = ChangePolicy::min_value_and_waste(
-            DrainWeights::TR_KEYSPEND,
-            TR_DUST_RELAY_MIN_VALUE,
-            fee_rate,
-            long_term_fee_rate,
-        );
+        // Force change output with minimum value for CPFP-ability.
+        let change_policy = ChangePolicy::min_value(DrainWeights::TR_KEYSPEND, min_change);
 
         // Try BnB first (optimal), fall back to greedy
         let metric = LowestFee {
@@ -602,19 +697,38 @@ impl Hashi {
         }
 
         let drain = cs.drain(target, change_policy);
+
+        // If the change policy produced no drain (excess too small), keep
+        // selecting additional UTXOs until we have enough for min_change.
+        if drain.is_none() {
+            // Select more UTXOs greedily to ensure minimum change
+            while !cs.is_exhausted() {
+                cs.select_next();
+                let d = cs.drain(target, change_policy);
+                if d.is_some() {
+                    break;
+                }
+            }
+        }
+
+        let drain = cs.drain(target, change_policy);
         let selected_utxos: Vec<Utxo> = cs.apply_selection(&active_utxos).cloned().collect();
         let selected_value: u64 = selected_utxos.iter().map(|u| u.amount).sum();
-        let fee = selected_value - withdrawal_amount - drain.value;
-        let change = if drain.is_some() {
-            Some(drain.value)
-        } else {
-            None
-        };
+
+        anyhow::ensure!(
+            drain.is_some(),
+            "UTXO selection could not produce minimum change of {min_change} sats for CPFP. \
+             Selected {selected_value} sats from {} UTXOs.",
+            selected_utxos.len()
+        );
+
+        let change_amount = drain.value;
+        let fee = selected_value - withdrawal_amount - change_amount;
 
         Ok(UtxoSelection {
             selected_utxos,
             fee,
-            change,
+            change: Some(change_amount),
         })
     }
 
@@ -710,6 +824,237 @@ impl Hashi {
             outputs,
             txid,
         })
+    }
+
+    // --- CPFP (Child-Pays-For-Parent) ---
+
+    /// Weight of a CPFP child transaction (1 P2TR input, 1 P2TR output).
+    /// Fixed overhead (version, locktime) + segwit marker/flag + 1 input + 1 output.
+    pub const CPFP_CHILD_WEIGHT: u64 = bdk_coin_select::TX_FIXED_FIELD_WEIGHT
+        + 2 // segwit marker and flag
+        + bdk_coin_select::TR_KEYSPEND_TXIN_WEIGHT
+        + bdk_coin_select::TXOUT_BASE_WEIGHT
+        + bdk_coin_select::TR_SPK_WEIGHT;
+
+    /// Build an unsigned CPFP child transaction that spends the parent's change
+    /// output and sends funds back to the same Hashi root address.
+    pub async fn build_unsigned_cpfp_tx(
+        &self,
+        pending: &crate::onchain::types::PendingWithdrawal,
+    ) -> anyhow::Result<(bitcoin::Transaction, u64)> {
+        let change_output = pending
+            .change_output
+            .as_ref()
+            .ok_or_else(|| anyhow!("PendingWithdrawal has no change output for CPFP"))?;
+
+        let parent_change_vout = pending.withdrawal_outputs.len() as u32;
+        let parent_txid = bitcoin::Txid::from_byte_array(pending.txid.into());
+
+        // Compute required child fee for the package
+        let parent_fee = self.compute_parent_fee(pending)?;
+        let parent_weight = self.compute_tx_weight(pending);
+        let child_fee = self
+            .cpfp_fee_for_package(parent_weight, parent_fee, Self::CPFP_CHILD_WEIGHT)
+            .await?;
+
+        let child_change_amount = change_output.amount.checked_sub(child_fee).ok_or_else(|| {
+            anyhow!(
+                "CPFP infeasible: change output {} sats < required child fee {} sats",
+                change_output.amount,
+                child_fee
+            )
+        })?;
+
+        anyhow::ensure!(
+            child_change_amount >= bdk_coin_select::TR_DUST_RELAY_MIN_VALUE,
+            "CPFP child change {} sats would be below dust threshold {} sats",
+            child_change_amount,
+            bdk_coin_select::TR_DUST_RELAY_MIN_VALUE
+        );
+
+        let input = bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: parent_txid,
+                vout: parent_change_vout,
+            },
+            script_sig: bitcoin::ScriptBuf::default(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::default(),
+        };
+
+        // Output goes back to Hashi root address (same as parent change)
+        let script_pubkey = script_pubkey_from_raw_address(&change_output.bitcoin_address)?;
+        let output = bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(child_change_amount),
+            script_pubkey,
+        };
+
+        let tx = bitcoin_utils::construct_tx(vec![input], vec![output]);
+        Ok((tx, child_fee))
+    }
+
+    /// Compute the required child fee so that the parent+child package achieves
+    /// the target fee rate (current estimated rate * multiplier).
+    pub async fn cpfp_fee_for_package(
+        &self,
+        parent_weight: u64,
+        parent_fee: u64,
+        child_weight: u64,
+    ) -> anyhow::Result<u64> {
+        let multiplier = self.config.cpfp_target_feerate_multiplier();
+        let kyoto_fee_rate = self
+            .btc_monitor()
+            .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
+            .await?;
+        let current_feerate_spwu = kyoto_fee_rate.to_sat_per_kwu() as f64 / 1000.0;
+        let target_feerate_spwu = current_feerate_spwu * multiplier;
+
+        let package_weight = parent_weight + child_weight;
+        let target_package_fee = (target_feerate_spwu * package_weight as f64).ceil() as u64;
+        let child_fee = target_package_fee.saturating_sub(parent_fee);
+
+        // Ensure child fee covers at least the minimum relay fee for the child alone
+        let min_child_fee = FeeRate::from_sat_per_vb(1.0).implied_fee(child_weight);
+        Ok(child_fee.max(min_child_fee))
+    }
+
+    /// Compute the weight of a withdrawal transaction from its pending data.
+    fn compute_tx_weight(&self, pending: &crate::onchain::types::PendingWithdrawal) -> u64 {
+        let num_inputs = pending.inputs.len() as u64;
+        let input_weight = bdk_coin_select::TR_KEYSPEND_TXIN_WEIGHT * num_inputs;
+        let output_weight: u64 = pending
+            .all_outputs()
+            .iter()
+            .map(|o| {
+                output_weight_for_address(&o.bitcoin_address)
+                    .unwrap_or(bdk_coin_select::TXOUT_BASE_WEIGHT + bdk_coin_select::TR_SPK_WEIGHT)
+            })
+            .sum();
+        bdk_coin_select::TX_FIXED_FIELD_WEIGHT + input_weight + output_weight + 2
+    }
+
+    /// Compute the fee of the parent transaction from input/output sums.
+    fn compute_parent_fee(
+        &self,
+        pending: &crate::onchain::types::PendingWithdrawal,
+    ) -> anyhow::Result<u64> {
+        let input_total: u64 = pending.inputs.iter().map(|u| u.amount).sum();
+        let output_total: u64 = pending.all_outputs().iter().map(|o| o.amount).sum();
+        anyhow::ensure!(
+            input_total >= output_total,
+            "Invalid parent tx: inputs ({input_total}) < outputs ({output_total})"
+        );
+        Ok(input_total - output_total)
+    }
+
+    /// Compute the taproot script-path sighash for a CPFP child transaction.
+    /// The CPFP child has a single input: the parent's change output at root pubkey.
+    pub(crate) fn cpfp_signing_message(
+        &self,
+        cpfp_tx: &bitcoin::Transaction,
+        parent_change_output: &OutputUtxo,
+    ) -> anyhow::Result<[u8; 32]> {
+        let hashi_pubkey = self.get_hashi_pubkey();
+        let pubkey = self.deposit_pubkey(&hashi_pubkey, None)?;
+        let address = self.bitcoin_address_from_pubkey(&pubkey);
+        let (_, _, leaf_hash) =
+            bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+
+        let prevout = TxOut {
+            value: Amount::from_sat(parent_change_output.amount),
+            script_pubkey: address.script_pubkey(),
+        };
+
+        let mut sighasher = SighashCache::new(cpfp_tx);
+        let sighash = sighasher
+            .taproot_script_spend_signature_hash(
+                0, // single input at index 0
+                &Prevouts::All(&[prevout]),
+                leaf_hash,
+                TapSighashType::Default,
+            )
+            .map_err(|e| anyhow!("Failed to construct CPFP taproot sighash: {e}"))?;
+
+        Ok(*sighash.as_byte_array())
+    }
+
+    /// Validate a CPFP request and produce an MPC Schnorr signature for the child tx.
+    pub async fn validate_and_sign_cpfp_tx(
+        &self,
+        pending_withdrawal_id: &Address,
+    ) -> anyhow::Result<(bitcoin::Transaction, SchnorrSignature, u64)> {
+        let pending = self
+            .onchain_state()
+            .pending_withdrawal(pending_withdrawal_id)
+            .ok_or_else(|| {
+                anyhow!("PendingWithdrawal {pending_withdrawal_id} not found on-chain")
+            })?;
+
+        anyhow::ensure!(
+            pending.signatures.is_some(),
+            "PendingWithdrawal is not yet signed"
+        );
+        anyhow::ensure!(
+            pending.change_output.is_some(),
+            "PendingWithdrawal has no change output for CPFP"
+        );
+        anyhow::ensure!(
+            pending.cpfp_info.is_none(),
+            "CPFP already submitted for this withdrawal"
+        );
+
+        let (cpfp_tx, child_fee) = self.build_unsigned_cpfp_tx(&pending).await?;
+        let change_output = pending.change_output.as_ref().unwrap();
+        let signing_message = self.cpfp_signing_message(&cpfp_tx, change_output)?;
+
+        // MPC sign the single CPFP input
+        let onchain_state = self.onchain_state().clone();
+        let epoch = onchain_state.epoch();
+        let p2p_channel = RpcP2PChannel::new(onchain_state, epoch);
+        let signing_manager = self.signing_manager();
+        let beacon = S::zero();
+
+        // Use a unique request ID for CPFP signing (XOR pending ID with a marker)
+        let mut cpfp_request_id_bytes = [0u8; Address::LENGTH];
+        cpfp_request_id_bytes.copy_from_slice(pending.id.as_bytes());
+        // Set high bit of first byte as CPFP marker to avoid collision with regular signing
+        cpfp_request_id_bytes[0] ^= 0x80;
+        let cpfp_request_id = Address::new(cpfp_request_id_bytes);
+
+        // No derivation path for change output (root pubkey)
+        let signature = SigningManager::sign(
+            &signing_manager,
+            &p2p_channel,
+            cpfp_request_id,
+            &signing_message,
+            &beacon,
+            None,
+            WITHDRAWAL_SIGNING_TIMEOUT,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to MPC sign CPFP transaction: {e}"))?;
+
+        Ok((cpfp_tx, signature, child_fee))
+    }
+
+    // --- Shared helpers ---
+
+    /// Build a taproot script-path witness for a single input.
+    /// Used by both regular withdrawal tx rebuilding and CPFP child tx rebuilding.
+    pub(crate) fn build_taproot_witness(
+        &self,
+        sig: &[u8],
+        derivation_path: Option<&Address>,
+    ) -> anyhow::Result<bitcoin::Witness> {
+        let hashi_pubkey = self.get_hashi_pubkey();
+        let pubkey = self.deposit_pubkey(&hashi_pubkey, derivation_path)?;
+        let (script, control_block, _) =
+            bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+        let mut witness = bitcoin::Witness::new();
+        witness.push(sig);
+        witness.push(script.to_bytes());
+        witness.push(control_block.serialize());
+        Ok(witness)
     }
 
     /// Run AML/Sanctions checks for a withdrawal request.
@@ -887,7 +1232,9 @@ fn withdrawal_signing_request_id(pending_withdrawal_id: &Address, input_index: u
 
 /// Convert raw bitcoin address bytes (witness program) to a `ScriptBuf`.
 /// 32-byte addresses are P2TR (witness v1), 20-byte addresses are P2WPKH (witness v0).
-fn script_pubkey_from_raw_address(address_bytes: &[u8]) -> anyhow::Result<bitcoin::ScriptBuf> {
+pub(crate) fn script_pubkey_from_raw_address(
+    address_bytes: &[u8],
+) -> anyhow::Result<bitcoin::ScriptBuf> {
     let version = match address_bytes.len() {
         32 => WitnessVersion::V1,
         20 => WitnessVersion::V0,

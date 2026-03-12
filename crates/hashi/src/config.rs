@@ -137,6 +137,24 @@ pub struct Config {
     /// which is too small for large MPC round messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
+
+    /// Duration in milliseconds a signed withdrawal can remain unconfirmed before
+    /// the leader automatically triggers a CPFP (Child-Pays-For-Parent) fee bump.
+    /// Defaults to 200,000 ms (200 seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpfp_trigger_after_ms: Option<u64>,
+
+    /// Fee rate multiplier for CPFP child transactions. The target package fee
+    /// rate is `current_estimated_feerate * cpfp_target_feerate_multiplier`.
+    /// Defaults to 2.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpfp_target_feerate_multiplier: Option<f64>,
+
+    /// Minimum change output amount (in satoshis) to ensure CPFP-ability.
+    /// Withdrawal transactions will always produce a change output >= this value.
+    /// Defaults to 10,000 sats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_cpfp_change_sats: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -308,6 +326,18 @@ impl Config {
     pub fn grpc_max_decoding_message_size(&self) -> usize {
         self.grpc_max_decoding_message_size
             .unwrap_or(16 * 1024 * 1024)
+    }
+
+    pub fn cpfp_trigger_after_ms(&self) -> u64 {
+        self.cpfp_trigger_after_ms.unwrap_or(200_000)
+    }
+
+    pub fn cpfp_target_feerate_multiplier(&self) -> f64 {
+        self.cpfp_target_feerate_multiplier.unwrap_or(2.0)
+    }
+
+    pub fn min_cpfp_change_sats(&self) -> u64 {
+        self.min_cpfp_change_sats.unwrap_or(10_000)
     }
 
     // Creates a new config suitable for testing. In particular this config will:

@@ -143,6 +143,44 @@ pub struct SignWithdrawalConfirmationResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignCpfpTransactionRequest {
+    /// The id of the PendingWithdrawal on Sui (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub pending_withdrawal_id: ::prost::bytes::Bytes,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignCpfpTransactionResponse {
+    /// The MPC Schnorr signature for the CPFP child transaction's single input.
+    #[prost(bytes = "bytes", tag = "1")]
+    pub signature: ::prost::bytes::Bytes,
+    /// The Bitcoin txid of the CPFP child transaction (32 bytes).
+    #[prost(bytes = "bytes", tag = "2")]
+    pub cpfp_txid: ::prost::bytes::Bytes,
+    /// Fee of the CPFP child transaction in satoshis.
+    #[prost(uint64, tag = "3")]
+    pub child_fee: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignCpfpTxSigningRequest {
+    /// Pending withdrawal id on Sui (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub pending_withdrawal_id: ::prost::bytes::Bytes,
+    /// CPFP child transaction txid (32 bytes).
+    #[prost(bytes = "bytes", tag = "2")]
+    pub cpfp_txid: ::prost::bytes::Bytes,
+    /// Change amount of the CPFP child output (satoshis).
+    #[prost(uint64, tag = "3")]
+    pub cpfp_change_amount: u64,
+    /// Schnorr signature for the CPFP child input.
+    #[prost(bytes = "bytes", tag = "4")]
+    pub cpfp_signature: ::prost::bytes::Bytes,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignCpfpTxSigningResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
 /// Generated client implementations.
 pub mod bridge_service_client {
     #![allow(
@@ -442,6 +480,66 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// CPFP: Sign a CPFP child transaction that fee-bumps a stuck withdrawal.
+        pub async fn sign_cpfp_transaction(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignCpfpTransactionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignCpfpTransactionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignCpfpTransaction",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignCpfpTransaction",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// CPFP: Sign the BLS certificate over the CPFP witness signature for on-chain storage.
+        pub async fn sign_cpfp_tx_signing(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignCpfpTxSigningRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignCpfpTxSigningResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignCpfpTxSigning",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignCpfpTxSigning",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -512,6 +610,22 @@ pub mod bridge_service_server {
             request: tonic::Request<super::SignWithdrawalConfirmationRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignWithdrawalConfirmationResponse>,
+            tonic::Status,
+        >;
+        /// CPFP: Sign a CPFP child transaction that fee-bumps a stuck withdrawal.
+        async fn sign_cpfp_transaction(
+            &self,
+            request: tonic::Request<super::SignCpfpTransactionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignCpfpTransactionResponse>,
+            tonic::Status,
+        >;
+        /// CPFP: Sign the BLS certificate over the CPFP witness signature for on-chain storage.
+        async fn sign_cpfp_tx_signing(
+            &self,
+            request: tonic::Request<super::SignCpfpTxSigningRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignCpfpTxSigningResponse>,
             tonic::Status,
         >;
     }
@@ -934,6 +1048,98 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SignWithdrawalConfirmationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignCpfpTransaction" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignCpfpTransactionSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SignCpfpTransactionRequest>
+                    for SignCpfpTransactionSvc<T> {
+                        type Response = super::SignCpfpTransactionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SignCpfpTransactionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_cpfp_transaction(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignCpfpTransactionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignCpfpTxSigning" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignCpfpTxSigningSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SignCpfpTxSigningRequest>
+                    for SignCpfpTxSigningSvc<T> {
+                        type Response = super::SignCpfpTxSigningResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SignCpfpTxSigningRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_cpfp_tx_signing(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignCpfpTxSigningSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

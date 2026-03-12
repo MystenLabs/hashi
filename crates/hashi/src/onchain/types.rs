@@ -593,6 +593,18 @@ pub struct PendingWithdrawal {
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
+    pub cpfp_info: Option<CpfpInfo>,
+}
+
+/// Stores CPFP (Child-Pays-For-Parent) data for a fee-bumped withdrawal.
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+pub struct CpfpInfo {
+    /// Bitcoin txid of the CPFP child transaction.
+    pub txid: Address,
+    /// Amount of the child's single change output (in satoshis).
+    pub change_amount: u64,
+    /// Schnorr witness signature for the child transaction's single input.
+    pub signature: Vec<u8>,
 }
 
 impl PendingWithdrawal {

@@ -244,6 +244,15 @@ pub struct PendingWithdrawal {
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
+    pub cpfp_info: Option<CpfpInfo>,
+}
+
+/// Rust version of the Move hashi::withdrawal_queue::CpfpInfo type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct CpfpInfo {
+    pub txid: Address,
+    pub change_amount: u64,
+    pub signature: Vec<u8>,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.

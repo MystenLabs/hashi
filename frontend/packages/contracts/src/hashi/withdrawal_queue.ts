@@ -45,6 +45,17 @@ export const WithdrawalRequest = new MoveStruct({
     approved: bcs.bool(),
   },
 });
+export const CpfpInfo = new MoveStruct({
+  name: `${$moduleName}::CpfpInfo`,
+  fields: {
+    /** Bitcoin txid of the CPFP child transaction. */
+    txid: bcs.Address,
+    /** Amount of the child's single change output (in satoshis). */
+    change_amount: bcs.u64(),
+    /** Schnorr witness signature for the child transaction's single input. */
+    signature: bcs.vector(bcs.u8()),
+  },
+});
 export const PendingWithdrawal = new MoveStruct({
   name: `${$moduleName}::PendingWithdrawal`,
   fields: {
@@ -57,6 +68,7 @@ export const PendingWithdrawal = new MoveStruct({
     timestamp_ms: bcs.u64(),
     randomness: bcs.vector(bcs.u8()),
     signatures: bcs.option(bcs.vector(bcs.vector(bcs.u8()))),
+    cpfp_info: bcs.option(CpfpInfo),
   },
 });
 export const WithdrawalRequestedEvent = new MoveStruct({
@@ -112,5 +124,14 @@ export const WithdrawalCancelledEvent = new MoveStruct({
     request_id: bcs.Address,
     requester_address: bcs.Address,
     btc_amount: bcs.u64(),
+  },
+});
+export const CpfpSubmittedEvent = new MoveStruct({
+  name: `${$moduleName}::CpfpSubmittedEvent`,
+  fields: {
+    pending_id: bcs.Address,
+    parent_txid: bcs.Address,
+    cpfp_txid: bcs.Address,
+    cpfp_change_amount: bcs.u64(),
   },
 });

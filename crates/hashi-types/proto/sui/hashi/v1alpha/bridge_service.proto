@@ -22,6 +22,10 @@ service BridgeService {
   rpc SignWithdrawalTxSigning(SignWithdrawalTxSigningRequest) returns (SignWithdrawalTxSigningResponse);
   // Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
   rpc SignWithdrawalConfirmation(SignWithdrawalConfirmationRequest) returns (SignWithdrawalConfirmationResponse);
+  // CPFP: Sign a CPFP child transaction that fee-bumps a stuck withdrawal.
+  rpc SignCpfpTransaction(SignCpfpTransactionRequest) returns (SignCpfpTransactionResponse);
+  // CPFP: Sign the BLS certificate over the CPFP witness signature for on-chain storage.
+  rpc SignCpfpTxSigning(SignCpfpTxSigningRequest) returns (SignCpfpTxSigningResponse);
 }
 
 message GetServiceInfoRequest {}
@@ -151,5 +155,34 @@ message SignWithdrawalConfirmationRequest {
 }
 
 message SignWithdrawalConfirmationResponse {
+  MemberSignature member_signature = 1;
+}
+
+message SignCpfpTransactionRequest {
+  // The id of the PendingWithdrawal on Sui (32 bytes).
+  bytes pending_withdrawal_id = 1;
+}
+
+message SignCpfpTransactionResponse {
+  // The MPC Schnorr signature for the CPFP child transaction's single input.
+  bytes signature = 1;
+  // The Bitcoin txid of the CPFP child transaction (32 bytes).
+  bytes cpfp_txid = 2;
+  // Fee of the CPFP child transaction in satoshis.
+  uint64 child_fee = 3;
+}
+
+message SignCpfpTxSigningRequest {
+  // Pending withdrawal id on Sui (32 bytes).
+  bytes pending_withdrawal_id = 1;
+  // CPFP child transaction txid (32 bytes).
+  bytes cpfp_txid = 2;
+  // Change amount of the CPFP child output (satoshis).
+  uint64 cpfp_change_amount = 3;
+  // Schnorr signature for the CPFP child input.
+  bytes cpfp_signature = 4;
+}
+
+message SignCpfpTxSigningResponse {
   MemberSignature member_signature = 1;
 }

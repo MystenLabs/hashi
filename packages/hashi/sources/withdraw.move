@@ -43,6 +43,14 @@ public struct WithdrawalConfirmationMessage has copy, drop, store {
     withdrawal_id: address,
 }
 
+// CPFP MESSAGE
+public struct CpfpSignedMessage has copy, drop, store {
+    pending_withdrawal_id: address,
+    cpfp_txid: address,
+    cpfp_change_amount: u64,
+    cpfp_signature: vector<u8>,
+}
+
 // ======== Message Constructors ========
 
 public(package) fun new_request_approval_message(request_id: address): RequestApprovalMessage {
@@ -234,6 +242,43 @@ entry fun sign_withdrawal(
     let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
 
     hashi.withdrawal_queue_mut().sign_pending_withdrawal(withdrawal_id, signatures);
+}
+
+/// Store CPFP child transaction data on a pending withdrawal.
+entry fun sign_cpfp(
+    hashi: &mut Hashi,
+    pending_withdrawal_id: address,
+    cpfp_txid: address,
+    cpfp_change_amount: u64,
+    cpfp_signature: vector<u8>,
+    epoch: u64,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+    _ctx: &mut TxContext,
+) {
+    hashi.config().assert_version_enabled();
+
+    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
+
+    let threshold =
+        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
+    let cpfp_message = CpfpSignedMessage {
+        pending_withdrawal_id,
+        cpfp_txid,
+        cpfp_change_amount,
+        cpfp_signature,
+    };
+    let _ = hashi
+        .current_committee()
+        .verify_certificate(cpfp_message, cert, threshold)
+        .into_message();
+
+    hashi.withdrawal_queue_mut().submit_cpfp_info(
+        pending_withdrawal_id,
+        cpfp_txid,
+        cpfp_change_amount,
+        cpfp_signature,
+    );
 }
 
 entry fun confirm_withdrawal(

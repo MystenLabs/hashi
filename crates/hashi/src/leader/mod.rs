@@ -11,6 +11,7 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::CpfpTxSigning;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
@@ -27,6 +28,8 @@ use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::bitcoin_utils;
+use hashi_types::proto::SignCpfpTransactionRequest;
+use hashi_types::proto::SignCpfpTxSigningRequest;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
@@ -45,7 +48,6 @@ use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 
-#[derive(Clone)]
 pub struct LeaderService {
     inner: Arc<Hashi>,
     deposit_retry_tracker: RetryTracker<DepositValidationErrorKind>,
@@ -100,7 +102,8 @@ impl LeaderService {
             self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
                 .await;
             self.process_unsigned_pending_withdrawals().await;
-            self.process_signed_pending_withdrawals().await;
+            self.process_signed_pending_withdrawals(checkpoint_timestamp_ms)
+                .await;
             self.check_delete_proposals(checkpoint_timestamp_ms).await;
             self.check_delete_spent_utxos().await;
         }
@@ -728,30 +731,47 @@ impl LeaderService {
     // Step 4-5: Broadcast signed tx and confirm on-chain
     // ========================================================================
 
-    async fn process_signed_pending_withdrawals(&self) {
+    async fn process_signed_pending_withdrawals(&self, checkpoint_timestamp_ms: u64) {
         let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
         pending_withdrawals.retain(|p| p.signatures.is_some());
         pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
 
         for pending in &pending_withdrawals {
-            self.handle_signed_withdrawal(pending).await;
+            self.handle_signed_withdrawal(pending, checkpoint_timestamp_ms)
+                .await;
         }
     }
 
     /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
-    /// enough BTC confirmations are reached.
-    async fn handle_signed_withdrawal(&self, pending: &PendingWithdrawal) {
+    /// enough BTC confirmations are reached. Uses on-chain timestamps to initiate CPFP transaction
+    async fn handle_signed_withdrawal(
+        &self,
+        pending: &PendingWithdrawal,
+        checkpoint_timestamp_ms: u64,
+    ) {
         let confirmation_threshold = self.inner.onchain_state().bitcoin_confirmation_threshold();
         let txid = bitcoin::Txid::from_byte_array(pending.txid.into());
 
-        match self.inner.btc_monitor().get_transaction_status(txid).await {
+        // If CPFP was submitted, also check the child tx status
+        let effective_txid = if let Some(ref cpfp) = pending.cpfp_info {
+            bitcoin::Txid::from_byte_array(cpfp.txid.into())
+        } else {
+            txid
+        };
+
+        match self
+            .inner
+            .btc_monitor()
+            .get_transaction_status(effective_txid)
+            .await
+        {
             Ok(TxStatus::Confirmed { confirmations })
                 if confirmations >= confirmation_threshold =>
             {
                 info!(
                     "Withdrawal tx {} confirmed with {confirmations} confirmations, \
                      proceeding to on-chain confirmation for {:?}",
-                    txid, pending.id
+                    effective_txid, pending.id
                 );
                 self.confirm_withdrawal_on_sui(pending).await;
             }
@@ -759,26 +779,130 @@ impl LeaderService {
                 debug!(
                     "Withdrawal tx {} has {confirmations}/{confirmation_threshold} \
                      confirmations, waiting for more",
-                    txid
+                    effective_txid
                 );
             }
             Ok(TxStatus::InMempool) => {
                 debug!(
                     "Withdrawal tx {} in mempool for {:?}, waiting for confirmations",
-                    txid, pending.id
+                    effective_txid, pending.id
                 );
+                self.maybe_trigger_cpfp(pending, checkpoint_timestamp_ms)
+                    .await;
             }
             Ok(TxStatus::NotFound) => {
-                self.rebuild_and_broadcast_withdrawal_btc_tx(pending, txid)
+                if pending.cpfp_info.is_some() {
+                    // CPFP child was submitted but not found, rebuild and rebroadcast both
+                    self.broadcast_cpfp_package(pending, None).await;
+                } else {
+                    self.rebuild_and_broadcast_withdrawal_btc_tx(pending, txid)
+                        .await;
+                }
+                self.maybe_trigger_cpfp(pending, checkpoint_timestamp_ms)
                     .await;
             }
             Err(e) => {
                 error!(
                     "Failed to query transaction status for {:?} (txid {}): {e}",
-                    pending.id, txid
+                    pending.id, effective_txid
                 );
             }
         }
+    }
+
+    /// Trigger CPFP if a signed withdrawal has been unconfirmed for longer than `cpfp_trigger_after_ms`
+    async fn maybe_trigger_cpfp(&self, pending: &PendingWithdrawal, checkpoint_timestamp_ms: u64) {
+        // Don't trigger CPFP if already submitted
+        if pending.cpfp_info.is_some() {
+            return;
+        }
+
+        let threshold_ms = self.inner.config.cpfp_trigger_after_ms();
+        let elapsed_ms = checkpoint_timestamp_ms.saturating_sub(pending.timestamp_ms);
+
+        if elapsed_ms >= threshold_ms {
+            info!(
+                "Withdrawal {:?} has been unconfirmed for {}ms (threshold: {}ms), \
+                 triggering CPFP",
+                pending.id, elapsed_ms, threshold_ms
+            );
+            self.process_cpfp_for_withdrawal(pending).await;
+        }
+    }
+
+    /// Build, sign, and broadcast a CPFP child transaction for a stuck withdrawal.
+    async fn process_cpfp_for_withdrawal(&self, pending: &PendingWithdrawal) {
+        let members = match self.inner.onchain_state().current_committee_members() {
+            Some(m) => m,
+            None => {
+                error!("No current committee members for CPFP");
+                return;
+            }
+        };
+
+        // Step 1: Collect MPC Schnorr signatures for the CPFP child tx
+        let (cpfp_tx, cpfp_signature, child_fee) =
+            match self.collect_cpfp_tx_signatures(&pending.id, &members).await {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(
+                        "Failed to collect CPFP signatures for {:?}: {e}",
+                        pending.id
+                    );
+                    return;
+                }
+            };
+
+        let cpfp_txid = Address::new(cpfp_tx.compute_txid().to_byte_array());
+        let child_change_amount = cpfp_tx.output[0].value.to_sat();
+
+        // Step 2: Collect BLS signatures and submit CPFP data on-chain
+        let cpfp_signing = CpfpTxSigning {
+            pending_withdrawal_id: pending.id,
+            cpfp_txid,
+            cpfp_change_amount: child_change_amount,
+            cpfp_signature: cpfp_signature.to_byte_array().to_vec(),
+        };
+
+        let cpfp_cert = match self
+            .collect_cpfp_tx_signing_signature(&cpfp_signing, &members)
+            .await
+        {
+            Ok(cert) => cert,
+            Err(e) => {
+                error!(
+                    "Failed to collect CPFP BLS signatures for {:?}: {e}",
+                    pending.id
+                );
+                return;
+            }
+        };
+
+        // Submit sign_cpfp on Sui
+        if let Err(e) = self
+            .submit_sign_cpfp(
+                &pending.id,
+                &cpfp_txid,
+                child_change_amount,
+                cpfp_signature.to_byte_array().as_ref(),
+                &cpfp_cert,
+            )
+            .await
+        {
+            error!(
+                "Failed to submit sign_cpfp on Sui for {:?}: {e}",
+                pending.id
+            );
+            return;
+        }
+
+        info!(
+            "CPFP submitted for withdrawal {:?}: child txid {:?}, fee {} sats",
+            pending.id, cpfp_txid, child_fee
+        );
+
+        // Step 3: Broadcast the package (parent + child)
+        self.broadcast_cpfp_package(pending, Some(&cpfp_tx)).await;
     }
 
     /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
@@ -844,22 +968,244 @@ impl LeaderService {
             pending.inputs.len()
         );
 
-        let hashi_pubkey = self.inner.get_hashi_pubkey();
         for ((input, pending_input), sig_bytes) in
             tx.input.iter_mut().zip(pending.inputs.iter()).zip(raw_sigs)
         {
-            let pubkey = self
+            input.witness = self
                 .inner
-                .deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
-            let (script, control_block, _) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
-            let mut witness = bitcoin::Witness::new();
-            witness.push(sig_bytes);
-            witness.push(script.to_bytes());
-            witness.push(control_block.serialize());
-            input.witness = witness;
+                .build_taproot_witness(sig_bytes, pending_input.derivation_path.as_ref())?;
         }
 
+        Ok(tx)
+    }
+
+    // ========================================================================
+    // CPFP helpers
+    // ========================================================================
+
+    /// Fan out to committee: MPC-sign the CPFP child transaction. (similar to `collect_withdrawal_tx_signatures`)
+    async fn collect_cpfp_tx_signatures(
+        &self,
+        pending_id: &Address,
+        members: &[CommitteeMember],
+    ) -> anyhow::Result<(bitcoin::Transaction, SchnorrSignature, u64)> {
+        let futures: Vec<_> = members
+            .iter()
+            .map(|member| self.request_cpfp_tx_signature(pending_id, member))
+            .collect();
+        let results = futures::future::join_all(futures).await;
+
+        for result in results {
+            match result {
+                Ok(signature) => {
+                    // Rebuild the CPFP tx locally to verify
+                    let pending = self
+                        .inner
+                        .onchain_state()
+                        .pending_withdrawal(pending_id)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("PendingWithdrawal {pending_id} not found")
+                        })?;
+                    let (cpfp_tx, child_fee) = self.inner.build_unsigned_cpfp_tx(&pending).await?;
+                    return Ok((cpfp_tx, signature, child_fee));
+                }
+                Err(e) => {
+                    warn!("Could not get CPFP signature from a node: {e}");
+                }
+            }
+        }
+        anyhow::bail!(
+            "Could not get CPFP MPC signatures for {:?}; stopping processing",
+            pending_id
+        )
+    }
+
+    /// Fan out to committee: BLS-sign the CPFP witness data for on-chain storage. (similar to `collect_withdrawal_tx_signing_signatures`)
+    async fn collect_cpfp_tx_signing_signature(
+        &self,
+        cpfp_signing: &CpfpTxSigning,
+        members: &[CommitteeMember],
+    ) -> anyhow::Result<CommitteeSignature> {
+        let proto_request = hashi_types::proto::SignCpfpTxSigningRequest {
+            pending_withdrawal_id: cpfp_signing
+                .pending_withdrawal_id
+                .as_bytes()
+                .to_vec()
+                .into(),
+            cpfp_txid: cpfp_signing.cpfp_txid.as_bytes().to_vec().into(),
+            cpfp_change_amount: cpfp_signing.cpfp_change_amount,
+            cpfp_signature: cpfp_signing.cpfp_signature.clone().into(),
+        };
+
+        let mut bls_signatures: Vec<MemberSignature> = Vec::new();
+        for member in members {
+            if let Some(signature) = self
+                .request_cpfp_tx_signing_signature(proto_request.clone(), member)
+                .await
+            {
+                bls_signatures.push(signature);
+            }
+        }
+
+        let committee = self
+            .inner
+            .onchain_state()
+            .current_committee()
+            .ok_or_else(|| anyhow::anyhow!("No current committee"))?;
+
+        let mut aggregator = BlsSignatureAggregator::new(&committee, cpfp_signing.clone());
+        for sig in bls_signatures {
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!("Failed to add CPFP BLS signature: {e}");
+            }
+        }
+
+        let weight = aggregator.weight();
+        let required_weight = certificate_threshold(committee.total_weight());
+        if weight < required_weight {
+            anyhow::bail!("Insufficient CPFP BLS signatures: weight {weight} < {required_weight}");
+        }
+
+        let signed = aggregator
+            .finish()
+            .map_err(|e| anyhow::anyhow!("Failed to aggregate CPFP BLS signatures: {e}"))?;
+        Ok(signed.committee_signature().clone())
+    }
+
+    /// Submit the sign_cpfp Move transaction on Sui.
+    async fn submit_sign_cpfp(
+        &self,
+        pending_id: &Address,
+        cpfp_txid: &Address,
+        cpfp_change_amount: u64,
+        cpfp_signature: &[u8],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        info!("Submitting sign_cpfp for {:?}", pending_id);
+
+        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+        executor
+            .execute_sign_cpfp(
+                pending_id,
+                cpfp_txid,
+                cpfp_change_amount,
+                cpfp_signature,
+                cert,
+            )
+            .await
+    }
+
+    /// Broadcast parent and CPFP child transactions.
+    /// If `unsigned_cpfp_tx` is provided (first-time broadcast after signing), uses it directly.
+    /// Otherwise, rebuilds the unsigned CPFP child from on-chain data.
+    async fn broadcast_cpfp_package(
+        &self,
+        pending: &PendingWithdrawal,
+        unsigned_cpfp_tx: Option<&bitcoin::Transaction>,
+    ) {
+        // Broadcast the parent (may already be in mempool)
+        match self.rebuild_signed_tx_from_onchain(pending) {
+            Ok(parent_tx) => {
+                let _ = self
+                    .inner
+                    .btc_monitor()
+                    .broadcast_transaction(parent_tx)
+                    .await;
+            }
+            Err(e) => {
+                warn!("Failed to rebuild parent tx for CPFP broadcast: {e}");
+            }
+        }
+
+        // Build or rebuild unsigned CPFP child tx
+        let unsigned = match unsigned_cpfp_tx {
+            Some(tx) => tx.clone(),
+            None => match self.rebuild_unsigned_cpfp_tx_from_onchain(pending) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    error!("Failed to rebuild unsigned CPFP child tx: {e}");
+                    return;
+                }
+            },
+        };
+
+        // Sign and broadcast
+        let signed_cpfp = match self.rebuild_signed_cpfp_tx(pending, &unsigned) {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!("Failed to build signed CPFP child tx: {e}");
+                return;
+            }
+        };
+
+        match self
+            .inner
+            .btc_monitor()
+            .broadcast_transaction(signed_cpfp)
+            .await
+        {
+            Ok(()) => {
+                info!("Broadcast CPFP child tx for {:?}", pending.id);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to broadcast CPFP child tx for {:?}: {e}",
+                    pending.id
+                );
+            }
+        }
+    }
+
+    /// Rebuild the unsigned CPFP child transaction from on-chain PendingWithdrawal data.
+    fn rebuild_unsigned_cpfp_tx_from_onchain(
+        &self,
+        pending: &PendingWithdrawal,
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        let cpfp_info = pending
+            .cpfp_info
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No CPFP info on pending withdrawal"))?;
+        let change_output = pending
+            .change_output
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No change output on pending withdrawal"))?;
+
+        let cpfp_input = bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array(pending.txid.into()),
+                vout: pending.withdrawal_outputs.len() as u32,
+            },
+            script_sig: bitcoin::ScriptBuf::default(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::default(),
+        };
+        let script_pubkey =
+            crate::withdrawals::script_pubkey_from_raw_address(&change_output.bitcoin_address)?;
+        let cpfp_output = bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(cpfp_info.change_amount),
+            script_pubkey,
+        };
+        Ok(bitcoin_utils::construct_tx(
+            vec![cpfp_input],
+            vec![cpfp_output],
+        ))
+    }
+
+    /// Add witness to an unsigned CPFP child tx using the on-chain signature.
+    fn rebuild_signed_cpfp_tx(
+        &self,
+        pending: &PendingWithdrawal,
+        unsigned_cpfp_tx: &bitcoin::Transaction,
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        let cpfp_info = pending
+            .cpfp_info
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No CPFP info"))?;
+
+        let mut tx = unsigned_cpfp_tx.clone();
+        tx.input[0].witness = self
+            .inner
+            .build_taproot_witness(&cpfp_info.signature, None)?;
         Ok(tx)
     }
 
@@ -1299,6 +1645,108 @@ impl LeaderService {
             pending_withdrawal_id
         );
         Ok(())
+    }
+
+    // ========================================================================
+    // CPFP gRPC request helpers
+    // ========================================================================
+
+    async fn request_cpfp_tx_signature(
+        &self,
+        pending_withdrawal_id: &Address,
+        member: &CommitteeMember,
+    ) -> anyhow::Result<SchnorrSignature> {
+        let validator_address = member.validator_address();
+        trace!("Requesting CPFP tx signature from {}", validator_address);
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                )
+            })?;
+
+        let proto_request = SignCpfpTransactionRequest {
+            pending_withdrawal_id: pending_withdrawal_id.as_bytes().to_vec().into(),
+        };
+
+        let response = rpc_client
+            .sign_cpfp_transaction(proto_request)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to get CPFP tx signature from {validator_address}: {e}")
+            })?;
+
+        trace!("Retrieved CPFP tx signature from {}", validator_address);
+
+        let sig_bytes: [u8; 64] = response
+            .into_inner()
+            .signature
+            .as_ref()
+            .try_into()
+            .map_err(|_| {
+                anyhow::anyhow!("Invalid CPFP Schnorr signature length from {validator_address}")
+            })?;
+        SchnorrSignature::from_byte_array(&sig_bytes).map_err(|e| {
+            anyhow::anyhow!("Invalid CPFP Schnorr signature from {validator_address}: {e}")
+        })
+    }
+
+    async fn request_cpfp_tx_signing_signature(
+        &self,
+        proto_request: SignCpfpTxSigningRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!(
+            "Requesting CPFP tx signing signature from {}",
+            validator_address
+        );
+
+        let mut rpc_client = self
+            .inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_cpfp_tx_signing(proto_request.clone())
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to get CPFP tx signing signature from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()?;
+
+        trace!(
+            "Retrieved CPFP tx signing signature from {}",
+            validator_address
+        );
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse member signature from CPFP tx signing response from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()
     }
 }
 
