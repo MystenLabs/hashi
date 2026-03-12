@@ -39,8 +39,8 @@ buf-lint: ## Run buf lint
 
 .PHONY: test
 test: ## Run all tests
-	cargo nextest run --all-features
-	cargo test --all-features --doc
+	cargo nextest run --workspace --all-features
+	cargo test --workspace --all-features --doc
 
 .PHONY: test-move
 test-move: ## Run all move tests
@@ -52,15 +52,15 @@ proto: ## Build proto files
 
 .PHONY: clippy
 clippy: ## run cargo clippy
-	cargo clippy --all-features --all-targets
+	cargo clippy --workspace --all-features --all-targets
 
 .PHONY: doc
 doc: ## Generate documentation
-	RUSTDOCFLAGS="-Dwarnings --cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --all-features --no-deps
+	RUSTDOCFLAGS="-Dwarnings --cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --workspace --all-features --no-deps
 
 .PHONY: doc-open
 doc-open: ## Generate and open documentation
-	RUSTDOCFLAGS="--cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --all-features --no-deps --open
+	RUSTDOCFLAGS="--cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --workspace --all-features --no-deps --open
 
 .PHONY: ci
 ci: check-fmt buf-lint clippy test ## Run the full CI process
