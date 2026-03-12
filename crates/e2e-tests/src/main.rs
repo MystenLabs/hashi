@@ -705,7 +705,7 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
 
     // Fetch MPC public key from on-chain state
     let (onchain_state, _service) =
-        hashi::onchain::OnchainState::new(&state.sui_rpc_url, hashi_ids, None, None)
+        hashi::onchain::OnchainState::new(&state.sui_rpc_url, hashi_ids, None, None, None)
             .await
             .context("Failed to read on-chain state")?;
 
