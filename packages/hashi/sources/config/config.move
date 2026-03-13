@@ -180,7 +180,7 @@ public(package) fun create(): Config {
     config.upsert(WITHDRAWAL_FEE_SUI_KEY, config_value::new_u64(0));
     config.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(500)); // 500 satoshis
     config.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(0));
-    config.upsert(BITCOIN_CONFIRMATION_THRESHOLD_KEY, config_value::new_u64(6));
+    config.upsert(BITCOIN_CONFIRMATION_THRESHOLD_KEY, config_value::new_u64(1)); // TODO: set to 6 before mainnet
     config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
 
     config
