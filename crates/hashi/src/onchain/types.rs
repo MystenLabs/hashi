@@ -449,19 +449,41 @@ pub struct Config {
     pub upgrade_cap: Option<UpgradeCap>,
 }
 
+// These constants mirror the values in config.move and must be kept in sync.
+const DUST_RELAY_MIN_VALUE: u64 = 546;
+const MIN_RELAY_FEE_RATE: u64 = 1;
+const INPUT_VB: u64 = 100;
+const OUTPUT_VB: u64 = 43;
+const NUM_OUTPUTS: u64 = 2;
+const TX_FIXED_VB: u64 = 11;
+
 impl Config {
     pub fn withdrawal_fee_btc(&self) -> u64 {
         match self.config.get("withdrawal_fee_btc") {
-            Some(ConfigValue::U64(v)) => *v,
-            _ => 0,
+            Some(ConfigValue::U64(v)) => (*v).max(DUST_RELAY_MIN_VALUE),
+            _ => DUST_RELAY_MIN_VALUE,
         }
     }
 
-    pub fn withdrawal_minimum(&self) -> u64 {
-        match self.config.get("withdrawal_minimum") {
-            Some(ConfigValue::U64(v)) => *v,
-            _ => 0,
+    pub fn max_fee_rate(&self) -> u64 {
+        match self.config.get("max_fee_rate") {
+            Some(ConfigValue::U64(v)) => (*v).max(MIN_RELAY_FEE_RATE),
+            _ => MIN_RELAY_FEE_RATE,
         }
+    }
+
+    pub fn max_inputs(&self) -> u64 {
+        match self.config.get("max_inputs") {
+            Some(ConfigValue::U64(v)) => (*v).max(1),
+            _ => 1,
+        }
+    }
+
+    /// Computed withdrawal minimum, mirroring the formula in config.move.
+    pub fn withdrawal_minimum(&self) -> u64 {
+        let tx_vbytes = TX_FIXED_VB + (self.max_inputs() * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB);
+        let worst_case_fee = self.max_fee_rate() * tx_vbytes;
+        self.withdrawal_fee_btc() + worst_case_fee + DUST_RELAY_MIN_VALUE
     }
 
     pub fn paused(&self) -> bool {

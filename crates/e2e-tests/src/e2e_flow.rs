@@ -480,7 +480,7 @@ mod tests {
 
         let mut networks = setup_test_networks().await?;
 
-        let deposit_amount_sats = 31337u64;
+        let deposit_amount_sats = 100_000u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
 
         let hbtc_balance = get_hbtc_balance(
@@ -496,7 +496,7 @@ mod tests {
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap();
-        let withdrawal_amount_sats = 20_000u64;
+        let withdrawal_amount_sats = 30_000u64;
         let btc_destination = networks.bitcoin_node.get_new_address()?;
         let destination_bytes = extract_witness_program(&btc_destination)?;
         info!(
@@ -595,7 +595,7 @@ mod tests {
         init_test_logging();
         let mut networks = setup_test_networks().await?;
         let deposit_amount_sats = 100_000u64;
-        let withdrawal_amount_sats = 20_000u64;
+        let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
 
         // First deposit
@@ -658,7 +658,7 @@ mod tests {
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
         let deposit_amount_sats = 100_000u64;
-        let withdrawal_amount_sats = 10_000u64;
+        let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
 
         // Perform 4 deposit+withdrawal cycles to exhaust batch 0 (~3 presigs)
@@ -711,7 +711,7 @@ mod tests {
         init_test_logging();
         let mut networks = setup_test_networks().await?;
         let deposit_amount_sats = 100_000u64;
-        let withdrawal_amount_sats = 20_000u64;
+        let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
 
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -742,7 +742,7 @@ mod tests {
         init_test_logging();
         let mut networks = setup_test_networks().await?;
         let deposit_amount_sats = 100_000u64;
-        let withdrawal_amount_sats = 20_000u64;
+        let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
 
         // First deposit + withdrawal to establish a consistent

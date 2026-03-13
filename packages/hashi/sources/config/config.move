@@ -13,6 +13,83 @@ use sui::{
 
 const PACKAGE_VERSION: u64 = 1;
 
+/// The minimum value (in satoshis) that a Bitcoin transaction output must carry
+/// to be relayed by nodes using Bitcoin Core's default dust relay fee rate
+/// (3 sat/vB). Outputs below this threshold are considered "dust" -- they cost
+/// more in fees to spend than they are worth -- and are rejected by the network's
+/// relay policy.
+///
+/// The exact dust threshold depends on the spend path because each path has a
+/// different input weight:
+///
+///   - P2PKH (legacy):             546 sats  (148 vB input)
+///   - P2WPKH (segwit v0):         294 sats  (68 vB input)
+///   - P2TR keypath (taproot):     330 sats  (58 vB input)
+///   - P2TR script-path 1-of-1:    369 sats  (75 vB input)
+///   - P2TR script-path 2-of-2:    429 sats  (100 vB input)
+///
+/// We use 546 sats -- the highest of these thresholds -- as a conservative floor
+/// that is safe regardless of the output's eventual spend path.
+const DUST_RELAY_MIN_VALUE: u64 = 546;
+
+/// The minimum fee rate (in sat/vB) required for a Bitcoin transaction to be
+/// relayed by nodes on the network. This is Bitcoin Core's default
+/// `-minrelaytxfee` expressed in sat/vB.
+const MIN_RELAY_FEE_RATE: u64 = 1;
+
+/// Virtual bytes (vB) for a single transaction input spent via a 2-of-2 taproot
+/// script-path. This is the heaviest input type we support.
+///
+/// Derived from weight units (WU), where vB = ceil(WU / 4):
+///
+///   Non-witness data (x4 multiplier):
+///     outpoint(32+4) + script_sig_len(1) + script_sig(0) + sequence(4) = 41 bytes
+///     41 x 4 = 164 WU
+///
+///   Witness data (x1 multiplier):
+///     items_count(1) + sig1_len(1) + sig1(64) + sig2_len(1) + sig2(64)
+///     + script_len(1) + script(68) + control_block_len(1) + control_block(33) = 234 WU
+///
+///     Where the script is: <pk1> OP_CHECKSIGVERIFY <pk2> OP_CHECKSIG (68 bytes)
+///     and the control block is: leaf_version|parity(1) + internal_key(32) = 33 bytes
+///     (single-leaf tree, no merkle siblings)
+///
+///   Total: ceil((164 + 234) / 4) = ceil(398 / 4) = 100 vB
+const INPUT_VB: u64 = 100;
+
+/// Virtual bytes (vB) for a single P2TR transaction output. We use P2TR as it is
+/// the heaviest segwit output type we support, making this a conservative
+/// worst-case assumption.
+///
+/// Derived from weight units (WU):
+///   value(8) + script_len(1) = 9 bytes base (x 4 = 36 WU)
+///   OP_1(1) + push_32(1) + x_only_pubkey(32) = 34 bytes script (x 4 = 136 WU)
+///
+///   Total: ceil((36 + 136) / 4) = ceil(172 / 4) = 43 vB
+///
+/// For comparison, P2WPKH outputs are ceil(124 / 4) = 31 vB.
+const OUTPUT_VB: u64 = 43;
+
+/// Number of outputs assumed for withdrawal minimum calculation:
+/// one recipient output + one change output.
+const NUM_OUTPUTS: u64 = 2;
+
+/// Fixed virtual bytes (vB) overhead per Bitcoin transaction, independent of the
+/// number of inputs and outputs.
+///
+/// Derived from weight units (WU):
+///   Non-witness (x4 multiplier):
+///     version(4) + locktime(4) = 8 bytes x 4 = 32 WU
+///
+///   Witness (x1 multiplier):
+///     segwit_marker(1) + segwit_flag(1) + input_count(1) + output_count(1)
+///     = 4 bytes x 1 = 4 WU
+///
+///   Adjustment: +6 WU for compact size encoding overhead.
+///
+///   Total: ceil((32 + 4 + 6) / 4) = ceil(42 / 4) = 11 vB
+const TX_FIXED_VB: u64 = 11;
+
 #[error(code = 0)]
 const EVersionDisabled: vector<u8> = b"Version disabled";
 #[error(code = 1)]
@@ -25,7 +102,8 @@ const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 const BITCOIN_CHAIN_ID_KEY: vector<u8> = b"bitcoin_chain_id";
 const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
 const WITHDRAWAL_FEE_BTC_KEY: vector<u8> = b"withdrawal_fee_btc";
-const WITHDRAWAL_MINIMUM_KEY: vector<u8> = b"withdrawal_minimum";
+const MAX_FEE_RATE_KEY: vector<u8> = b"max_fee_rate";
+const MAX_INPUTS_KEY: vector<u8> = b"max_inputs";
 const BITCOIN_CONFIRMATION_THRESHOLD_KEY: vector<u8> = b"bitcoin_confirmation_threshold";
 const PAUSED_KEY: vector<u8> = b"paused";
 const WITHDRAWAL_CANCELLATION_COOLDOWN_KEY: vector<u8> = b"withdrawal_cancellation_cooldown_ms";
@@ -75,20 +153,71 @@ public(package) fun set_deposit_fee(self: &mut Config, fee: u64) {
     self.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(fee))
 }
 
+/// The protocol fee (in satoshis) deducted from the user's withdrawal amount.
+/// Returns the greater of the configured value or DUST_RELAY_MIN_VALUE, ensuring
+/// the fee is always at least economically meaningful regardless of governance
+/// misconfiguration.
 public(package) fun withdrawal_fee_btc(self: &Config): u64 {
-    self.get(WITHDRAWAL_FEE_BTC_KEY).as_u64()
+    self.get(WITHDRAWAL_FEE_BTC_KEY).as_u64().max(DUST_RELAY_MIN_VALUE)
 }
 
 public(package) fun set_withdrawal_fee_btc(self: &mut Config, fee: u64) {
     self.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(fee))
 }
 
-public(package) fun withdrawal_minimum(self: &Config): u64 {
-    self.get(WITHDRAWAL_MINIMUM_KEY).as_u64()
+/// The worst-case fee rate (in sat/vB) used to compute the withdrawal minimum.
+/// This represents the highest sustained fee environment we expect to operate in
+/// without pausing withdrawals. Governance-updatable to adapt to changing network
+/// conditions.
+///
+/// Returns the greater of the configured value or MIN_RELAY_FEE_RATE (1 sat/vB),
+/// ensuring the assumed fee rate is never below the minimum required for a
+/// transaction to be relayed by Bitcoin nodes.
+public(package) fun max_fee_rate(self: &Config): u64 {
+    self.get(MAX_FEE_RATE_KEY).as_u64().max(MIN_RELAY_FEE_RATE)
 }
 
-public(package) fun set_withdrawal_minimum(self: &mut Config, fee: u64) {
-    self.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(fee))
+public(package) fun set_max_fee_rate(self: &mut Config, fee_rate: u64) {
+    self.upsert(MAX_FEE_RATE_KEY, config_value::new_u64(fee_rate))
+}
+
+/// The worst-case number of UTXO inputs assumed per withdrawal transaction.
+/// More inputs means a heavier transaction and higher fees. Governance-updatable
+/// to account for changes in UTXO pool fragmentation.
+///
+/// Returns the greater of the configured value or 1, since a transaction
+/// requires at least one input.
+public(package) fun max_inputs(self: &Config): u64 {
+    self.get(MAX_INPUTS_KEY).as_u64().max(1)
+}
+
+public(package) fun set_max_inputs(self: &mut Config, max_inputs: u64) {
+    self.upsert(MAX_INPUTS_KEY, config_value::new_u64(max_inputs))
+}
+
+/// Computes the minimum withdrawal amount (in satoshis) required for a
+/// withdrawal request to be accepted. This ensures the withdrawal is large
+/// enough to produce a valid Bitcoin transaction even under worst-case fee
+/// conditions.
+///
+/// The minimum is the sum of three components:
+///   1. withdrawal_fee_btc -- the protocol fee deducted from the user's amount
+///   2. worst_case_network_fee -- estimated miner fee at max_fee_rate with
+///      max_inputs inputs and NUM_OUTPUTS outputs
+///   3. DUST_RELAY_MIN_VALUE -- the user's output must be at least this large
+///      to be relayed by Bitcoin nodes
+///
+/// Formula:
+///   tx_vbytes = TX_FIXED_VB + (max_inputs * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB)
+///   worst_case_fee = max_fee_rate * tx_vbytes
+///   minimum = withdrawal_fee_btc + worst_case_fee + DUST_RELAY_MIN_VALUE
+public(package) fun withdrawal_minimum(self: &Config): u64 {
+    let tx_vbytes = TX_FIXED_VB
+        + (self.max_inputs() * INPUT_VB)
+        + (NUM_OUTPUTS * OUTPUT_VB);
+    let worst_case_fee = self.max_fee_rate() * tx_vbytes;
+
+    self.withdrawal_fee_btc() + worst_case_fee + DUST_RELAY_MIN_VALUE
 }
 
 public(package) fun bitcoin_confirmation_threshold(self: &Config): u64 {
@@ -168,8 +297,13 @@ public(package) fun create(): Config {
     // Set initial config values
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
     config.upsert(DEPOSIT_FEE_KEY, config_value::new_u64(0));
-    config.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(500)); // 500 satoshis
-    config.upsert(WITHDRAWAL_MINIMUM_KEY, config_value::new_u64(0));
+    config.upsert(WITHDRAWAL_FEE_BTC_KEY, config_value::new_u64(DUST_RELAY_MIN_VALUE));
+    // Worst-case fee rate in sat/vB for withdrawal minimum calculation.
+    // 25 sat/vB covers historically sustained congestion periods; brief spikes
+    // above this are handled by pausing withdrawals.
+    config.upsert(MAX_FEE_RATE_KEY, config_value::new_u64(25));
+    // Worst-case number of inputs per withdrawal transaction.
+    config.upsert(MAX_INPUTS_KEY, config_value::new_u64(10));
     config.upsert(BITCOIN_CONFIRMATION_THRESHOLD_KEY, config_value::new_u64(1)); // TODO: set to 6 before mainnet
     config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
 

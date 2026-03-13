@@ -51,6 +51,22 @@ const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
 /// whether to create a change output vs. paying a slightly higher fee.
 const LONG_TERM_FEE_RATE_SAT_PER_VB: f32 = 10.0;
 
+/// Witness satisfaction weight (WU) for a 2-of-2 taproot script-path spend.
+/// This is the witness-only portion; TXIN_BASE_WEIGHT (164 WU) is added by
+/// Candidate::new() to get the full input weight.
+///
+///   items_count(1) + sig1_len(1) + sig1(64) + sig2_len(1) + sig2(64)
+///   + script_len(1) + script(68) + control_block_len(1) + control_block(33)
+///   = 234 WU
+const SCRIPT_PATH_2OF2_SATISFACTION_WEIGHT: u64 = 234;
+
+/// Full input weight (WU) for a 2-of-2 taproot script-path spend.
+/// TXIN_BASE_WEIGHT (164 WU) + satisfaction (234 WU) = 398 WU (100 vB).
+/// Used in fee validation where we calculate weight directly without
+/// going through Candidate::new().
+const SCRIPT_PATH_2OF2_TXIN_WEIGHT: u64 =
+    bdk_coin_select::TXIN_BASE_WEIGHT + SCRIPT_PATH_2OF2_SATISFACTION_WEIGHT;
+
 /// Maximum BnB iterations before falling back to greedy selection.
 const BNB_MAX_ROUNDS: usize = 1_000;
 
@@ -235,7 +251,7 @@ impl Hashi {
         {
             // Estimate transaction weight
             let num_inputs = selected_utxos.len() as u64;
-            let input_weight = bdk_coin_select::TR_KEYSPEND_TXIN_WEIGHT * num_inputs;
+            let input_weight = SCRIPT_PATH_2OF2_TXIN_WEIGHT * num_inputs;
             let output_weight: u64 = approval
                 .outputs
                 .iter()
@@ -559,10 +575,10 @@ impl Hashi {
         let recipient_output_weight = output_weight_for_address(recipient_address)?;
         let long_term_fee_rate = FeeRate::from_sat_per_vb(LONG_TERM_FEE_RATE_SAT_PER_VB);
 
-        // Map each UTXO to a bdk_coin_select Candidate (P2TR key-path spend)
+        // Map each UTXO to a bdk_coin_select Candidate (2-of-2 script-path spend)
         let candidates: Vec<Candidate> = active_utxos
             .iter()
-            .map(|utxo| Candidate::new_tr_keyspend(utxo.amount))
+            .map(|utxo| Candidate::new(utxo.amount, SCRIPT_PATH_2OF2_SATISFACTION_WEIGHT, true))
             .collect();
 
         let mut cs = CoinSelector::new(&candidates);
@@ -576,8 +592,13 @@ impl Hashi {
             },
         };
 
+        let drain_weights = DrainWeights {
+            output_weight: bdk_coin_select::TXOUT_BASE_WEIGHT + bdk_coin_select::TR_SPK_WEIGHT,
+            spend_weight: SCRIPT_PATH_2OF2_TXIN_WEIGHT,
+            n_outputs: 1,
+        };
         let change_policy = ChangePolicy::min_value_and_waste(
-            DrainWeights::TR_KEYSPEND,
+            drain_weights,
             TR_DUST_RELAY_MIN_VALUE,
             fee_rate,
             long_term_fee_rate,

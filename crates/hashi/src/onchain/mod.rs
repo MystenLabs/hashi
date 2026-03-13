@@ -362,6 +362,14 @@ impl OnchainState {
         self.state().hashi().config.withdrawal_fee_btc()
     }
 
+    pub fn max_fee_rate(&self) -> u64 {
+        self.state().hashi().config.max_fee_rate()
+    }
+
+    pub fn max_inputs(&self) -> u64 {
+        self.state().hashi().config.max_inputs()
+    }
+
     pub fn withdrawal_minimum(&self) -> u64 {
         self.state().hashi().config.withdrawal_minimum()
     }
