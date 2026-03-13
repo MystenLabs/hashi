@@ -272,14 +272,6 @@ impl MpcService {
 
     async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
-        let committee = onchain_state
-            .state()
-            .hashi()
-            .committees
-            .committees()
-            .get(&target_epoch)
-            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {target_epoch}"))?
-            .clone();
         let mpc_manager = self
             .inner
             .mpc_manager()
@@ -292,7 +284,6 @@ impl MpcService {
             target_epoch,
             None,
             signer,
-            committee,
         );
         let output = MpcManager::run_dkg(&mpc_manager, &p2p_channel, &mut tob_channel)
             .await
@@ -326,7 +317,6 @@ impl MpcService {
             epoch,
             Some(batch_index),
             signer,
-            committee.clone(),
         );
         let nonce_outputs = MpcManager::run_nonce_generation(
             &mpc_manager,
@@ -624,31 +614,14 @@ impl MpcService {
 
     async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
         let onchain_state = self.inner.onchain_state().clone();
-        let target_committee = onchain_state
-            .state()
-            .hashi()
-            .committees
-            .committees()
-            .get(&target_epoch)
-            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {}", target_epoch))?
-            .clone();
         let mpc_manager = self
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for key rotation"))?;
         let source_epoch = mpc_manager.read().unwrap().source_epoch;
-        let source_committee = onchain_state
-            .state()
-            .hashi()
-            .committees
-            .committees()
-            .get(&source_epoch)
-            .ok_or_else(|| anyhow::anyhow!("No committee for source epoch {source_epoch}"))?
-            .clone();
-        let previous_certs =
-            fetch_certificates(&onchain_state, source_epoch, None, &source_committee)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
+        let previous_certs = fetch_certificates(&onchain_state, source_epoch, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
         let signer = self.inner.config.operator_private_key()?;
@@ -659,7 +632,6 @@ impl MpcService {
             target_epoch,
             None,
             signer,
-            target_committee,
         );
         let output = MpcManager::run_key_rotation(
             &mpc_manager,

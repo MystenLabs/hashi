@@ -227,8 +227,6 @@ impl DealerMessagesHash {
     pub fn from_onchain_cert(
         cert: &CertifiedMessage<DealerMessagesHashV1>,
         epoch: u64,
-        committee: &Committee,
-        threshold: u64,
     ) -> Result<DealerCertificate, MpcError> {
         let hash_bytes: [u8; 32] =
             cert.message
@@ -244,15 +242,14 @@ impl DealerMessagesHash {
             dealer_address: cert.message.dealer_address,
             messages_hash: hash_bytes.into(),
         };
-        SignedMessage::try_from_parts(
+        let signed_message = SignedMessage::new(
             epoch,
             message,
             &cert.signature.signature,
             &cert.signature.signers_bitmap,
-            committee,
-            threshold,
         )
-        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+        Ok(signed_message)
     }
 }
 
@@ -426,8 +423,9 @@ pub struct DealerFlowData {
     pub recipients: Vec<Address>,
     pub messages_hash: DealerMessagesHash,
     pub my_signature: MemberSignature,
-    pub required_weight: u64,
+    pub required_weight: u16,
     pub committee: Committee,
+    pub reduced_weights: HashMap<Address, u16>,
 }
 
 pub(crate) struct RotationComplainContext {
@@ -672,7 +670,6 @@ mod tests {
     fn test_from_onchain_cert_success() {
         let mut rng = rand::thread_rng();
         let epoch = 100u64;
-        let threshold = 2u64;
 
         // Create committee with 3 members
         let signing_keys: Vec<_> = (0..3)
@@ -725,8 +722,7 @@ mod tests {
         };
 
         // Parse back using from_onchain_cert
-        let result =
-            DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch, &committee, threshold);
+        let result = DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch);
         assert!(
             result.is_ok(),
             "Should parse valid certificate: {:?}",
@@ -743,20 +739,7 @@ mod tests {
 
     #[test]
     fn test_from_onchain_cert_invalid_hash_length() {
-        let mut rng = rand::thread_rng();
         let epoch = 100u64;
-        let threshold = 1u64;
-
-        // Create minimal committee
-        let signing_key = Bls12381PrivateKey::generate(&mut rng);
-        let encryption_key = EncryptionPrivateKey::new(&mut rng);
-        let member = CommitteeMember::new(
-            Address::new([0u8; 32]),
-            signing_key.public_key(),
-            EncryptionPublicKey::from_private_key(&encryption_key),
-            1,
-        );
-        let committee = Committee::new(vec![member], epoch);
 
         // Create certificate with invalid hash length (not 32 bytes)
         let onchain_cert = CertifiedMessage {
@@ -772,8 +755,7 @@ mod tests {
             stake_support: 0,
         };
 
-        let result =
-            DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch, &committee, threshold);
+        let result = DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
