@@ -389,7 +389,6 @@ impl SuiTxExecutor {
         &mut self,
         withdrawal_amount_sats: u64,
         destination_bytes: Vec<u8>,
-        withdrawal_fee_sui: u64,
     ) -> anyhow::Result<Address> {
         let mut builder = TransactionBuilder::new();
 
@@ -417,17 +416,14 @@ impl SuiTxExecutor {
         // Pure inputs
         let destination_arg = builder.pure(&destination_bytes);
 
-        // SUI fee coin via CoinWithBalance intent
-        let fee_coin_arg = builder.intent(CoinWithBalance::sui(withdrawal_fee_sui));
-
-        // Call withdraw::request_withdrawal(hashi, clock, btc, bitcoin_address, fee)
+        // Call withdraw::request_withdrawal(hashi, clock, btc, bitcoin_address)
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("request_withdrawal"),
             ),
-            vec![hashi_arg, clock_arg, btc_arg, destination_arg, fee_coin_arg],
+            vec![hashi_arg, clock_arg, btc_arg, destination_arg],
         );
 
         let response = self.execute(builder).await?;

@@ -54,13 +54,8 @@ async fn request(
         .context("Withdrawal address does not match the configured Bitcoin network")?;
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
-    // Get withdrawal fee from on-chain state
-    let client_for_fee = HashiClient::new(config).await?;
-    let withdrawal_fee_sui = client_for_fee.fetch_withdrawal_fee_sui();
-
     print_info(&format!("Withdrawal amount: {} sats", amount));
     print_info(&format!("BTC destination: {}", btc_address));
-    print_info(&format!("Withdrawal fee: {} MIST", withdrawal_fee_sui));
 
     let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
@@ -68,7 +63,7 @@ async fn request(
     print_info("Submitting withdrawal request on Sui...");
 
     let request_id = executor
-        .execute_create_withdrawal_request(amount, destination_bytes, withdrawal_fee_sui)
+        .execute_create_withdrawal_request(amount, destination_bytes)
         .await?;
 
     print_success(&format!("Withdrawal request created: {}", request_id));

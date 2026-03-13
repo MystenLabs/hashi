@@ -47,7 +47,6 @@ export interface RequestWithdrawalArguments {
   hashi: RawTransactionArgument<string>;
   btc: RawTransactionArgument<string>;
   bitcoinAddress: RawTransactionArgument<number[]>;
-  fee: RawTransactionArgument<string>;
 }
 export interface RequestWithdrawalOptions {
   package?: string;
@@ -57,7 +56,6 @@ export interface RequestWithdrawalOptions {
         hashi: RawTransactionArgument<string>,
         btc: RawTransactionArgument<string>,
         bitcoinAddress: RawTransactionArgument<number[]>,
-        fee: RawTransactionArgument<string>,
       ];
 }
 export function requestWithdrawal(options: RequestWithdrawalOptions) {
@@ -67,9 +65,8 @@ export function requestWithdrawal(options: RequestWithdrawalOptions) {
     "0x2::clock::Clock",
     null,
     "vector<u8>",
-    null,
   ] satisfies (string | null)[];
-  const parameterNames = ["hashi", "btc", "bitcoinAddress", "fee"];
+  const parameterNames = ["hashi", "btc", "bitcoinAddress"];
   return (tx: Transaction) =>
     tx.moveCall({
       package: packageAddress,

@@ -507,13 +507,8 @@ mod tests {
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
                 .with_signer(user_key.clone());
-        let withdrawal_fee_sui = hashi.onchain_state().withdrawal_fee_sui();
         let withdrawal_request_id = withdrawal_executor
-            .execute_create_withdrawal_request(
-                withdrawal_amount_sats,
-                destination_bytes,
-                withdrawal_fee_sui,
-            )
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
         info!("Withdrawal request created: {}", withdrawal_request_id);
 
@@ -569,13 +564,8 @@ mod tests {
         let destination_bytes = extract_witness_program(&btc_destination)?;
         let mut executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(signer);
-        let withdrawal_fee_sui = hashi.onchain_state().withdrawal_fee_sui();
         executor
-            .execute_create_withdrawal_request(
-                withdrawal_amount_sats,
-                destination_bytes,
-                withdrawal_fee_sui,
-            )
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);

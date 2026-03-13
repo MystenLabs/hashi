@@ -457,13 +457,6 @@ impl Config {
         }
     }
 
-    pub fn withdrawal_fee_sui(&self) -> u64 {
-        match self.config.get("withdrawal_fee_sui") {
-            Some(ConfigValue::U64(v)) => *v,
-            _ => 0,
-        }
-    }
-
     pub fn withdrawal_minimum(&self) -> u64 {
         match self.config.get("withdrawal_minimum") {
             Some(ConfigValue::U64(v)) => *v,

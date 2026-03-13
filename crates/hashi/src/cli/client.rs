@@ -206,11 +206,6 @@ impl HashiClient {
         self.onchain_state.pending_withdrawals()
     }
 
-    /// Fetch the withdrawal fee in SUI
-    pub fn fetch_withdrawal_fee_sui(&self) -> u64 {
-        self.onchain_state.withdrawal_fee_sui()
-    }
-
     // ========================================================================
     // Transaction builders (proposal/governance)
     // ========================================================================

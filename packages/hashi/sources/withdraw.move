@@ -9,7 +9,7 @@ use hashi::{
     utxo::UtxoId,
     withdrawal_queue::{OutputUtxo, withdrawal_request}
 };
-use sui::{clock::Clock, coin::{Self, Coin}, random::Random, sui::SUI};
+use sui::{clock::Clock, coin::{Self, Coin}, random::Random};
 
 #[error]
 const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
@@ -83,15 +83,10 @@ public fun request_withdrawal(
     clock: &Clock,
     btc: Coin<BTC>,
     bitcoin_address: vector<u8>,
-    fee: Coin<SUI>,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
-
-    // Check that the fee is sufficient
-    assert!(hashi.config().withdrawal_fee_sui() == fee.value());
-    sui::coin::send_funds(fee, hashi.id().to_address());
 
     // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());
