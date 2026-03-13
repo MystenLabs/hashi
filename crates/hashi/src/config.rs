@@ -274,21 +274,32 @@ impl Config {
     }
 
     pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<crate::btc_monitor::TrustedPeer>> {
-        let peers = self
-            .bitcoin_trusted_peers
-            .as_ref()
-            .map(|peers| {
-                peers
-                    .iter()
-                    .map(|addr| {
-                        addr.parse::<std::net::SocketAddr>()
-                            .map(crate::btc_monitor::TrustedPeer::from)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("Failed to parse bitcoin_trusted_peers: {}", e))?
-            .unwrap_or_default();
+        use std::net::ToSocketAddrs;
+
+        let Some(peer_strs) = self.bitcoin_trusted_peers.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let mut peers = Vec::new();
+        for addr in peer_strs {
+            // First try parsing as a direct IP:port SocketAddr.
+            // If that fails, resolve as a DNS hostname via ToSocketAddrs.
+            if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
+                peers.push(crate::btc_monitor::TrustedPeer::from(sock));
+            } else {
+                let resolved = addr
+                    .to_socket_addrs()
+                    .map_err(|e| anyhow::anyhow!("Failed to resolve bitcoin peer '{}': {}", addr, e))?;
+                let mut count = 0;
+                for sock in resolved {
+                    peers.push(crate::btc_monitor::TrustedPeer::from(sock));
+                    count += 1;
+                }
+                if count == 0 {
+                    anyhow::bail!("DNS resolution for bitcoin peer '{}' returned no addresses", addr);
+                }
+            }
+        }
         Ok(peers)
     }
 
