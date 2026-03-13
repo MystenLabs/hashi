@@ -17,8 +17,6 @@ use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SuiTxExecutor;
-use hashi_types::committee::Committee;
-use hashi_types::committee::certificate_threshold;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -54,7 +52,6 @@ pub struct SuiTobChannel {
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
     pending_certs: VecDeque<CertificateV1>,
-    committee: Committee,
 }
 
 impl SuiTobChannel {
@@ -64,7 +61,6 @@ impl SuiTobChannel {
         epoch: u64,
         batch_index: Option<u32>,
         signer: Ed25519PrivateKey,
-        committee: Committee,
     ) -> Self {
         Self {
             hashi_ids,
@@ -74,7 +70,6 @@ impl SuiTobChannel {
             signer,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
-            committee,
         }
     }
 
@@ -92,9 +87,7 @@ pub async fn fetch_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
     batch_index: Option<u32>,
-    committee: &Committee,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    let threshold = certificate_threshold(committee.total_weight());
     let Some((protocol_type, raw_certs)) = onchain_state
         .fetch_certs(epoch, batch_index)
         .await
@@ -104,7 +97,7 @@ pub async fn fetch_certificates(
     };
     let mut certificates = Vec::with_capacity(raw_certs.len());
     for (dealer, cert) in raw_certs {
-        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch, committee, threshold)
+        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch)
             .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
         let cert = CertificateV1::new(protocol_type, batch_index, inner_cert);
         certificates.push((dealer, cert));
@@ -116,14 +109,9 @@ pub async fn fetch_certificates(
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = fetch_certificates(
-            &self.onchain_state,
-            self.epoch,
-            self.batch_index,
-            &self.committee,
-        )
-        .await
-        .map_err(ChannelError::from)?;
+        let existing = fetch_certificates(&self.onchain_state, self.epoch, self.batch_index)
+            .await
+            .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
         }
@@ -141,14 +129,9 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = fetch_certificates(
-                &self.onchain_state,
-                self.epoch,
-                self.batch_index,
-                &self.committee,
-            )
-            .await
-            .map_err(ChannelError::from)?;
+            let all_certs = fetch_certificates(&self.onchain_state, self.epoch, self.batch_index)
+                .await
+                .map_err(ChannelError::from)?;
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
                     self.seen_dealers.insert(dealer);
@@ -162,13 +145,8 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(all_certs) = fetch_certificates(
-            &self.onchain_state,
-            self.epoch,
-            self.batch_index,
-            &self.committee,
-        )
-        .await
+        if let Ok(all_certs) =
+            fetch_certificates(&self.onchain_state, self.epoch, self.batch_index).await
         {
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {

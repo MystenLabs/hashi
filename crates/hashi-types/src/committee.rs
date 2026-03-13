@@ -458,6 +458,8 @@ pub struct BlsSignatureAggregator<'a, T> {
     bitmap: BitMap,
     signed_weight: u64,
     message: T,
+    reduced_weights: Option<HashMap<Address, u16>>,
+    signed_reduced_weight: u16,
 }
 
 impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
@@ -468,6 +470,24 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
             aggregate_signature: None,
             signed_weight: 0,
             message,
+            reduced_weights: None,
+            signed_reduced_weight: 0,
+        }
+    }
+
+    pub fn new_with_reduced_weights(
+        committee: &'a Committee,
+        message: T,
+        reduced_weights: HashMap<Address, u16>,
+    ) -> Self {
+        Self {
+            bitmap: BitMap::new(),
+            committee,
+            aggregate_signature: None,
+            signed_weight: 0,
+            message,
+            reduced_weights: Some(reduced_weights),
+            signed_reduced_weight: 0,
         }
     }
 
@@ -502,7 +522,19 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
         }
 
         self.signed_weight += self.committee.members[*index].weight;
+        if let Some(ref weights) = self.reduced_weights {
+            self.signed_reduced_weight += weights
+                .get(&signature.address)
+                .copied()
+                .expect("reduced_weights must contain all committee members");
+        }
         Ok(())
+    }
+
+    /// The total reduced weight of the signatures aggregated so far.
+    /// Only meaningful when constructed with [`Self::new_with_reduced_weights`].
+    pub fn reduced_weight(&self) -> u16 {
+        self.signed_reduced_weight
     }
 
     /// Add a raw [BLS12381Signature] from the given signer to this aggregator.
@@ -822,6 +854,71 @@ mod test {
                 .is_signer(&addresses[0], &wrong_committee)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_reduced_weight_tracking() {
+        let mut rng = rand::thread_rng();
+        let epoch = 1u64;
+
+        let private_keys: Vec<_> = (0..4)
+            .map(|_| Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+        let addresses: Vec<_> = (0..4).map(|i| Address::new([i as u8; 32])).collect();
+        let encryption_keys: Vec<EncryptionPublicKey> = (0..4)
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
+        let members: Vec<_> = (0..4)
+            .map(|i| CommitteeMember {
+                address: addresses[i],
+                public_key: private_keys[i].public_key(),
+                encryption_public_key: encryption_keys[i].clone(),
+                weight: 2500, // committee weight
+            })
+            .collect();
+        let committee = Committee::new(members, epoch);
+
+        // Reduced weights: different from committee weights
+        let reduced_weights: HashMap<Address, u16> =
+            addresses.iter().map(|addr| (*addr, 1u16)).collect();
+
+        let message = vec![42u8; 10];
+
+        // Aggregator without reduced weights: reduced_weight() is always 0
+        let mut plain = BlsSignatureAggregator::new(&committee, message.clone());
+        plain
+            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .unwrap();
+        assert_eq!(plain.weight(), 2500);
+        assert_eq!(plain.reduced_weight(), 0);
+
+        // Aggregator with reduced weights
+        let mut agg = BlsSignatureAggregator::new_with_reduced_weights(
+            &committee,
+            message.clone(),
+            reduced_weights,
+        );
+        assert_eq!(agg.reduced_weight(), 0);
+
+        agg.add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .unwrap();
+        assert_eq!(agg.weight(), 2500);
+        assert_eq!(agg.reduced_weight(), 1);
+
+        agg.add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .unwrap();
+        assert_eq!(agg.weight(), 5000);
+        assert_eq!(agg.reduced_weight(), 2);
+
+        agg.add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .unwrap();
+        assert_eq!(agg.weight(), 7500);
+        assert_eq!(agg.reduced_weight(), 3);
+
+        // finish() still works and produces a valid cert
+        let cert = agg.finish().unwrap();
+        committee.verify_signature(&cert).unwrap();
     }
 
     #[proptest]

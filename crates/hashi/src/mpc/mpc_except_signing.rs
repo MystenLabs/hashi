@@ -57,7 +57,6 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
-use hashi_types::committee::certificate_threshold;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -589,8 +588,11 @@ impl MpcManager {
             })
             .await?
         };
-        let mut aggregator =
-            BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.messages_hash.clone());
+        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+            &dealer_data.committee,
+            dealer_data.messages_hash.clone(),
+            dealer_data.reduced_weights,
+        );
         aggregator
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
@@ -610,7 +612,7 @@ impl MpcManager {
                 Err(e) => tracing::info!("Failed to send message to {:?}: {}", addr, e),
             }
         }
-        if aggregator.weight() >= dealer_data.required_weight {
+        if aggregator.reduced_weight() >= dealer_data.required_weight {
             let dkg_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -770,8 +772,11 @@ impl MpcManager {
             })
             .await?
         };
-        let mut aggregator =
-            BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.messages_hash.clone());
+        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+            &dealer_data.committee,
+            dealer_data.messages_hash.clone(),
+            dealer_data.reduced_weights,
+        );
         aggregator
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
@@ -794,7 +799,7 @@ impl MpcManager {
                 }
             }
         }
-        if aggregator.weight() >= dealer_data.required_weight {
+        if aggregator.reduced_weight() >= dealer_data.required_weight {
             let rotation_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -974,8 +979,11 @@ impl MpcManager {
             })
             .await?
         };
-        let mut aggregator =
-            BlsSignatureAggregator::new(&dealer_data.committee, dealer_data.messages_hash.clone());
+        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+            &dealer_data.committee,
+            dealer_data.messages_hash.clone(),
+            dealer_data.reduced_weights,
+        );
         aggregator
             .add_signature(dealer_data.my_signature)
             .expect("first signature should always be valid");
@@ -995,7 +1003,7 @@ impl MpcManager {
                 Err(e) => tracing::info!("Failed to send nonce message to {:?}: {}", addr, e),
             }
         }
-        if aggregator.weight() >= dealer_data.required_weight {
+        if aggregator.reduced_weight() >= dealer_data.required_weight {
             let nonce_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1709,7 +1717,17 @@ impl MpcManager {
             .map(|m| m.validator_address())
             .filter(|addr| *addr != self.address)
             .collect();
-        let required_weight = certificate_threshold(self.committee.total_weight());
+        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        let reduced_weights: HashMap<Address, u16> = self
+            .committee
+            .members()
+            .iter()
+            .filter_map(|m| {
+                let party_id = self.committee.index_of(&m.validator_address())? as u16;
+                let weight = self.dkg_config.nodes.weight_of(party_id).ok()?;
+                Some((m.validator_address(), weight))
+            })
+            .collect();
         let request = SendMessagesRequest { messages };
         DealerFlowData {
             request,
@@ -1718,6 +1736,7 @@ impl MpcManager {
             my_signature,
             required_weight,
             committee: self.committee.clone(),
+            reduced_weights,
         }
     }
 
