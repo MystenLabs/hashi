@@ -195,6 +195,13 @@ public(package) fun set_max_inputs(self: &mut Config, max_inputs: u64) {
     self.upsert(MAX_INPUTS_KEY, config_value::new_u64(max_inputs))
 }
 
+/// Minimum deposit amount (in satoshis). Deposits below the Bitcoin
+/// network's dust relay threshold are rejected because the resulting UTXO
+/// would cost more in fees to spend than it is worth.
+public(package) fun deposit_minimum(_self: &Config): u64 {
+    DUST_RELAY_MIN_VALUE
+}
+
 /// Computes the minimum withdrawal amount (in satoshis) required for a
 /// withdrawal request to be accepted. This ensures the withdrawal is large
 /// enough to produce a valid Bitcoin transaction even under worst-case fee

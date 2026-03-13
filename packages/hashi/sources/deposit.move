@@ -17,6 +17,9 @@ public fun deposit(
     assert!(hashi.config().deposit_fee() == fee.value());
     sui::coin::send_funds(fee, hashi.id().to_address());
 
+    // Check that the deposit amount meets the dust minimum
+    assert!(request.utxo().amount() >= hashi.config().deposit_minimum());
+
     // Check that the UTXO isn't already active or previously spent (replay protection)
     assert!(!hashi.utxo_pool().is_spent_or_active(request.utxo().id()));
 
