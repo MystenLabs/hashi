@@ -257,6 +257,17 @@ public(package) fun message<T>(self: &CertifiedMessage<T>): &T {
     &self.message
 }
 
+public(package) fun new_certified_message<T>(
+    message: T,
+    signature: CommitteeSignature,
+): CertifiedMessage<T> {
+    CertifiedMessage {
+        message,
+        signature,
+        stake_support: 0,
+    }
+}
+
 public(package) fun into_message<T>(self: CertifiedMessage<T>): T {
     let CertifiedMessage {
         message,

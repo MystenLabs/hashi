@@ -2,7 +2,7 @@
 
 module hashi::tob;
 
-use hashi::committee::{Committee, CertifiedMessage};
+use hashi::committee::CertifiedMessage;
 use sui::linked_table::{Self, LinkedTable};
 
 const EWrongEpoch: u64 = 0;
@@ -77,13 +77,11 @@ public(package) fun destroy_all(epoch_certs: EpochCertsV1, current_epoch: u64) {
 
 public(package) fun submit_cert(
     epoch_certs: &mut EpochCertsV1,
-    committee: &Committee,
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,
-    threshold: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.certs.contains(dealer)) {
@@ -91,6 +89,6 @@ public(package) fun submit_cert(
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
     let sig = hashi::committee::new_committee_signature(epoch, signature, signers_bitmap);
-    let cert = committee.verify_certificate(message, sig, threshold);
+    let cert = hashi::committee::new_certified_message(message, sig);
     epoch_certs.certs.push_back(dealer, cert);
 }

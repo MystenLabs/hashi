@@ -151,17 +151,17 @@ public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
     &mut self.tob
 }
 
-public(package) fun epoch_certs_and_committee(
+public(package) fun epoch_certs(
     self: &mut Hashi,
     key: hashi::tob::TobKey,
     protocol_type: hashi::tob::ProtocolType,
     ctx: &mut TxContext,
-): (&mut hashi::tob::EpochCertsV1, &Committee) {
+): &mut hashi::tob::EpochCertsV1 {
     let epoch = key.epoch();
     if (!self.tob.contains(key)) {
         self.tob.add(key, hashi::tob::create(epoch, protocol_type, ctx));
     };
-    (self.tob.borrow_mut(key), self.committee_set.get_committee(epoch))
+    self.tob.borrow_mut(key)
 }
 
 // ======== Test-only Functions ========
