@@ -1,0 +1,1 @@
+export { LegalNav } from './LegalNav';

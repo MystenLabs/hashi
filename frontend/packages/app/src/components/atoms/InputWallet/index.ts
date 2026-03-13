@@ -1,0 +1,1 @@
+export { InputWallet } from './InputWallet';

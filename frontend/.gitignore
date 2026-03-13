@@ -1,1 +1,7 @@
 node_modules
+dist
+*.tsbuildinfo
+
+# Generated env files (written by sync-localnet.sh)
+.env.localnet
+.env.local

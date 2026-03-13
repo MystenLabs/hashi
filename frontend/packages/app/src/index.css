@@ -1,0 +1,88 @@
+@import url("https://fonts.googleapis.com/css2?family=Fragment+Mono&display=swap");
+@import "tailwindcss";
+
+@font-face {
+  font-family: "TWK Everett";
+  src:
+    url("/fnt/TWK Everett/TWKEverett-Regular.woff2") format("woff2"),
+    url("/fnt/TWK Everett/TWKEverett-Regular.woff") format("woff"),
+    url("/fnt/TWK Everett/TWKEverett-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "TWK Everett";
+  src:
+    url("/fnt/TWK Everett/TWKEverett-Book.woff2") format("woff2"),
+    url("/fnt/TWK Everett/TWKEverett-Book.woff") format("woff"),
+    url("/fnt/TWK Everett/TWKEverett-Book.otf") format("opentype");
+  font-weight: 450;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "TWK Everett";
+  src:
+    url("/fnt/TWK Everett/TWKEverett-Medium.woff2") format("woff2"),
+    url("/fnt/TWK Everett/TWKEverett-Medium.woff") format("woff"),
+    url("/fnt/TWK Everett/TWKEverett-Medium.otf") format("opentype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "TWK Everett";
+  src:
+    url("/fnt/TWK Everett/TWKEverett-Bold.woff2") format("woff2"),
+    url("/fnt/TWK Everett/TWKEverett-Bold.woff") format("woff"),
+    url("/fnt/TWK Everett/TWKEverett-Bold.otf") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --breakpoint-xs: 30rem;
+
+  --color-valid: #51f189;
+  --color-error: #ff9292;
+  --color-orange: #fe9416;
+  --color-yellow: #ffff7a;
+
+  --color-failed-bg: #ff9292;
+  --color-failed-text: #340000;
+
+  --color-warning-bg: #ffff7a;
+  --color-warning-text: #4c4c00;
+
+  --text-h1: 2.75rem;
+  --text-h1--line-height: 1.25;
+
+  --text-h2: 2.25rem;
+  --text-h2--line-height: 1.25;
+
+  --font-sans: "TWK Everett", Arial, Helvetica, sans-serif;
+  --font-mono: "Fragment Mono", monospace;
+  --font-weight-book: 450;
+
+  --shadow-popover:
+    0 13rem 5rem 0 rgba(0, 0, 0, 0.01), 0 7.5rem 4.5rem 0 rgba(0, 0, 0, 0.05),
+    0 3.5rem 3.5rem 0 rgba(0, 0, 0, 0.09), 0 0.75rem 1.5rem 0 rgba(0, 0, 0, 0.1);
+}
+
+@layer base {
+  :focus-visible {
+    @apply outline-yellow outline-1 outline-offset-2;
+  }
+  html {
+    @apply bg-black text-white;
+  }
+  body {
+    @apply bg-[url(/bg.png)] bg-cover bg-center tracking-tight text-pretty antialiased;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+}
