@@ -361,14 +361,26 @@ mod tests {
         }
     }
 
+    /// Wait for a withdrawal transaction to be confirmed on the Bitcoin chain.
+    /// The output to `destination` must be at most `max_amount` and at least
+    /// `min_amount` (to account for variable miner fees deducted from the user).
     async fn wait_for_withdrawal_tx_success(
         bitcoin_node: &crate::BitcoinNodeHandle,
         txid: &Txid,
         destination: &bitcoin::Address,
-        amount: Amount,
+        max_amount: Amount,
+        min_amount: Amount,
         timeout: Duration,
     ) -> Result<()> {
         let start = std::time::Instant::now();
+
+        let check_output = |tx: &bitcoin::Transaction| -> bool {
+            tx.output.iter().any(|output| {
+                output.value <= max_amount
+                    && output.value >= min_amount
+                    && output.script_pubkey == destination.script_pubkey()
+            })
+        };
 
         // Wait until the tx is visible (either in mempool or already confirmed).
         loop {
@@ -384,14 +396,12 @@ mod tests {
             {
                 info!("Withdrawal tx {} is already confirmed", txid);
                 let tx = bitcoin_node.rpc_client().get_raw_transaction(txid, None)?;
-                let pays_destination = tx.output.iter().any(|output| {
-                    output.value == amount && output.script_pubkey == destination.script_pubkey()
-                });
-                if !pays_destination {
+                if !check_output(&tx) {
                     return Err(anyhow!(
-                        "Withdrawal tx {} is confirmed but does not pay {} to {}",
+                        "Withdrawal tx {} is confirmed but does not pay [{}, {}] to {}",
                         txid,
-                        amount,
+                        min_amount,
+                        max_amount,
                         destination
                     ));
                 }
@@ -431,14 +441,12 @@ mod tests {
             let tx = bitcoin_node
                 .rpc_client()
                 .get_raw_transaction(txid, Some(&block_hash))?;
-            let pays_destination = tx.output.iter().any(|output| {
-                output.value == amount && output.script_pubkey == destination.script_pubkey()
-            });
-            if !pays_destination {
+            if !check_output(&tx) {
                 return Err(anyhow!(
-                    "Withdrawal tx {} is confirmed but does not pay {} to {}",
+                    "Withdrawal tx {} is confirmed but does not pay [{}, {}] to {}",
                     txid,
-                    amount,
+                    min_amount,
+                    max_amount,
                     destination
                 ));
             }
@@ -541,11 +549,18 @@ mod tests {
             withdrawal_txid
         );
         let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
+        let withdrawal_minimum = hashi.onchain_state().withdrawal_minimum();
+        let max_output = Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc);
+        // User output is at least btc_amount - (withdrawal_minimum - DUST_RELAY_MIN_VALUE).
+        // Since btc_amount >= withdrawal_minimum, output >= DUST_RELAY_MIN_VALUE (546 sats).
+        let max_deduction = withdrawal_minimum.saturating_sub(546);
+        let min_output = Amount::from_sat(withdrawal_amount_sats.saturating_sub(max_deduction));
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
             &withdrawal_txid,
             &btc_destination,
-            Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc),
+            max_output,
+            min_output,
             Duration::from_secs(30),
         )
         .await?;
@@ -579,12 +594,18 @@ mod tests {
         drop(miner);
 
         let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
+        let withdrawal_minimum = hashi.onchain_state().withdrawal_minimum();
         let withdrawal_txid = address_to_txid(&confirmed.txid);
+        let max_output = Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc);
+        let min_output = Amount::from_sat(
+            withdrawal_amount_sats.saturating_sub(withdrawal_minimum.saturating_sub(546)),
+        );
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
             &withdrawal_txid,
             &btc_destination,
-            Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc),
+            max_output,
+            min_output,
             Duration::from_secs(30),
         )
         .await
