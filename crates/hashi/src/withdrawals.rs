@@ -56,8 +56,8 @@ const LONG_TERM_FEE_RATE_SAT_PER_VB: f32 = 10.0;
 /// Candidate::new() to get the full input weight.
 ///
 ///   items_count(1) + sig1_len(1) + sig1(64) + sig2_len(1) + sig2(64)
-///   + script_len(1) + script(68) + control_block_len(1) + control_block(33)
-///   = 234 WU
+///     + script_len(1) + script(68) + control_block_len(1) + control_block(33)
+///     = 234 WU
 const SCRIPT_PATH_2OF2_SATISFACTION_WEIGHT: u64 = 234;
 
 /// Full input weight (WU) for a 2-of-2 taproot script-path spend.
@@ -197,48 +197,18 @@ impl Hashi {
             })
             .collect::<anyhow::Result<_>>()?;
 
-        // 3. Verify each withdrawal request has a matching output
-        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
-        for request in &requests {
-            let expected_amount = request.btc_amount - withdrawal_fee_btc;
-            let has_matching_output = approval.outputs.iter().any(|output| {
-                output.amount == expected_amount
-                    && output.bitcoin_address == request.bitcoin_address
-            });
-            anyhow::ensure!(
-                has_matching_output,
-                "No matching output for withdrawal request {:?}",
-                request.id
-            );
-        }
-
-        // 4. Verify change output goes to hashi root pubkey (if present)
-        let non_request_outputs: Vec<&OutputUtxo> = approval
-            .outputs
-            .iter()
-            .filter(|output| {
-                !requests.iter().any(|r| {
-                    output.amount == r.btc_amount - withdrawal_fee_btc
-                        && output.bitcoin_address == r.bitcoin_address
-                })
-            })
-            .collect();
+        // 3. Verify output count: one per request, plus at most one change output
+        let request_count = requests.len();
+        let output_count = approval.outputs.len();
         anyhow::ensure!(
-            non_request_outputs.len() <= 1,
-            "Expected at most 1 change output, found {}",
-            non_request_outputs.len()
+            output_count == request_count || output_count == request_count + 1,
+            "Expected {} or {} outputs, got {}",
+            request_count,
+            request_count + 1,
+            output_count
         );
-        if let Some(change_output) = non_request_outputs.first() {
-            let hashi_pubkey = self.get_hashi_pubkey();
-            let expected_address =
-                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
-            anyhow::ensure!(
-                change_output.bitcoin_address == expected_address,
-                "Change output does not go to hashi root pubkey"
-            );
-        }
 
-        // 5. Verify inputs >= outputs (positive fee)
+        // 4. Compute miner fee and verify the per-user fee split
         let input_total: u64 = selected_utxos.iter().map(|u| u.amount).sum();
         let output_total: u64 = approval.outputs.iter().map(|o| o.amount).sum();
         anyhow::ensure!(
@@ -247,7 +217,62 @@ impl Hashi {
         );
         let fee = input_total - output_total;
 
-        // 5a. Validate fee is reasonable
+        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
+        let per_user_miner_fee = fee / request_count as u64;
+
+        // Verify per-user miner fee does not exceed worst-case budget
+        let withdrawal_minimum = self.onchain_state().withdrawal_minimum();
+        let max_network_fee = withdrawal_minimum - withdrawal_fee_btc - TR_DUST_RELAY_MIN_VALUE;
+        anyhow::ensure!(
+            per_user_miner_fee <= max_network_fee,
+            "Per-user miner fee {} sats exceeds worst-case budget {} sats",
+            per_user_miner_fee,
+            max_network_fee
+        );
+
+        // Verify each positional withdrawal output matches the expected amount and address
+        for (i, request) in requests.iter().enumerate() {
+            let output = &approval.outputs[i];
+            let expected_amount = request.btc_amount - withdrawal_fee_btc - per_user_miner_fee;
+            anyhow::ensure!(
+                expected_amount >= TR_DUST_RELAY_MIN_VALUE,
+                "Withdrawal output {} sats is below dust threshold {} sats",
+                expected_amount,
+                TR_DUST_RELAY_MIN_VALUE
+            );
+            anyhow::ensure!(
+                output.amount == expected_amount,
+                "Output {i} amount {} does not match expected {} for request {:?}",
+                output.amount,
+                expected_amount,
+                request.id
+            );
+            anyhow::ensure!(
+                output.bitcoin_address == request.bitcoin_address,
+                "Output {i} address does not match request {:?}",
+                request.id
+            );
+        }
+
+        // 5. Verify change output (if present) goes to hashi root pubkey
+        if output_count == request_count + 1 {
+            let change_output = &approval.outputs[request_count];
+            let hashi_pubkey = self.get_hashi_pubkey();
+            let expected_address =
+                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
+            anyhow::ensure!(
+                change_output.bitcoin_address == expected_address,
+                "Change output does not go to hashi root pubkey"
+            );
+            anyhow::ensure!(
+                change_output.amount >= TR_DUST_RELAY_MIN_VALUE,
+                "Change output {} sats is below dust threshold {} sats",
+                change_output.amount,
+                TR_DUST_RELAY_MIN_VALUE
+            );
+        }
+
+        // 6. Validate fee is reasonable
         {
             // Estimate transaction weight
             let num_inputs = selected_utxos.len() as u64;
@@ -283,16 +308,6 @@ impl Hashi {
                 fee <= max_fee,
                 "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
                  ({FEE_RATE_TOLERANCE_MULTIPLIER}x our estimate of {our_estimated_fee} sats)"
-            );
-        }
-
-        // 5b. Validate change output is above dust threshold
-        if let Some(change_output) = non_request_outputs.first() {
-            anyhow::ensure!(
-                change_output.amount >= TR_DUST_RELAY_MIN_VALUE,
-                "Change output {} sats is below dust threshold {} sats",
-                change_output.amount,
-                TR_DUST_RELAY_MIN_VALUE
             );
         }
 
@@ -682,29 +697,64 @@ impl Hashi {
         &self,
         request: &WithdrawalRequest,
     ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
-        // Fetch current fee rate from the Bitcoin node
+        // Fetch current fee rate from the Bitcoin node, capped at the on-chain
+        // max_fee_rate to ensure the miner fee stays within the budget the Move
+        // contract will accept.
         let kyoto_fee_rate = self
             .btc_monitor()
             .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
+        let onchain_max_fee_rate =
+            FeeRate::from_sat_per_vb(self.onchain_state().max_fee_rate() as f32);
         // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
-        let fee_rate = FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
+        let node_fee_rate =
+            FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
+        // Cap at the on-chain configured maximum
+        let fee_rate = std::cmp::min(node_fee_rate, onchain_max_fee_rate);
 
         let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
-        let output_amount = request.btc_amount - withdrawal_fee_btc;
+        let max_user_output = request.btc_amount - withdrawal_fee_btc;
 
         let selection = self
-            .select_utxos_for_withdrawal(output_amount, &request.bitcoin_address, fee_rate)
+            .select_utxos_for_withdrawal(max_user_output, &request.bitcoin_address, fee_rate)
             .map_err(WithdrawalCommitmentError::UtxoSelectionFailed)?;
 
+        // Shift the miner fee from the UTXO pool (change) to the user output.
+        // The user pays selection.fee; the change grows by the same amount.
+        // This preserves the invariant: input_total = max_user_output + change_amount,
+        // which the Move contract relies on to compute the per-user miner fee.
+        let user_output = max_user_output
+            .checked_sub(selection.fee)
+            .ok_or_else(|| {
+                WithdrawalCommitmentError::BtcTxBuildFailed(anyhow!(
+                    "Miner fee {} sats exceeds max user output {} sats",
+                    selection.fee,
+                    max_user_output
+                ))
+            })?;
+        let change_amount = selection.change.unwrap_or(0) + selection.fee;
+
+        // When the selector returns no change and the fee is sub-dust, we cannot
+        // create a valid change output and the Move contract would reject the tx.
+        // This is extremely rare (requires UTXOs to near-exactly match the target).
+        if change_amount > 0 && change_amount < TR_DUST_RELAY_MIN_VALUE {
+            return Err(WithdrawalCommitmentError::BtcTxBuildFailed(anyhow!(
+                "Fee redistribution produces sub-dust change of {} sats \
+                 (no change from selector, miner fee {} sats). \
+                 Retrying may select different UTXOs.",
+                change_amount,
+                selection.fee
+            )));
+        }
+
         let mut outputs = vec![OutputUtxo {
-            amount: output_amount,
+            amount: user_output,
             bitcoin_address: request.bitcoin_address.clone(),
         }];
 
-        // Add change output back to hashi root pubkey if selection produced change
-        if let Some(change_amount) = selection.change {
+        // Add change output if present (change_amount is either 0 or >= dust)
+        if change_amount >= TR_DUST_RELAY_MIN_VALUE {
             let hashi_pubkey = self.get_hashi_pubkey();
             let change_address = self
                 .get_deposit_address(&hashi_pubkey, None)

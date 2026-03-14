@@ -1,12 +1,19 @@
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, utxo::{Utxo, UtxoId, UtxoInfo}};
-use sui::{bag::Bag, balance::Balance, clock::Clock, random::Random};
-
-const NUMBER_OF_RANDOM_BYTES: u16 = 32;
+use hashi::{btc::BTC, config::Config, utxo::{Utxo, UtxoId, UtxoInfo}};
+use sui::{bag::Bag, balance::Balance, clock::Clock};
 
 #[error]
 const ERequestNotApproved: vector<u8> = b"Withdrawal request has not been approved";
+#[error]
+const EOutputBelowDust: vector<u8> =
+    b"Withdrawal output would be below dust threshold after miner fee deduction";
+#[error]
+const EOutputAmountMismatch: vector<u8> = b"Withdrawal output amount does not match expected value";
+#[error]
+const EOutputAddressMismatch: vector<u8> = b"Withdrawal output address does not match request";
+#[error]
+const EMinerFeeExceedsMax: vector<u8> = b"Per-user miner fee exceeds worst-case network fee budget";
 
 public struct WithdrawalRequestQueue has store {
     requests: Bag,
@@ -85,11 +92,16 @@ public(package) fun new_pending_withdrawal(
     inputs: vector<Utxo>,
     mut outputs: vector<OutputUtxo>,
     txid: address,
-    withdrawal_fee_btc: u64,
+    config: &Config,
     clock: &Clock,
-    r: &Random,
+    randomness: vector<u8>,
     ctx: &mut TxContext,
 ): PendingWithdrawal {
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+    let max_network_fee =
+        config.withdrawal_minimum() - withdrawal_fee_btc
+        - hashi::config::dust_relay_min_value();
+
     let mut input_amount = 0;
     inputs.do_ref!(|utxo| {
         input_amount = input_amount + utxo.amount();
@@ -101,7 +113,7 @@ public(package) fun new_pending_withdrawal(
     });
 
     assert!(input_amount >= output_amount);
-    let _fee = input_amount - output_amount;
+    let miner_fee = input_amount - output_amount;
 
     // Outputs must be either one-per-request, or one-per-request plus a single
     // trailing change output.
@@ -109,12 +121,20 @@ public(package) fun new_pending_withdrawal(
     let output_count = outputs.length();
     assert!(output_count == request_count || output_count == request_count + 1);
 
-    // Each approved request must match the output at the same index.
-    request_count.do!(|request_index| {
-        let request = requests.borrow(request_index);
-        let output = outputs.borrow(request_index);
-        assert!(request.btc_amount - withdrawal_fee_btc == output.amount);
-        assert!(request.bitcoin_address == output.bitcoin_address);
+    // Miner fee is split evenly across all withdrawal requests. Any remainder
+    // (at most request_count - 1 sats) is a rounding bonus to the miner.
+    let per_user_miner_fee = miner_fee / request_count;
+    assert!(per_user_miner_fee <= max_network_fee, EMinerFeeExceedsMax);
+
+    // Each withdrawal output must match the expected amount after deducting
+    // both the protocol fee (withdrawal_fee_btc) and the per-user miner fee.
+    request_count.do!(|i| {
+        let request = requests.borrow(i);
+        let output = outputs.borrow(i);
+        let expected = request.btc_amount - withdrawal_fee_btc - per_user_miner_fee;
+        assert!(expected >= hashi::config::dust_relay_min_value(), EOutputBelowDust);
+        assert!(output.amount == expected, EOutputAmountMismatch);
+        assert!(output.bitcoin_address == request.bitcoin_address, EOutputAddressMismatch);
     });
 
     // TODO: ensure any change output goes to the correct destination address, once we start
@@ -127,9 +147,6 @@ public(package) fun new_pending_withdrawal(
     } else {
         option::none()
     };
-
-    let mut rng = sui::random::new_generator(r, ctx);
-    let randomness = rng.generate_bytes(NUMBER_OF_RANDOM_BYTES);
 
     PendingWithdrawal {
         id: ctx.fresh_object_address(),

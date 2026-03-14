@@ -195,6 +195,12 @@ public(package) fun set_max_inputs(self: &mut Config, max_inputs: u64) {
     self.upsert(MAX_INPUTS_KEY, config_value::new_u64(max_inputs))
 }
 
+/// The dust relay minimum value as a pure constant accessor, usable by
+/// other modules without needing a `&Config` reference.
+public(package) fun dust_relay_min_value(): u64 {
+    DUST_RELAY_MIN_VALUE
+}
+
 /// Minimum deposit amount (in satoshis). Deposits below the Bitcoin
 /// network's dust relay threshold are rejected because the resulting UTXO
 /// would cost more in fees to spend than it is worth.
@@ -219,7 +225,8 @@ public(package) fun deposit_minimum(_self: &Config): u64 {
 ///   worst_case_fee = max_fee_rate * tx_vbytes
 ///   minimum = withdrawal_fee_btc + worst_case_fee + DUST_RELAY_MIN_VALUE
 public(package) fun withdrawal_minimum(self: &Config): u64 {
-    let tx_vbytes = TX_FIXED_VB
+    let tx_vbytes =
+        TX_FIXED_VB
         + (self.max_inputs() * INPUT_VB)
         + (NUM_OUTPUTS * OUTPUT_VB);
     let worst_case_fee = self.max_fee_rate() * tx_vbytes;

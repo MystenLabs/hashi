@@ -182,16 +182,17 @@ entry fun commit_withdrawal_tx(
         request
     });
 
-    let withdrawal_fee_btc = hashi.config().withdrawal_fee_btc();
+    let mut rng = sui::random::new_generator(r, ctx);
+    let randomness = rng.generate_bytes(32);
 
     let pending_withdrawal = hashi::withdrawal_queue::new_pending_withdrawal(
         requests,
         inputs,
         outputs,
         txid,
-        withdrawal_fee_btc,
+        hashi.config(),
         clock,
-        r,
+        randomness,
         ctx,
     );
 

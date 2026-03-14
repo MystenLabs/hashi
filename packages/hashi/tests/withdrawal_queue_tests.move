@@ -5,7 +5,19 @@
 #[allow(implicit_const_copy, unused_const)]
 module hashi::withdrawal_queue_tests;
 
-use hashi::{btc::BTC, test_utils, utxo, withdrawal_queue};
+use hashi::{
+    btc::BTC,
+    config,
+    test_utils,
+    utxo,
+    withdrawal_queue::{
+        Self,
+        EOutputBelowDust,
+        EOutputAmountMismatch,
+        EOutputAddressMismatch,
+        EMinerFeeExceedsMax
+    }
+};
 use sui::clock;
 
 // ======== Test Addresses ========
@@ -35,10 +47,13 @@ fun setup_request(
 }
 
 fun make_test_output(amount: u64): withdrawal_queue::OutputUtxo {
+    make_test_output_with_address(amount, x"0000000000000000000000000000000000000000")
+}
+
+fun make_test_output_with_address(amount: u64, addr: vector<u8>): withdrawal_queue::OutputUtxo {
     withdrawal_queue::output_utxo_from_bcs({
         let mut bytes = vector[];
         bytes.append(sui::bcs::to_bytes(&amount));
-        let addr = x"0000000000000000000000000000000000000000";
         bytes.append(sui::bcs::to_bytes(&addr));
         bytes
     })
@@ -370,4 +385,419 @@ fun test_cancel_approved_request() {
     btc.destroy_for_testing();
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
+}
+
+// ======== Miner fee split validation tests ========
+
+#[test]
+fun test_miner_fee_single_request() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount = 30_000u64;
+    let input_amount = 50_000u64;
+    let miner_fee = 1_000u64;
+    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let change = input_amount - user_output - miner_fee;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xAA01, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xAA01,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+fun test_miner_fee_single_request_large_fee() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount = 40_000u64;
+    let miner_fee = 5_000u64;
+    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let input_amount = 100_000u64;
+    let change = input_amount - user_output - miner_fee;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xAA02, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xAA02,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+fun test_miner_fee_batched_even_split() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount = 30_000u64;
+    let input_amount = 100_000u64;
+    let miner_fee = 2_000u64;
+    let per_user = miner_fee / 2;
+    let user_output = btc_amount - withdrawal_fee_btc - per_user;
+    let change = input_amount - (user_output * 2) - miner_fee;
+
+    let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let info2 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBB01, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info1, info2],
+        vector[test_utxo],
+        vector[
+            make_test_output(user_output),
+            make_test_output(user_output),
+            make_test_output(change),
+        ],
+        @0xBB01,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+fun test_miner_fee_batched_with_remainder() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    // 3 requests, miner_fee=1001 -> per_user=333, remainder=2 goes to miner
+    let btc_amount = 40_000u64;
+    let miner_fee = 1_001u64;
+    let per_user = miner_fee / 3; // 333
+    let user_output = btc_amount - withdrawal_fee_btc - per_user;
+    let total_user_outputs = user_output * 3;
+    let input_amount = total_user_outputs + miner_fee + 10_000; // 10k change
+    let change = input_amount - total_user_outputs - miner_fee;
+
+    let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let info2 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let info3 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBB02, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info1, info2, info3],
+        vector[test_utxo],
+        vector[
+            make_test_output(user_output),
+            make_test_output(user_output),
+            make_test_output(user_output),
+            make_test_output(change),
+        ],
+        @0xBB02,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+fun test_miner_fee_batched_unequal_amounts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount_1 = 50_000u64;
+    let btc_amount_2 = 30_000u64;
+    let miner_fee = 800u64;
+    let per_user = miner_fee / 2; // 400
+    let user_output_1 = btc_amount_1 - withdrawal_fee_btc - per_user;
+    let user_output_2 = btc_amount_2 - withdrawal_fee_btc - per_user;
+    let input_amount = user_output_1 + user_output_2 + miner_fee + 5_000;
+    let change = input_amount - user_output_1 - user_output_2 - miner_fee;
+
+    let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount_1, ctx);
+    let info2 = approve_and_extract_info(&mut queue, &clock, btc_amount_2, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBB03, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info1, info2],
+        vector[test_utxo],
+        vector[
+            make_test_output(user_output_1),
+            make_test_output(user_output_2),
+            make_test_output(change),
+        ],
+        @0xBB03,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+fun test_miner_fee_zero() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount = 30_000u64;
+    let user_output = btc_amount - withdrawal_fee_btc;
+    let input_amount = user_output + 5_000;
+    let change = 5_000u64;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xCC01, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xCC01,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+fun test_miner_fee_output_at_dust_floor() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    // Request amount chosen so user output is exactly config::dust_relay_min_value()
+    let miner_fee = 5_000u64;
+    let btc_amount = withdrawal_fee_btc + miner_fee + config::dust_relay_min_value();
+    let user_output = config::dust_relay_min_value();
+    let input_amount = user_output + miner_fee + 1_000;
+    let change = 1_000u64;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xCC02, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xCC02,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+    queue.insert_pending_withdrawal(pending);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+#[expected_failure(abort_code = EOutputBelowDust)]
+fun test_miner_fee_output_below_dust_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    // user_output = 2000 - 546 - 1000 = 454, which is < 546 (dust)
+    let btc_amount = 2_000u64;
+    let miner_fee = 1_000u64;
+    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let input_amount = user_output + miner_fee + 1_000;
+    let change = 1_000u64;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD01, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xDD01,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+
+    queue.insert_pending_withdrawal(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+#[expected_failure(abort_code = EOutputAmountMismatch)]
+fun test_miner_fee_wrong_output_amount_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount = 30_000u64;
+    let input_amount = 50_000u64;
+    // Correct miner fee would be derived from input-output totals.
+    // We construct outputs that don't match the expected split.
+    let wrong_output = btc_amount - withdrawal_fee_btc - 500; // assumes 500 miner fee
+    let change = input_amount - wrong_output - 1_000; // but actual miner fee = 1000
+    // miner_fee = input - outputs = 50000 - wrong_output - change = 1000
+    // per_user = 1000, expected = 30000 - 546 - 1000 = 28454
+    // wrong_output = 30000 - 546 - 500 = 28954, which != 28454
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(wrong_output), make_test_output(change)],
+        @0xDD02,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+
+    queue.insert_pending_withdrawal(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+#[expected_failure(abort_code = EOutputAddressMismatch)]
+fun test_miner_fee_wrong_address_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+
+    let btc_amount = 30_000u64;
+    let miner_fee = 1_000u64;
+    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let input_amount = user_output + miner_fee + 5_000;
+    let change = 5_000u64;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD03, 0), input_amount, option::none());
+
+    // Output uses a different address than the request (which uses all-zeros)
+    let wrong_addr = x"1111111111111111111111111111111111111111";
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output_with_address(user_output, wrong_addr), make_test_output(change)],
+        @0xDD03,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+
+    queue.insert_pending_withdrawal(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
+#[expected_failure(abort_code = EMinerFeeExceedsMax)]
+fun test_miner_fee_exceeds_max_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let mut config = config::create();
+    let withdrawal_fee_btc = config.withdrawal_fee_btc();
+    // Set max_fee_rate=1, max_inputs=1 to get a small max_network_fee:
+    // tx_vbytes = 11 + 1*100 + 2*43 = 197, worst_case_fee = 1*197 = 197
+    config.set_max_fee_rate(1);
+    config.set_max_inputs(1);
+
+    let btc_amount = 30_000u64;
+    let miner_fee = 200u64; // exceeds max_network_fee of 197
+    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let input_amount = user_output + miner_fee + 5_000;
+    let change = 5_000u64;
+
+    let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xEE01, 0), input_amount, option::none());
+
+    let pending = withdrawal_queue::new_pending_withdrawal(
+        vector[info],
+        vector[test_utxo],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xEE01,
+        &config,
+        &clock,
+        vector[],
+        ctx,
+    );
+
+    queue.insert_pending_withdrawal(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
 }
