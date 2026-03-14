@@ -3,6 +3,7 @@ use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use bdk_core::Merge;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
@@ -279,10 +280,9 @@ impl Config {
                 .map_err(|e| anyhow::anyhow!("Failed to resolve bitcoin peer '{addr}': {e}"))?
                 .map(crate::btc_monitor::TrustedPeer::from)
                 .collect();
-            anyhow::ensure!(
-                !resolved.is_empty(),
-                "No addresses resolved for bitcoin peer '{addr}'"
-            );
+            if resolved.is_empty() {
+                tracing::warn!("No addresses resolved for bitcoin peer '{addr}'");
+            }
             peers.extend(resolved);
         }
         Ok(peers)
