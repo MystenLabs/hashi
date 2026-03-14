@@ -217,12 +217,10 @@ impl Hashi {
         );
         let fee = input_total - output_total;
 
-        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
         let per_user_miner_fee = fee / request_count as u64;
 
         // Verify per-user miner fee does not exceed worst-case budget
-        let withdrawal_minimum = self.onchain_state().withdrawal_minimum();
-        let max_network_fee = withdrawal_minimum - withdrawal_fee_btc - TR_DUST_RELAY_MIN_VALUE;
+        let max_network_fee = self.onchain_state().worst_case_network_fee();
         anyhow::ensure!(
             per_user_miner_fee <= max_network_fee,
             "Per-user miner fee {} sats exceeds worst-case budget {} sats",
@@ -230,10 +228,11 @@ impl Hashi {
             max_network_fee
         );
 
-        // Verify each positional withdrawal output matches the expected amount and address
+        // Verify each positional withdrawal output matches the expected amount and address.
+        // request.btc_amount is already net of the protocol fee (deducted at request time).
         for (i, request) in requests.iter().enumerate() {
             let output = &approval.outputs[i];
-            let expected_amount = request.btc_amount - withdrawal_fee_btc - per_user_miner_fee;
+            let expected_amount = request.btc_amount - per_user_miner_fee;
             anyhow::ensure!(
                 expected_amount >= TR_DUST_RELAY_MIN_VALUE,
                 "Withdrawal output {} sats is below dust threshold {} sats",
@@ -713,8 +712,8 @@ impl Hashi {
         // Cap at the on-chain configured maximum
         let fee_rate = std::cmp::min(node_fee_rate, onchain_max_fee_rate);
 
-        let withdrawal_fee_btc = self.onchain_state().withdrawal_fee_btc();
-        let max_user_output = request.btc_amount - withdrawal_fee_btc;
+        // request.btc_amount is already net of the protocol fee (deducted at request time)
+        let max_user_output = request.btc_amount;
 
         let selection = self
             .select_utxos_for_withdrawal(max_user_output, &request.bitcoin_address, fee_rate)
@@ -724,15 +723,13 @@ impl Hashi {
         // The user pays selection.fee; the change grows by the same amount.
         // This preserves the invariant: input_total = max_user_output + change_amount,
         // which the Move contract relies on to compute the per-user miner fee.
-        let user_output = max_user_output
-            .checked_sub(selection.fee)
-            .ok_or_else(|| {
-                WithdrawalCommitmentError::BtcTxBuildFailed(anyhow!(
-                    "Miner fee {} sats exceeds max user output {} sats",
-                    selection.fee,
-                    max_user_output
-                ))
-            })?;
+        let user_output = max_user_output.checked_sub(selection.fee).ok_or_else(|| {
+            WithdrawalCommitmentError::BtcTxBuildFailed(anyhow!(
+                "Miner fee {} sats exceeds max user output {} sats",
+                selection.fee,
+                max_user_output
+            ))
+        })?;
         let change_amount = selection.change.unwrap_or(0) + selection.fee;
 
         // When the selector returns no change and the fee is sub-dust, we cannot

@@ -548,13 +548,12 @@ mod tests {
             "Observed withdrawal Bitcoin txid in event: {}",
             withdrawal_txid
         );
-        let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
-        let withdrawal_minimum = hashi.onchain_state().withdrawal_minimum();
-        let max_output = Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc);
-        // User output is at least btc_amount - (withdrawal_minimum - DUST_RELAY_MIN_VALUE).
-        // Since btc_amount >= withdrawal_minimum, output >= DUST_RELAY_MIN_VALUE (546 sats).
-        let max_deduction = withdrawal_minimum.saturating_sub(546);
-        let min_output = Amount::from_sat(withdrawal_amount_sats.saturating_sub(max_deduction));
+        // The on-chain btc_amount is net of the protocol fee (deducted at request time).
+        let net_amount = withdrawal_amount_sats - hashi.onchain_state().withdrawal_fee_btc();
+        let max_output = Amount::from_sat(net_amount);
+        let min_output = Amount::from_sat(
+            net_amount.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
+        );
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
             &withdrawal_txid,
@@ -593,12 +592,11 @@ mod tests {
 
         drop(miner);
 
-        let withdrawal_fee_btc = hashi.onchain_state().withdrawal_fee_btc();
-        let withdrawal_minimum = hashi.onchain_state().withdrawal_minimum();
         let withdrawal_txid = address_to_txid(&confirmed.txid);
-        let max_output = Amount::from_sat(withdrawal_amount_sats - withdrawal_fee_btc);
+        let net_amount = withdrawal_amount_sats - hashi.onchain_state().withdrawal_fee_btc();
+        let max_output = Amount::from_sat(net_amount);
         let min_output = Amount::from_sat(
-            withdrawal_amount_sats.saturating_sub(withdrawal_minimum.saturating_sub(546)),
+            net_amount.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
         );
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,

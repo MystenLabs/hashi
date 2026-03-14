@@ -58,6 +58,17 @@ export interface RequestWithdrawalOptions {
         bitcoinAddress: RawTransactionArgument<number[]>,
       ];
 }
+/**
+ * Request a withdrawal of BTC from the bridge.
+ *
+ * The protocol fee (`withdrawal_fee_btc`) is deducted upfront from the provided
+ * BTC coin and sent to Hashi's address balance. The remaining amount (net of fee)
+ * is stored in the withdrawal request and determines the user's Bitcoin output at
+ * commitment time.
+ *
+ * The user must provide at least `withdrawal_minimum()` sats, which guarantees the
+ * net amount covers worst-case miner fees plus dust.
+ */
 export function requestWithdrawal(options: RequestWithdrawalOptions) {
   const packageAddress = options.package ?? "@local-pkg/hashi";
   const argumentsTypes = [
@@ -302,6 +313,13 @@ export interface CancelWithdrawalOptions {
         requestId: RawTransactionArgument<string>,
       ];
 }
+/**
+ * Cancel a pending withdrawal request and return the stored BTC to the requester.
+ *
+ * NOTE: The protocol fee (`withdrawal_fee_btc`) was deducted at request time and
+ * is non-refundable. The returned amount is the net BTC stored in the request
+ * (original amount minus protocol fee).
+ */
 export function cancelWithdrawal(options: CancelWithdrawalOptions) {
   const packageAddress = options.package ?? "@local-pkg/hashi";
   const argumentsTypes = [null, "address", "0x2::clock::Clock"] satisfies (

@@ -208,30 +208,29 @@ public(package) fun deposit_minimum(_self: &Config): u64 {
     DUST_RELAY_MIN_VALUE
 }
 
-/// Computes the minimum withdrawal amount (in satoshis) required for a
-/// withdrawal request to be accepted. This ensures the withdrawal is large
-/// enough to produce a valid Bitcoin transaction even under worst-case fee
-/// conditions.
-///
-/// The minimum is the sum of three components:
-///   1. withdrawal_fee_btc -- the protocol fee deducted from the user's amount
-///   2. worst_case_network_fee -- estimated miner fee at max_fee_rate with
-///      max_inputs inputs and NUM_OUTPUTS outputs
-///   3. DUST_RELAY_MIN_VALUE -- the user's output must be at least this large
-///      to be relayed by Bitcoin nodes
-///
-/// Formula:
-///   tx_vbytes = TX_FIXED_VB + (max_inputs * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB)
-///   worst_case_fee = max_fee_rate * tx_vbytes
-///   minimum = withdrawal_fee_btc + worst_case_fee + DUST_RELAY_MIN_VALUE
-public(package) fun withdrawal_minimum(self: &Config): u64 {
+/// The worst-case Bitcoin network (miner) fee for a withdrawal transaction,
+/// assuming max_inputs inputs and NUM_OUTPUTS outputs at max_fee_rate.
+/// This is the maximum per-user miner fee the contract will accept.
+public(package) fun worst_case_network_fee(self: &Config): u64 {
     let tx_vbytes =
         TX_FIXED_VB
         + (self.max_inputs() * INPUT_VB)
         + (NUM_OUTPUTS * OUTPUT_VB);
-    let worst_case_fee = self.max_fee_rate() * tx_vbytes;
+    self.max_fee_rate() * tx_vbytes
+}
 
-    self.withdrawal_fee_btc() + worst_case_fee + DUST_RELAY_MIN_VALUE
+/// Computes the minimum withdrawal amount (in satoshis) required for a
+/// withdrawal request to be accepted. This ensures the withdrawal is large
+/// enough to cover the protocol fee and produce a valid Bitcoin transaction
+/// even under worst-case fee conditions.
+///
+/// The minimum is the sum of three components:
+///   1. withdrawal_fee_btc -- the protocol fee deducted upfront
+///   2. worst_case_network_fee -- estimated miner fee at max_fee_rate
+///   3. DUST_RELAY_MIN_VALUE -- the user's output must be at least this large
+///      to be relayed by Bitcoin nodes
+public(package) fun withdrawal_minimum(self: &Config): u64 {
+    self.withdrawal_fee_btc() + self.worst_case_network_fee() + DUST_RELAY_MIN_VALUE
 }
 
 public(package) fun bitcoin_confirmation_threshold(self: &Config): u64 {
