@@ -370,6 +370,10 @@ impl OnchainState {
         self.state().hashi().config.max_inputs()
     }
 
+    pub fn worst_case_network_fee(&self) -> u64 {
+        self.state().hashi().config.worst_case_network_fee()
+    }
+
     pub fn withdrawal_minimum(&self) -> u64 {
         self.state().hashi().config.withdrawal_minimum()
     }

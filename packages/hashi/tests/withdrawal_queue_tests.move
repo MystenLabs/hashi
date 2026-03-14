@@ -395,12 +395,12 @@ fun test_miner_fee_single_request() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
+    // btc_amount is net of protocol fee (already deducted at request time)
     let btc_amount = 30_000u64;
     let input_amount = 50_000u64;
     let miner_fee = 1_000u64;
-    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let user_output = btc_amount - miner_fee;
     let change = input_amount - user_output - miner_fee;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
@@ -429,11 +429,10 @@ fun test_miner_fee_single_request_large_fee() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     let btc_amount = 40_000u64;
     let miner_fee = 5_000u64;
-    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let user_output = btc_amount - miner_fee;
     let input_amount = 100_000u64;
     let change = input_amount - user_output - miner_fee;
 
@@ -463,13 +462,12 @@ fun test_miner_fee_batched_even_split() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     let btc_amount = 30_000u64;
     let input_amount = 100_000u64;
     let miner_fee = 2_000u64;
     let per_user = miner_fee / 2;
-    let user_output = btc_amount - withdrawal_fee_btc - per_user;
+    let user_output = btc_amount - per_user;
     let change = input_amount - (user_output * 2) - miner_fee;
 
     let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
@@ -503,13 +501,12 @@ fun test_miner_fee_batched_with_remainder() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     // 3 requests, miner_fee=1001 -> per_user=333, remainder=2 goes to miner
     let btc_amount = 40_000u64;
     let miner_fee = 1_001u64;
     let per_user = miner_fee / 3; // 333
-    let user_output = btc_amount - withdrawal_fee_btc - per_user;
+    let user_output = btc_amount - per_user;
     let total_user_outputs = user_output * 3;
     let input_amount = total_user_outputs + miner_fee + 10_000; // 10k change
     let change = input_amount - total_user_outputs - miner_fee;
@@ -547,14 +544,13 @@ fun test_miner_fee_batched_unequal_amounts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     let btc_amount_1 = 50_000u64;
     let btc_amount_2 = 30_000u64;
     let miner_fee = 800u64;
     let per_user = miner_fee / 2; // 400
-    let user_output_1 = btc_amount_1 - withdrawal_fee_btc - per_user;
-    let user_output_2 = btc_amount_2 - withdrawal_fee_btc - per_user;
+    let user_output_1 = btc_amount_1 - per_user;
+    let user_output_2 = btc_amount_2 - per_user;
     let input_amount = user_output_1 + user_output_2 + miner_fee + 5_000;
     let change = input_amount - user_output_1 - user_output_2 - miner_fee;
 
@@ -589,10 +585,9 @@ fun test_miner_fee_zero() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     let btc_amount = 30_000u64;
-    let user_output = btc_amount - withdrawal_fee_btc;
+    let user_output = btc_amount; // zero miner fee, btc_amount already net
     let input_amount = user_output + 5_000;
     let change = 5_000u64;
 
@@ -622,11 +617,10 @@ fun test_miner_fee_output_at_dust_floor() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
-    // Request amount chosen so user output is exactly config::dust_relay_min_value()
+    // btc_amount is net of protocol fee. Choose so user output is exactly dust.
     let miner_fee = 5_000u64;
-    let btc_amount = withdrawal_fee_btc + miner_fee + config::dust_relay_min_value();
+    let btc_amount = miner_fee + config::dust_relay_min_value();
     let user_output = config::dust_relay_min_value();
     let input_amount = user_output + miner_fee + 1_000;
     let change = 1_000u64;
@@ -658,12 +652,11 @@ fun test_miner_fee_output_below_dust_aborts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
-    // user_output = 2000 - 546 - 1000 = 454, which is < 546 (dust)
-    let btc_amount = 2_000u64;
-    let miner_fee = 1_000u64;
-    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    // btc_amount is net of protocol fee. user_output = 1000 - 600 = 400 < 546 (dust)
+    let btc_amount = 1_000u64;
+    let miner_fee = 600u64;
+    let user_output = btc_amount - miner_fee;
     let input_amount = user_output + miner_fee + 1_000;
     let change = 1_000u64;
 
@@ -694,17 +687,15 @@ fun test_miner_fee_wrong_output_amount_aborts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     let btc_amount = 30_000u64;
     let input_amount = 50_000u64;
-    // Correct miner fee would be derived from input-output totals.
-    // We construct outputs that don't match the expected split.
-    let wrong_output = btc_amount - withdrawal_fee_btc - 500; // assumes 500 miner fee
+    // Construct outputs that don't match the expected split.
+    let wrong_output = btc_amount - 500; // assumes 500 miner fee
     let change = input_amount - wrong_output - 1_000; // but actual miner fee = 1000
     // miner_fee = input - outputs = 50000 - wrong_output - change = 1000
-    // per_user = 1000, expected = 30000 - 546 - 1000 = 28454
-    // wrong_output = 30000 - 546 - 500 = 28954, which != 28454
+    // per_user = 1000, expected = 30000 - 1000 = 29000
+    // wrong_output = 30000 - 500 = 29500, which != 29000
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
     let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none());
@@ -733,11 +724,10 @@ fun test_miner_fee_wrong_address_aborts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
 
     let btc_amount = 30_000u64;
     let miner_fee = 1_000u64;
-    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let user_output = btc_amount - miner_fee;
     let input_amount = user_output + miner_fee + 5_000;
     let change = 5_000u64;
 
@@ -770,7 +760,6 @@ fun test_miner_fee_exceeds_max_aborts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let mut config = config::create();
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
     // Set max_fee_rate=1, max_inputs=1 to get a small max_network_fee:
     // tx_vbytes = 11 + 1*100 + 2*43 = 197, worst_case_fee = 1*197 = 197
     config.set_max_fee_rate(1);
@@ -778,7 +767,7 @@ fun test_miner_fee_exceeds_max_aborts() {
 
     let btc_amount = 30_000u64;
     let miner_fee = 200u64; // exceeds max_network_fee of 197
-    let user_output = btc_amount - withdrawal_fee_btc - miner_fee;
+    let user_output = btc_amount - miner_fee;
     let input_amount = user_output + miner_fee + 5_000;
     let change = 5_000u64;
 

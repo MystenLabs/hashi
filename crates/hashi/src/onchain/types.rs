@@ -479,11 +479,16 @@ impl Config {
         }
     }
 
+    /// Worst-case network (miner) fee for a withdrawal transaction,
+    /// mirroring the formula in config.move.
+    pub fn worst_case_network_fee(&self) -> u64 {
+        let tx_vbytes = TX_FIXED_VB + (self.max_inputs() * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB);
+        self.max_fee_rate() * tx_vbytes
+    }
+
     /// Computed withdrawal minimum, mirroring the formula in config.move.
     pub fn withdrawal_minimum(&self) -> u64 {
-        let tx_vbytes = TX_FIXED_VB + (self.max_inputs() * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB);
-        let worst_case_fee = self.max_fee_rate() * tx_vbytes;
-        self.withdrawal_fee_btc() + worst_case_fee + DUST_RELAY_MIN_VALUE
+        self.withdrawal_fee_btc() + self.worst_case_network_fee() + DUST_RELAY_MIN_VALUE
     }
 
     pub fn paused(&self) -> bool {

@@ -97,10 +97,7 @@ public(package) fun new_pending_withdrawal(
     randomness: vector<u8>,
     ctx: &mut TxContext,
 ): PendingWithdrawal {
-    let withdrawal_fee_btc = config.withdrawal_fee_btc();
-    let max_network_fee =
-        config.withdrawal_minimum() - withdrawal_fee_btc
-        - hashi::config::dust_relay_min_value();
+    let max_network_fee = config.worst_case_network_fee();
 
     let mut input_amount = 0;
     inputs.do_ref!(|utxo| {
@@ -127,11 +124,12 @@ public(package) fun new_pending_withdrawal(
     assert!(per_user_miner_fee <= max_network_fee, EMinerFeeExceedsMax);
 
     // Each withdrawal output must match the expected amount after deducting
-    // both the protocol fee (withdrawal_fee_btc) and the per-user miner fee.
+    // the per-user miner fee. The protocol fee was already deducted at request
+    // time, so request.btc_amount is net of the protocol fee.
     request_count.do!(|i| {
         let request = requests.borrow(i);
         let output = outputs.borrow(i);
-        let expected = request.btc_amount - withdrawal_fee_btc - per_user_miner_fee;
+        let expected = request.btc_amount - per_user_miner_fee;
         assert!(expected >= hashi::config::dust_relay_min_value(), EOutputBelowDust);
         assert!(output.amount == expected, EOutputAmountMismatch);
         assert!(output.bitcoin_address == request.bitcoin_address, EOutputAddressMismatch);

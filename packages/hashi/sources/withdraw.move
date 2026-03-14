@@ -72,29 +72,36 @@ public(package) fun new_withdrawal_confirmation_message(
     WithdrawalConfirmationMessage { withdrawal_id }
 }
 
-// User entry-point for requesting a withdrawal
-//
-// In order to successfully enqueue a request:
-// - The system needs to not be paused
-// - The fee needs to be sufficient
-// - The requested BTC amount to withdrawal needs to be above a certain minimum
+/// Request a withdrawal of BTC from the bridge.
+///
+/// The protocol fee (`withdrawal_fee_btc`) is deducted upfront from the
+/// provided BTC coin and sent to Hashi's address balance. The remaining
+/// amount (net of fee) is stored in the withdrawal request and determines
+/// the user's Bitcoin output at commitment time.
+///
+/// The user must provide at least `withdrawal_minimum()` sats, which
+/// guarantees the net amount covers worst-case miner fees plus dust.
 public fun request_withdrawal(
     hashi: &mut Hashi,
     clock: &Clock,
-    btc: Coin<BTC>,
+    mut btc: Coin<BTC>,
     bitcoin_address: vector<u8>,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
 
-    // check that the withdrawal amount is a minimum of X
     assert!(btc.value() >= hashi.config().withdrawal_minimum());
 
     // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
     let addr_len = bitcoin_address.length();
     assert!(addr_len == 20 || addr_len == 32);
 
+    // Deduct protocol fee upfront and send to Hashi's address balance.
+    let fee_coin = btc.split(hashi.config().withdrawal_fee_btc(), ctx);
+    sui::coin::send_funds(fee_coin, hashi.id().to_address());
+
+    // Store remaining BTC (net of protocol fee) in the withdrawal request.
     let request = withdrawal_request(btc.into_balance(), bitcoin_address, clock, ctx);
     request.emit_withdrawal_requested();
     hashi.withdrawal_queue_mut().insert_request(request);
@@ -265,6 +272,11 @@ entry fun confirm_withdrawal(
     };
 }
 
+/// Cancel a pending withdrawal request and return the stored BTC to the requester.
+///
+/// NOTE: The protocol fee (`withdrawal_fee_btc`) was deducted at request time and
+/// is non-refundable. The returned amount is the net BTC stored in the
+/// request (original amount minus protocol fee).
 public fun cancel_withdrawal(
     hashi: &mut Hashi,
     request_id: address,
