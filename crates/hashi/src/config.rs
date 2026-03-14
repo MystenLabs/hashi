@@ -3,7 +3,6 @@ use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use bdk_core::Merge;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
