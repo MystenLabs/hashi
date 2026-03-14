@@ -25,7 +25,7 @@ function TransferDetailsRow({ label, value, copyValue, action, tooltip, alert }:
 	const { copied, copy } = useCopyToClipboard();
 
 	return (
-		<div className="font-book mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-current/12 pt-3 text-sm leading-none first:mt-0 first:border-0 first:pt-0">
+		<div className="font-book mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-current/12 pt-3 text-xs leading-none first:mt-0 first:border-0 first:pt-0 md:text-sm">
 			<span className="flex items-center gap-1 text-current/60">
 				{label}
 				{tooltip && (
@@ -80,7 +80,7 @@ export function TransferDetails({
 	className,
 }: TransferDetailsProps) {
 	return (
-		<div className={cn('flex flex-col gap-8 rounded-xs bg-black/16 p-8', className)}>
+		<div className={cn('flex flex-col gap-8 rounded-xs bg-black/16 p-4 md:p-8', className)}>
 			<div>
 				{rows.map((row) => (
 					<TransferDetailsRow key={row.label} {...row} />
@@ -88,10 +88,10 @@ export function TransferDetails({
 			</div>
 
 			<div className="flex flex-col gap-3">
-				<div className="flex items-center justify-between gap-2">
-					<span className="font-book text-xl leading-none">{summary}</span>
-					<Icon name={currency} className="ml-auto h-5 w-5" />
-					<span className="text-xl leading-none font-bold text-white">
+				<div className="flex items-center justify-between gap-1.5">
+					<span className="font-book leading-none md:text-xl">{summary}</span>
+					<Icon name={currency} className="ml-auto h-4 w-4 md:h-5 md:w-5" />
+					<span className="leading-none font-bold text-white md:text-xl">
 						{amount} {currency}
 					</span>
 				</div>

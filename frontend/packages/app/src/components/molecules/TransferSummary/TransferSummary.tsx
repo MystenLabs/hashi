@@ -28,12 +28,12 @@ export function TransferSummary({
 	return (
 		<div
 			className={cn(
-				'flex flex-col items-center justify-center gap-4 bg-black/16 p-8',
+				'flex flex-col items-center justify-center gap-4 bg-black/16 p-4 md:p-8',
 				className,
 			)}
 		>
 			{isCompleted && (
-				<div className="bg-valid mb-4 flex h-11 w-11 items-center justify-center rounded-xs text-black">
+				<div className="bg-valid mb-4 flex h-11 w-11 animate-checkmark items-center justify-center rounded-xs text-black">
 					<Icon name="Check" className="h-6 w-6" />
 				</div>
 			)}
@@ -54,7 +54,7 @@ export function TransferSummary({
 			)}
 
 			{bitcoinHash && (
-				<div className="font-book mt-4 flex w-full items-center justify-between border-t border-white/12 pt-4 text-sm leading-none">
+				<div className="font-book mt-4 flex items-center justify-between self-stretch border-t border-white/12 pt-4 text-sm leading-none">
 					<div className="text-current/60">Bitcoin TXN hash</div>
 					<div className="group flex items-center gap-1.5">
 						{bitcoinHash}
@@ -69,7 +69,7 @@ export function TransferSummary({
 			)}
 
 			{suiHash && (
-				<div className="font-book mt-4 flex w-full items-center justify-between border-t border-white/12 pt-4 text-sm leading-none">
+				<div className="font-book mt-4 flex items-center justify-between self-stretch border-t border-white/12 pt-4 text-sm leading-none">
 					<div className="text-current/60">SUI TXN hash</div>
 					<div className="group flex items-center gap-1.5">
 						{suiHash}
@@ -83,7 +83,7 @@ export function TransferSummary({
 				</div>
 			)}
 
-			{alert && <Alert className="-m-4 mt-2">{alert}</Alert>}
+			{alert && <Alert className="mt-2 md:-m-4 md:mt-2">{alert}</Alert>}
 		</div>
 	);
 }

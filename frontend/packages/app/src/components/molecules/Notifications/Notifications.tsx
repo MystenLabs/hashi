@@ -104,7 +104,12 @@ export function Notifications({
 	className,
 }: NotificationsProps) {
 	return (
-		<div className={cn('flex flex-col gap-6 rounded-xs bg-black p-6', className)}>
+		<div
+			className={cn(
+				'shadow-popover flex flex-col gap-6 bg-black p-6 md:rounded-xs',
+				className,
+			)}
+		>
 			<div className="flex items-center justify-between gap-4">
 				<h3 className="-my-0.5 text-2xl leading-none font-medium text-white">Notifications</h3>
 				<button aria-label="Close" className="flex text-white" onClick={onClose}>

@@ -72,15 +72,15 @@ export function InputWallet({
 	return (
 		<div
 			className={cn(
-				'flex w-full flex-col rounded-xs bg-black/16 p-8 ring-1 ring-black/24 transition-shadow ring-inset',
-				isConnect ? 'gap-8' : 'gap-4',
+				'flex w-full flex-col rounded-xs bg-black/16 p-4 ring-1 ring-black/24 transition-all duration-300 ring-inset md:p-8',
+				isConnect ? 'gap-6 md:gap-8' : 'gap-4',
 				!connectedAddress && 'cursor-text hover:ring-white/32 has-focus:ring-white/64',
 				className,
 			)}
 			onClick={handleClick}
 		>
 			<div className="-my-0.5 flex items-center justify-between">
-				<label className="leading-none text-white/80">{label}</label>
+				<span className="leading-none text-white/80">{label}</span>
 				{isConnect && !connectedAddress && (
 					<button
 						type="button"
@@ -91,17 +91,17 @@ export function InputWallet({
 						}}
 					>
 						Connect Wallet
-						<Icon name="CaretDown" className="h-4 w-4 -rotate-90" />
+						<Icon name="CaretDown" className="-mx-0.5 h-4 w-4 -rotate-90" />
 					</button>
 				)}
 			</div>
 
 			{connectedAddress ? (
-				<div className="relative -my-1.5 flex items-start gap-4">
-					<div className="text-2xl leading-tight tracking-tight text-white">
+				<div className="relative -my-0.5 flex items-start gap-4 md:-my-1.5">
+					<div className="text-lg leading-tight tracking-tight text-white md:text-2xl">
 						{formatAddress(connectedAddress)}
 					</div>
-					<span className="mt-0.5 flex h-6 w-6 shrink-0 translate-y-px items-center justify-center rounded-xs bg-valid">
+					<span className="flex h-6 w-6 shrink-0 translate-y-px items-center justify-center rounded-xs bg-valid md:mt-0.5">
 						<svg
 							viewBox="0 0 12 12"
 							fill="none"
@@ -117,9 +117,9 @@ export function InputWallet({
 				</div>
 			) : (
 				<>
-					<div className="relative -my-1.5 flex items-start gap-4">
+					<div className="relative -my-0.5 flex items-start gap-4 md:-my-1.5">
 						{isEmpty && (
-							<div className="pointer-events-none absolute inset-0 text-2xl leading-tight tracking-tight text-white/30">
+							<div className="pointer-events-none absolute inset-0 text-lg leading-tight tracking-tight text-white/30 md:text-2xl">
 								{placeholder}
 							</div>
 						)}
@@ -130,12 +130,12 @@ export function InputWallet({
 							onInput={handleInput}
 							onPaste={handlePaste}
 							onKeyDown={handleKeyDown}
-							className="min-h-[1.25em] grow bg-transparent text-2xl leading-tight tracking-tight break-all text-white outline-none placeholder:text-white/30"
+							className="min-h-[1.25em] grow bg-transparent text-lg leading-tight tracking-tight break-all text-white outline-none placeholder:text-white/30 md:text-2xl"
 						></div>
 						{(isValid || isInvalid) && (
 							<span
 								className={cn(
-									'mt-0.5 flex h-6 w-6 shrink-0 translate-y-px items-center justify-center rounded-xs',
+									'flex h-6 w-6 shrink-0 translate-y-px items-center justify-center rounded-xs md:mt-0.5',
 									isValid ? 'bg-valid' : 'bg-error',
 								)}
 							>
@@ -161,7 +161,7 @@ export function InputWallet({
 						)}
 					</div>
 					{isInvalid && errorMessage && (
-						<span className="text-error text-sm leading-none">{errorMessage}</span>
+						<span className="text-error text-xs leading-none md:text-sm">{errorMessage}</span>
 					)}
 				</>
 			)}

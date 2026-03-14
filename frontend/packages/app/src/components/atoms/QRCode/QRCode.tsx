@@ -32,5 +32,5 @@ export function QRCode({ value, size = 120, className }: QRCodeProps) {
 		);
 	}
 
-	return <canvas ref={canvasRef} className={cn('rounded-xs', className)} />;
+	return <canvas ref={canvasRef} className={cn('animate-scale-in rounded-xs', className)} />;
 }

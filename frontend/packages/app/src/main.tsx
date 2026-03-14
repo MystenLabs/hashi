@@ -15,13 +15,19 @@ import { CONFIG } from './lib/constants';
 import { LocalStorageKeys } from './lib/localStorageKeys';
 
 const networks: Record<string, { url: string; network: string }> = {
+	devnet: { url: getJsonRpcFullnodeUrl('devnet'), network: 'devnet' },
 	testnet: { url: getJsonRpcFullnodeUrl('testnet'), network: 'testnet' },
 	mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
 };
 
 // Add localnet if a custom RPC URL is provided
-if (CONFIG.SUI_RPC_URL) {
+if (CONFIG.SUI_RPC_URL && CONFIG.DEFAULT_NETWORK === 'localnet') {
 	networks.localnet = { url: CONFIG.SUI_RPC_URL, network: 'localnet' };
+}
+
+// Override devnet URL if a custom RPC URL is provided for devnet
+if (CONFIG.SUI_RPC_URL && CONFIG.DEFAULT_NETWORK === 'devnet') {
+	networks.devnet = { url: CONFIG.SUI_RPC_URL, network: 'devnet' };
 }
 
 const storedNetwork =
@@ -38,7 +44,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 				networks={networks}
 				defaultNetwork={defaultNetwork}
 				createClient={(_name, config) =>
-					new SuiJsonRpcClient({ url: config.url, network: config.network as 'testnet' })
+					new SuiJsonRpcClient({ url: config.url, network: config.network as 'devnet' | 'testnet' | 'mainnet' })
 				}
 			>
 				<WalletProvider autoConnect enableUnsafeBurner={!!networks.localnet}>

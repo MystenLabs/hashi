@@ -21,11 +21,11 @@ export function Banner({ message, onDismiss, className }: BannerProps) {
 	return (
 		<div
 			className={cn(
-				'@container flex items-center justify-between gap-3 bg-[#3b82f6] p-3 text-white',
+				'flex animate-slide-down items-center justify-between gap-3 bg-[#3b82f6] p-3 text-white',
 				className,
 			)}
 		>
-			<p className="mx-auto -my-0.5 text-sm @md:text-base">{message}</p>
+			<p className="mx-auto -my-0.5 text-sm md:text-base">{message}</p>
 			<button aria-label="Dismiss banner" type="button" onClick={handleDismiss} className="flex">
 				<Icon name="Close" />
 			</button>

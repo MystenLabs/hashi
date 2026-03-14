@@ -32,7 +32,7 @@ export function Header({ className, ...props }: HeaderProps) {
 	return (
 		<header
 			className={cn(
-				'relative z-40 flex w-full items-center justify-between border-b border-white/15 px-5 py-3.5',
+				'relative flex w-full items-center justify-between border-b border-white/15 px-5 py-3.5',
 				className,
 			)}
 		>
@@ -49,7 +49,7 @@ export function Header({ className, ...props }: HeaderProps) {
 							{props.username}
 						</HeadButton>
 						{dropdownOpen && (
-							<div className="absolute right-0 top-full mt-2 min-w-48 rounded-xs bg-black p-2 shadow-popover ring-1 ring-white/16 ring-inset">
+							<div className="absolute right-0 top-full z-50 mt-2 min-w-48 rounded-xs bg-black p-2 shadow-popover ring-1 ring-white/16 ring-inset">
 								<button
 									className="flex w-full items-center justify-between gap-2 rounded-xs px-3 py-2 text-left text-sm text-white/80 transition-colors hover:bg-white/10 hover:text-white"
 									onClick={() => {

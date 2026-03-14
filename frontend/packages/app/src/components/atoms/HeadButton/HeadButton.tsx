@@ -19,7 +19,7 @@ export function HeadButton({
 		<button
 			disabled={disabled}
 			className={cn(
-				'flex items-center justify-center px-4 py-2 gap-2 rounded-xs bg-white/20 hover:bg-white/35 transition-colors text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/20',
+				'flex cursor-pointer items-center justify-center gap-2 rounded-xs bg-white/20 px-4 py-2 font-bold text-white transition-all duration-200 hover:bg-white/35 hover:scale-105 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white/20 disabled:hover:scale-100 [&.active]:bg-white [&.active]:text-black',
 				className,
 			)}
 			{...props}

@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { Icon } from '@/components/atoms/Icon';
 
-const alertVariants = cva('flex gap-3 rounded-xs p-3 text-xs', {
+const alertVariants = cva('flex mx-auto animate-fade-in gap-3 rounded-xs p-3 text-xs', {
 	variants: {
 		variant: {
 			warning: 'bg-warning-bg text-warning-text',

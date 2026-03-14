@@ -28,20 +28,19 @@ export function HelpWidget({ className }: { className?: string }) {
 	return (
 		<div
 			className={cn(
-				'fixed top-5 right-5 bottom-5 z-10 flex flex-col justify-end md:absolute',
+				'pointer-events-none fixed right-3 bottom-3 z-20 flex flex-col justify-end md:absolute md:top-5 md:right-5 md:bottom-5',
 				className,
 			)}
 		>
 			<div className="sticky bottom-5">
-				<div ref={containerRef} className="relative">
-					<div
+				<div ref={containerRef} className="pointer-events-auto relative">
+					<HowItWorks
+						onClose={() => setIsOpen(false)}
 						className={
-							'shadow-popover pointer-events-none absolute right-0 bottom-19 w-120 origin-bottom-right scale-95 rounded-xs opacity-0 transition [&.opened]:pointer-events-auto [&.opened]:scale-100 [&.opened]:opacity-100' +
+							'pointer-events-none absolute -right-3 -bottom-3 h-dvh w-screen origin-bottom-right scale-95 overflow-auto opacity-0 transition md:right-0 md:bottom-full md:mb-5 md:h-auto md:w-120 [&.opened]:pointer-events-auto [&.opened]:scale-100 [&.opened]:opacity-100' +
 							(isOpen ? ' opened' : '')
 						}
-					>
-						<HowItWorks onClose={() => setIsOpen(false)} />
-					</div>
+					/>
 					<HelpButton onClick={() => setIsOpen((prev) => !prev)} />
 				</div>
 			</div>

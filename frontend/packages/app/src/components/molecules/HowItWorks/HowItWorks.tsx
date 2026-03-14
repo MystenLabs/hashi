@@ -64,7 +64,7 @@ export function HowItWorks({ className, onClose }: HowItWorksProps) {
 	return (
 		<div
 			className={cn(
-				'flex w-full flex-col gap-6 rounded-xs bg-black p-6 ring-1 ring-white/16 ring-inset',
+				'shadow-popover flex w-full flex-col gap-6 bg-black p-6 ring-1 ring-white/16 ring-inset md:rounded-xs',
 				className,
 			)}
 		>

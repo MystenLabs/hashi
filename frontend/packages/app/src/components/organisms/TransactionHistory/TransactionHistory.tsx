@@ -92,7 +92,7 @@ function TableHeader() {
 
 function TableRow({ transaction, onClick }: { transaction: Transaction; onClick?: () => void }) {
 	return (
-		<tr onClick={onClick} className="cursor-pointer">
+		<tr onClick={onClick} className="cursor-pointer transition-colors hover:bg-white/6">
 			<td className="border-t border-white/12 p-3 pl-0">
 				<DirectionLabel direction={transaction.direction} />
 			</td>
@@ -168,26 +168,28 @@ export function TransactionHistory({
 				</h2>
 			)}
 
-			<PageContent className="max-w-none">
-				{!isConnected ? (
-					<NotConnectedState onConnectWallet={onConnectWallet} />
-				) : !hasTransactions ? (
-					<EmptyState onMakeTransfer={onMakeTransfer} />
-				) : (
-					<table className="mx-3 border-collapse leading-none">
-						<TableHeader />
-						<tbody>
-							{transactions.map((tx) => (
-								<TableRow
-									key={tx.id}
-									transaction={tx}
-									onClick={() => onRowClick?.(tx.id)}
-								/>
-							))}
-						</tbody>
-					</table>
-				)}
-			</PageContent>
+			<div className="-mx-5 overflow-auto px-5">
+				<PageContent className="block w-fit max-w-none px-7 md:w-auto">
+					{!isConnected ? (
+						<NotConnectedState onConnectWallet={onConnectWallet} />
+					) : !hasTransactions ? (
+						<EmptyState onMakeTransfer={onMakeTransfer} />
+					) : (
+						<table className="w-full border-collapse leading-none whitespace-nowrap">
+							<TableHeader />
+							<tbody>
+								{transactions.map((tx) => (
+									<TableRow
+										key={tx.id}
+										transaction={tx}
+										onClick={() => onRowClick?.(tx.id)}
+									/>
+								))}
+							</tbody>
+						</table>
+					)}
+				</PageContent>
+			</div>
 		</div>
 	);
 }

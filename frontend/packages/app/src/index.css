@@ -5,8 +5,7 @@
   font-family: "TWK Everett";
   src:
     url("/fnt/TWK Everett/TWKEverett-Regular.woff2") format("woff2"),
-    url("/fnt/TWK Everett/TWKEverett-Regular.woff") format("woff"),
-    url("/fnt/TWK Everett/TWKEverett-Regular.otf") format("opentype");
+    url("/fnt/TWK Everett/TWKEverett-Regular.woff") format("woff");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -15,8 +14,7 @@
   font-family: "TWK Everett";
   src:
     url("/fnt/TWK Everett/TWKEverett-Book.woff2") format("woff2"),
-    url("/fnt/TWK Everett/TWKEverett-Book.woff") format("woff"),
-    url("/fnt/TWK Everett/TWKEverett-Book.otf") format("opentype");
+    url("/fnt/TWK Everett/TWKEverett-Book.woff") format("woff");
   font-weight: 450;
   font-style: normal;
   font-display: swap;
@@ -25,8 +23,7 @@
   font-family: "TWK Everett";
   src:
     url("/fnt/TWK Everett/TWKEverett-Medium.woff2") format("woff2"),
-    url("/fnt/TWK Everett/TWKEverett-Medium.woff") format("woff"),
-    url("/fnt/TWK Everett/TWKEverett-Medium.otf") format("opentype");
+    url("/fnt/TWK Everett/TWKEverett-Medium.woff") format("woff");
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -35,8 +32,7 @@
   font-family: "TWK Everett";
   src:
     url("/fnt/TWK Everett/TWKEverett-Bold.woff2") format("woff2"),
-    url("/fnt/TWK Everett/TWKEverett-Bold.woff") format("woff"),
-    url("/fnt/TWK Everett/TWKEverett-Bold.otf") format("opentype");
+    url("/fnt/TWK Everett/TWKEverett-Bold.woff") format("woff");
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -59,7 +55,7 @@
   --text-h1: 2.75rem;
   --text-h1--line-height: 1.25;
 
-  --text-h2: 2.25rem;
+  --text-h2: 2rem;
   --text-h2--line-height: 1.25;
 
   --font-sans: "TWK Everett", Arial, Helvetica, sans-serif;
@@ -69,6 +65,80 @@
   --shadow-popover:
     0 13rem 5rem 0 rgba(0, 0, 0, 0.01), 0 7.5rem 4.5rem 0 rgba(0, 0, 0, 0.05),
     0 3.5rem 3.5rem 0 rgba(0, 0, 0, 0.09), 0 0.75rem 1.5rem 0 rgba(0, 0, 0, 0.1);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes checkmark-pop {
+  0% { transform: scale(0); opacity: 0; }
+  60% { transform: scale(1.15); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes progress-fill {
+  from { width: 0%; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fade-in 0.4s ease-out both;
+  }
+  .animate-slide-up {
+    animation: slide-up 0.5s ease-out both;
+  }
+  .animate-slide-down {
+    animation: slide-down 0.3s ease-out both;
+  }
+  .animate-scale-in {
+    animation: scale-in 0.4s ease-out both;
+  }
+  .animate-checkmark {
+    animation: checkmark-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  .animate-progress {
+    animation: progress-fill 0.8s ease-out both;
+  }
+  .animate-pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+  .animate-shimmer {
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.08) 50%, transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer 2s ease-in-out infinite;
+  }
+  .stagger-1 { animation-delay: 0.05s; }
+  .stagger-2 { animation-delay: 0.1s; }
+  .stagger-3 { animation-delay: 0.15s; }
+  .stagger-4 { animation-delay: 0.2s; }
+  .stagger-5 { animation-delay: 0.25s; }
 }
 
 @layer base {

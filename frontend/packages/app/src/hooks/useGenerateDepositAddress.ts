@@ -10,7 +10,7 @@ import { deriveDepositAddress, arkworksToCompressedHex } from '@/lib/bitcoin';
  */
 export function useGenerateDepositAddress(recipient: string | undefined) {
 	const client = useSuiClient();
-	const network = CONFIG.DEFAULT_NETWORK === 'mainnet' ? 'mainnet' : CONFIG.DEFAULT_NETWORK === 'testnet' ? 'testnet' : 'regtest';
+	const network = CONFIG.DEFAULT_NETWORK === 'mainnet' ? 'mainnet' : CONFIG.DEFAULT_NETWORK === 'localnet' ? 'regtest' : 'testnet';
 
 	return useQuery({
 		queryKey: [QueryKeys.DepositAddress, recipient],

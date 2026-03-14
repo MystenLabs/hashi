@@ -36,8 +36,8 @@ export function PageLayout({ children }: PageLayoutProps) {
 				</>
 			)}
 
-			<div className="relative grow px-5 py-20">
-				<main className="flex flex-col items-center">{children}</main>
+			<div className="relative grow px-5 py-10 md:py-20">
+				<main className="animate-fade-in">{children}</main>
 				<HelpWidget />
 			</div>
 

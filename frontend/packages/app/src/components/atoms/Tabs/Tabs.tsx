@@ -29,13 +29,13 @@ export function Tabs({ tabs = defaultTabs, value = 'receive', disabled, classNam
 					disabled={disabled}
 					onClick={() => onChange(tab.value)}
 					className={cn(
-						'flex-1 rounded-xs p-2.5 text-white transition-colors hover:bg-white/20 disabled:pointer-events-none',
+						'xs:flex-1 grow rounded-xs py-2.5 text-white transition-all duration-200 hover:bg-white/20 disabled:pointer-events-none',
 						value === tab.value
 							? 'pointer-events-none bg-white/10 font-bold'
 							: 'font-book',
 					)}
 				>
-					<span className={`flex items-center justify-center gap-2 ${disabled ? 'opacity-30' : ''}`}>
+					<span className={`flex items-center justify-center gap-2 text-sm md:text-base ${disabled ? 'opacity-30' : ''}`}>
 						{tab.icon}
 						{tab.label}
 					</span>

@@ -27,20 +27,23 @@ export function NotificationsMenu({ className }: { className?: string }) {
 	}, [isOpen]);
 
 	return (
-		<div ref={containerRef} className={cn('relative', className)}>
-			<HeadButton
-				trailingIcon={<Icon name="Bell" />}
-				onClick={() => setIsOpen((prev) => !prev)}
-			></HeadButton>
-			<div className="bg-yellow absolute top-0 right-0 h-2 w-2 rounded-full ring-2 ring-black"></div>
-			<div
+		<div ref={containerRef} className={cn('md:relative', className)}>
+			<div className="relative">
+				<HeadButton
+					trailingIcon={<Icon name="Bell" />}
+					className={isOpen ? 'active' : ''}
+					onClick={() => setIsOpen((prev) => !prev)}
+				></HeadButton>
+				<div className="bg-yellow absolute top-0 right-0 h-2 w-2 rounded-full ring-2 ring-black"></div>
+			</div>
+			<Notifications
+				notifications={[]}
 				className={
-					'shadow-popover pointer-events-none absolute top-full right-0 mt-5 w-120 origin-top-right scale-95 rounded-xs opacity-0 transition [&.opened]:pointer-events-auto [&.opened]:scale-100 [&.opened]:opacity-100' +
+					'pointer-events-none absolute top-full right-0 z-50 mt-px w-full origin-top-right scale-95 opacity-0 transition md:mt-5 md:w-120 [&.opened]:pointer-events-auto [&.opened]:scale-100 [&.opened]:opacity-100' +
 					(isOpen ? ' opened' : '')
 				}
-			>
-				<Notifications notifications={[]} onClose={() => setIsOpen(false)} />
-			</div>
+				onClose={() => setIsOpen(false)}
+			/>
 		</div>
 	);
 }

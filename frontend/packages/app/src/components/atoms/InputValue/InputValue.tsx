@@ -66,7 +66,7 @@ export function InputValue({
 	return (
 		<label
 			className={cn(
-				'flex w-full cursor-text flex-col gap-4 rounded-xs bg-black/16 p-8 ring-1 ring-black/24 transition-shadow ring-inset hover:ring-white/32 has-focus:ring-white/64',
+				'flex w-full cursor-text flex-col gap-4 rounded-xs bg-black/16 p-4 ring-1 ring-black/24 transition-all duration-300 ring-inset hover:ring-white/32 has-focus:ring-white/64 has-focus:shadow-[0_0_0_1px_rgba(255,255,255,0.1)] md:p-8',
 				className,
 			)}
 		>
@@ -75,7 +75,7 @@ export function InputValue({
 				{currency}
 				{maxValue && (
 					<div className="ml-auto flex items-center gap-3">
-						<div className="font-book flex items-center gap-1 text-current/60">
+						<div className="font-book flex items-center gap-1 text-sm text-current/60 md:text-base">
 							<Icon name="Wallet" />
 							{maxValue}
 						</div>
@@ -99,7 +99,7 @@ export function InputValue({
 				onPaste={handlePaste}
 				onChange={handleChange}
 				onKeyDown={handleKeyDown}
-				className="text-h1 -my-1.5 flex h-11 w-full appearance-none bg-transparent leading-none text-white outline-none placeholder:text-white/60 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+				className="text-h2 md:text-h1 -my-2 flex h-11 w-full appearance-none bg-transparent leading-none text-white outline-none placeholder:text-white/60 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 			/>
 			{usdValue && <span className="leading-none text-white/60">{usdValue}</span>}
 		</label>

@@ -8,10 +8,10 @@ interface FooterProps {
 
 export function Footer({ className }: FooterProps) {
 	return (
-		<footer className={cn('border-t @container border-black/25 p-5', className)}>
-			<div className="flex flex-col gap-4 text-center items-center justify-between @md:flex-row">
-				<Copyright />
+		<footer className={cn('animate-fade-in border-t border-black/25 p-5', className)}>
+			<div className="flex flex-col items-center justify-between gap-4 text-center md:flex-row">
 				<LegalNav />
+				<Copyright className="md:order-first" />
 			</div>
 		</footer>
 	);

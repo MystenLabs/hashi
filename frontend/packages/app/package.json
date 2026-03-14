@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:devnet": "vite --mode devnet",
     "dev:localnet": "bash scripts/sync-localnet.sh && vite --mode localnet",
     "build": "tsc && vite build",
     "preview": "vite preview"

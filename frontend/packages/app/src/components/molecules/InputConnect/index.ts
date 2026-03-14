@@ -1,1 +1,0 @@
-export { InputConnect } from './InputConnect';

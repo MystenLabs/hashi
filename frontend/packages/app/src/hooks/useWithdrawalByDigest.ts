@@ -51,7 +51,8 @@ export function useWithdrawalByDigest(txDigest: string | undefined) {
 				requester_address: string;
 			};
 
-			const btcAddr = witnessProgramToAddress(parsed.bitcoin_address);
+			const btcNetwork = CONFIG.DEFAULT_NETWORK === 'mainnet' ? 'mainnet' : CONFIG.DEFAULT_NETWORK === 'localnet' ? 'regtest' : 'testnet';
+			const btcAddr = witnessProgramToAddress(parsed.bitcoin_address, btcNetwork);
 
 			// 2. Determine status by checking for downstream events
 			let status: WithdrawalOnChainStatus = 'requested';

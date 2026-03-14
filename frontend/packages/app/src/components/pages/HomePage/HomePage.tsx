@@ -25,7 +25,7 @@ export function HomePage() {
 				/>
 			</PageContent>
 
-			<p className="mt-4 max-w-93 text-center text-xs text-shadow-[0_1px_2px_rgb(0_0_0/0.24)]">
+			<p className="mx-auto mt-4 max-w-93 animate-fade-in stagger-3 text-center text-xs text-shadow-[0_1px_2px_rgb(0_0_0/0.24)]">
 				BTC becomes suiBTC in the SUI wallet. This token represents Bitcoin on the Sui network
 				and can be used across Sui's DeFi ecosystem. You can withdraw it back as BTC to a Bitcoin
 				wallet anytime.
