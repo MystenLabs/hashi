@@ -8,11 +8,12 @@ module hashi::test_utils;
 
 use hashi::{
     committee::{Self, CommitteeMember},
+    config_value,
     deposit_queue,
     disable_version,
     enable_version,
     hashi::Hashi,
-    update_deposit_fee,
+    update_config,
     utxo_pool,
     withdrawal_queue
 };
@@ -216,7 +217,14 @@ public fun create_deposit_fee_proposal(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    update_deposit_fee::propose(hashi, fee, vec_map::empty(), clock, ctx)
+    update_config::propose(
+        hashi,
+        b"deposit_fee".to_string(),
+        config_value::new_u64(fee),
+        vec_map::empty(),
+        clock,
+        ctx,
+    )
 }
 
 /// Creates an enable version proposal and returns its ID

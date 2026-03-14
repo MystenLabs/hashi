@@ -1311,8 +1311,8 @@ async fn scrape_proposals(
         // Deserialize proposal based on the proposal type
         let contents = field.child_object().contents().value();
         let result: Option<(Address, u64)> = match &proposal_type {
-            types::ProposalType::UpdateDepositFee => {
-                bcs::from_bytes::<move_types::Proposal<move_types::UpdateDepositFee>>(contents)
+            types::ProposalType::UpdateConfig => {
+                bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
                     .ok()
                     .map(|p| (p.id, p.timestamp_ms))
             }
@@ -1374,7 +1374,7 @@ fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
     };
 
     match (inner_tag.module().as_str(), inner_tag.name().as_str()) {
-        ("update_deposit_fee", "UpdateDepositFee") => types::ProposalType::UpdateDepositFee,
+        ("update_config", "UpdateConfig") => types::ProposalType::UpdateConfig,
         ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,

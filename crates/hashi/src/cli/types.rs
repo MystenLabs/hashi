@@ -47,7 +47,7 @@ pub mod display {
     pub fn format_proposal_type(proposal_type: &ProposalType) -> String {
         match proposal_type {
             ProposalType::Upgrade => "Upgrade".to_string(),
-            ProposalType::UpdateDepositFee => "UpdateDepositFee".to_string(),
+            ProposalType::UpdateConfig => "UpdateConfig".to_string(),
             ProposalType::EnableVersion => "EnableVersion".to_string(),
             ProposalType::DisableVersion => "DisableVersion".to_string(),
             ProposalType::Unknown(s) => format!("Unknown({})", s),

@@ -459,7 +459,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
     };
 
     match (struct_tag.module().as_str(), struct_tag.name().as_str()) {
-        ("update_deposit_fee", "UpdateDepositFee") => ProposalType::UpdateDepositFee,
+        ("update_config", "UpdateConfig") => ProposalType::UpdateConfig,
         ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,

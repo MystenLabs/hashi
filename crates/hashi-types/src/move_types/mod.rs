@@ -160,7 +160,7 @@ pub struct UpgradeCap {
 }
 
 /// Rust version of the Move hashi::config_value::Value type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum ConfigValue {
     U64(u64),
     Address(Address),
@@ -324,10 +324,11 @@ pub struct Proposal<T> {
     pub data: T,
 }
 
-/// Rust version of the Move hashi::update_deposit_fee::UpdateDepositFee type.
+/// Rust version of the Move hashi::update_config::UpdateConfig type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct UpdateDepositFee {
-    pub fee: u64,
+pub struct UpdateConfig {
+    pub key: String,
+    pub value: ConfigValue,
 }
 
 /// Rust version of the Move hashi::enable_version::EnableVersion type.

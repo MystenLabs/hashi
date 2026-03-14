@@ -5,7 +5,7 @@
 #[allow(implicit_const_copy, deprecated_usage, unused_variable)]
 module hashi::proposal_tests;
 
-use hashi::{proposal, test_utils, update_deposit_fee::UpdateDepositFee};
+use hashi::{proposal, test_utils, update_config::UpdateConfig};
 use sui::clock;
 
 // ======== Test Addresses ========
@@ -40,7 +40,7 @@ fun test_create_proposal() {
     assert!(hashi.proposals().contains(proposal_id));
 
     // Verify the creator voted automatically
-    let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
     assert!(prop.votes().length() == 1);
     assert!(prop.votes().contains(&VOTER1));
 
@@ -93,10 +93,10 @@ fun test_vote_on_proposal() {
 
     // VOTER2 votes
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx2);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // Verify vote count is now 2
-    let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
     assert!(prop.votes().length() == 2);
     assert!(prop.votes().contains(&VOTER1));
     assert!(prop.votes().contains(&VOTER2));
@@ -125,7 +125,7 @@ fun test_double_vote_fails() {
     );
 
     // VOTER1 tries to vote again - should fail
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx);
 
     // Won't reach here
     clock::destroy_for_testing(clock);
@@ -152,7 +152,7 @@ fun test_vote_by_non_member_fails() {
 
     // NON_VOTER tries to vote - should fail
     let ctx_non = &mut test_utils::new_tx_context(NON_VOTER, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx_non);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx_non);
 
     // Won't reach here
     clock::destroy_for_testing(clock);
@@ -180,15 +180,15 @@ fun test_remove_vote() {
 
     // Verify vote exists
     {
-        let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
+        let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
         assert!(prop.votes().length() == 1);
     };
 
     // VOTER1 removes vote
-    proposal::remove_vote<UpdateDepositFee>(&mut hashi, proposal_id, ctx);
+    proposal::remove_vote<UpdateConfig>(&mut hashi, proposal_id, ctx);
 
     // Verify vote was removed
-    let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
     assert!(prop.votes().length() == 0);
 
     // Clean up
@@ -216,7 +216,7 @@ fun test_remove_nonexistent_vote_fails() {
 
     // VOTER2 tries to remove vote without having voted - should fail
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    proposal::remove_vote<UpdateDepositFee>(&mut hashi, proposal_id, ctx2);
+    proposal::remove_vote<UpdateConfig>(&mut hashi, proposal_id, ctx2);
 
     // Won't reach here
     clock::destroy_for_testing(clock);
@@ -247,7 +247,7 @@ fun test_execute_proposal_with_quorum() {
     );
 
     // Execute the proposal
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
     // Verify the deposit fee was updated
     assert!(hashi.config().deposit_fee() == 1000);
@@ -277,7 +277,7 @@ fun test_execute_without_quorum_fails() {
     );
 
     // Try to execute without quorum - should fail
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
     // Won't reach here
     clock::destroy_for_testing(clock);
@@ -303,14 +303,14 @@ fun test_execute_after_gathering_votes() {
 
     // VOTER2 votes (66% weight)
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx2);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // VOTER3 votes (100% weight)
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx3);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx3);
 
     // Now execute with 100% quorum
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
     // Verify the deposit fee was updated
     assert!(hashi.config().deposit_fee() == 1000);
@@ -345,7 +345,7 @@ fun test_vote_on_expired_proposal_fails() {
 
     // VOTER2 tries to vote on expired proposal - should fail
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx2);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // Won't reach here
     clock::destroy_for_testing(clock);
@@ -374,7 +374,7 @@ fun test_execute_expired_proposal_fails() {
     clock::increment_for_testing(&mut clock, MAX_PROPOSAL_DURATION_MS + 1);
 
     // Try to execute expired proposal - should fail
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
     // Won't reach here
     clock::destroy_for_testing(clock);
@@ -402,7 +402,7 @@ fun test_delete_expired_proposal() {
     clock::increment_for_testing(&mut clock, MAX_PROPOSAL_DURATION_MS + 1);
 
     // Delete expired proposal - should succeed
-    let data = proposal::delete_expired<UpdateDepositFee>(&mut hashi, proposal_id, &clock);
+    let data = proposal::delete_expired<UpdateConfig>(&mut hashi, proposal_id, &clock);
     std::unit_test::destroy(data);
 
     // Verify proposal no longer exists
@@ -432,7 +432,7 @@ fun test_delete_non_expired_proposal_fails() {
     );
 
     // Try to delete non-expired proposal - should fail
-    let data = proposal::delete_expired<UpdateDepositFee>(&mut hashi, proposal_id, &clock);
+    let data = proposal::delete_expired<UpdateConfig>(&mut hashi, proposal_id, &clock);
 
     // Won't reach here
     std::unit_test::destroy(data);
@@ -461,28 +461,20 @@ fun test_weighted_quorum() {
         ctx1,
     );
 
-    // 50% is not enough for 100% quorum - verify we need more votes
-    let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
+    // 50% is not enough for 66.67% quorum - verify we need more votes
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
     assert!(!proposal::quorum_reached(prop, &hashi));
 
-    // VOTER2 votes (now 5/6 = 83% total weight)
+    // VOTER2 votes (now 5/6 = 83% total weight, exceeds 66.67% threshold)
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx2);
+    proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
-    // Still not enough for 100% quorum
-    let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
-    assert!(!proposal::quorum_reached(prop, &hashi));
-
-    // VOTER3 votes (now 6/6 = 100% total weight)
-    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
-    proposal::vote<UpdateDepositFee>(&mut hashi, proposal_id, &clock, ctx3);
-
-    // Now we have quorum
-    let prop: &proposal::Proposal<UpdateDepositFee> = hashi.proposals().borrow(proposal_id);
+    // 83% exceeds the 66.67% quorum threshold
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
     assert!(proposal::quorum_reached(prop, &hashi));
 
     // Execute should succeed
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
     assert!(hashi.config().deposit_fee() == 1000);
 
     // Clean up
@@ -522,11 +514,11 @@ fun test_multiple_concurrent_proposals() {
     assert!(hashi.proposals().contains(proposal_id_2));
 
     // Execute first proposal
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id_1, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id_1, &clock);
     assert!(hashi.config().deposit_fee() == 1000);
 
     // Execute second proposal (overwrites first)
-    hashi::update_deposit_fee::execute(&mut hashi, proposal_id_2, &clock);
+    hashi::update_config::execute(&mut hashi, proposal_id_2, &clock);
     assert!(hashi.config().deposit_fee() == 2000);
 
     // Clean up

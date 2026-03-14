@@ -94,6 +94,8 @@ const TX_FIXED_VB: u64 = 11;
 const EVersionDisabled: vector<u8> = b"Version disabled";
 #[error(code = 1)]
 const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
+#[error(code = 2)]
+const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type";
 
 //
 // Config Key's
@@ -128,6 +130,33 @@ fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     };
 
     self.config.insert(key, value);
+}
+
+/// Validated upsert: accepts a key string and a Value, validates that
+/// known keys receive the expected value type, and rejects unknown keys.
+/// This is the entry point used by the generic `UpdateConfig` proposal.
+public(package) fun upsert_checked(self: &mut Config, key: String, value: Value) {
+    assert!(is_valid_config_entry(&key, &value), EInvalidConfigEntry);
+    // Re-use the internal upsert via the typed setters so any
+    // per-field side-effects are preserved.
+    let bytes = *key.as_bytes();
+    self.upsert(bytes, value);
+}
+
+/// Returns true when `key` is a recognised config key and `value`
+/// carries the type that key expects.
+#[allow(implicit_const_copy)]
+fun is_valid_config_entry(key: &String, value: &Value): bool {
+    let k = key.as_bytes();
+    // prettier-ignore
+    if (k == &DEPOSIT_FEE_KEY)                         { value.is_u64() }
+    else if (k == &WITHDRAWAL_FEE_BTC_KEY)             { value.is_u64() }
+    else if (k == &MAX_FEE_RATE_KEY)                   { value.is_u64() }
+    else if (k == &MAX_INPUTS_KEY)                     { value.is_u64() }
+    else if (k == &BITCOIN_CONFIRMATION_THRESHOLD_KEY) { value.is_u64() }
+    else if (k == &PAUSED_KEY)                         { value.is_bool() }
+    else if (k == &WITHDRAWAL_CANCELLATION_COOLDOWN_KEY) { value.is_u64() }
+    else { false }
 }
 
 /// Assert that the package version is the current version.

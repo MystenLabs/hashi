@@ -153,10 +153,10 @@ impl LeaderService {
 
             // Get the type argument for the proposal
             let type_arg = match &proposal.proposal_type {
-                ProposalType::UpdateDepositFee => TypeTag::Struct(Box::new(StructTag::new(
+                ProposalType::UpdateConfig => TypeTag::Struct(Box::new(StructTag::new(
                     hashi_ids.package_id,
-                    Identifier::from_static("update_deposit_fee"),
-                    Identifier::from_static("UpdateDepositFee"),
+                    Identifier::from_static("update_config"),
+                    Identifier::from_static("UpdateConfig"),
                     vec![],
                 ))),
                 ProposalType::EnableVersion => TypeTag::Struct(Box::new(StructTag::new(

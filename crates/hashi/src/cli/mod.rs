@@ -129,10 +129,18 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose updating the deposit fee
-    UpdateDepositFee {
-        /// The new deposit fee (in satoshis)
-        fee: u64,
+    /// Propose updating a configuration value
+    ///
+    /// Known config keys and their expected value types:
+    ///   deposit_fee (u64), withdrawal_fee_btc (u64), max_fee_rate (u64),
+    ///   max_inputs (u64), bitcoin_confirmation_threshold (u64),
+    ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool)
+    UpdateConfig {
+        /// The config key to update
+        key: String,
+
+        /// The new value. Prefix with the type: u64:123, bool:true
+        value: String,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -443,10 +451,15 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     )
                     .await?;
                 }
-                CreateProposalCommands::UpdateDepositFee { fee, metadata } => {
-                    commands::proposal::create_update_deposit_fee_proposal(
+                CreateProposalCommands::UpdateConfig {
+                    key,
+                    value,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_config_proposal(
                         &config,
-                        fee,
+                        &key,
+                        &value,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

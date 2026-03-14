@@ -32,8 +32,9 @@ pub enum CreateProposalParams {
         digest: Vec<u8>,
         metadata: Vec<(String, String)>,
     },
-    UpdateDepositFee {
-        fee: u64,
+    UpdateConfig {
+        key: String,
+        value: hashi_types::move_types::ConfigValue,
         metadata: Vec<(String, String)>,
     },
     EnableVersion {
@@ -280,72 +281,162 @@ impl HashiClient {
         &self,
         params: CreateProposalParams,
     ) -> TransactionBuilder {
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        match params {
-            CreateProposalParams::Upgrade { digest, metadata } => {
-                let digest_arg = builder.pure(&digest);
-                let metadata_arg = builder.pure(&metadata);
-                builder.move_call(
-                    Function::new(
-                        self.hashi_ids.package_id,
-                        Identifier::from_static("upgrade"),
-                        Identifier::from_static("propose"),
-                    ),
-                    vec![hashi_arg, digest_arg, metadata_arg, clock_arg],
-                );
-            }
-            CreateProposalParams::UpdateDepositFee { fee, metadata } => {
-                let fee_arg = builder.pure(&fee);
-                let metadata_arg = builder.pure(&metadata);
-                builder.move_call(
-                    Function::new(
-                        self.hashi_ids.package_id,
-                        Identifier::from_static("update_deposit_fee"),
-                        Identifier::from_static("propose"),
-                    ),
-                    vec![hashi_arg, fee_arg, metadata_arg, clock_arg],
-                );
-            }
-            CreateProposalParams::EnableVersion { version, metadata } => {
-                let version_arg = builder.pure(&version);
-                let metadata_arg = builder.pure(&metadata);
-                builder.move_call(
-                    Function::new(
-                        self.hashi_ids.package_id,
-                        Identifier::from_static("enable_version"),
-                        Identifier::from_static("propose"),
-                    ),
-                    vec![hashi_arg, version_arg, metadata_arg, clock_arg],
-                );
-            }
-            CreateProposalParams::DisableVersion { version, metadata } => {
-                let version_arg = builder.pure(&version);
-                let metadata_arg = builder.pure(&metadata);
-                builder.move_call(
-                    Function::new(
-                        self.hashi_ids.package_id,
-                        Identifier::from_static("disable_version"),
-                        Identifier::from_static("propose"),
-                    ),
-                    vec![hashi_arg, version_arg, metadata_arg, clock_arg],
-                );
-            }
-        }
-
-        builder
+        build_create_proposal_transaction(self.hashi_ids, params)
     }
+}
+
+/// Build a `TransactionBuilder` for creating a proposal, given `HashiIds` and params.
+///
+/// This is a standalone function so it can be reused outside `HashiClient` (e.g. in tests).
+pub fn build_create_proposal_transaction(
+    hashi_ids: HashiIds,
+    params: CreateProposalParams,
+) -> TransactionBuilder {
+    let mut builder = TransactionBuilder::new();
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let clock_arg = builder.object(
+        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+
+    match params {
+        CreateProposalParams::Upgrade { digest, metadata } => {
+            let digest_arg = builder.pure(&digest);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("upgrade"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, digest_arg, metadata_arg, clock_arg],
+            );
+        }
+        CreateProposalParams::UpdateConfig {
+            key,
+            value,
+            metadata,
+        } => {
+            let value_arg = build_config_value(&mut builder, hashi_ids.package_id, &value);
+
+            let key_arg = builder.pure(&key);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("update_config"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, key_arg, value_arg, metadata_arg, clock_arg],
+            );
+        }
+        CreateProposalParams::EnableVersion { version, metadata } => {
+            let version_arg = builder.pure(&version);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("enable_version"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, version_arg, metadata_arg, clock_arg],
+            );
+        }
+        CreateProposalParams::DisableVersion { version, metadata } => {
+            let version_arg = builder.pure(&version);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("disable_version"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, version_arg, metadata_arg, clock_arg],
+            );
+        }
+    }
+
+    builder
+}
+
+/// Build a `config_value::Value` enum via a move call (e.g. `config_value::new_u64(v)`).
+/// Returns the `Argument` holding the constructed `Value`.
+fn build_config_value(
+    builder: &mut TransactionBuilder,
+    package_id: Address,
+    value: &hashi_types::move_types::ConfigValue,
+) -> sui_transaction_builder::Argument {
+    use hashi_types::move_types::ConfigValue;
+
+    let (func_name, arg) = match value {
+        ConfigValue::U64(v) => ("new_u64", builder.pure(v)),
+        ConfigValue::Address(v) => ("new_address", builder.pure(v)),
+        ConfigValue::String(v) => ("new_string", builder.pure(v)),
+        ConfigValue::Bool(v) => ("new_bool", builder.pure(v)),
+        ConfigValue::Bytes(v) => ("new_bytes", builder.pure(v)),
+    };
+
+    builder.move_call(
+        Function::new(
+            package_id,
+            Identifier::from_static("config_value"),
+            Identifier::new(func_name).unwrap(),
+        ),
+        vec![arg],
+    )
+}
+
+/// Build a `VecMap<String, String>` for proposal metadata via move calls.
+///
+/// Move structs like `VecMap` cannot be passed as pure args in PTBs.
+/// Instead we construct one via `vec_map::empty()` + `vec_map::insert()`.
+fn build_metadata(
+    builder: &mut TransactionBuilder,
+    metadata: &[(String, String)],
+) -> sui_transaction_builder::Argument {
+    let sui_framework = Address::from_static("0x2");
+    let move_stdlib = Address::from_static("0x1");
+
+    let string_type = TypeTag::Struct(Box::new(StructTag::new(
+        move_stdlib,
+        Identifier::from_static("string"),
+        Identifier::from_static("String"),
+        vec![],
+    )));
+
+    // vec_map::empty<String, String>()
+    let map = builder.move_call(
+        Function::new(
+            sui_framework,
+            Identifier::from_static("vec_map"),
+            Identifier::from_static("empty"),
+        )
+        .with_type_args(vec![string_type.clone(), string_type.clone()]),
+        vec![],
+    );
+
+    // vec_map::insert(&mut map, key, value) for each entry
+    for (key, value) in metadata {
+        let key_arg = builder.pure(key);
+        let value_arg = builder.pure(value);
+        builder.move_call(
+            Function::new(
+                sui_framework,
+                Identifier::from_static("vec_map"),
+                Identifier::from_static("insert"),
+            )
+            .with_type_args(vec![string_type.clone(), string_type.clone()]),
+            vec![map, key_arg, value_arg],
+        );
+    }
+
+    map
 }
 
 /// Get the TypeTag for a proposal type (from on-chain type)
@@ -359,7 +450,7 @@ pub fn get_proposal_type_arg(
 
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),
-        ProposalType::UpdateDepositFee => ("update_deposit_fee", "UpdateDepositFee"),
+        ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::Unknown(s) => {

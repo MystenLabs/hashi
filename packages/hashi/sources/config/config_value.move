@@ -16,24 +16,38 @@ public enum Value has copy, drop, store {
     // Dynamic(TypeName, vector<u8>)
 }
 
-public(package) fun new_u64(value: u64): Value {
+public fun new_u64(value: u64): Value {
     Value::U64(value)
 }
 
-public(package) fun new_address(value: address): Value {
+public fun new_address(value: address): Value {
     Value::Address(value)
 }
 
-public(package) fun new_string(value: String): Value {
+public fun new_string(value: String): Value {
     Value::String(value)
 }
 
-public(package) fun new_bool(value: bool): Value {
+public fun new_bool(value: bool): Value {
     Value::Bool(value)
 }
 
-public(package) fun new_bytes(value: vector<u8>): Value {
+public fun new_bytes(value: vector<u8>): Value {
     Value::Bytes(value)
+}
+
+public(package) fun is_u64(value: &Value): bool {
+    match (value) {
+        Value::U64(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_bool(value: &Value): bool {
+    match (value) {
+        Value::Bool(_) => true,
+        _ => false,
+    }
 }
 
 public(package) fun as_u64(value: Value): u64 {

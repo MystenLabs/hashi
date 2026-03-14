@@ -413,7 +413,7 @@ pub struct Proposal {
 /// The type of proposal data stored in a `Proposal<T>`
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposalType {
-    UpdateDepositFee,
+    UpdateConfig,
     EnableVersion,
     DisableVersion,
     Upgrade,
@@ -423,7 +423,7 @@ pub enum ProposalType {
 impl ProposalType {
     pub fn as_str(&self) -> &str {
         match self {
-            ProposalType::UpdateDepositFee => "update_deposit_fee",
+            ProposalType::UpdateConfig => "update_config",
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
@@ -433,7 +433,7 @@ impl ProposalType {
 
     pub fn all_labels() -> &'static [&'static str] {
         &[
-            "update_deposit_fee",
+            "update_config",
             "enable_version",
             "disable_version",
             "upgrade",

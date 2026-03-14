@@ -291,30 +291,58 @@ pub async fn create_upgrade_proposal(
     Ok(())
 }
 
-/// Create an update deposit fee proposal
-pub async fn create_update_deposit_fee_proposal(
+/// Create an update config proposal
+pub async fn create_update_config_proposal(
     config: &CliConfig,
-    fee: u64,
+    key: &str,
+    value_str: &str,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    println!("\n{}", "Creating Update Deposit Fee Proposal:".bold());
-    println!("  New fee: {} satoshis", fee);
+    let value = parse_config_value(value_str)
+        .context("Invalid value format. Use type:value, e.g. u64:1000 or bool:true")?;
+
+    println!("\n{}", "Creating Update Config Proposal:".bold());
+    println!("  Key:   {}", key);
+    println!("  Value: {}", value_str);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this deposit fee update proposal").await? {
+    if !tx_opts.skip_confirm && !confirm_action("create this config update proposal").await? {
         return Ok(());
     }
 
     let mut client = HashiClient::new(config).await?;
-    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateDepositFee {
-        fee,
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateConfig {
+        key: key.to_string(),
+        value,
         metadata,
     });
 
-    print_info("Transaction: update_deposit_fee::propose");
+    print_info("Transaction: update_config::propose");
     execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
+}
+
+/// Parse a CLI config value string like "u64:1000" or "bool:true" into a ConfigValueParam.
+fn parse_config_value(s: &str) -> Result<hashi_types::move_types::ConfigValue> {
+    use hashi_types::move_types::ConfigValue;
+
+    let (type_prefix, raw) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("expected type:value format (e.g. u64:1000)"))?;
+
+    match type_prefix {
+        "u64" => Ok(ConfigValue::U64(raw.parse().context("invalid u64")?)),
+        "bool" => Ok(ConfigValue::Bool(raw.parse().context("invalid bool")?)),
+        "string" => Ok(ConfigValue::String(raw.to_string())),
+        "address" => Ok(ConfigValue::Address(
+            raw.parse().context("invalid address")?,
+        )),
+        other => anyhow::bail!(
+            "unknown type prefix '{}' (expected u64, bool, string, address)",
+            other
+        ),
+    }
 }
 
 /// Create an enable version proposal

@@ -757,6 +757,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_update_config_proposal() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting UpdateConfig Proposal E2E Test ===");
+
+        // Stand up a minimal network (1 node). We only need the Sui chain
+        // with the Hashi package deployed and a registered committee member.
+        let networks = TestNetworksBuilder::new().with_nodes(1).build().await?;
+
+        // Wait for the node to finish DKG so the committee is fully set up.
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+
+        let hashi_ids = networks.hashi_network.ids();
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+
+        // The operator key is a committee member — use it to sign the proposal.
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?;
+
+        // Use the same builder logic the CLI uses.
+        use hashi::cli::client::CreateProposalParams;
+        use hashi::cli::client::build_create_proposal_transaction;
+
+        let builder = build_create_proposal_transaction(
+            hashi_ids,
+            CreateProposalParams::UpdateConfig {
+                key: "deposit_fee".to_string(),
+                value: hashi_types::move_types::ConfigValue::U64(42),
+                metadata: vec![],
+            },
+        );
+
+        info!("Executing update_config::propose transaction...");
+        let response = executor.execute(builder).await?;
+        assert!(
+            response.transaction().effects().status().success(),
+            "update_config::propose transaction failed: {:?}",
+            response.transaction().effects().status()
+        );
+        info!("Transaction succeeded: {}", response.transaction().digest());
+
+        info!("=== UpdateConfig Proposal E2E Test Passed ===");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_runtime_nonce_desync_recovery() -> Result<()> {
         init_test_logging();
         let mut networks = setup_test_networks().await?;
