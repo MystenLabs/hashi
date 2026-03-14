@@ -17,6 +17,7 @@ import { useCreateDepositRequest } from '@/hooks/useCreateDepositRequest';
 import { useDepositByDigest } from '@/hooks/useDepositByDigest';
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard';
 import { lookupVout } from '@/lib/btc-rpc';
+import { useDepositFees } from '@/hooks/useDepositFees';
 import { truncateAddress, truncateHash } from '@/lib/utils';
 
 type DepositStep =
@@ -192,6 +193,7 @@ function DepositFlowView({
 	const { data: depositAddressData, isLoading: isLoadingAddress, error: addressError, fetchStatus } =
 		useGenerateDepositAddress(wallet);
 	const { mutateAsync: createDeposit } = useCreateDepositRequest();
+	const { data: fees } = useDepositFees();
 
 	const generatedAddress = depositAddressData?.address ?? '';
 	const isAddressIdle = fetchStatus === 'idle' && !depositAddressData;
@@ -244,6 +246,7 @@ function DepositFlowView({
 				vout,
 				amountSats,
 				recipient: wallet,
+				depositFeeMist: fees?.depositFeeMist,
 			});
 
 			setBtcTxHash(txidInput.trim());
@@ -286,8 +289,8 @@ function DepositFlowView({
 											? 'Hashi object not configured'
 											: truncateAddress(generatedAddress),
 							},
-							{ label: 'Estimated Gas', value: '— SUI' },
-							{ label: 'Hashi Protocol Fee', value: '— SUI' },
+							{ label: 'Estimated Gas', value: fees?.gasEstimateSui ?? '— SUI' },
+							{ label: 'Hashi Protocol Fee', value: fees?.depositFeeSui ?? '— SUI' },
 							{ label: 'Estimated Time', tooltip: 'Bitcoin requires 6 confirmations for security. Each confirmation takes approximately 10 minutes.', value: '~60-80 min' },
 						]}
 						amount={amount}

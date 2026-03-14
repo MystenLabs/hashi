@@ -26,9 +26,6 @@ export function useRequestWithdrawal() {
 			// Use coinWithBalance intent — handles both address balances and coin objects
 			const btcCoin = tx.add(coinWithBalance({ type: btcCoinType, balance: amountSats }));
 
-			// Split zero SUI for fee (withdrawal fee — may need real amount from config)
-			const [feeCoin] = tx.splitCoins(tx.gas, [0]);
-
 			tx.add(
 				requestWithdrawal({
 					package: pkg,
@@ -36,7 +33,6 @@ export function useRequestWithdrawal() {
 						hashi: CONFIG.HASHI_OBJECT_ID,
 						btc: btcCoin,
 						bitcoinAddress,
-						fee: feeCoin,
 					},
 				}),
 			);

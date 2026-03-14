@@ -12,6 +12,7 @@ interface CreateDepositParams {
 	vout: number;
 	amountSats: bigint;
 	recipient: string;
+	depositFeeMist?: bigint;
 }
 
 export function useCreateDepositRequest() {
@@ -20,7 +21,7 @@ export function useCreateDepositRequest() {
 	const queryClient = useQueryClient();
 
 	return {
-		mutateAsync: async ({ txid, vout, amountSats, recipient }: CreateDepositParams) => {
+		mutateAsync: async ({ txid, vout, amountSats, recipient, depositFeeMist = 0n }: CreateDepositParams) => {
 			if (!account) throw new Error('Wallet not connected');
 
 			// Bitcoin txids are displayed in reversed byte order.
@@ -61,8 +62,8 @@ export function useCreateDepositRequest() {
 				}),
 			);
 
-			// 4. Split zero SUI for fee (deposit fee — may need real amount from config)
-			const [feeCoin] = tx.splitCoins(tx.gas, [0]);
+			// 4. Split SUI for the protocol deposit fee
+			const [feeCoin] = tx.splitCoins(tx.gas, [depositFeeMist]);
 
 			// 5. Call deposit(hashi, request, fee)
 			tx.add(

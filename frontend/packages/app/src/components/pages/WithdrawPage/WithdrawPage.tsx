@@ -15,6 +15,7 @@ import { useWithdrawalByDigest } from '@/hooks/useWithdrawalByDigest';
 import type { WithdrawalOnChainStatus } from '@/hooks/useWithdrawalByDigest';
 import { useRequestWithdrawal } from '@/hooks/useRequestWithdrawal';
 import { bitcoinAddressToWitnessProgram } from '@/lib/bitcoin';
+import { useWithdrawalFees } from '@/hooks/useWithdrawalFees';
 import { truncateAddress, truncateHash } from '@/lib/utils';
 
 type WithdrawStep =
@@ -214,6 +215,7 @@ function WithdrawFlowView({
 	const [submitError, setSubmitError] = useState('');
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const { mutateAsync: requestWithdrawal } = useRequestWithdrawal();
+	const { data: fees } = useWithdrawalFees();
 	const data = {
 		amount: entry?.amount || '0',
 		wallet: entry?.wallet || '',
@@ -274,8 +276,8 @@ function WithdrawFlowView({
 						rows={[
 							{ label: 'From Sui Wallet', value: data.wallet ? truncateAddress(data.wallet) : '—', action: 'copy', copyValue: data.wallet },
 							{ label: 'To Bitcoin Wallet', value: btcAddress ? truncateAddress(btcAddress) : '—', action: 'copy', copyValue: btcAddress },
-							{ label: 'Estimated Gas', value: '— SUI' },
-							{ label: 'Hashi Protocol Fee', value: '— SUI' },
+							{ label: 'Estimated Gas', value: fees?.gasEstimateSui ?? '— SUI' },
+							{ label: 'Hashi Protocol Fee', value: fees?.withdrawalFeeLabel ?? '— sats' },
 							{
 								label: 'Estimated Time',
 								tooltip: 'Bitcoin requires 6 confirmations for security. Each confirmation takes approximately 10 minutes.',
