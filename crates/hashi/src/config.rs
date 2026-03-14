@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -267,21 +268,22 @@ impl Config {
     }
 
     pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<crate::btc_monitor::TrustedPeer>> {
-        let peers = self
-            .bitcoin_trusted_peers
-            .as_ref()
-            .map(|peers| {
-                peers
-                    .iter()
-                    .map(|addr| {
-                        addr.parse::<std::net::SocketAddr>()
-                            .map(crate::btc_monitor::TrustedPeer::from)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("Failed to parse bitcoin_trusted_peers: {}", e))?
-            .unwrap_or_default();
+        let Some(peer_strs) = self.bitcoin_trusted_peers.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let mut peers = Vec::new();
+        for addr in peer_strs {
+            let resolved: Vec<_> = addr
+                .to_socket_addrs()
+                .map_err(|e| anyhow::anyhow!("Failed to resolve bitcoin peer '{addr}': {e}"))?
+                .map(crate::btc_monitor::TrustedPeer::from)
+                .collect();
+            if resolved.is_empty() {
+                tracing::warn!("No addresses resolved for bitcoin peer '{addr}'");
+            }
+            peers.extend(resolved);
+        }
         Ok(peers)
     }
 
