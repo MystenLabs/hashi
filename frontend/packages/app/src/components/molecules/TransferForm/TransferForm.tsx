@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useLayoutEffect } from 'react';
 import { useCurrentAccount, ConnectModal } from '@mysten/dapp-kit';
 import { cn } from '@/lib/utils';
 import { Icon } from '@/components/atoms/Icon';
@@ -34,26 +34,55 @@ export function TransferForm({ className, onSubmit }: TransferFormProps) {
 		});
 	};
 
+	const contentRef = useRef<HTMLDivElement>(null);
+	const [contentHeight, setContentHeight] = useState<number | undefined>();
+
+	useLayoutEffect(() => {
+		if (contentRef.current) {
+			setContentHeight(contentRef.current.scrollHeight);
+		}
+	}, [tab]);
+
 	const hasWallet = !!account || !!wallet;
+	const parsedAmount = parseFloat(amount) || 0;
+	const insufficientBalance = isWithdraw && balanceBtc !== undefined && parsedAmount > parseFloat(balanceBtc);
+	const canSubmit = isWithdraw
+		? !!amount && parsedAmount > 0 && hasWallet && !insufficientBalance
+		: hasWallet;
 
 	return (
 		<div className={cn('flex flex-col gap-4', className)}>
 			<Tabs value={tab} onChange={setTab} />
-			<InputValue
-				value={amount}
-				onChange={setAmount}
-				icon={isWithdraw ? <Icon name="suiBTC" /> : <Icon name="BTC" />}
-				currency={isWithdraw ? 'suiBTC' : 'BTC'}
-				maxValue={balanceBtc}
-			/>
-			<InputWallet
-				connectedAddress={account?.address}
-				onConnectWallet={() => setConnectModalOpen(true)}
-				onChange={setWallet}
-			/>
-			<Button disabled={!amount || !hasWallet} onClick={handleSubmit}>
-				Review Transfer
-			</Button>
+			<div
+				className="transition-[height] duration-300 ease-out"
+				style={contentHeight ? { height: contentHeight, overflow: 'hidden' } : undefined}
+			>
+				<div
+					ref={contentRef}
+					key={tab}
+					className="flex animate-fade-in flex-col gap-4"
+				>
+					{isWithdraw && (
+						<InputValue
+							value={amount}
+							onChange={setAmount}
+							icon={<Icon name="suiBTC" />}
+							currency="suiBTC"
+							maxValue={balanceBtc}
+						/>
+					)}
+					<InputWallet
+						connectedAddress={account?.address}
+						onConnectWallet={() => setConnectModalOpen(true)}
+						onChange={setWallet}
+						label={isWithdraw ? 'To Bitcoin Wallet' : 'To SUI Wallet'}
+						placeholder={isWithdraw ? 'Enter Bitcoin wallet address' : 'Enter SUI wallet address'}
+					/>
+					<Button disabled={!canSubmit} onClick={handleSubmit}>
+						{insufficientBalance ? 'Insufficient Balance' : isWithdraw ? 'Review Transfer' : 'Generate Deposit Address'}
+					</Button>
+				</div>
+			</div>
 
 			<ConnectModal
 				trigger={<></>}

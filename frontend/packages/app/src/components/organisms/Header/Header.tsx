@@ -32,14 +32,14 @@ export function Header({ className, ...props }: HeaderProps) {
 	return (
 		<header
 			className={cn(
-				'relative flex w-full items-center justify-between border-b border-white/15 px-5 py-3.5',
+				'relative flex w-full items-center justify-between border-b border-white/15 px-3 py-2.5 md:px-5 md:py-3.5',
 				className,
 			)}
 		>
 			<Logo />
 
 			{props.username ? (
-				<div className="flex gap-3">
+				<div className="flex gap-2 md:gap-3">
 					<div className="relative" ref={dropdownRef}>
 						<HeadButton
 							leadingIcon={<Icon name="SUI" />}
@@ -73,9 +73,11 @@ export function Header({ className, ...props }: HeaderProps) {
 							</div>
 						)}
 					</div>
-					<div className="w-px bg-white/25"></div>
-					<NotificationsMenu />
-					<MainMenu />
+					<div className="hidden w-px bg-white/25 md:block"></div>
+					<div className="hidden md:block">
+						<NotificationsMenu />
+					</div>
+					<MainMenu showNotifications />
 				</div>
 			) : (
 				<HeadButton

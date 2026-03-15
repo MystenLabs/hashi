@@ -9,6 +9,7 @@ export interface MainMenuItemProps {
 	icon: React.ReactNode;
 	external?: boolean;
 	href?: string;
+	mobileOnly?: boolean;
 }
 
 const menuItems: MainMenuItemProps[] = [
@@ -28,16 +29,26 @@ const menuItems: MainMenuItemProps[] = [
 	},
 ];
 
+const notificationItem: MainMenuItemProps = {
+	label: 'Notifications',
+	icon: <Icon name="Bell" className="h-4 w-4" />,
+	mobileOnly: true,
+};
+
 export function MainMenu({
 	items = menuItems,
+	showNotifications = false,
 	className,
 }: {
 	items?: MainMenuItemProps[];
+	showNotifications?: boolean;
 	className?: string;
 }) {
 	const [isOpen, setIsOpen] = useState(false);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const navigate = useNavigate();
+
+	const allItems = showNotifications ? [notificationItem, ...items] : items;
 
 	// Close on escape press
 	useEffect(() => {
@@ -73,11 +84,14 @@ export function MainMenu({
 				}
 			>
 				<div className="rounded-xs bg-black ring-1 ring-white/12 ring-inset">
-					{items.map((item) => (
+					{allItems.map((item) => (
 						<button
 							key={item.label}
 							type="button"
-							className="-mt-px flex w-full items-center gap-2 border-t border-white/12 p-3 transition-colors first:mt-0 first:border-0 hover:bg-white/6"
+							className={cn(
+								'-mt-px flex w-full items-center gap-2 border-t border-white/12 p-3 transition-colors first:mt-0 first:border-0 hover:bg-white/6',
+								item.mobileOnly && 'md:hidden',
+							)}
 							onClick={() => {
 								setIsOpen(false);
 								if (item.href) navigate(item.href);

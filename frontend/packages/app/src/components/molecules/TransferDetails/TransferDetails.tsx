@@ -15,9 +15,10 @@ export interface TransferDetailsRowProps {
 export interface TransferDetailsProps {
 	rows: TransferDetailsRowProps[];
 	summary?: string;
-	amount: string;
-	currency: 'BTC' | 'suiBTC';
-	usdValue: string;
+	amount?: string;
+	currency?: 'BTC' | 'suiBTC';
+	usdValue?: string;
+	hideSummary?: boolean;
 	className?: string;
 }
 
@@ -77,6 +78,7 @@ export function TransferDetails({
 	amount,
 	currency,
 	usdValue,
+	hideSummary,
 	className,
 }: TransferDetailsProps) {
 	return (
@@ -87,19 +89,21 @@ export function TransferDetails({
 				))}
 			</div>
 
-			<div className="flex flex-col gap-3">
-				<div className="flex items-center justify-between gap-1.5">
-					<span className="font-book leading-none md:text-xl">{summary}</span>
-					<Icon name={currency} className="ml-auto h-4 w-4 md:h-5 md:w-5" />
-					<span className="leading-none font-bold text-white md:text-xl">
-						{amount} {currency}
-					</span>
+			{!hideSummary && currency && (
+				<div className="flex flex-col gap-3">
+					<div className="flex items-center justify-between gap-1.5">
+						<span className="font-book leading-none md:text-xl">{summary}</span>
+						<Icon name={currency} className="ml-auto h-4 w-4 md:h-5 md:w-5" />
+						<span className="leading-none font-bold text-white md:text-xl">
+							{amount} {currency}
+						</span>
+					</div>
+					<div className="flex items-center justify-between text-xs leading-none text-current/80">
+						<span>1 BTC = 1suiBTC</span>
+						<span>{usdValue}</span>
+					</div>
 				</div>
-				<div className="flex items-center justify-between text-xs leading-none text-current/80">
-					<span>1 BTC = 1suiBTC</span>
-					<span>{usdValue}</span>
-				</div>
-			</div>
+			)}
 		</div>
 	);
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import { Alert } from '@/components/atoms/Alert';
 import { Button } from '@/components/atoms/Button';
@@ -101,7 +101,7 @@ function WithdrawStatusView({
 	if (isLoading || !data) {
 		return (
 			<PageLayout>
-				<PageTitle>Loading Withdrawal Status...</PageTitle>
+				<PageTitle key="loading">Loading Withdrawal Status...</PageTitle>
 				<PageContent>
 					<ProgressBar message="Fetching transaction details..." className="max-w-120" />
 				</PageContent>
@@ -121,7 +121,7 @@ function WithdrawStatusView({
 	if (data.status === 'cancelled') {
 		return (
 			<PageLayout>
-				<PageTitle>Withdrawal Cancelled</PageTitle>
+				<PageTitle key="cancelled">Withdrawal Cancelled</PageTitle>
 				<PageContent>
 					<Alert variant="error">This withdrawal request has been cancelled.</Alert>
 					<TransferSummary label="Cancelled Withdrawal" amount={amount} currency="suiBTC" />
@@ -134,7 +134,7 @@ function WithdrawStatusView({
 	if (data.status === 'confirmed') {
 		return (
 			<PageLayout>
-				<PageTitle>Withdraw Completed</PageTitle>
+				<PageTitle key="confirmed">Withdraw Completed</PageTitle>
 				<PageContent>
 					<TransferSummary
 						isCompleted
@@ -174,7 +174,7 @@ function WithdrawStatusView({
 
 	return (
 		<PageLayout>
-			<PageTitle>Withdrawal In Progress</PageTitle>
+			<PageTitle key="pending">Withdrawal In Progress</PageTitle>
 			<PageContent>
 				<TransferSummary
 					label="Withdrawing"
@@ -211,6 +211,11 @@ function WithdrawFlowView({
 	navigate: ReturnType<typeof useNavigate>;
 }) {
 	const [step] = useState<WithdrawStep>('review');
+
+	useEffect(() => {
+		window.scrollTo({ top: 0, behavior: 'smooth' });
+	}, [step]);
+
 	const [btcAddress, setBtcAddress] = useState('');
 	const [submitError, setSubmitError] = useState('');
 	const [isSubmitting, setIsSubmitting] = useState(false);
@@ -252,7 +257,7 @@ function WithdrawFlowView({
 	if (step === 'review') {
 		return (
 			<PageLayout>
-				<PageTitle>Review Transfer</PageTitle>
+				<PageTitle key="review">Review Transfer</PageTitle>
 				<PageContent>
 					<TransferSummary
 						label="Withdrawing"
@@ -311,7 +316,7 @@ function WithdrawFlowView({
 	// which renders WithdrawStatusView. This fallback shouldn't be reached.
 	return (
 		<PageLayout>
-			<PageTitle>Submitting Withdrawal...</PageTitle>
+			<PageTitle key="submitting">Submitting Withdrawal...</PageTitle>
 			<PageContent>
 				<ProgressBar message="Submitting withdrawal request..." className="max-w-120" />
 			</PageContent>

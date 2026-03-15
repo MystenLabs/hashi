@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import { Alert } from '@/components/atoms/Alert';
 import { Button } from '@/components/atoms/Button';
@@ -22,7 +22,6 @@ import { truncateAddress, truncateHash } from '@/lib/utils';
 
 type DepositStep =
 	| 'review'
-	| 'awaiting'
 	| 'detecting'
 	| 'progress'
 	| 'finalizing'
@@ -67,7 +66,7 @@ function DepositStatusView({
 	if (isLoading || !data) {
 		return (
 			<PageLayout>
-				<PageTitle>Loading Deposit Status...</PageTitle>
+				<PageTitle key="loading">Loading Deposit Status...</PageTitle>
 				<PageContent>
 					<ProgressBar message="Fetching transaction details..." className="max-w-120" />
 				</PageContent>
@@ -87,7 +86,7 @@ function DepositStatusView({
 	if (data.status === 'confirmed') {
 		return (
 			<PageLayout>
-				<PageTitle>Transfer Completed</PageTitle>
+				<PageTitle key="confirmed">Transfer Completed</PageTitle>
 				<PageContent>
 					<TransferSummary
 						isCompleted
@@ -108,8 +107,8 @@ function DepositStatusView({
 						usdValue=""
 					/>
 					<div className="flex flex-col gap-3">
-						<Button trailingIcon={<Icon name="ArrowUpRight" />}>View in Sui Wallet</Button>
-						<Button variant="secondary" onClick={() => navigate('/')}>Make Another Transfer</Button>
+						<Button variant="secondary">View in Sui Wallet</Button>
+						<Button onClick={() => navigate('/')}>Make Another Transfer</Button>
 					</div>
 				</PageContent>
 			</PageLayout>
@@ -119,7 +118,7 @@ function DepositStatusView({
 	if (data.status === 'expired') {
 		return (
 			<PageLayout>
-				<PageTitle>Deposit Expired</PageTitle>
+				<PageTitle key="expired">Deposit Expired</PageTitle>
 				<PageContent>
 					<Alert variant="error">
 						This deposit request has expired. Deposit requests expire after 3 days.
@@ -134,7 +133,7 @@ function DepositStatusView({
 	// status === 'pending' — still waiting for committee confirmation
 	return (
 		<PageLayout>
-			<PageTitle>Deposit In Progress</PageTitle>
+			<PageTitle key="pending">Deposit In Progress</PageTitle>
 			<PageContent>
 				<TransferSummary
 					label="Receiving"
@@ -174,12 +173,13 @@ function DepositFlowView({
 	navigate: ReturnType<typeof useNavigate>;
 }) {
 	const [step, setStep] = useState<DepositStep>('review');
-	const [amount] = useState(entry?.amount || '0');
 	const [wallet] = useState(entry?.wallet || '');
-	const [usdValue] = useState(entry?.usdValue || '');
-	const [depositAddress, setDepositAddress] = useState('');
 	const [btcTxHash, setBtcTxHash] = useState('');
 	const [confirmations] = useState(0);
+
+	useEffect(() => {
+		window.scrollTo({ top: 0, behavior: 'smooth' });
+	}, [step]);
 
 	const [txidInput, setTxidInput] = useState('');
 	const [voutResolved, setVoutResolved] = useState<{ vout: number; amountSats: bigint } | null>(null);
@@ -195,13 +195,10 @@ function DepositFlowView({
 	const { mutateAsync: createDeposit } = useCreateDepositRequest();
 	const { data: fees } = useDepositFees();
 
-	const generatedAddress = depositAddressData?.address ?? '';
+	const depositAddress = depositAddressData?.address ?? '';
 	const isAddressIdle = fetchStatus === 'idle' && !depositAddressData;
 
-	const handleConfirmReview = () => {
-		setDepositAddress(generatedAddress);
-		setStep('awaiting');
-	};
+	const handleCopyAddress = () => { if (depositAddress) copyAddress(depositAddress); };
 
 	// Auto-lookup vout when txid changes (if Bitcoin RPC is available)
 	const handleTxidChange = useCallback(async (txid: string) => {
@@ -235,7 +232,7 @@ function DepositFlowView({
 		}
 
 		const vout = showAdvanced && voutOverride !== '' ? parseInt(voutOverride, 10) : voutResolved?.vout ?? 0;
-		const amountSats = voutResolved?.amountSats ?? BigInt(Math.round(parseFloat(amount) * 1e8));
+		const amountSats = voutResolved?.amountSats ?? 0n;
 
 		setSubmitError('');
 		setIsSubmitting(true);
@@ -263,81 +260,61 @@ function DepositFlowView({
 	const { copied: copiedStatus, copy: copyStatus } = useCopyToClipboard();
 
 	const handleCopyStatusLink = () => copyStatus(window.location.href);
-	const handleCopyAddress = () => { if (depositAddress) copyAddress(depositAddress); };
 
 	// -- Render by step --
 
 	if (step === 'review') {
 		return (
 			<PageLayout>
-				<PageTitle>Review Transfer</PageTitle>
+				<PageTitle key="review">Deposit BTC</PageTitle>
 				<PageContent>
-					<TransferSummary label="To Send" amount={amount} currency="BTC" usdValue={usdValue} />
-					<TransferDetails
-						rows={[
-							{ action: 'copy', label: 'SUI Wallet Address', value: truncateAddress(wallet), copyValue: wallet },
-							{
-								action: 'copy',
-								alert: 'You will be sending BTC to this deposit address generated specifically for the Sui wallet address you entered. Do NOT send BTC from an exchange.',
-								label: 'Deposit Address',
-								copyValue: generatedAddress,
-								value: isLoadingAddress
-									? 'Generating...'
+					<div className="flex flex-col items-center gap-4">
+						{isLoadingAddress ? (
+							<div className="flex h-40 w-40 items-center justify-center rounded-xs bg-white/10">
+								<span className="animate-pulse-glow text-sm text-white/60">Generating...</span>
+							</div>
+						) : depositAddress ? (
+							<QRCode value={depositAddress} size={160} className="mx-auto" />
+						) : null}
+						<div className="flex items-center gap-2 rounded-xs bg-black/16 px-4 py-2 ring-1 ring-black/24 ring-inset">
+							<span className="font-mono text-sm break-all">
+								{isLoadingAddress
+									? 'Generating deposit address...'
 									: addressError
 										? 'Failed to generate address'
 										: isAddressIdle
 											? 'Hashi object not configured'
-											: truncateAddress(generatedAddress),
-							},
+											: depositAddress}
+							</span>
+							{depositAddress && (
+								<button
+									type="button"
+									aria-label={copiedAddress ? 'Copied' : 'Copy address'}
+									className="ml-2 flex shrink-0 cursor-pointer items-center justify-center rounded-xs bg-white/12 p-1.5 transition-colors hover:bg-white/24"
+									onClick={handleCopyAddress}
+								>
+									{copiedAddress
+										? <Icon name="Check" className="h-4 w-4 text-valid" />
+										: <Icon name="Copy" className="h-4 w-4" />}
+								</button>
+							)}
+						</div>
+					</div>
+					<Alert>
+						Send BTC to the address above from a personal wallet. Do NOT send from an exchange.
+					</Alert>
+					<TransferDetails
+						rows={[
+							{ action: 'copy', label: 'SUI Wallet Address', value: truncateAddress(wallet), copyValue: wallet },
 							{ label: 'Estimated Gas', value: fees?.gasEstimateSui ?? '— SUI' },
 							{ label: 'Hashi Protocol Fee', value: fees?.depositFeeSui ?? '— SUI' },
 							{ label: 'Estimated Time', tooltip: 'Bitcoin requires 6 confirmations for security. Each confirmation takes approximately 10 minutes.', value: '~60-80 min' },
 						]}
-						amount={amount}
-						currency="suiBTC"
-						summary="Receives"
-						usdValue={usdValue}
+						hideSummary
 					/>
-					<div className="mt-4 flex flex-col gap-3 text-center">
-						<div className="text-sm">This action cannot be undone once submitted.</div>
-						<Button onClick={handleConfirmReview} disabled={isLoadingAddress || !generatedAddress}>Confirm & Continue</Button>
-						<Button variant="secondary" onClick={() => navigate('/')}>Cancel</Button>
-					</div>
-				</PageContent>
-			</PageLayout>
-		);
-	}
-
-	if (step === 'awaiting') {
-		return (
-			<PageLayout>
-				<PageTitle>Send BTC to the deposit address</PageTitle>
-				<PageContent>
-					<div className="flex flex-col items-center gap-4">
-						<QRCode value={depositAddress} size={160} className="mx-auto" />
-						<div className="rounded-xs bg-black/16 px-4 py-2 font-mono text-lg break-all ring-1 ring-black/24 ring-inset">
-							{depositAddress}
-						</div>
-						<Button
-							trailingIcon={copiedAddress ? <Icon name="Check" className="text-valid" /> : <Icon name="Copy" />}
-							variant="secondary"
-							onClick={handleCopyAddress}
-						>
-							{copiedAddress ? 'Copied' : 'Copy Address'}
-						</Button>
-					</div>
-					<div className="flex flex-col items-center justify-center gap-3 rounded-xs bg-black/16 p-4">
-						<div className="flex items-center gap-2">
-							<Icon name="BTC" className="h-5 w-5" />
-							<div className="text-xl leading-none font-bold">{amount} BTC</div>
-						</div>
-						<Alert>
-							Send exactly {amount} BTC to the address above from a personal wallet. Do NOT send from an exchange.
-						</Alert>
-					</div>
 					<div className="flex flex-col gap-3">
-						<Button onClick={() => setStep('detecting')}>I've Sent the BTC</Button>
-						<Button variant="secondary" onClick={() => setStep('review')}>Back</Button>
+						<Button onClick={() => setStep('detecting')} disabled={!depositAddress}>I've Sent the BTC</Button>
+						<Button variant="secondary" onClick={() => navigate('/')}>Cancel</Button>
 					</div>
 				</PageContent>
 			</PageLayout>
@@ -347,10 +324,12 @@ function DepositFlowView({
 	if (step === 'detecting') {
 		return (
 			<PageLayout>
-				<PageTitle>Submit Deposit Request</PageTitle>
+				<PageTitle key="detecting">Submit Deposit Request</PageTitle>
 				<PageContent>
 					{submitError && <Alert variant="error">{submitError}</Alert>}
-					<TransferSummary label="Depositing" amount={amount} currency="BTC" />
+					{voutResolved && (
+						<TransferSummary label="Depositing" amount={(Number(voutResolved.amountSats) / 1e8).toString()} currency="BTC" />
+					)}
 					<div className="flex flex-col gap-4">
 						<label className="flex flex-col gap-2">
 							<span className="font-book text-sm text-current/60">Bitcoin Transaction ID (txid)</span>
@@ -404,7 +383,7 @@ function DepositFlowView({
 						<Button onClick={handleSubmitDeposit} disabled={isSubmitting || !txidInput.trim()}>
 							{isSubmitting ? 'Submitting...' : 'Submit Deposit Request'}
 						</Button>
-						<Button variant="secondary" onClick={() => { setSubmitError(''); setStep('awaiting'); }}>Back</Button>
+						<Button variant="secondary" onClick={() => { setSubmitError(''); setStep('review'); }}>Back</Button>
 					</div>
 				</PageContent>
 			</PageLayout>
@@ -421,10 +400,10 @@ function DepositFlowView({
 
 		return (
 			<PageLayout>
-				<PageTitle>Bitcoin Transaction Detected</PageTitle>
+				<PageTitle key="progress">Bitcoin Transaction Detected</PageTitle>
 				<PageContent>
-					<TransferSummary label="Receiving" amount={amount} currency="BTC" usdValue={usdValue} bitcoinHash={btcTxHash ? truncateHash(btcTxHash) : undefined} />
-					<TransactionConfirmations steps={REQUIRED_CONFIRMATIONS} currentStep={confirmations} timeRemaining={timeRemaining} btcReceiving={amount} />
+					<TransferSummary label="Receiving" amount="—" currency="BTC" bitcoinHash={btcTxHash ? truncateHash(btcTxHash) : undefined} />
+					<TransactionConfirmations steps={REQUIRED_CONFIRMATIONS} currentStep={confirmations} timeRemaining={timeRemaining} />
 					<div className="flex flex-col gap-3 text-center">
 						<Button trailingIcon={copiedStatus ? <Icon name="Check" className="text-valid" /> : <Icon name="Copy" />} variant="secondary" onClick={handleCopyStatusLink}>{copiedStatus ? 'Copied' : 'Copy Status Link'}</Button>
 						<div className="mx-auto max-w-100 text-sm">Use this link to check the status of your transaction later.</div>
@@ -437,9 +416,9 @@ function DepositFlowView({
 	// fallback
 	return (
 		<PageLayout>
-			<PageTitle>Transfer Completed</PageTitle>
+			<PageTitle key="completed">Transfer Completed</PageTitle>
 			<PageContent>
-				<TransferSummary isCompleted label="In SUI Wallet" amount={amount} currency="suiBTC" usdValue={usdValue} bitcoinHash={btcTxHash ? truncateHash(btcTxHash) : undefined} />
+				<TransferSummary isCompleted label="In SUI Wallet" amount="—" currency="suiBTC" bitcoinHash={btcTxHash ? truncateHash(btcTxHash) : undefined} />
 				<div className="flex flex-col gap-3">
 					<Button onClick={() => navigate('/')}>Make Another Transfer</Button>
 				</div>

@@ -139,6 +139,42 @@
   .stagger-3 { animation-delay: 0.15s; }
   .stagger-4 { animation-delay: 0.2s; }
   .stagger-5 { animation-delay: 0.25s; }
+
+  /* CTA button hover — bg blue→white, text→black, arrow swap */
+  .btn-cta {
+    position: relative;
+    overflow: hidden;
+    background-color: #298DFF;
+    color: #fff;
+    transition: background-color 0.4s cubic-bezier(0.16, 1, 0.3, 1), color 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .btn-cta:hover {
+    background-color: #fff;
+    color: #000;
+  }
+  .btn-cta svg path:nth-of-type(1) {
+    transition: translate 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    translate: 0 0;
+  }
+  .btn-cta svg path:nth-of-type(2) {
+    transition: translate 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    translate: -100% 0;
+  }
+  .btn-cta:hover svg path:nth-of-type(1) {
+    translate: 100% 0;
+  }
+  .btn-cta:hover svg path:nth-of-type(2) {
+    translate: 0 0;
+  }
+
+  /* CTA icon — blue box slides up behind white arrow on hover */
+  .btn-cta-icon-bg {
+    transform: translateY(100%);
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .btn-cta:hover .btn-cta-icon-bg {
+    transform: translateY(0%);
+  }
 }
 
 @layer base {
