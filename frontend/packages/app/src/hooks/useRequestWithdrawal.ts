@@ -4,6 +4,7 @@ import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 import { requestWithdrawal } from '@hashi/contracts/src/hashi/withdraw';
 import { CONFIG } from '@/lib/constants';
 import { QueryKeys } from '@/lib/queryKeys';
+import { addTransaction, formatDate } from '@/lib/transactionHistory';
 
 interface RequestWithdrawalParams {
 	amountSats: bigint;
@@ -38,6 +39,14 @@ export function useRequestWithdrawal() {
 			);
 
 			const result = await signAndExecute({ transaction: tx });
+
+			addTransaction(account.address, {
+				id: result.digest,
+				direction: 'sui-to-btc',
+				amount: (Number(amountSats) / 1e8).toString(),
+				currency: 'suiBTC',
+				date: formatDate(new Date()),
+			});
 
 			queryClient.invalidateQueries({ queryKey: [QueryKeys.WithdrawalStatus] });
 			queryClient.invalidateQueries({ queryKey: [QueryKeys.Balance] });

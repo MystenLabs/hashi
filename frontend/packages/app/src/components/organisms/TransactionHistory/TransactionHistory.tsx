@@ -1,7 +1,10 @@
+import { useRef, useState, useEffect } from 'react';
 import { cva } from 'class-variance-authority';
 import { Button } from '@/components/atoms/Button';
 import { Icon } from '@/components/atoms/Icon';
 import { PageContent } from '@/components/atoms/PageContent';
+import { useTransactionStatus } from '@/hooks/useTransactionStatus';
+import { useScrambleText, SCRAMBLE_ACCENT } from '@/hooks/useScrambleText';
 
 type TransactionStatus = 'pending' | 'confirming' | 'complete' | 'failed';
 type TransactionDirection = 'btc-to-sui' | 'sui-to-btc';
@@ -20,7 +23,7 @@ interface TransactionHistoryProps {
 	isConnected?: boolean;
 	onMakeTransfer?: () => void;
 	onConnectWallet?: () => void;
-	onRowClick?: (id: string) => void;
+	onRowClick?: (id: string, direction: TransactionDirection) => void;
 	className?: string;
 }
 
@@ -58,7 +61,33 @@ const badgeVariants = cva('inline-flex text-sm px-2 -my-0.5 py-0.5 capitalize', 
 });
 
 function StatusBadge({ status }: { status: TransactionStatus }) {
-	return <span className={badgeVariants({ variant: status })}>{status}</span>;
+	const { chars, scramble } = useScrambleText(status);
+	const prevStatus = useRef(status);
+
+	useEffect(() => {
+		if (prevStatus.current !== status) {
+			prevStatus.current = status;
+			scramble();
+		}
+	}, [status, scramble]);
+
+	return (
+		<span className={badgeVariants({ variant: status })}>
+			<span className="relative inline-flex">
+				<span className="invisible">{status}</span>
+				<span className="absolute inset-0 text-center">
+					{chars.map((state, i) => (
+						<span
+							key={i}
+							style={state.colored ? { color: SCRAMBLE_ACCENT } : undefined}
+						>
+							{state.char}
+						</span>
+					))}
+				</span>
+			</span>
+		</span>
+	);
 }
 
 function DirectionLabel({ direction }: { direction: TransactionDirection }) {
@@ -91,8 +120,31 @@ function TableHeader() {
 }
 
 function TableRow({ transaction, onClick }: { transaction: Transaction; onClick?: () => void }) {
+	const rowRef = useRef<HTMLTableRowElement>(null);
+	const [isVisible, setIsVisible] = useState(false);
+
+	useEffect(() => {
+		const el = rowRef.current;
+		if (!el) return;
+
+		const observer = new IntersectionObserver(
+			([entry]) => setIsVisible(entry.isIntersecting),
+			{ threshold: 0 },
+		);
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, []);
+
+	const { data: liveStatus } = useTransactionStatus(
+		transaction.id,
+		transaction.direction,
+		isVisible,
+	);
+
+	const status = liveStatus ?? transaction.status;
+
 	return (
-		<tr onClick={onClick} className="cursor-pointer transition-colors hover:bg-white/6">
+		<tr ref={rowRef} onClick={onClick} className="cursor-pointer transition-colors hover:bg-white/6">
 			<td className="border-t border-white/12 p-3 pl-0">
 				<DirectionLabel direction={transaction.direction} />
 			</td>
@@ -108,7 +160,7 @@ function TableRow({ transaction, onClick }: { transaction: Transaction; onClick?
 				</div>
 			</td>
 			<td className="border-t border-white/12 p-3">
-				<StatusBadge status={transaction.status} />
+				<StatusBadge status={status} />
 			</td>
 			<td className="border-t border-white/12 p-3">{transaction.date}</td>
 			<td className="w-1 border-t border-white/12 p-3 pr-0">
@@ -182,7 +234,7 @@ export function TransactionHistory({
 									<TableRow
 										key={tx.id}
 										transaction={tx}
-										onClick={() => onRowClick?.(tx.id)}
+										onClick={() => onRowClick?.(tx.id, tx.direction)}
 									/>
 								))}
 							</tbody>

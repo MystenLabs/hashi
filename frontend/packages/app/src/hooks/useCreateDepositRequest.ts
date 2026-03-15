@@ -6,6 +6,7 @@ import { depositRequest as createDepositRequest } from '@hashi/contracts/src/has
 import { deposit } from '@hashi/contracts/src/hashi/deposit';
 import { CONFIG } from '@/lib/constants';
 import { QueryKeys } from '@/lib/queryKeys';
+import { addTransaction, formatDate } from '@/lib/transactionHistory';
 
 interface CreateDepositParams {
 	txid: string;
@@ -78,6 +79,14 @@ export function useCreateDepositRequest() {
 			);
 
 			const result = await signAndExecute({ transaction: tx });
+
+			addTransaction(account.address, {
+				id: result.digest,
+				direction: 'btc-to-sui',
+				amount: (Number(amountSats) / 1e8).toString(),
+				currency: 'BTC',
+				date: formatDate(new Date()),
+			});
 
 			queryClient.invalidateQueries({ queryKey: [QueryKeys.DepositStatus] });
 			queryClient.invalidateQueries({ queryKey: [QueryKeys.History] });
