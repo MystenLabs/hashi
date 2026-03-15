@@ -986,30 +986,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bdk_chain"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b5d691fd092aacec7e05046b7d04897d58d6d65ed3152cb6cf65dababcfabed"
-dependencies = [
- "bdk_core",
- "bitcoin",
- "miniscript 12.3.5",
-]
-
-[[package]]
 name = "bdk_coin_select"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43064fa3dd1d3a8b24079cfcb5ede6b785857edc782277f17a1736511ccc1916"
-
-[[package]]
-name = "bdk_core"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dbbe4aad0c898bfeb5253c222be3ea3dccfb380a07e72c87e3e4ed6664a6753"
-dependencies = [
- "bitcoin",
-]
 
 [[package]]
 name = "bech32"
@@ -2602,9 +2582,7 @@ dependencies = [
  "backon",
  "base64ct",
  "bcs",
- "bdk_chain",
  "bdk_coin_select",
- "bdk_core",
  "bin-version",
  "bitcoin",
  "bitcoincore-rpc",
@@ -2749,7 +2727,7 @@ dependencies = [
  "hex",
  "hpke",
  "k256",
- "miniscript 13.0.0",
+ "miniscript",
  "proptest",
  "prost",
  "prost-types",
@@ -3579,16 +3557,6 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
-name = "miniscript"
-version = "12.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "487906208f38448e186e3deb02f2b8ef046a9078b0de00bdb28bf4fb9b76951c"
-dependencies = [
- "bech32 0.11.1",
- "bitcoin",
-]
 
 [[package]]
 name = "miniscript"
