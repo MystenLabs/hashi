@@ -14,8 +14,7 @@ use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
-use hashi_types::move_types::CertifiedMessage;
-use hashi_types::move_types::DealerMessagesHashV1;
+use hashi_types::move_types::DealerSubmissionV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -225,7 +224,7 @@ pub struct DealerMessagesHash {
 
 impl DealerMessagesHash {
     pub fn from_onchain_cert(
-        cert: &CertifiedMessage<DealerMessagesHashV1>,
+        cert: &DealerSubmissionV1,
         epoch: u64,
     ) -> Result<DealerCertificate, MpcError> {
         let hash_bytes: [u8; 32] =
@@ -497,6 +496,7 @@ mod tests {
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
+    use hashi_types::move_types::DealerMessagesHashV1;
     use std::num::NonZeroU16;
 
     fn create_test_validator(
@@ -708,7 +708,7 @@ mod tests {
         let signed_message = aggregator.finish().unwrap();
 
         // Convert to on-chain format
-        let onchain_cert = CertifiedMessage {
+        let onchain_cert = DealerSubmissionV1 {
             message: DealerMessagesHashV1 {
                 dealer_address,
                 messages_hash: messages_hash.to_vec(),
@@ -718,7 +718,6 @@ mod tests {
                 signature: signed_message.signature_bytes().to_vec(),
                 signers_bitmap: signed_message.signers_bitmap_bytes().to_vec(),
             },
-            stake_support: 3,
         };
 
         // Parse back using from_onchain_cert
@@ -742,7 +741,7 @@ mod tests {
         let epoch = 100u64;
 
         // Create certificate with invalid hash length (not 32 bytes)
-        let onchain_cert = CertifiedMessage {
+        let onchain_cert = DealerSubmissionV1 {
             message: DealerMessagesHashV1 {
                 dealer_address: Address::new([0u8; 32]),
                 messages_hash: vec![1, 2, 3], // Invalid: only 3 bytes
@@ -752,7 +751,6 @@ mod tests {
                 signature: vec![],
                 signers_bitmap: vec![],
             },
-            stake_support: 0,
         };
 
         let result = DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch);
