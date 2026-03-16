@@ -84,6 +84,8 @@ fun submit_cert_internal(
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
+    assert!(ctx.sender() == dealer);
+    assert!(hashi.committee_set().has_member(dealer));
     let pending = hashi.committee_set().pending_epoch_change();
     assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
     let epoch_certs = hashi.epoch_certs(key, protocol_type, ctx);
