@@ -429,7 +429,7 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<DkgOutput> {
         let certified = tob_channel.certified_dealers().await;
-        let (certified_weight, threshold) = {
+        let (certified_reduced_weight, threshold) = {
             let mgr = mpc_manager.read().unwrap();
             let weight: u16 = certified
                 .iter()
@@ -440,7 +440,7 @@ impl MpcManager {
                 .sum();
             (weight, mgr.dkg_config.threshold)
         };
-        if certified_weight < threshold
+        if certified_reduced_weight < threshold
             && let Err(e) = Self::run_as_dealer(mpc_manager, p2p_channel, tob_channel).await
         {
             tracing::error!("Dealer phase failed: {}. Continuing as party only.", e);
@@ -528,8 +528,21 @@ impl MpcManager {
             mgr.message_responses.clear();
             mgr.complaint_responses.clear();
         }
-        if let Err(e) =
-            Self::run_as_nonce_dealer(mpc_manager, batch_index, p2p_channel, tob_channel).await
+        let certified = tob_channel.certified_dealers().await;
+        let (certified_reduced_weight, required_reduced_weight) = {
+            let mgr = mpc_manager.read().unwrap();
+            let weight: u16 = certified
+                .iter()
+                .filter_map(|d| {
+                    let party_id = mgr.committee.index_of(d)? as u16;
+                    mgr.dkg_config.nodes.weight_of(party_id).ok()
+                })
+                .sum();
+            (weight, 2 * mgr.dkg_config.max_faulty + 1)
+        };
+        if certified_reduced_weight < required_reduced_weight
+            && let Err(e) =
+                Self::run_as_nonce_dealer(mpc_manager, batch_index, p2p_channel, tob_channel).await
         {
             tracing::error!(
                 "Nonce dealer phase failed: {}. Continuing as party only.",
@@ -10505,6 +10518,80 @@ mod tests {
                 .keys()
                 .any(|k| matches!(k, ComplaintsToProcessKey::NonceGeneration(_))),
             "Should have no nonce complaints after successful run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_nonce_generation_skips_dealer_phase() {
+        let mut rng = rand::thread_rng();
+        let weights: [u16; 5] = [1, 1, 1, 2, 2];
+        let num_validators = weights.len();
+        let setup = TestSetup::with_weights(&weights);
+        let batch_index = 0u32;
+
+        // Create all managers
+        let mut managers: Vec<_> = (0..num_validators)
+            .map(|i| setup.create_manager(i))
+            .collect();
+
+        // Create nonce dealer messages for all validators
+        let dealer_messages: Vec<NonceMessage> = (0..num_validators)
+            .map(|i| create_nonce_dealer_message(&setup, i, batch_index, &mut rng))
+            .collect();
+
+        // Collect signatures and create certificates for all dealers
+        let mut certificates = Vec::new();
+        for (dealer_idx, nonce_msg) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_idx);
+            let messages = Messages::NonceGeneration(nonce_msg.clone());
+
+            let mut signatures = Vec::new();
+            for manager in managers.iter_mut() {
+                let response = send_and_assert_ok(manager, dealer_addr, &messages);
+                let sig = MemberSignature::new(
+                    manager.dkg_config.epoch,
+                    manager.address,
+                    response.signature,
+                );
+                signatures.push(sig);
+            }
+
+            let cert =
+                create_test_certificate(setup.committee(), &messages, dealer_addr, signatures)
+                    .unwrap();
+            certificates.push(CertificateV1::NonceGeneration { batch_index, cert });
+        }
+
+        // Test validator 0 with all certificates already on TOB
+        // Total weight = 7, required = 2*2+1 = 5, existing = 7 >= 5 → dealer skips
+        let test_manager = managers.remove(0);
+
+        let other_managers: HashMap<_, _> = managers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+
+        let test_manager = Arc::new(RwLock::new(test_manager));
+        let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
+
+        let outputs =
+            MpcManager::run_nonce_generation(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
+                .await
+                .unwrap();
+
+        // Verify dealer did NOT publish (skipped)
+        assert_eq!(
+            mock_tob.published_count(),
+            0,
+            "Nonce dealer should be skipped when existing_weight >= required_weight"
+        );
+
+        // Verify nonce generation completed successfully
+        assert!(
+            !outputs.is_empty(),
+            "Should have nonce outputs after party phase"
         );
     }
 
