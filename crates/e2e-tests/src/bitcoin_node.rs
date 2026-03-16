@@ -224,6 +224,7 @@ pub struct BitcoinNodeBuilder {
     dir: Option<PathBuf>,
     initial_blocks: u64,
     bitcoin_core_path: Option<PathBuf>,
+    rpc_port: Option<u16>,
 }
 
 impl BitcoinNodeBuilder {
@@ -232,6 +233,7 @@ impl BitcoinNodeBuilder {
             initial_blocks: DEFAULT_INITIAL_BLOCKS,
             bitcoin_core_path: None,
             dir: None,
+            rpc_port: None,
         }
     }
 
@@ -250,11 +252,16 @@ impl BitcoinNodeBuilder {
         self
     }
 
+    pub fn with_rpc_port(mut self, port: u16) -> Self {
+        self.rpc_port = Some(port);
+        self
+    }
+
     pub async fn build(self) -> Result<BitcoinNodeHandle> {
         let bitcoin_core_path = self
             .bitcoin_core_path
             .unwrap_or_else(|| PathBuf::from("bitcoind"));
-        let rpc_port = get_available_port();
+        let rpc_port = self.rpc_port.unwrap_or_else(get_available_port);
 
         let data_dir = self.dir.ok_or_else(|| anyhow!("no data_dir configured"))?;
 

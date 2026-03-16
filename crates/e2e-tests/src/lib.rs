@@ -119,6 +119,16 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_sui_rpc_port(mut self, port: u16) -> Self {
+        self.sui_builder = self.sui_builder.with_rpc_port(port);
+        self
+    }
+
+    pub fn with_btc_rpc_port(mut self, port: u16) -> Self {
+        self.bitcoin_builder = self.bitcoin_builder.with_rpc_port(port);
+        self
+    }
+
     pub fn with_batch_size_per_weight(mut self, batch_size_per_weight: u16) -> Self {
         self.hashi_builder = self
             .hashi_builder
