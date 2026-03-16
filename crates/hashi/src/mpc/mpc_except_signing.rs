@@ -140,7 +140,7 @@ impl MpcManager {
         // TODO: Pass t and f as arguments instead of computing them
         let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
         let total_weight = nodes.total_weight();
-        let max_faulty = ((total_weight - threshold) / 2).min(threshold.saturating_sub(1));
+        let max_faulty = ((total_weight - threshold) / 2).min(threshold - 1);
         let dkg_config = DkgConfig::new(epoch, nodes, threshold, max_faulty)?;
         let party_id = committee
             .index_of(&address)
