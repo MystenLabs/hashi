@@ -612,7 +612,7 @@ impl MpcManager {
                 Err(e) => tracing::info!("Failed to send message to {:?}: {}", addr, e),
             }
         }
-        if aggregator.reduced_weight() >= dealer_data.required_weight {
+        if aggregator.reduced_weight() >= dealer_data.required_reduced_weight {
             let dkg_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -799,7 +799,7 @@ impl MpcManager {
                 }
             }
         }
-        if aggregator.reduced_weight() >= dealer_data.required_weight {
+        if aggregator.reduced_weight() >= dealer_data.required_reduced_weight {
             let rotation_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1003,7 +1003,7 @@ impl MpcManager {
                 Err(e) => tracing::info!("Failed to send nonce message to {:?}: {}", addr, e),
             }
         }
-        if aggregator.reduced_weight() >= dealer_data.required_weight {
+        if aggregator.reduced_weight() >= dealer_data.required_reduced_weight {
             let nonce_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1717,7 +1717,7 @@ impl MpcManager {
             .map(|m| m.validator_address())
             .filter(|addr| *addr != self.address)
             .collect();
-        let required_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        let required_reduced_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
         let reduced_weights: HashMap<Address, u16> = self
             .committee
             .members()
@@ -1734,7 +1734,7 @@ impl MpcManager {
             recipients,
             messages_hash,
             my_signature,
-            required_weight,
+            required_reduced_weight,
             committee: self.committee.clone(),
             reduced_weights,
         }
