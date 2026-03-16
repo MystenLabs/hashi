@@ -124,7 +124,7 @@ function WithdrawStatusView({
 				<PageTitle key="cancelled">Withdrawal Cancelled</PageTitle>
 				<PageContent>
 					<Alert variant="error">This withdrawal request has been cancelled.</Alert>
-					<TransferSummary label="Cancelled Withdrawal" amount={amount} currency="suiBTC" />
+					<TransferSummary label="Cancelled Withdrawal" amount={amount} currency="hBTC" />
 					<Button onClick={() => navigate('/')}>Start a New Transfer</Button>
 				</PageContent>
 			</PageLayout>
@@ -149,7 +149,7 @@ function WithdrawStatusView({
 							{ label: 'SUI TXN hash', value: truncateHash(suiTxHash), action: 'external' as const },
 						]}
 						summary="Burnt"
-						currency="suiBTC"
+						currency="hBTC"
 						amount={amount}
 						usdValue=""
 					/>
@@ -179,7 +179,7 @@ function WithdrawStatusView({
 				<TransferSummary
 					label="Withdrawing"
 					amount={amount}
-					currency="suiBTC"
+					currency="hBTC"
 					suiHash={truncateHash(suiTxHash)}
 				/>
 				<TransactionProgress
@@ -262,7 +262,7 @@ function WithdrawFlowView({
 					<TransferSummary
 						label="Withdrawing"
 						amount={data.amount}
-						currency="suiBTC"
+						currency="hBTC"
 						usdValue={data.usdValue}
 					/>
 
@@ -281,7 +281,8 @@ function WithdrawFlowView({
 						rows={[
 							{ label: 'From Sui Wallet', value: data.wallet ? truncateAddress(data.wallet) : '—', action: 'copy', copyValue: data.wallet },
 							{ label: 'To Bitcoin Wallet', value: btcAddress ? truncateAddress(btcAddress) : '—', action: 'copy', copyValue: btcAddress },
-							{ label: 'Estimated Gas', value: fees?.gasEstimateSui ?? '— SUI' },
+							{ label: 'Sui Network Fee', value: fees?.gasEstimateSui ?? '~0.003 SUI' },
+							{ label: 'BTC Network Fee', tooltip: 'The actual fee depends on Bitcoin network congestion and transaction size. The maximum is determined by on-chain configuration.', value: fees?.btcNetworkFeeLabel ?? '—' },
 							{ label: 'Hashi Protocol Fee', value: fees?.withdrawalFeeLabel ?? '— sats' },
 							{
 								label: 'Estimated Time',
@@ -290,15 +291,16 @@ function WithdrawFlowView({
 							},
 						]}
 						summary="Receives"
-						amount={data.amount}
+						amount={fees ? (parseFloat(data.amount) - Number(fees.withdrawalFeeSats) / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : data.amount}
 						currency="BTC"
+						subtitle="minus BTC network fee"
 						usdValue={data.usdValue}
 					/>
 
 					{submitError && <Alert variant="error">{submitError}</Alert>}
 
 					<Alert>
-						Your wallet will ask you to sign a transaction that burns {data.amount} suiBTC and submits a withdrawal request.
+						Your wallet will ask you to sign a transaction that burns {data.amount} hBTC and submits a withdrawal request.
 					</Alert>
 
 					<div className="mt-4 flex flex-col gap-3 text-center">

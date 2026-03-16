@@ -9,8 +9,8 @@ import { CONFIG } from '@/lib/constants';
 interface DepositFees {
 	/** Protocol deposit fee in MIST */
 	depositFeeMist: bigint;
-	/** Protocol deposit fee formatted as SUI string */
-	depositFeeSui: string;
+	/** Protocol deposit fee formatted as sats string */
+	depositFeeSats: string;
 	/** Estimated gas cost in MIST */
 	gasEstimateMist: bigint;
 	/** Estimated gas cost formatted as SUI string */
@@ -101,9 +101,9 @@ export function useDepositFees() {
 
 			return {
 				depositFeeMist,
-				depositFeeSui: formatMistToSui(depositFeeMist),
+				depositFeeSats: depositFeeMist > 0n ? `${depositFeeMist.toString()} sats` : '— sats',
 				gasEstimateMist,
-				gasEstimateSui: gasEstimateMist > 0n ? formatMistToSui(gasEstimateMist) : '~0.003 SUI',
+				gasEstimateSui: gasEstimateMist > 0n ? `~${formatMistToSui(gasEstimateMist)}` : '~0.003 SUI',
 			};
 		},
 		enabled: !!sender && !!CONFIG.HASHI_OBJECT_ID,

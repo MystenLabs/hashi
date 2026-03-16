@@ -44,7 +44,7 @@ export function useRequestWithdrawal() {
 				id: result.digest,
 				direction: 'sui-to-btc',
 				amount: (Number(amountSats) / 1e8).toString(),
-				currency: 'suiBTC',
+				currency: 'hBTC',
 				date: formatDate(new Date()),
 			});
 

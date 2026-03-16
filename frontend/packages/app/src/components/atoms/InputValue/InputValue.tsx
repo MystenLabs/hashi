@@ -4,11 +4,12 @@ import { Icon } from '@/components/atoms/Icon';
 
 interface InputValueProps {
 	icon?: React.ReactNode;
-	currency?: 'BTC' | 'suiBTC';
+	currency?: 'BTC' | 'hBTC';
 	name?: string;
 	value?: string;
 	defaultValue?: string;
 	maxValue?: string;
+	minValue?: string;
 	placeholder?: string;
 	usdValue?: string;
 	className?: string;
@@ -22,6 +23,7 @@ export function InputValue({
 	value,
 	defaultValue = '',
 	maxValue,
+	minValue,
 	placeholder = '0.00',
 	usdValue,
 	className,
@@ -101,6 +103,11 @@ export function InputValue({
 				onKeyDown={handleKeyDown}
 				className="text-h2 md:text-h1 -my-2 flex h-11 w-full appearance-none bg-transparent leading-none text-white outline-none placeholder:text-white/60 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 			/>
+			{minValue && (
+				<span className="leading-none text-white/40 text-xs">
+					Min: {minValue} {currency}
+				</span>
+			)}
 			{usdValue && <span className="leading-none text-white/60">{usdValue}</span>}
 		</label>
 	);

@@ -17,7 +17,7 @@ interface TabsProps {
 
 const defaultTabs: Tab[] = [
 	{ value: 'receive', label: 'Receive BTC', icon: <Icon name="BTC" /> },
-	{ value: 'withdraw', label: 'Withdraw suiBTC', icon: <Icon name="suiBTC" /> },
+	{ value: 'withdraw', label: 'Withdraw hBTC', icon: <Icon name="hBTC" /> },
 ];
 
 export function Tabs({ tabs = defaultTabs, value = 'receive', disabled, className, onChange }: TabsProps) {

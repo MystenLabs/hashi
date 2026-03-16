@@ -6,7 +6,7 @@ export interface TransferSummaryProps {
 	isCompleted?: boolean;
 	label: string;
 	amount: string;
-	currency: 'BTC' | 'suiBTC';
+	currency: 'BTC' | 'hBTC';
 	usdValue?: string;
 	bitcoinHash?: string;
 	suiHash?: string;

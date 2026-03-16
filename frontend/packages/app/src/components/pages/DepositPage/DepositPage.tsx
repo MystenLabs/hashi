@@ -92,7 +92,7 @@ function DepositStatusView({
 						isCompleted
 						label="In SUI Wallet"
 						amount={amount}
-						currency="suiBTC"
+						currency="hBTC"
 						bitcoinHash={truncateHash(btcTxHash)}
 					/>
 					<TransferDetails
@@ -146,7 +146,7 @@ function DepositStatusView({
 						{ status: 'success', label: 'Deposit request submitted' },
 						{ status: 'current', label: 'Waiting for Bitcoin confirmations & committee verification' },
 					]}
-					alert="This step is handled automatically. Bitcoin requires 6 confirmations (~60 min), then the Hashi committee will verify and mint suiBTC."
+					alert="This step is handled automatically. Bitcoin requires 6 confirmations (~60 min), then the Hashi committee will verify and mint hBTC."
 				/>
 				<div className="flex flex-col gap-3 text-center">
 					<Button trailingIcon={<Icon name="Copy" />} variant="secondary" onClick={handleCopyStatusLink}>
@@ -269,6 +269,18 @@ function DepositFlowView({
 				<PageTitle key="review">Deposit BTC</PageTitle>
 				<PageContent>
 					<div className="flex flex-col items-center gap-4">
+						<div className="relative w-full self-start">
+							<div className="group absolute left-0 top-1/2 -translate-y-1/2">
+								<Icon
+									name="Question"
+									className="h-5 w-5 transition-colors group-hover:text-white/60"
+								/>
+								<div className="shadow-popover pointer-events-none absolute bottom-full left-0 mb-2 w-64 translate-y-1 scale-95 rounded-xs bg-black p-3 text-sm font-normal text-white opacity-0 ring-1 ring-white/24 transition ring-inset group-hover:translate-y-0 group-hover:scale-100 group-hover:opacity-100">
+									This address is uniquely generated from your SUI wallet address. Only send BTC to this address from a personal wallet — deposits from exchanges are not supported.
+								</div>
+							</div>
+							<h3 className="text-center text-xl font-bold">Deposit Address</h3>
+						</div>
 						{isLoadingAddress ? (
 							<div className="flex h-40 w-40 items-center justify-center rounded-xs bg-white/10">
 								<span className="animate-pulse-glow text-sm text-white/60">Generating...</span>
@@ -306,8 +318,8 @@ function DepositFlowView({
 					<TransferDetails
 						rows={[
 							{ action: 'copy', label: 'SUI Wallet Address', value: truncateAddress(wallet), copyValue: wallet },
-							{ label: 'Estimated Gas', value: fees?.gasEstimateSui ?? '— SUI' },
-							{ label: 'Hashi Protocol Fee', value: fees?.depositFeeSui ?? '— SUI' },
+							{ label: 'Sui Network Fee', value: fees?.gasEstimateSui ?? '~0.003 SUI' },
+							{ label: 'Hashi Protocol Fee', value: fees?.depositFeeSats ?? '— sats' },
 							{ label: 'Estimated Time', tooltip: 'Bitcoin requires 6 confirmations for security. Each confirmation takes approximately 10 minutes.', value: '~60-80 min' },
 						]}
 						hideSummary
@@ -418,7 +430,7 @@ function DepositFlowView({
 		<PageLayout>
 			<PageTitle key="completed">Transfer Completed</PageTitle>
 			<PageContent>
-				<TransferSummary isCompleted label="In SUI Wallet" amount="—" currency="suiBTC" bitcoinHash={btcTxHash ? truncateHash(btcTxHash) : undefined} />
+				<TransferSummary isCompleted label="In SUI Wallet" amount="—" currency="hBTC" bitcoinHash={btcTxHash ? truncateHash(btcTxHash) : undefined} />
 				<div className="flex flex-col gap-3">
 					<Button onClick={() => navigate('/')}>Make Another Transfer</Button>
 				</div>

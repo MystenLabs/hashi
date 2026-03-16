@@ -7,7 +7,7 @@ type NotificationType = 'complete' | 'received' | 'failed';
 export interface Notification {
 	id: string;
 	type: NotificationType;
-	currency: 'BTC' | 'suiBTC';
+	currency: 'BTC' | 'hBTC';
 	title: string;
 	message: string;
 	time: string;

@@ -189,6 +189,9 @@ export const icons = {
 	suiBTC: (
 		<img src="/suibtc-logo.svg" alt="" width="100%" height="100%" />
 	),
+	hBTC: (
+		<img src="/suibtc-logo.svg" alt="" width="100%" height="100%" />
+	),
 	Wallet: (
 		<svg
 			width="100%"

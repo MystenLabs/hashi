@@ -13,7 +13,7 @@ export interface Transaction {
 	id: string;
 	direction: TransactionDirection;
 	amount: string;
-	currency: 'BTC' | 'suiBTC';
+	currency: 'BTC' | 'hBTC';
 	status: TransactionStatus;
 	date: string;
 }
@@ -46,7 +46,7 @@ const EmptyIcon = () => (
 	</div>
 );
 
-const badgeVariants = cva('inline-flex text-sm px-2 -my-0.5 py-0.5 capitalize', {
+const badgeVariants = cva('inline-flex text-sm px-2 -my-0.5 py-0.5', {
 	variants: {
 		variant: {
 			pending: 'bg-[#A15A00]/32 text-[#FFB252]',
@@ -74,14 +74,14 @@ function StatusBadge({ status }: { status: TransactionStatus }) {
 	return (
 		<span className={badgeVariants({ variant: status })}>
 			<span className="relative inline-flex">
-				<span className="invisible">{status}</span>
+				<span className="invisible">{status[0].toUpperCase() + status.slice(1)}</span>
 				<span className="absolute inset-0 text-center">
 					{chars.map((state, i) => (
 						<span
 							key={i}
 							style={state.colored ? { color: SCRAMBLE_ACCENT } : undefined}
 						>
-							{state.char}
+							{i === 0 && state.resolved ? state.char.toUpperCase() : state.char}
 						</span>
 					))}
 				</span>
@@ -94,12 +94,12 @@ function DirectionLabel({ direction }: { direction: TransactionDirection }) {
 	const isBtcToSui = direction === 'btc-to-sui';
 	return (
 		<div className="flex items-center gap-1.5">
-			<span className="font-bold">{isBtcToSui ? 'BTC' : 'suiBTC'}</span>
+			<span className="font-bold">{isBtcToSui ? 'BTC' : 'hBTC'}</span>
 			<Icon
 				name="ArrowRight"
 				className={'h-4 w-4' + (isBtcToSui ? ' text-valid' : ' text-orange')}
 			/>
-			<span className="opacity-60">{isBtcToSui ? 'suiBTC' : 'BTC'}</span>
+			<span className="opacity-60">{isBtcToSui ? 'hBTC' : 'BTC'}</span>
 		</div>
 	);
 }
@@ -179,7 +179,7 @@ function EmptyState({ onMakeTransfer }: { onMakeTransfer?: () => void }) {
 				Once you connect your SUI wallet and start making transactions, they'll appear here. Your
 				full activity history will be organized in one place for easy tracking.
 			</p>
-			<Button variant="secondary" onClick={onMakeTransfer}>
+			<Button onClick={onMakeTransfer}>
 				Make a Transfer
 			</Button>
 		</div>

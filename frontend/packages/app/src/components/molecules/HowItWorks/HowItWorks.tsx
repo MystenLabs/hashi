@@ -25,13 +25,13 @@ const sections: InfoSection[] = [
 				icon: <Icon name="BTC" className="h-10 w-10" />,
 				title: 'Bitcoin \u2192 Sui',
 				description:
-					'You send real BTC and receive an equivalent wrapped token (called suiBTC) into the entered Sui wallet. This token represents their Bitcoin on the Sui network and can be used across Sui\u2019s DeFi ecosystem.',
+					'You send real BTC and receive an equivalent wrapped token (called hBTC) into the entered Sui wallet. This token represents their Bitcoin on the Sui network and can be used across Sui\u2019s DeFi ecosystem.',
 			},
 			{
-				icon: <Icon name="suiBTC" className="h-10 w-10" />,
+				icon: <Icon name="hBTC" className="h-10 w-10" />,
 				title: 'Sui \u2192 Bitcoin',
 				description:
-					'The reverse. You can withdraw your suiBTC back, it gets burned on Sui, and real BTC is released to the entered Bitcoin wallet address.',
+					'The reverse. You can withdraw your hBTC back, it gets burned on Sui, and real BTC is released to the entered Bitcoin wallet address.',
 			},
 		],
 	},
@@ -78,7 +78,7 @@ export function HowItWorks({ className, onClose }: HowItWorksProps) {
 			<p className="font-book -my-0.5 text-sm text-white/60">
 				Hashi Protocol lets you move Bitcoin between Bitcoin blockchain and Sui blockchain. Think
 				of it as a transfer or exchange experience. You put BTC in one side, and it comes out the
-				other side in a form native to SUI network, suiBTC.
+				other side in a form native to SUI network, hBTC.
 			</p>
 
 			{sections.map((section) => (

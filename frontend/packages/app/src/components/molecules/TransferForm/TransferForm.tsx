@@ -7,6 +7,7 @@ import { InputValue } from '@/components/atoms/InputValue';
 import { InputWallet } from '@/components/atoms/InputWallet';
 import { Button } from '@/components/atoms/Button';
 import { useHbtcBalance } from '@/hooks/useHbtcBalance';
+import { useWithdrawalFees } from '@/hooks/useWithdrawalFees';
 
 interface TransferFormProps {
 	className?: string;
@@ -16,6 +17,7 @@ interface TransferFormProps {
 export function TransferForm({ className, onSubmit }: TransferFormProps) {
 	const account = useCurrentAccount();
 	const { data: hbtcBalance } = useHbtcBalance();
+	const { data: withdrawalFees } = useWithdrawalFees();
 	const [tab, setTab] = useState('receive');
 	const [amount, setAmount] = useState('');
 	const [wallet, setWallet] = useState('');
@@ -46,8 +48,10 @@ export function TransferForm({ className, onSubmit }: TransferFormProps) {
 	const hasWallet = !!account || !!wallet;
 	const parsedAmount = parseFloat(amount) || 0;
 	const insufficientBalance = isWithdraw && balanceBtc !== undefined && parsedAmount > parseFloat(balanceBtc);
+	const minBtc = withdrawalFees?.withdrawalMinimumBtc;
+	const belowMinimum = isWithdraw && minBtc !== undefined && parsedAmount > 0 && parsedAmount < parseFloat(minBtc);
 	const canSubmit = isWithdraw
-		? !!amount && parsedAmount > 0 && hasWallet && !insufficientBalance
+		? !!amount && parsedAmount > 0 && hasWallet && !insufficientBalance && !belowMinimum
 		: hasWallet;
 
 	return (
@@ -66,9 +70,10 @@ export function TransferForm({ className, onSubmit }: TransferFormProps) {
 						<InputValue
 							value={amount}
 							onChange={setAmount}
-							icon={<Icon name="suiBTC" />}
-							currency="suiBTC"
+							icon={<Icon name="hBTC" />}
+							currency="hBTC"
 							maxValue={balanceBtc}
+							minValue={minBtc}
 						/>
 					)}
 					<InputWallet
@@ -79,7 +84,7 @@ export function TransferForm({ className, onSubmit }: TransferFormProps) {
 						placeholder={isWithdraw ? 'Enter Bitcoin wallet address' : 'Enter SUI wallet address'}
 					/>
 					<Button disabled={!canSubmit} onClick={handleSubmit}>
-						{insufficientBalance ? 'Insufficient Balance' : isWithdraw ? 'Review Transfer' : 'Generate Deposit Address'}
+						{insufficientBalance ? 'Insufficient Balance' : belowMinimum ? 'Below Minimum' : isWithdraw ? 'Review Transfer' : 'Generate Deposit Address'}
 					</Button>
 				</div>
 			</div>

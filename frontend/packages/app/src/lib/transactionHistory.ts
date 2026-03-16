@@ -4,7 +4,7 @@ export interface StoredTransaction {
 	id: string;
 	direction: 'btc-to-sui' | 'sui-to-btc';
 	amount: string;
-	currency: 'BTC' | 'suiBTC';
+	currency: 'BTC' | 'hBTC';
 	date: string;
 }
 

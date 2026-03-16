@@ -3,7 +3,7 @@ import { Logo } from '@/components/atoms/Logo';
 import { Icon } from '@/components/atoms/Icon';
 import { HeadButton } from '@/components/atoms/HeadButton';
 import { MainMenu } from '@/components/organisms/MainMenu';
-import { NotificationsMenu } from '@/components/organisms/NotificationsMenu';
+import { NetworkBadge } from '@/components/atoms/NetworkBadge';
 import { cn } from '@/lib/utils';
 
 type HeaderProps = {
@@ -36,7 +36,10 @@ export function Header({ className, ...props }: HeaderProps) {
 				className,
 			)}
 		>
-			<Logo />
+			<div className="flex items-center gap-2.5">
+				<Logo />
+				<NetworkBadge />
+			</div>
 
 			{props.username ? (
 				<div className="flex gap-2 md:gap-3">
@@ -73,11 +76,7 @@ export function Header({ className, ...props }: HeaderProps) {
 							</div>
 						)}
 					</div>
-					<div className="hidden w-px bg-white/25 md:block"></div>
-					<div className="hidden md:block">
-						<NotificationsMenu />
-					</div>
-					<MainMenu showNotifications />
+					<MainMenu />
 				</div>
 			) : (
 				<HeadButton

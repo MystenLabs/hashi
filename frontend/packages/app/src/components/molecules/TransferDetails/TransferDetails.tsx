@@ -16,8 +16,9 @@ export interface TransferDetailsProps {
 	rows: TransferDetailsRowProps[];
 	summary?: string;
 	amount?: string;
-	currency?: 'BTC' | 'suiBTC';
+	currency?: 'BTC' | 'hBTC';
 	usdValue?: string;
+	subtitle?: string;
 	hideSummary?: boolean;
 	className?: string;
 }
@@ -78,6 +79,7 @@ export function TransferDetails({
 	amount,
 	currency,
 	usdValue,
+	subtitle,
 	hideSummary,
 	className,
 }: TransferDetailsProps) {
@@ -99,7 +101,7 @@ export function TransferDetails({
 						</span>
 					</div>
 					<div className="flex items-center justify-between text-xs leading-none text-current/80">
-						<span>1 BTC = 1suiBTC</span>
+						<span>{subtitle ?? '1 BTC = 1 hBTC'}</span>
 						<span>{usdValue}</span>
 					</div>
 				</div>
