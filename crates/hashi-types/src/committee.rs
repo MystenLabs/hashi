@@ -480,6 +480,13 @@ impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
         message: T,
         reduced_weights: HashMap<Address, u16>,
     ) -> Self {
+        assert!(
+            committee
+                .members
+                .iter()
+                .all(|m| reduced_weights.contains_key(&m.address)),
+            "reduced_weights must contain all committee members",
+        );
         Self {
             bitmap: BitMap::new(),
             committee,
