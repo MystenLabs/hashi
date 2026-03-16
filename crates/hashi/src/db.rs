@@ -239,6 +239,31 @@ impl Database {
         .concat();
         list_messages_by_prefix(&self.nonce_messages, &prefix)
     }
+
+    pub fn delete_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<()> {
+        let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
+        self.dealer_messages.remove(key)
+    }
+
+    pub fn delete_rotation_messages(&self, epoch: u64, dealer: &Address) -> Result<()> {
+        let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
+        self.rotation_messages.remove(key)
+    }
+
+    pub fn delete_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<()> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        self.nonce_messages.remove(key)
+    }
 }
 
 /// List all `(Address, T)` pairs from a keyspace where keys match the given prefix.
@@ -779,6 +804,81 @@ mod tests {
             1,
             "epoch 7 should remain"
         );
+    }
+
+    #[test]
+    fn test_delete_dealer_message() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let message = create_test_message();
+
+        db.store_dealer_message(1, &dealer1, &message).unwrap();
+        db.store_dealer_message(1, &dealer2, &message).unwrap();
+        assert_eq!(db.list_all_dealer_messages(1).unwrap().len(), 2);
+
+        // Delete one
+        db.delete_dealer_message(1, &dealer1).unwrap();
+        assert!(db.get_dealer_message(1, &dealer1).unwrap().is_none());
+        assert!(db.get_dealer_message(1, &dealer2).unwrap().is_some());
+        assert_eq!(db.list_all_dealer_messages(1).unwrap().len(), 1);
+
+        // Delete non-existent is a no-op
+        db.delete_dealer_message(1, &dealer1).unwrap();
+        db.delete_dealer_message(99, &dealer2).unwrap();
+    }
+
+    #[test]
+    fn test_delete_rotation_messages() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let mut messages: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        messages.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        db.store_rotation_messages(1, &dealer1, &messages).unwrap();
+        db.store_rotation_messages(1, &dealer2, &messages).unwrap();
+        assert_eq!(db.list_all_rotation_messages(1).unwrap().len(), 2);
+
+        // Delete one
+        db.delete_rotation_messages(1, &dealer1).unwrap();
+        assert!(db.get_rotation_messages(1, &dealer1).unwrap().is_none());
+        assert!(db.get_rotation_messages(1, &dealer2).unwrap().is_some());
+        assert_eq!(db.list_all_rotation_messages(1).unwrap().len(), 1);
+
+        // Delete non-existent is a no-op
+        db.delete_rotation_messages(1, &dealer1).unwrap();
+    }
+
+    #[test]
+    fn test_delete_nonce_message() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let message = create_test_nonce_message();
+
+        db.store_nonce_message(1, 0, &dealer1, &message).unwrap();
+        db.store_nonce_message(1, 0, &dealer2, &message).unwrap();
+        assert_eq!(db.list_nonce_messages(1, 0).unwrap().len(), 2);
+
+        // Delete one
+        db.delete_nonce_message(1, 0, &dealer1).unwrap();
+        let remaining = db.list_nonce_messages(1, 0).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, dealer2);
+
+        // Delete non-existent is a no-op
+        db.delete_nonce_message(1, 0, &dealer1).unwrap();
+        db.delete_nonce_message(1, 1, &dealer2).unwrap();
     }
 
     #[test]
