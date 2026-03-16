@@ -265,18 +265,20 @@ pub enum DepositValidationErrorKind {
 impl RetryPolicy for DepositValidationErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
         match self {
-            Self::BitcoinConfirmFailed | Self::AmlServiceError => 30 * 1000,
-            Self::NeverRetry => 60 * 60 * 1000,
+            Self::AmlServiceError => 5 * 1000,
+            Self::BitcoinConfirmFailed => 60 * 1000,
+            Self::NeverRetry => u64::MAX,
         }
     }
 
     fn max_delay_ms(self) -> u64 {
-        60 * 60 * 1000
+        60 * 1000
     }
 
     fn max_retries(self) -> u32 {
         match self {
-            Self::BitcoinConfirmFailed | Self::AmlServiceError => u32::MAX,
+            Self::AmlServiceError => u32::MAX,
+            Self::BitcoinConfirmFailed => 60 * 24,
             Self::NeverRetry => 0,
         }
     }
