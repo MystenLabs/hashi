@@ -110,6 +110,7 @@ pub struct SuiNetworkBuilder {
     pub num_validators: usize,
     pub epoch_duration_ms: u64,
     pub sui_binary_path: Option<PathBuf>, // Optional custom binary
+    pub rpc_port: Option<u16>,
 }
 
 impl Default for SuiNetworkBuilder {
@@ -119,6 +120,7 @@ impl Default for SuiNetworkBuilder {
             epoch_duration_ms: DEFAULT_EPOCH_DURATION_MS,
             sui_binary_path: None,
             dir: None,
+            rpc_port: None,
         }
     }
 }
@@ -144,6 +146,11 @@ impl SuiNetworkBuilder {
         self
     }
 
+    pub fn with_rpc_port(mut self, port: u16) -> Self {
+        self.rpc_port = Some(port);
+        self
+    }
+
     pub async fn build(self) -> Result<SuiNetworkHandle> {
         let dir = self
             .dir
@@ -156,7 +163,7 @@ impl SuiNetworkBuilder {
             admin_ports,
         } = load_keys(&dir)?;
 
-        let rpc_port = get_available_port();
+        let rpc_port = self.rpc_port.unwrap_or_else(get_available_port);
         let process = self.start_network(&dir, rpc_port)?;
 
         let rpc_url = format!("http://127.0.0.1:{rpc_port}");

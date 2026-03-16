@@ -62,6 +62,14 @@ enum Commands {
         #[clap(long, default_value = "4")]
         num_validators: usize,
 
+        /// Sui fullnode RPC port
+        #[clap(long, default_value = "9000")]
+        sui_rpc_port: u16,
+
+        /// Bitcoin regtest RPC port
+        #[clap(long, default_value = "18443")]
+        btc_rpc_port: u16,
+
         /// Enable verbose tracing output
         #[clap(long, short)]
         verbose: bool,
@@ -207,9 +215,20 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start {
             num_validators,
+            sui_rpc_port,
+            btc_rpc_port,
             verbose,
             opts,
-        } => cmd_start(num_validators, verbose, &opts.data_dir).await,
+        } => {
+            cmd_start(
+                num_validators,
+                sui_rpc_port,
+                btc_rpc_port,
+                verbose,
+                &opts.data_dir,
+            )
+            .await
+        }
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
@@ -233,7 +252,13 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_start(num_validators: usize, verbose: bool, data_dir: &Path) -> Result<()> {
+async fn cmd_start(
+    num_validators: usize,
+    sui_rpc_port: u16,
+    btc_rpc_port: u16,
+    verbose: bool,
+    data_dir: &Path,
+) -> Result<()> {
     // Check for existing running instance
     if let Ok(state) = LocalnetState::load(data_dir) {
         if state.is_alive() {
@@ -270,6 +295,8 @@ async fn cmd_start(num_validators: usize, verbose: bool, data_dir: &Path) -> Res
 
     let test_networks = TestNetworksBuilder::new()
         .with_nodes(num_validators)
+        .with_sui_rpc_port(sui_rpc_port)
+        .with_btc_rpc_port(btc_rpc_port)
         .build()
         .await?;
 
