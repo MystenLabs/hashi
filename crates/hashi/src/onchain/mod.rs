@@ -366,8 +366,8 @@ impl OnchainState {
         self.state().hashi().config.max_fee_rate()
     }
 
-    pub fn max_inputs(&self) -> u64 {
-        self.state().hashi().config.max_inputs()
+    pub fn input_budget(&self) -> u64 {
+        self.state().hashi().config.input_budget()
     }
 
     pub fn worst_case_network_fee(&self) -> u64 {

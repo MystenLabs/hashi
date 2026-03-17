@@ -15,7 +15,7 @@ fun test_withdrawal_minimum_with_defaults() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
-    // Default config: max_fee_rate=25, max_inputs=10, withdrawal_fee_btc=546
+    // Default config: max_fee_rate=25, input_budget=10, withdrawal_fee_btc=546
     // tx_vbytes = 11 + (10 * 100) + (2 * 43) = 1,097 vB
     // worst_case_fee = 25 * 1,097 = 27,425 sats
     // minimum = 546 + 27,425 + 546 = 28,517 sats
@@ -59,18 +59,18 @@ fun test_max_fee_rate_floors_at_min_relay_fee() {
 }
 
 #[test]
-fun test_max_inputs_floors_at_one() {
+fun test_input_budget_floors_at_one() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
-    // Set max_inputs to zero
-    hashi.config_mut().set_max_inputs(0);
+    // Set input_budget to zero
+    hashi.config_mut().set_input_budget(0);
     // Should return 1, not 0
-    assert!(hashi.config().max_inputs() == 1);
+    assert!(hashi.config().input_budget() == 1);
 
-    // Set max_inputs above floor
-    hashi.config_mut().set_max_inputs(20);
-    assert!(hashi.config().max_inputs() == 20);
+    // Set input_budget above floor
+    hashi.config_mut().set_input_budget(20);
+    assert!(hashi.config().input_budget() == 20);
 
     std::unit_test::destroy(hashi);
 }
@@ -86,9 +86,9 @@ fun test_withdrawal_minimum_updates_with_config_changes() {
     hashi.config_mut().set_max_fee_rate(50);
     assert!(hashi.config().withdrawal_minimum() > baseline);
 
-    // Reset and increase max_inputs instead
+    // Reset and increase input_budget instead
     hashi.config_mut().set_max_fee_rate(25);
-    hashi.config_mut().set_max_inputs(20);
+    hashi.config_mut().set_input_budget(20);
     assert!(hashi.config().withdrawal_minimum() > baseline);
 
     std::unit_test::destroy(hashi);
