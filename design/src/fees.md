@@ -81,7 +81,7 @@ footprint but also a share of UTXO pool maintenance. At minimum, a
 withdrawal must pay for the fixed transaction overhead, its own
 recipient output, and a change output back to the pool. On top of
 that, the protocol requires each withdrawal to budget for up to
-`max_inputs` input weights. This headroom allows the coin selector to
+`input_budget` input weights. This headroom allows the coin selector to
 consolidate many small UTXOs into fewer large ones during normal
 withdrawal traffic -- a form of opportunistic UTXO smashing that keeps
 the pool healthy without requiring dedicated consolidation
@@ -91,7 +91,7 @@ The Move contract and the Rust validator both compute this worst-case
 miner fee using conservative transaction size estimates:
 
 ```
-tx_vbytes    = TX_FIXED_VB + (max_inputs * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB)
+tx_vbytes    = TX_FIXED_VB + (input_budget * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB)
 network_fee  = max_fee_rate * tx_vbytes
 ```
 
@@ -104,7 +104,7 @@ input type Hashi uses):
 | `INPUT_VB`    | `100 vB`    | 2-of-2 taproot script-path input (398 WU / 4)    |
 | `OUTPUT_VB`   | `43 vB`     | P2TR output (172 WU / 4)                          |
 | `NUM_OUTPUTS` | `2`         | One recipient output + one change output          |
-| `max_inputs`  | `10`        | Governance-configurable (initially 10)            |
+| `input_budget`  | `10`        | Per-request worst case, governance-configurable   |
 | `max_fee_rate`| `25 sat/vB` | Governance-configurable (initially 25)            |
 
 With defaults: `(11 + 10*100 + 2*43) * 25 = 27,425` sats.

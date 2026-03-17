@@ -760,10 +760,10 @@ fun test_miner_fee_exceeds_max_aborts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let mut config = config::create();
-    // Set max_fee_rate=1, max_inputs=1 to get a small max_network_fee:
+    // Set max_fee_rate=1, input_budget=1 to get a small max_network_fee:
     // tx_vbytes = 11 + 1*100 + 2*43 = 197, worst_case_fee = 1*197 = 197
     config.set_max_fee_rate(1);
-    config.set_max_inputs(1);
+    config.set_input_budget(1);
 
     let btc_amount = 30_000u64;
     let miner_fee = 200u64; // exceeds max_network_fee of 197

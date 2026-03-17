@@ -105,7 +105,7 @@ const BITCOIN_CHAIN_ID_KEY: vector<u8> = b"bitcoin_chain_id";
 const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
 const WITHDRAWAL_FEE_BTC_KEY: vector<u8> = b"withdrawal_fee_btc";
 const MAX_FEE_RATE_KEY: vector<u8> = b"max_fee_rate";
-const MAX_INPUTS_KEY: vector<u8> = b"max_inputs";
+const INPUT_BUDGET_KEY: vector<u8> = b"input_budget";
 const BITCOIN_CONFIRMATION_THRESHOLD_KEY: vector<u8> = b"bitcoin_confirmation_threshold";
 const PAUSED_KEY: vector<u8> = b"paused";
 const WITHDRAWAL_CANCELLATION_COOLDOWN_KEY: vector<u8> = b"withdrawal_cancellation_cooldown_ms";
@@ -152,7 +152,7 @@ fun is_valid_config_entry(key: &String, value: &Value): bool {
     if (k == &DEPOSIT_FEE_KEY)                         { value.is_u64() }
     else if (k == &WITHDRAWAL_FEE_BTC_KEY)             { value.is_u64() }
     else if (k == &MAX_FEE_RATE_KEY)                   { value.is_u64() }
-    else if (k == &MAX_INPUTS_KEY)                     { value.is_u64() }
+    else if (k == &INPUT_BUDGET_KEY)                     { value.is_u64() }
     else if (k == &BITCOIN_CONFIRMATION_THRESHOLD_KEY) { value.is_u64() }
     else if (k == &PAUSED_KEY)                         { value.is_bool() }
     else if (k == &WITHDRAWAL_CANCELLATION_COOLDOWN_KEY) { value.is_u64() }
@@ -210,18 +210,23 @@ public(package) fun set_max_fee_rate(self: &mut Config, fee_rate: u64) {
     self.upsert(MAX_FEE_RATE_KEY, config_value::new_u64(fee_rate))
 }
 
-/// The worst-case number of UTXO inputs assumed per withdrawal transaction.
-/// More inputs means a heavier transaction and higher fees. Governance-updatable
-/// to account for changes in UTXO pool fragmentation.
+/// The worst-case number of UTXO inputs assumed per individual withdrawal
+/// request for fee estimation purposes. This is not a hard cap on the number
+/// of inputs in a Bitcoin transaction -- batched transactions that serve
+/// multiple requests may use more inputs than this value.
 ///
-/// Returns the greater of the configured value or 1, since a transaction
+/// More inputs means a heavier assumed weight and a higher worst-case miner
+/// fee charged to each user. Governance-updatable to account for changes in
+/// UTXO pool fragmentation.
+///
+/// Returns the greater of the configured value or 1, since a withdrawal
 /// requires at least one input.
-public(package) fun max_inputs(self: &Config): u64 {
-    self.get(MAX_INPUTS_KEY).as_u64().max(1)
+public(package) fun input_budget(self: &Config): u64 {
+    self.get(INPUT_BUDGET_KEY).as_u64().max(1)
 }
 
-public(package) fun set_max_inputs(self: &mut Config, max_inputs: u64) {
-    self.upsert(MAX_INPUTS_KEY, config_value::new_u64(max_inputs))
+public(package) fun set_input_budget(self: &mut Config, input_budget: u64) {
+    self.upsert(INPUT_BUDGET_KEY, config_value::new_u64(input_budget))
 }
 
 /// The dust relay minimum value as a pure constant accessor, usable by
@@ -238,12 +243,12 @@ public(package) fun deposit_minimum(_self: &Config): u64 {
 }
 
 /// The worst-case Bitcoin network (miner) fee for a withdrawal transaction,
-/// assuming max_inputs inputs and NUM_OUTPUTS outputs at max_fee_rate.
+/// assuming input_budget inputs and NUM_OUTPUTS outputs at max_fee_rate.
 /// This is the maximum per-user miner fee the contract will accept.
 public(package) fun worst_case_network_fee(self: &Config): u64 {
     let tx_vbytes =
         TX_FIXED_VB
-        + (self.max_inputs() * INPUT_VB)
+        + (self.input_budget() * INPUT_VB)
         + (NUM_OUTPUTS * OUTPUT_VB);
     self.max_fee_rate() * tx_vbytes
 }
@@ -344,8 +349,8 @@ public(package) fun create(): Config {
     // 25 sat/vB covers historically sustained congestion periods; brief spikes
     // above this are handled by pausing withdrawals.
     config.upsert(MAX_FEE_RATE_KEY, config_value::new_u64(25));
-    // Worst-case number of inputs per withdrawal transaction.
-    config.upsert(MAX_INPUTS_KEY, config_value::new_u64(10));
+    // Assumed number of inputs per withdrawal request for fee budgeting.
+    config.upsert(INPUT_BUDGET_KEY, config_value::new_u64(10));
     config.upsert(BITCOIN_CONFIRMATION_THRESHOLD_KEY, config_value::new_u64(1)); // TODO: set to 6 before mainnet
     config.upsert(WITHDRAWAL_CANCELLATION_COOLDOWN_KEY, config_value::new_u64(1000 * 60 * 60)); // 1 hour
 

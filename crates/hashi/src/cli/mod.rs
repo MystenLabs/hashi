@@ -133,7 +133,7 @@ pub enum CreateProposalCommands {
     ///
     /// Known config keys and their expected value types:
     ///   deposit_fee (u64), withdrawal_fee_btc (u64), max_fee_rate (u64),
-    ///   max_inputs (u64), bitcoin_confirmation_threshold (u64),
+    ///   input_budget (u64), bitcoin_confirmation_threshold (u64),
     ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool)
     UpdateConfig {
         /// The config key to update

@@ -472,8 +472,8 @@ impl Config {
         }
     }
 
-    pub fn max_inputs(&self) -> u64 {
-        match self.config.get("max_inputs") {
+    pub fn input_budget(&self) -> u64 {
+        match self.config.get("input_budget") {
             Some(ConfigValue::U64(v)) => (*v).max(1),
             _ => 1,
         }
@@ -482,7 +482,7 @@ impl Config {
     /// Worst-case network (miner) fee for a withdrawal transaction,
     /// mirroring the formula in config.move.
     pub fn worst_case_network_fee(&self) -> u64 {
-        let tx_vbytes = TX_FIXED_VB + (self.max_inputs() * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB);
+        let tx_vbytes = TX_FIXED_VB + (self.input_budget() * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB);
         self.max_fee_rate() * tx_vbytes
     }
 
