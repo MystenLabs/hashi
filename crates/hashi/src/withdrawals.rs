@@ -845,11 +845,11 @@ pub enum WithdrawalApprovalErrorKind {
 
 impl RetryPolicy for WithdrawalApprovalErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
-        30 * 1000
+        5 * 1000
     }
 
     fn max_delay_ms(self) -> u64 {
-        60 * 60 * 1000
+        2 * 60 * 1000
     }
 
     fn max_retries(self) -> u32 {
@@ -888,11 +888,11 @@ pub enum WithdrawalCommitmentErrorKind {
 
 impl RetryPolicy for WithdrawalCommitmentErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
-        30 * 1000
+        5 * 1000
     }
 
     fn max_delay_ms(self) -> u64 {
-        60 * 60 * 1000
+        60 * 1000
     }
 
     fn max_retries(self) -> u32 {
