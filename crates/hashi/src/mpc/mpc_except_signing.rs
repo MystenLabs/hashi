@@ -2361,7 +2361,9 @@ impl MpcManager {
                 self.reconstruct_from_rotation_certificates(certificates, previous_threshold)
             }
             Some(CertificateV1::NonceGeneration { .. }) => {
-                todo!("Reconstruct previous output from nonce generation certificates")
+                unreachable!(
+                    "Nonce generation certificates cannot appear as previous certificates for key rotation"
+                )
             }
         }
     }
@@ -2662,6 +2664,12 @@ impl MpcManager {
             (is_member, mgr.previous_threshold)
         };
         let previous = if is_member_of_previous_committee {
+            Self::retrieve_missing_previous_messages(
+                mpc_manager,
+                previous_certificates,
+                p2p_channel,
+            )
+            .await?;
             let mgr = Arc::clone(mpc_manager);
             let certs = previous_certificates.to_vec();
             spawn_blocking(move || {
@@ -2687,6 +2695,133 @@ impl MpcManager {
             }
         };
         Ok((previous, is_member_of_previous_committee))
+    }
+
+    async fn retrieve_missing_previous_messages(
+        mpc_manager: &Arc<RwLock<Self>>,
+        previous_certificates: &[CertificateV1],
+        p2p_channel: &impl P2PChannel,
+    ) -> MpcResult<()> {
+        for cert in previous_certificates {
+            let (msg, certificate, protocol_type, needs_retrieval) = match cert {
+                CertificateV1::Dkg(dkg_cert) => {
+                    let msg = dkg_cert.message();
+                    let missing = {
+                        let mgr = mpc_manager.read().unwrap();
+                        mgr.public_messages_store
+                            .get_dealer_message(mgr.source_epoch, &msg.dealer_address)
+                            .map_err(|e| MpcError::StorageError(e.to_string()))?
+                            .is_none()
+                    };
+                    (
+                        msg,
+                        dkg_cert as &DealerCertificate,
+                        ProtocolTypeIndicator::Dkg,
+                        missing,
+                    )
+                }
+                CertificateV1::Rotation(rotation_cert) => {
+                    let msg = rotation_cert.message();
+                    let missing = {
+                        let mgr = mpc_manager.read().unwrap();
+                        mgr.public_messages_store
+                            .get_rotation_messages(mgr.source_epoch, &msg.dealer_address)
+                            .map_err(|e| MpcError::StorageError(e.to_string()))?
+                            .is_none()
+                    };
+                    (
+                        msg,
+                        rotation_cert as &DealerCertificate,
+                        ProtocolTypeIndicator::KeyRotation,
+                        missing,
+                    )
+                }
+                _ => continue,
+            };
+            if needs_retrieval {
+                tracing::info!(
+                    "Previous epoch {:?} message for dealer {:?} not in DB, retrieving from signers",
+                    protocol_type,
+                    msg.dealer_address
+                );
+                Self::retrieve_message_using_previous_committee(
+                    mpc_manager,
+                    msg,
+                    certificate,
+                    protocol_type,
+                    p2p_channel,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn retrieve_message_using_previous_committee(
+        mpc_manager: &Arc<RwLock<Self>>,
+        message: &DealerMessagesHash,
+        certificate: &DealerCertificate,
+        protocol_type: ProtocolTypeIndicator,
+        p2p_channel: &impl P2PChannel,
+    ) -> MpcResult<()> {
+        let (request, signers) = {
+            let mgr = mpc_manager.read().unwrap();
+            let previous_committee = mgr.previous_committee.as_ref().ok_or_else(|| {
+                MpcError::InvalidConfig("Previous committee required for message retrieval".into())
+            })?;
+            let request = RetrieveMessagesRequest {
+                dealer: message.dealer_address,
+                protocol_type,
+            };
+            let signers = certificate.signers(previous_committee).map_err(|_| {
+                MpcError::ProtocolFailed(
+                    "Certificate does not match the previous committee".to_string(),
+                )
+            })?;
+            (request, signers)
+        };
+        for signer in signers {
+            match p2p_channel.retrieve_messages(&signer, &request).await {
+                Ok(response) => {
+                    if compute_messages_hash(&response.messages) == message.messages_hash {
+                        let mut mgr = mpc_manager.write().unwrap();
+                        match &response.messages {
+                            Messages::Dkg(msg) => {
+                                mgr.store_dkg_message(message.dealer_address, msg)?;
+                            }
+                            Messages::Rotation(msgs) => {
+                                mgr.store_rotation_messages(message.dealer_address, msgs)?;
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    "Unexpected message type from signer {:?} for dealer {:?}",
+                                    signer,
+                                    message.dealer_address
+                                );
+                                continue;
+                            }
+                        }
+                        return Ok(());
+                    }
+                    tracing::info!(
+                        "Message hash mismatch from signer {:?} for dealer {:?}",
+                        signer,
+                        message.dealer_address
+                    );
+                }
+                Err(e) => {
+                    tracing::info!(
+                        "Failed to retrieve previous epoch message from signer {:?}: {}",
+                        signer,
+                        e
+                    );
+                }
+            }
+        }
+        Err(MpcError::PairwiseCommunicationError(format!(
+            "Could not retrieve previous epoch message for dealer {:?} from any signer",
+            message.dealer_address
+        )))
     }
 
     fn get_dealer_messages(
@@ -8366,6 +8501,178 @@ mod tests {
         assert!(
             previous_output.key_shares.shares.is_empty(),
             "New member should have empty key_shares"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
+        // Test that prepare_previous_output fetches DKG messages from peers
+        // when they are missing from the local store (simulating a node that
+        // missed SendMessages from some dealers during the previous DKG).
+        let rotation_setup = RotationTestSetup::new();
+        let epoch = rotation_setup.setup.epoch();
+
+        // Create test manager (validator 0) with an EMPTY store — simulates
+        // messages not persisted to DB.
+        let (mut test_manager, test_dkg_output) =
+            rotation_setup.create_receiver_with_memory_store(0);
+        let test_addr = rotation_setup.setup.address(0);
+
+        // RotationTestSetup creates DKG certs at epoch 100 (current) but sets
+        // previous_committee to epoch 99. Since signers() checks epoch, we
+        // override previous_committee to match the cert epoch so retrieval works.
+        test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+        test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+        test_manager.source_epoch = epoch;
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        // Peers have the messages in their in-memory dkg_messages map.
+        // create_receiver_with_memory_store clears dkg_messages after completing DKG,
+        // so we restore them from the setup's dealer_messages.
+        let mut other_managers_map = HashMap::new();
+        for i in 1..5 {
+            let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+            manager.previous_output = Some(output);
+            manager.source_epoch = epoch;
+            for (j, msg) in rotation_setup.dealer_messages.iter().enumerate() {
+                let dealer_addr = rotation_setup
+                    .setup
+                    .address(rotation_setup.dealer_indices[j]);
+                if let Messages::Dkg(dkg_msg) = msg {
+                    manager.dkg_messages.insert(dealer_addr, dkg_msg.clone());
+                }
+            }
+            other_managers_map.insert(rotation_setup.setup.address(i), manager);
+        }
+        let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+        let previous_certs = rotation_setup.certificates();
+        let (previous_output, is_member) =
+            MpcManager::prepare_previous_output(&test_manager, &previous_certs, &mock_p2p)
+                .await
+                .expect(
+                    "prepare_previous_output should succeed by retrieving missing DKG messages",
+                );
+
+        assert!(is_member, "Validator 0 is in the previous committee");
+        assert_eq!(
+            previous_output.public_key, test_dkg_output.public_key,
+            "Reconstructed public key should match original DKG output"
+        );
+        assert_eq!(
+            previous_output.threshold, test_dkg_output.threshold,
+            "Threshold should be preserved"
+        );
+        assert!(
+            !previous_output.key_shares.shares.is_empty(),
+            "Should have key shares after reconstruction"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
+        // Test that prepare_previous_output fetches rotation messages from peers
+        // when they are missing from the local store.
+        let rotation_setup = RotationTestSetup::new();
+        let epoch = rotation_setup.setup.epoch();
+
+        // Override session ID to KeyRotation so rotation messages match
+        // what reconstruct_from_rotation_certificates expects.
+        let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+        // Create rotation dealers with KeyRotation session ID.
+        let dealer_indices = [0usize, 1, 4];
+        let mut dealers: Vec<(usize, MpcManager, DkgOutput)> = dealer_indices
+            .iter()
+            .map(|&i| {
+                let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+                mgr.previous_output = Some(output.clone());
+                mgr.session_id = rotation_session_id.clone();
+                (i, mgr, output)
+            })
+            .collect();
+
+        // Each dealer creates rotation messages and we build certs.
+        let mut rng = rand::thread_rng();
+        let mut rotation_certs = Vec::new();
+        let mut dealer_rotation_messages: HashMap<Address, RotationMessages> = HashMap::new();
+
+        for idx in 0..dealers.len() {
+            let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+            let dkg_output = dealers[idx].2.clone();
+            let msgs = dealers[idx]
+                .1
+                .create_rotation_messages(&dkg_output, &mut rng);
+            let rotation_messages = Messages::Rotation(msgs.clone());
+            // Store in all dealers so signers can serve retrieval requests.
+            for d in dealers.iter_mut() {
+                d.1.rotation_messages.insert(dealer_addr, msgs.clone());
+            }
+            dealer_rotation_messages.insert(dealer_addr, msgs);
+
+            // Sign with dealers 0 and 1.
+            let out0 = dealers[0].2.clone();
+            let out1 = dealers[1].2.clone();
+            let sig0 = dealers[0]
+                .1
+                .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+                .unwrap();
+            let sig1 = dealers[1]
+                .1
+                .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+                .unwrap();
+
+            let mem_sig0 = MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0);
+            let mem_sig1 = MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1);
+            let cert = create_rotation_test_certificate(
+                rotation_setup.setup.committee(),
+                &rotation_messages,
+                dealer_addr,
+                vec![mem_sig0, mem_sig1],
+            )
+            .unwrap();
+            rotation_certs.push(CertificateV1::Rotation(cert));
+        }
+
+        // Create test manager (validator 2) with EMPTY store.
+        let (mut test_manager, test_dkg_output) =
+            rotation_setup.create_receiver_with_memory_store(2);
+        let test_addr = rotation_setup.setup.address(2);
+        test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+        test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+        test_manager.source_epoch = epoch;
+        test_manager.previous_output = Some(test_dkg_output.clone());
+        let test_manager = Arc::new(RwLock::new(test_manager));
+
+        // Peers have rotation messages in their in-memory map.
+        let mut other_managers_map = HashMap::new();
+        // Use dealers as peers (they have the rotation messages).
+        for (i, mgr, _) in dealers {
+            other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+        }
+        // Add remaining validators (3) that don't have rotation messages.
+        let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+        mgr3.previous_output = Some(out3);
+        other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+
+        let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+        let (previous_output, is_member) = MpcManager::prepare_previous_output(
+            &test_manager,
+            &rotation_certs,
+            &mock_p2p,
+        )
+        .await
+        .expect("prepare_previous_output should succeed by retrieving missing rotation messages");
+
+        assert!(is_member, "Validator 2 is in the previous committee");
+        assert_eq!(
+            previous_output.public_key, test_dkg_output.public_key,
+            "Public key should be preserved after rotation reconstruction"
+        );
+        assert!(
+            !previous_output.key_shares.shares.is_empty(),
+            "Should have key shares after reconstruction"
         );
     }
 
