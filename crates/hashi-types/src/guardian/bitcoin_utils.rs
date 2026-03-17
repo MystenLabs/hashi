@@ -726,6 +726,28 @@ mod bitcoin_tests {
         );
     }
 
+    #[test]
+    fn test_single_key_address_matches_descriptor() {
+        let (keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_BTC_SK), Regtest);
+        let pubkey = keypair.x_only_public_key().0;
+
+        // Build the address via the direct function.
+        let addr_direct = single_key_taproot_script_path_address(&pubkey, Regtest);
+
+        // Build the address via a descriptor: tr({nums}, pk({key})).
+        let desc_str = format!("tr({},pk({}))", nums_internal_key(), pubkey);
+        let desc = Descriptor::<BitcoinPubkey>::from_str(&desc_str).expect("valid descriptor");
+        let addr_descriptor = match &desc {
+            Descriptor::Tr(tr) => tr.address(Regtest),
+            _ => panic!("expected taproot descriptor"),
+        };
+
+        assert_eq!(
+            addr_direct, addr_descriptor,
+            "single_key_taproot_script_path_address must match tr(nums, pk(key)) descriptor"
+        );
+    }
+
     // Party 1: Enclave
     // Party 2: Hashi
     // Scenario:
