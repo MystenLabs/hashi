@@ -15,6 +15,7 @@
 - [Guardian](./guardian.md)
 - [Limiter](./limiter.md)
 - [Fees](./fees.md)
+- [Configuration](./config.md)
 
 # Flows
 
