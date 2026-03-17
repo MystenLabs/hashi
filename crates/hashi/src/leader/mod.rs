@@ -73,6 +73,13 @@ impl LeaderService {
 
     async fn run(self) {
         info!("Starting leader service");
+
+        // Wait for DKG to complete before processing any checkpoints.
+        let mpc_handle = self.inner.mpc_handle().expect("MpcHandle not initialized");
+        info!("Waiting for MPC key to become available...");
+        mpc_handle.wait_for_key_ready().await;
+        info!("MPC key is ready, starting leader loop");
+
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
 
         loop {
