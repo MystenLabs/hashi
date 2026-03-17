@@ -8,7 +8,7 @@ check-fmt: ## Check code formatting
 	buf format --diff --exit-code
 
 .PHONY: fmt
-fmt: fmt-rust fmt-buf fmt-move fmt-frontend ## Format all code (Rust, protobuf, Move, and TypeScript)
+fmt: fmt-rust fmt-buf fmt-move ## Format all code (Rust, protobuf, and Move)
 
 .PHONY: fmt-rust
 fmt-rust: ## Format Rust code
@@ -24,14 +24,6 @@ fmt-move: ## Format Move code
 	prettier-move -w packages/*/sources/**/*.move
 	prettier-move -w packages/*/tests/*.move
 	prettier-move -w packages/*/tests/**/*.move
-
-.PHONY: fmt-frontend
-fmt-frontend: ## Format TypeScript code
-	pnpm --dir frontend --filter @hashi/contracts fmt
-
-.PHONY: check-fmt-frontend
-check-fmt-frontend: ## Check TypeScript code formatting
-	pnpm --dir frontend --filter @hashi/contracts check-fmt
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint
@@ -82,6 +74,3 @@ help: ## Show this help
 	@echo "Available targets:"
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-.PHONY: codegen
-codegen: ## Generate TypeScript code from Move contracts
-	pnpm --dir frontend --filter @hashi/contracts codegen
