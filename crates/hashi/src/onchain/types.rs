@@ -454,7 +454,7 @@ const DUST_RELAY_MIN_VALUE: u64 = 546;
 const MIN_RELAY_FEE_RATE: u64 = 1;
 const INPUT_VB: u64 = 100;
 const OUTPUT_VB: u64 = 43;
-const NUM_OUTPUTS: u64 = 2;
+const OUTPUT_BUDGET: u64 = 2;
 const TX_FIXED_VB: u64 = 11;
 
 impl Config {
@@ -482,7 +482,7 @@ impl Config {
     /// Worst-case network (miner) fee for a withdrawal transaction,
     /// mirroring the formula in config.move.
     pub fn worst_case_network_fee(&self) -> u64 {
-        let tx_vbytes = TX_FIXED_VB + (self.input_budget() * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB);
+        let tx_vbytes = TX_FIXED_VB + (self.input_budget() * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB);
         self.max_fee_rate() * tx_vbytes
     }
 

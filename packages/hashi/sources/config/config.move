@@ -72,7 +72,7 @@ const OUTPUT_VB: u64 = 43;
 
 /// Number of outputs assumed for withdrawal minimum calculation:
 /// one recipient output + one change output.
-const NUM_OUTPUTS: u64 = 2;
+const OUTPUT_BUDGET: u64 = 2;
 
 /// Fixed virtual bytes (vB) overhead per Bitcoin transaction, independent of the
 /// number of inputs and outputs.
@@ -243,13 +243,13 @@ public(package) fun deposit_minimum(_self: &Config): u64 {
 }
 
 /// The worst-case Bitcoin network (miner) fee for a withdrawal transaction,
-/// assuming input_budget inputs and NUM_OUTPUTS outputs at max_fee_rate.
+/// assuming input_budget inputs and OUTPUT_BUDGET outputs at max_fee_rate.
 /// This is the maximum per-user miner fee the contract will accept.
 public(package) fun worst_case_network_fee(self: &Config): u64 {
     let tx_vbytes =
         TX_FIXED_VB
         + (self.input_budget() * INPUT_VB)
-        + (NUM_OUTPUTS * OUTPUT_VB);
+        + (OUTPUT_BUDGET * OUTPUT_VB);
     self.max_fee_rate() * tx_vbytes
 }
 

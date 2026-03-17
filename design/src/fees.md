@@ -91,7 +91,7 @@ The Move contract and the Rust validator both compute this worst-case
 miner fee using conservative transaction size estimates:
 
 ```
-tx_vbytes    = TX_FIXED_VB + (input_budget * INPUT_VB) + (NUM_OUTPUTS * OUTPUT_VB)
+tx_vbytes    = TX_FIXED_VB + (input_budget * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB)
 network_fee  = max_fee_rate * tx_vbytes
 ```
 
@@ -103,7 +103,7 @@ input type Hashi uses):
 | `TX_FIXED_VB` | `11 vB`     | nVersion (4) + nLockTime (4) + varint counts (3) |
 | `INPUT_VB`    | `100 vB`    | 2-of-2 taproot script-path input (398 WU / 4)    |
 | `OUTPUT_VB`   | `43 vB`     | P2TR output (172 WU / 4)                          |
-| `NUM_OUTPUTS` | `2`         | One recipient output + one change output          |
+| `OUTPUT_BUDGET` | `2`         | One recipient output + one change output          |
 | `input_budget`  | `10`        | Per-request worst case, governance-configurable   |
 | `max_fee_rate`| `25 sat/vB` | Governance-configurable (initially 25)            |
 
