@@ -441,7 +441,10 @@ impl OnchainState {
     ) -> Result<
         Option<(
             move_types::ProtocolType,
-            Vec<(Address, move_types::DealerSubmissionV1)>,
+            Vec<(
+                Address,
+                move_types::CertifiedMessage<move_types::DealerMessagesHashV1>,
+            )>,
         )>,
     > {
         let epoch_certs = match self.fetch_epoch_certs(epoch, batch_index).await? {
@@ -453,7 +456,10 @@ impl OnchainState {
         };
         let mut nodes: std::collections::HashMap<
             Address,
-            move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>,
+            move_types::LinkedTableNode<
+                Address,
+                move_types::CertifiedMessage<move_types::DealerMessagesHashV1>,
+            >,
         > = std::collections::HashMap::new();
         let mut stream = self
             .0
