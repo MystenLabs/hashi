@@ -552,6 +552,23 @@ mod tests {
         Ok(())
     }
 
+    /// Shutdown a node, open its DB, delete the first half of messages listed
+    /// by `list_fn`, using `delete_fn` to remove each one.
+    fn delete_first_half_of_messages(
+        node: &HashiNodeHandle,
+        _label: &str,
+        list_fn: impl FnOnce(&hashi::db::Database) -> Result<Vec<sui_sdk_types::Address>>,
+        delete_fn: impl Fn(&hashi::db::Database, &sui_sdk_types::Address) -> anyhow::Result<()>,
+    ) -> Result<()> {
+        let db = node.open_db()?;
+        let dealers = list_fn(&db)?;
+        let to_delete = dealers.len() / 2;
+        for dealer in &dealers[..to_delete] {
+            delete_fn(&db, dealer)?;
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_with_nodes_sets_same_num_of_nodes() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
@@ -1009,6 +1026,122 @@ mod tests {
         // n=7, t=3, f=2. Two nodes have wrong key shares.
         // Each node collects 7 sigs (2 bad), RS capacity (7-3)/2=2 → corrects 2.
         run_signing_test(7, &[0, 1]).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mid_protocol_restart_recovery() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for DKG completion on all nodes
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        let epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        // Phase 1: DKG + nonce recovery with partial state
+        let node0 = &mut test_networks.hashi_network_mut().nodes_mut()[0];
+        node0.shutdown().await;
+        delete_first_half_of_messages(
+            node0,
+            "dealer",
+            |db| {
+                Ok(db
+                    .list_all_dealer_messages(epoch)?
+                    .into_iter()
+                    .map(|(addr, _)| addr)
+                    .collect())
+            },
+            |db, dealer| Ok(db.delete_dealer_message(epoch, dealer)?),
+        )?;
+        delete_first_half_of_messages(
+            node0,
+            "nonce",
+            |db| {
+                Ok(db
+                    .list_nonce_messages(epoch, 0)?
+                    .into_iter()
+                    .map(|(addr, _)| addr)
+                    .collect())
+            },
+            |db, dealer| Ok(db.delete_nonce_message(epoch, 0, dealer)?),
+        )?;
+
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .start()
+            .await?;
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_mpc_key(DKG_TIMEOUT)
+            .await
+            .expect("DKG + nonce recovery with partial state should complete");
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        // Phase 2: Rotation + nonce recovery with partial state
+        let next_epoch = epoch + 1;
+        test_networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(test_networks.hashi_network().nodes(), next_epoch).await;
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        let node0 = &mut test_networks.hashi_network_mut().nodes_mut()[0];
+        node0.shutdown().await;
+        delete_first_half_of_messages(
+            node0,
+            "rotation",
+            |db| {
+                Ok(db
+                    .list_all_rotation_messages(next_epoch)?
+                    .into_iter()
+                    .map(|(addr, _)| addr)
+                    .collect())
+            },
+            |db, dealer| Ok(db.delete_rotation_messages(next_epoch, dealer)?),
+        )?;
+        delete_first_half_of_messages(
+            node0,
+            "nonce",
+            |db| {
+                Ok(db
+                    .list_nonce_messages(next_epoch, 0)?
+                    .into_iter()
+                    .map(|(addr, _)| addr)
+                    .collect())
+            },
+            |db, dealer| Ok(db.delete_nonce_message(next_epoch, 0, dealer)?),
+        )?;
+
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .start()
+            .await?;
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_mpc_key(DKG_TIMEOUT)
+            .await
+            .expect("Rotation recovery with partial state should complete");
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -72,7 +72,7 @@ impl HashiNodeHandle {
         unreachable!()
     }
 
-    async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) {
         let Some((service, _hashi)) = self.service.take() else {
             tracing::warn!("Hashi node not running, cannot shutdown");
             return;
@@ -86,6 +86,16 @@ impl HashiNodeHandle {
     pub async fn restart(&mut self) -> Result<()> {
         self.shutdown().await;
         self.start().await
+    }
+
+    /// Open the node's DB independently (node must be stopped).
+    pub fn open_db(&self) -> Result<hashi::db::Database> {
+        assert!(
+            self.service.is_none(),
+            "Cannot open DB while node is running"
+        );
+        let db_path = self.config.db.as_deref().expect("db path not set");
+        hashi::db::Database::open(db_path)
     }
 
     pub fn hashi(&self) -> &Arc<Hashi> {
