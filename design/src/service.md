@@ -34,19 +34,10 @@ block-beta
   pool["UTXO pool"]
 
   block
-    gov["Governance Request Queue"]
-
-    block
-      columns 1
-      block
-        deposits["Deposit Request Queue"]
-        withdrawals["Withdraw Request Queue"]
-      end
-      Limiter
-    end
-
+    gov["Governance Requests"]
+    deposits["Deposit Request Queue"]
+    withdrawals["Withdrawal Request Queue"]
   end
 
-  processor["Processing Queue"]
   broadcast["Ordered broadcast channel"]
 ```

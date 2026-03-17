@@ -30,28 +30,39 @@ sequenceDiagram
     User    ->>     Hashi:      Notify hashi of deposit
     Hashi   ->>     Bitcoin:    Query for deposit
     Hashi   ->>     Hashi:      Quorum agreement on deposit
-    Hashi   ->>     User:       #35;BTC sent to User
+    Hashi   ->>     User:       hBTC sent to User
 ```
 
 </div>
 
 ### BTC Deposit Address
 
-Every Sui Address has its own unique Hashi Bitcoin deposit address. 
+Every Sui Address has its own unique Hashi Bitcoin deposit address.
 
-This unique deposit address can be derived by the following:
+This unique deposit address is `P2TR` and can be derived by the following:
 
-<!-- TODO provide a more mathematical definition of this -->
 ```
-G: Guardian Public Key
-H: Base Hashi MPC Public Key
-S: User's Sui Address
-D: User's unique Bitcoin deposit address
+tr({i}, multi_a(2, {g}, {h}))
 
-D = 2-of-2 Multisig of G and (Pubkey H using derevation path S)
+where:
+- H is base Hashi MPC Public Key
+- h = derive(H, d) -- the child public key derived from public key H using
+  derivation path d (the User's Sui Address)
+- g is the guardian's fixed public key
+- i is the NUMS internal key
+  0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0 defined in
+  BIP-341.
 ```
 
-Any `BTC` sent to `D` can only ever be claimed by `S`.
+Once confirmed, the quantity of `BTC` sent to this address will be minted directly into the user's Sui address.
+
+> **NOTE**
+>
+> For devnet the deposit address omits the guardian key and can be determined by:
+>
+> ```
+> tr({i}, pk({h}))
+> ```
 
 ### Deposit
 
@@ -66,10 +77,10 @@ hashi.
    transaction.
 1. Hashi nodes communicate, waiting till a quorum has confirmed the deposit
    (after X block confirmations).
-1. Hashi confirms the deposit on chain, minting the equivalent amount of `#BTC`
+1. Hashi confirms the deposit on chain, minting the equivalent amount of `hBTC`
    and transferring it to the user's Sui address. The user can then immediately
-   use the `#BTC` to interact with a defi protocol to, for example, leverage the
-   `#BTC` as collateral for a loan in `USDC`. 
+   use the `hBTC` to interact with a defi protocol to, for example, leverage the
+   `hBTC` as collateral for a loan in `USDC`.
 
 ## Withdraw Flow
 
@@ -101,7 +112,7 @@ sequenceDiagram
 
 ### Withdraw
 
-1. User sends a transaction to Sui with the amount of `#BTC` they would like to
+1. User sends a transaction to Sui with the amount of `hBTC` they would like to
    withdraw and the Bitcoin address they want to withdraw to.
 1. Hashi will pick up the withdrawal request and will craft a bitcoin
    transaction that sends the requested `BTC` (minus fees) to the provided

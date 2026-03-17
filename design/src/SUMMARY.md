@@ -13,9 +13,7 @@
 - [Service](./service.md)
 - [MPC Protocol](./mpc-protocol.md)
 - [Guardian](./guardian.md)
-- [Bitcoin Integration](./bitcoin-integration.md)
 - [Limiter](./limiter.md)
-- [Upgrades](./upgrades.md)
 - [Fees](./fees.md)
 
 # Flows

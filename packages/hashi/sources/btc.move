@@ -4,7 +4,7 @@ module hashi::btc;
 use sui::{coin::TreasuryCap, coin_registry::{CoinRegistry, MetadataCap}};
 
 const DECIMALS: u8 = 8;
-const SYMBOL: vector<u8> = b"BTC";
+const SYMBOL: vector<u8> = b"hBTC";
 const NAME: vector<u8> = b"BTC";
 const DESCRIPTION: vector<u8> = b"BTC secured by hashi.";
 const ICON_URL: vector<u8> = b"";
