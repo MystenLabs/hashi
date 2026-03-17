@@ -13,6 +13,7 @@
 - [Service](./service.md)
 - [MPC Protocol](./mpc-protocol.md)
 - [Guardian](./guardian.md)
+- [Address Scheme](./address-scheme.md)
 - [Limiter](./limiter.md)
 - [Fees](./fees.md)
 - [Configuration](./config.md)

@@ -35,34 +35,10 @@ sequenceDiagram
 
 </div>
 
-### BTC Deposit Address
+### BTC deposit address
 
-Every Sui Address has its own unique Hashi Bitcoin deposit address.
-
-This unique deposit address is `P2TR` and can be derived by the following:
-
-```
-tr({i}, multi_a(2, {g}, {h}))
-
-where:
-- H is base Hashi MPC Public Key
-- h = derive(H, d) -- the child public key derived from public key H using
-  derivation path d (the User's Sui Address)
-- g is the guardian's fixed public key
-- i is the NUMS internal key
-  0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0 defined in
-  BIP-341.
-```
-
-Once confirmed, the quantity of `BTC` sent to this address will be minted directly into the user's Sui address.
-
-> **NOTE**
->
-> For devnet the deposit address omits the guardian key and can be determined by:
->
-> ```
-> tr({i}, pk({h}))
-> ```
+Every Sui address has its own unique Hashi Bitcoin deposit address. See
+[address scheme](./address-scheme.md) for the full derivation details.
 
 ### Deposit
 
