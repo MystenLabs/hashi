@@ -13,6 +13,7 @@ import {
 import { bcs } from "@mysten/sui/bcs";
 import { type Transaction } from "@mysten/sui/transactions";
 import * as linked_table from "./deps/sui/linked_table.js";
+import * as committee from "./committee.js";
 const $moduleName = "@local-pkg/hashi::tob";
 export const TobKey = new MoveStruct({
   name: `${$moduleName}::TobKey`,
@@ -34,7 +35,7 @@ export const EpochCertsV1 = new MoveStruct({
   fields: {
     epoch: bcs.u64(),
     protocol_type: ProtocolType,
-    /** Certificates indexed by dealer address (first-cert-wins). */
+    /** Dealer submissions indexed by dealer address (first-submission-wins). */
     certs: linked_table.LinkedTable(bcs.Address),
   },
 });
@@ -43,6 +44,13 @@ export const DealerMessagesHashV1 = new MoveStruct({
   fields: {
     dealer_address: bcs.Address,
     messages_hash: bcs.vector(bcs.u8()),
+  },
+});
+export const DealerSubmissionV1 = new MoveStruct({
+  name: `${$moduleName}::DealerSubmissionV1`,
+  fields: {
+    message: DealerMessagesHashV1,
+    signature: committee.CommitteeSignature,
   },
 });
 export interface ProtocolTypeDkgOptions {

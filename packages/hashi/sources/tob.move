@@ -2,7 +2,7 @@
 
 module hashi::tob;
 
-use hashi::committee::CertifiedMessage;
+use hashi::committee::CommitteeSignature;
 use sui::linked_table::{Self, LinkedTable};
 
 const EWrongEpoch: u64 = 0;
@@ -43,13 +43,18 @@ public fun epoch(self: &TobKey): u64 {
 public struct EpochCertsV1 has store {
     epoch: u64,
     protocol_type: ProtocolType,
-    /// Certificates indexed by dealer address (first-cert-wins).
-    certs: LinkedTable<address, CertifiedMessage<DealerMessagesHashV1>>,
+    /// Dealer submissions indexed by dealer address (first-submission-wins).
+    certs: LinkedTable<address, DealerSubmissionV1>,
 }
 
 public struct DealerMessagesHashV1 has copy, drop, store {
     dealer_address: address,
     messages_hash: vector<u8>,
+}
+
+public struct DealerSubmissionV1 has copy, drop, store {
+    message: DealerMessagesHashV1,
+    signature: CommitteeSignature,
 }
 
 public(package) fun create(
@@ -89,6 +94,6 @@ public(package) fun submit_cert(
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
     let sig = hashi::committee::new_committee_signature(epoch, signature, signers_bitmap);
-    let cert = hashi::committee::new_certified_message(message, sig);
-    epoch_certs.certs.push_back(dealer, cert);
+    let submission = DealerSubmissionV1 { message, signature: sig };
+    epoch_certs.certs.push_back(dealer, submission);
 }

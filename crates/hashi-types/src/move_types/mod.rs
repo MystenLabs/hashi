@@ -367,8 +367,8 @@ pub struct Entry<K, V> {
 pub struct EpochCertsV1 {
     pub epoch: u64,
     pub protocol_type: ProtocolType,
-    /// Certificates indexed by dealer address (first-cert-wins).
-    // LinkedTable<address, CertifiedMessage<DealerMessagesHashV1>>
+    /// Dealer submissions indexed by dealer address (first-submission-wins).
+    // LinkedTable<address, DealerSubmissionV1>
     pub certs: LinkedTable<Address>,
 }
 
@@ -411,6 +411,13 @@ pub struct CertifiedMessage<T> {
     pub message: T,
     pub signature: CommitteeSignature,
     pub stake_support: u64,
+}
+
+/// Rust version of the Move hashi::tob::DealerSubmissionV1 type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct DealerSubmissionV1 {
+    pub message: DealerMessagesHashV1,
+    pub signature: CommitteeSignature,
 }
 
 #[derive(Debug)]
