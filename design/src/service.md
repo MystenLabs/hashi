@@ -13,7 +13,7 @@ object) which will serve a gRPC `HashiService`.
 
 ## Stateless
 
-A main goal of this design is the make the hashi service as stateless as
+A main goal of this design is to make the hashi service as stateless as
 possible. Outside of any cryptographic material required for participating in
 the protocol, any state critical for the functioning of the service must be
 stored on Sui as a part of the live object set and knowledge of any historical

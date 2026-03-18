@@ -15,7 +15,7 @@ tr({i}, multi_a(2, {g}, {h}))
 
 where:
 
-- `H` is the base Hashi MPC public key and can be found onchain.
+- `H` is the base Hashi MPC public key and can be found on-chain.
 - `h = derive(H, d)` -- the child public key derived from `H` using
   derivation path `d` (the depositor's Sui address)
 - `g` is the guardian's fixed public key

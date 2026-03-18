@@ -58,6 +58,8 @@ hashi.
    use the `hBTC` to interact with a defi protocol to, for example, leverage the
    `hBTC` as collateral for a loan in `USDC`.
 
+For a detailed breakdown of each phase, see [deposit](./deposit.md).
+
 ## Withdraw Flow
 
 Once a user has decided they want their `BTC` back on Bitcoin (e.g. they've paid
@@ -94,3 +96,5 @@ sequenceDiagram
    transaction that sends the requested `BTC` (minus fees) to the provided
    Bitcoin address and uses MPC to sign the transaction.
 1. The transaction is broadcast to the Bitcoin network.
+
+For a detailed breakdown of each phase, see [withdraw](./withdraw.md).

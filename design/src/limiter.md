@@ -21,7 +21,7 @@ and broadcast a Bitcoin transaction to satisfy the request.
 When a withdraw request comes in and it would exceed the rate limit, hashi will
 wait to process it until sufficient capacity is replenished.
 
-Withdrawals will generally be processed in FIFO order, but this isn't a strict
+Withdrawals will generally be processed in FIFO order, but this is not a strict
 requirement and there are some scenarios where they may be processed out of
 order.
 

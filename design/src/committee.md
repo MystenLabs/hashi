@@ -71,7 +71,7 @@ Addressing any of the above would require deep changes to sui's reconfiguration
 process some of which would be directly opposed by the core team and regardless
 would take a significant amount of time itself to implement correctly.
 
-The one downside of not having tight coupling is needing to handle the hand off
+The one downside of not having tight coupling is needing to handle the hand-off
 from an old committee to a newer committee as it would require that 2f+1
 stake-weighted members of the old committee are alive and willing to
 participate in the hand-off protocol. This design makes this assumption given

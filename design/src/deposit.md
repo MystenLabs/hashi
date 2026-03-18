@@ -24,9 +24,9 @@ The deposit must meet the dust minimum (`546 sats`) to avoid creating
 unspendable UTXOs on Bitcoin.
 
 Once the Bitcoin transaction is broadcast, the user notifies Hashi by
-constructing a `DepositRequest` and calling `deposit` on Sui.
+constructing a `DepositRequest` and calling `hashi::deposit::deposit` on Sui.
 
-First, the user creates the request by calling `deposit_request`:
+First, the user creates the request by calling `hashi::deposit_queue::deposit_request`:
 
 ```move
 public fun deposit_request(
@@ -110,7 +110,7 @@ graph LR
 ```
 
 Once a quorum of validators have agreed that a deposit should be confirmed,
-one validator submits the certificate on-chain by calling `confirm_deposit`:
+one validator submits the certificate on-chain by calling `hashi::deposit::confirm_deposit`:
 
 ```move
 public fun confirm_deposit(

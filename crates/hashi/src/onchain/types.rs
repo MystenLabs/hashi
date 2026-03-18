@@ -482,7 +482,8 @@ impl Config {
     /// Worst-case network (miner) fee for a withdrawal transaction,
     /// mirroring the formula in config.move.
     pub fn worst_case_network_fee(&self) -> u64 {
-        let tx_vbytes = TX_FIXED_VB + (self.input_budget() * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB);
+        let tx_vbytes =
+            TX_FIXED_VB + (self.input_budget() * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB);
         self.max_fee_rate() * tx_vbytes
     }
 
