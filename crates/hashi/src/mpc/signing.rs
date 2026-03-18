@@ -101,6 +101,10 @@ impl SigningManager {
         self.initial_presig_count
     }
 
+    pub fn presignatures_remaining(&self) -> usize {
+        self.presignatures.len()
+    }
+
     pub fn batch_index(&self) -> u32 {
         self.batch_index
     }

@@ -402,6 +402,9 @@ impl Monitor {
                         FALLBACK_FEE_RATE_SAT_PER_KWU
                     }
                 };
+                self.metrics
+                    .btc_fee_rate_sat_per_kvb
+                    .set((sat_per_kwu * 4) as i64);
                 FeeRate::from_sat_per_kwu(sat_per_kwu)
             });
         let _ = result_tx.send(result);

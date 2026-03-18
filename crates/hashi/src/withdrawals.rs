@@ -505,7 +505,8 @@ impl Hashi {
                 .inputs
                 .get(input_index)
                 .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
-            let signature = SigningManager::sign(
+            let sign_start = std::time::Instant::now();
+            let sign_result = SigningManager::sign(
                 &signing_manager,
                 &p2p_channel,
                 request_id,
@@ -514,8 +515,41 @@ impl Hashi {
                 derivation_address.as_ref(),
                 WITHDRAWAL_SIGNING_TIMEOUT,
             )
-            .await
-            .map_err(|e| {
+            .await;
+            let sign_duration = sign_start.elapsed().as_secs_f64();
+
+            match &sign_result {
+                Ok(_) => {
+                    self.metrics
+                        .mpc_sign_duration_seconds
+                        .with_label_values(&["success"])
+                        .observe(sign_duration);
+                    self.metrics
+                        .presig_pool_remaining
+                        .set(signing_manager.read().unwrap().presignatures_remaining() as i64);
+                }
+                Err(e) => {
+                    self.metrics
+                        .mpc_sign_duration_seconds
+                        .with_label_values(&["failure"])
+                        .observe(sign_duration);
+                    let reason = match e {
+                        crate::mpc::types::SigningError::Timeout { .. } => "timeout",
+                        crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                        crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
+                            "too_many_invalid"
+                        }
+                        crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                        _ => "other",
+                    };
+                    self.metrics
+                        .mpc_sign_failures_total
+                        .with_label_values(&[reason])
+                        .inc();
+                }
+            }
+
+            let signature = sign_result.map_err(|e| {
                 anyhow!("Failed to sign withdrawal transaction input {input_index}: {e}")
             })?;
 

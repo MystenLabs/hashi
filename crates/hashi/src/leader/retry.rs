@@ -68,6 +68,17 @@ where
         self.state.lock().unwrap().remove(request_id);
     }
 
+    pub(super) fn in_backoff_count(&self, checkpoint_timestamp_ms: u64) -> usize {
+        let states = self.state.lock().unwrap();
+        states
+            .values()
+            .filter(|s| {
+                s.attempt < s.last_error_kind.max_retries()
+                    && s.next_retry_at_ms > checkpoint_timestamp_ms
+            })
+            .count()
+    }
+
     pub(super) fn record_failure(
         &self,
         error_kind: K,
