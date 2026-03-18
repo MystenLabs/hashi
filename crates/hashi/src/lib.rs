@@ -349,8 +349,9 @@ impl Hashi {
                     .join("btc-monitor"),
             )
             .build();
-        let (client, service) = crate::btc_monitor::monitor::Monitor::run(monitor_config)
-            .expect("Failed to start BtcMonitor");
+        let (client, service) =
+            crate::btc_monitor::monitor::Monitor::run(monitor_config, self.metrics.clone())
+                .expect("Failed to start BtcMonitor");
         self.btc_monitor
             .set(client)
             .map_err(|_| anyhow!("BtcMonitor already initialized"))?;
