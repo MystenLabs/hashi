@@ -248,6 +248,7 @@ entry fun confirm_withdrawal(
     _ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
+    hashi.assert_unpaused();
 
     let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
 
