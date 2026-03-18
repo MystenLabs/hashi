@@ -14,6 +14,11 @@ const EOutputAmountMismatch: vector<u8> = b"Withdrawal output amount does not ma
 const EOutputAddressMismatch: vector<u8> = b"Withdrawal output address does not match request";
 #[error]
 const EMinerFeeExceedsMax: vector<u8> = b"Per-user miner fee exceeds worst-case network fee budget";
+#[error]
+const EInputsBelowOutputs: vector<u8> = b"Total input amount is less than total output amount";
+#[error]
+const EOutputCountMismatch: vector<u8> =
+    b"Output count must equal request count or request count + 1 (change)";
 
 public struct WithdrawalRequestQueue has store {
     requests: Bag,
@@ -109,14 +114,17 @@ public(package) fun new_pending_withdrawal(
         output_amount = output_amount + utxo.amount;
     });
 
-    assert!(input_amount >= output_amount);
+    assert!(input_amount >= output_amount, EInputsBelowOutputs);
     let miner_fee = input_amount - output_amount;
 
     // Outputs must be either one-per-request, or one-per-request plus a single
     // trailing change output.
     let request_count = requests.length();
     let output_count = outputs.length();
-    assert!(output_count == request_count || output_count == request_count + 1);
+    assert!(
+        output_count == request_count || output_count == request_count + 1,
+        EOutputCountMismatch,
+    );
 
     // Miner fee is split evenly across all withdrawal requests. Any remainder
     // (at most request_count - 1 sats) is a rounding bonus to the miner.
