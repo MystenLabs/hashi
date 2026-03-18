@@ -1,7 +1,7 @@
 module hashi::deposit;
 
 use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, utxo::UtxoId};
-use sui::{coin::Coin, sui::SUI};
+use sui::{coin::{Self, Coin}, sui::SUI};
 
 public fun deposit(
     hashi: &mut Hashi,
@@ -40,6 +40,7 @@ public fun confirm_deposit(
     request_id: address,
     // Committe signature over the deposit request
     signature: CommitteeSignature,
+    ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
@@ -71,7 +72,7 @@ public fun confirm_deposit(
         let amount = utxo.amount();
         // XXX Do we want to check an inflow limit here?
         let btc = hashi.treasury_mut().mint_balance<BTC>(amount);
-        sui::balance::send_funds(btc, recipient);
+        transfer::public_transfer(coin::from_balance(btc, ctx), recipient);
     };
 
     hashi.utxo_pool_mut().insert_active(utxo);
