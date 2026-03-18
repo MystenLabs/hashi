@@ -61,6 +61,7 @@ pub struct Metrics {
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
 
+    pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
 
@@ -286,6 +287,12 @@ impl Metrics {
                 "hashi_sui_tx_submissions_total",
                 "Total Sui transaction submissions by operation and outcome",
                 &["operation", "status"],
+                registry,
+            )
+            .unwrap(),
+            is_leader: register_int_gauge_with_registry!(
+                "hashi_is_leader",
+                "Whether this node is the current leader (1) or not (0)",
                 registry,
             )
             .unwrap(),

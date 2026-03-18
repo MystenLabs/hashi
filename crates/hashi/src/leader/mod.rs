@@ -94,7 +94,10 @@ impl LeaderService {
                 (checkpoint_info.height, checkpoint_info.timestamp_ms)
             };
 
-            if self.is_current_leader(checkpoint_height) {
+            let is_leader = self.is_current_leader(checkpoint_height);
+            self.inner.metrics.is_leader.set(i64::from(is_leader));
+
+            if is_leader {
                 debug!("Checkpoint {checkpoint_height}: We are the leader node");
             } else {
                 trace!("We are not the leader node");
