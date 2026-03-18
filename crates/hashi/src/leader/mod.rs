@@ -956,7 +956,7 @@ impl LeaderService {
             pending.inputs.len()
         );
 
-        let hashi_pubkey = self.inner.get_hashi_pubkey();
+        let hashi_pubkey = self.inner.get_hashi_pubkey()?;
         for ((input, pending_input), sig_bytes) in
             tx.input.iter_mut().zip(pending.inputs.iter()).zip(raw_sigs)
         {

@@ -265,7 +265,7 @@ mod tests {
         let hbtc_recipient = user_key.public_key().derive_address();
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let deposit_address =
-            hashi.get_deposit_address(&hashi.get_hashi_pubkey(), Some(&hbtc_recipient))?;
+            hashi.get_deposit_address(&hashi.get_hashi_pubkey()?, Some(&hbtc_recipient))?;
 
         info!("Sending Bitcoin to deposit address...");
         let txid = networks

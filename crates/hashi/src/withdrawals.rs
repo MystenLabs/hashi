@@ -258,7 +258,7 @@ impl Hashi {
         // 5. Verify change output (if present) goes to hashi root pubkey
         if output_count == request_count + 1 {
             let change_output = &approval.outputs[request_count];
-            let hashi_pubkey = self.get_hashi_pubkey();
+            let hashi_pubkey = self.get_hashi_pubkey()?;
             let expected_address =
                 witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
             anyhow::ensure!(
@@ -387,7 +387,7 @@ impl Hashi {
 
         let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &pending.inputs)?;
-        let hashi_pubkey = self.get_hashi_pubkey();
+        let hashi_pubkey = self.get_hashi_pubkey()?;
 
         for (i, (sig_bytes, sighash)) in message
             .signatures
@@ -565,7 +565,7 @@ impl Hashi {
         unsigned_tx: &bitcoin::Transaction,
         inputs: &[Utxo],
     ) -> anyhow::Result<Vec<[u8; 32]>> {
-        let hashi_pubkey = self.get_hashi_pubkey();
+        let hashi_pubkey = self.get_hashi_pubkey()?;
         let spend_inputs = inputs
             .iter()
             .map(|input| {
@@ -788,7 +788,9 @@ impl Hashi {
 
         // Add change output if present (change_amount is either 0 or >= dust)
         if change_amount >= TR_DUST_RELAY_MIN_VALUE {
-            let hashi_pubkey = self.get_hashi_pubkey();
+            let hashi_pubkey = self
+                .get_hashi_pubkey()
+                .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
             let change_address = self
                 .get_deposit_address(&hashi_pubkey, None)
                 .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;

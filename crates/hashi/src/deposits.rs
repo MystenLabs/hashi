@@ -179,7 +179,9 @@ impl Hashi {
                     ))
                 },
             )?;
-        let hashi_pubkey = self.get_hashi_pubkey();
+        let hashi_pubkey = self
+            .get_hashi_pubkey()
+            .map_err(DepositValidationError::NotReady)?;
         let expected_address = self
             .get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())
             .map_err(DepositValidationError::NeverRetry)?;
@@ -227,16 +229,16 @@ impl Hashi {
         bitcoin_utils::single_key_taproot_script_path_address(pubkey, self.config.bitcoin_network())
     }
 
-    pub fn get_hashi_pubkey(&self) -> XOnlyPublicKey {
+    pub fn get_hashi_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
         let g = self
             .mpc_handle()
-            .expect("MpcHandle not initialized")
+            .context("MpcHandle not initialized")?
             .public_key()
-            .expect("MPC public key not available yet");
+            .context("MPC public key not available yet")?;
         // Convert G (ProjectivePoint, 33 bytes compressed) to SchnorrPublicKey (32 bytes x-only)
-        let schnorr_pk =
-            SchnorrPublicKey::try_from(&g).expect("valid non-zero group element for schnorr key");
-        XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array()).expect("valid 32-byte x-only key")
+        let schnorr_pk = SchnorrPublicKey::try_from(&g)
+            .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
+        Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
     }
 
     fn sign_deposit_confirmation(
@@ -274,6 +276,7 @@ impl Hashi {
 pub enum DepositValidationErrorKind {
     BitcoinConfirmFailed,
     AmlServiceError,
+    NotReady,
     NeverRetry,
 }
 
@@ -281,6 +284,7 @@ impl RetryPolicy for DepositValidationErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
         match self {
             Self::AmlServiceError => 5 * 1000,
+            Self::NotReady => 5 * 1000,
             Self::BitcoinConfirmFailed => 60 * 1000,
             Self::NeverRetry => u64::MAX,
         }
@@ -292,7 +296,7 @@ impl RetryPolicy for DepositValidationErrorKind {
 
     fn max_retries(self) -> u32 {
         match self {
-            Self::AmlServiceError => u32::MAX,
+            Self::AmlServiceError | Self::NotReady => u32::MAX,
             Self::BitcoinConfirmFailed => 60 * 24,
             Self::NeverRetry => 0,
         }
@@ -307,6 +311,9 @@ pub enum DepositValidationError {
     #[error("Screener service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
+    #[error("Not ready: {0}")]
+    NotReady(#[source] anyhow::Error),
+
     #[error("Never retry: {0}")]
     NeverRetry(#[source] anyhow::Error),
 }
@@ -316,6 +323,7 @@ impl DepositValidationError {
         match self {
             Self::BitcoinConfirmFailed(_) => DepositValidationErrorKind::BitcoinConfirmFailed,
             Self::AmlServiceError(_) => DepositValidationErrorKind::AmlServiceError,
+            Self::NotReady(_) => DepositValidationErrorKind::NotReady,
             Self::NeverRetry(_) => DepositValidationErrorKind::NeverRetry,
         }
     }
