@@ -3,7 +3,7 @@
 
 module hashi::proposal;
 
-use hashi::{hashi::Hashi, proposal_events};
+use hashi::{hashi::Hashi, proposal_events, threshold};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -114,8 +114,9 @@ public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
     });
 
     let total_weight = hashi.current_committee().total_weight();
+    let required = threshold::weight_threshold(total_weight, proposal.quorum_threshold_bps);
 
-    (valid_voting_power * 10000 / total_weight) as u64 >= proposal.quorum_threshold_bps
+    valid_voting_power >= required
 }
 
 public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
