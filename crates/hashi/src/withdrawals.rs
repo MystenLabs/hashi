@@ -22,6 +22,8 @@ use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
@@ -500,7 +502,7 @@ impl Hashi {
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &pending.inputs)?;
         let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
         for (input_index, message) in signing_messages.iter().enumerate() {
-            let request_id = withdrawal_signing_request_id(&pending.id, input_index as u32);
+            let request_id = withdrawal_input_signing_request_id(&pending.id, input_index as u32);
             let derivation_address = pending
                 .inputs
                 .get(input_index)
@@ -976,15 +978,13 @@ fn output_weight_for_address(bitcoin_address: &[u8]) -> anyhow::Result<u64> {
     }
 }
 
-fn withdrawal_signing_request_id(pending_withdrawal_id: &Address, input_index: u32) -> Address {
-    let mut bytes = [0u8; Address::LENGTH];
-    bytes.copy_from_slice(pending_withdrawal_id.as_bytes());
-    let index_bytes = input_index.to_le_bytes();
-    for (i, b) in index_bytes.iter().enumerate() {
-        let idx = bytes.len() - index_bytes.len() + i;
-        bytes[idx] ^= *b;
-    }
-    Address::new(bytes)
+fn withdrawal_input_signing_request_id(
+    pending_withdrawal_id: &Address,
+    input_index: u32,
+) -> Address {
+    let bytes =
+        bcs::to_bytes(&(pending_withdrawal_id, input_index)).expect("serialization should succeed");
+    Address::new(Blake2b256::digest(&bytes).digest)
 }
 
 /// Convert raw bitcoin address bytes (witness program) to a `ScriptBuf`.
