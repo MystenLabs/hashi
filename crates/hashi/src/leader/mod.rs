@@ -34,6 +34,7 @@ use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
 use std::sync::Arc;
+use std::time::Duration;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
 use tracing::debug;
@@ -104,15 +105,32 @@ impl LeaderService {
                 continue;
             }
 
-            self.process_deposit_requests(checkpoint_timestamp_ms).await;
-            self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms)
-                .await;
-            self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
-                .await;
-            self.process_unsigned_pending_withdrawals().await;
-            self.process_signed_pending_withdrawals().await;
-            self.check_delete_proposals(checkpoint_timestamp_ms).await;
-            self.check_delete_spent_utxos().await;
+            let timeout = Duration::from_secs(60);
+
+            let _ = tokio::time::timeout(
+                timeout,
+                self.process_deposit_requests(checkpoint_timestamp_ms),
+            )
+            .await;
+            let _ = tokio::time::timeout(
+                timeout,
+                self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms),
+            )
+            .await;
+            let _ = tokio::time::timeout(
+                timeout,
+                self.process_approved_withdrawal_requests(checkpoint_timestamp_ms),
+            )
+            .await;
+            let _ =
+                tokio::time::timeout(timeout, self.process_unsigned_pending_withdrawals()).await;
+            let _ = tokio::time::timeout(timeout, self.process_signed_pending_withdrawals()).await;
+            let _ = tokio::time::timeout(
+                timeout,
+                self.check_delete_proposals(checkpoint_timestamp_ms),
+            )
+            .await;
+            let _ = tokio::time::timeout(timeout, self.check_delete_spent_utxos()).await;
         }
     }
 
@@ -149,6 +167,7 @@ impl LeaderService {
     }
 
     async fn process_deposit_requests(&self, checkpoint_timestamp_ms: u64) {
+        debug!("Entering process_deposit_requests");
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
@@ -353,6 +372,7 @@ impl LeaderService {
     // ========================================================================
 
     async fn process_unapproved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
+        debug!("Entering process_unapproved_withdrawal_requests");
         let mut unapproved: Vec<_> = self
             .inner
             .onchain_state()
@@ -552,6 +572,7 @@ impl LeaderService {
     // ========================================================================
 
     async fn process_approved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
+        debug!("Entering process_approved_withdrawal_requests");
         let mut approved: Vec<_> = self
             .inner
             .onchain_state()
@@ -699,6 +720,7 @@ impl LeaderService {
     // ========================================================================
 
     async fn process_unsigned_pending_withdrawals(&self) {
+        debug!("Entering process_unsigned_pending_withdrawals");
         let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
         pending_withdrawals.retain(|p| p.signatures.is_none());
         pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
@@ -812,6 +834,7 @@ impl LeaderService {
     // ========================================================================
 
     async fn process_signed_pending_withdrawals(&self) {
+        debug!("Entering process_signed_pending_withdrawals");
         let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
         pending_withdrawals.retain(|p| p.signatures.is_some());
         pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
