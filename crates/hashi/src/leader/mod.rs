@@ -188,7 +188,7 @@ impl LeaderService {
             return;
         }
 
-        info!("Processing deposit request: {:?}", deposit_request.id);
+        info!(deposit_request_id = %deposit_request.id, "Processing deposit request");
 
         // Validate deposit_request before asking for signatures
         match self.inner.validate_deposit_request(deposit_request).await {
@@ -211,10 +211,7 @@ impl LeaderService {
             }
         }
 
-        info!(
-            "Deposit request {:?} validated successfully",
-            deposit_request.id
-        );
+        info!(deposit_request_id = %deposit_request.id, "Deposit request validated successfully");
 
         let proto_request = deposit_request.to_proto();
         let members = self
@@ -237,9 +234,7 @@ impl LeaderService {
             .submit_deposit_confirmation(deposit_request.clone(), signatures)
             .await;
         if let Err(e) = result {
-            error!(
-                "Failed to submit deposit confirmation for deposit request:{deposit_request:?}: {e}"
-            );
+            error!(deposit_request_id = %deposit_request.id, "Failed to submit deposit confirmation: {e}");
         }
     }
 
@@ -301,10 +296,7 @@ impl LeaderService {
         deposit_request: DepositRequest,
         signatures: Vec<MemberSignature>,
     ) -> anyhow::Result<()> {
-        info!(
-            "Aggregating signatures and submitting confirmation to hashi for deposit id {:?}",
-            deposit_request.id
-        );
+        info!(deposit_request_id = %deposit_request.id, "Aggregating signatures and submitting deposit confirmation");
 
         let committee = self
             .inner
@@ -342,10 +334,7 @@ impl LeaderService {
                     .with_label_values(&["confirm_deposit", "success"])
                     .inc();
                 self.inner.metrics.deposits_confirmed_total.inc();
-                info!(
-                    "Successfully submitted deposit confirmation for request: {:?}",
-                    deposit_request.id
-                );
+                info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
             })
             .inspect_err(|_| {
                 self.inner
@@ -454,7 +443,7 @@ impl LeaderService {
             let mut aggregator = BlsSignatureAggregator::new(&committee, approval);
             for sig in signatures {
                 if let Err(e) = aggregator.add_signature(sig) {
-                    error!("Failed to add approval signature for {:?}: {e}", request.id);
+                    error!(withdrawal_request_id = %request.id, "Failed to add approval signature: {e}");
                 }
             }
 
@@ -471,10 +460,7 @@ impl LeaderService {
                     request.id,
                     checkpoint_timestamp_ms,
                 );
-                error!(
-                    "Insufficient approval signatures for {:?}: weight {weight} < {required_weight}",
-                    request.id
-                );
+                error!(withdrawal_request_id = %request.id, "Insufficient approval signatures: weight {weight} < {required_weight}");
                 continue;
             }
 
@@ -483,10 +469,7 @@ impl LeaderService {
                     certified.push((request.id, signed.committee_signature().clone()));
                 }
                 Err(e) => {
-                    error!(
-                        "Failed to build approval certificate for {:?}: {e}",
-                        request.id
-                    );
+                    error!(withdrawal_request_id = %request.id, "Failed to build approval certificate: {e}");
                 }
             }
         }
@@ -607,7 +590,7 @@ impl LeaderService {
         request: &WithdrawalRequest,
         checkpoint_timestamp_ms: u64,
     ) {
-        info!("Processing approved withdrawal request: {:?}", request.id);
+        info!(withdrawal_request_id = %request.id, "Processing approved withdrawal request");
 
         // Build the withdrawal tx commitment
         let approval = match self.inner.build_withdrawal_tx_commitment(request).await {
@@ -658,7 +641,7 @@ impl LeaderService {
         let mut signature_aggregator = BlsSignatureAggregator::new(&committee, approval.clone());
         for signature in signatures {
             if let Err(e) = signature_aggregator.add_signature(signature) {
-                error!("Failed to add withdrawal approval signature: {e}");
+                error!(withdrawal_request_id = %request.id, "Failed to add withdrawal commitment signature: {e}");
             }
         }
 
@@ -675,20 +658,14 @@ impl LeaderService {
                 request.id,
                 checkpoint_timestamp_ms,
             );
-            error!(
-                "Insufficient withdrawal approval signatures for request {:?}: weight {weight} < {required_weight}",
-                request.id
-            );
+            error!(withdrawal_request_id = %request.id, "Insufficient withdrawal commitment signatures: weight {weight} < {required_weight}");
             return;
         }
 
         let signed_approval = match signature_aggregator.finish() {
             Ok(signed_approval) => signed_approval,
             Err(e) => {
-                error!(
-                    "Failed to build withdrawal approval certificate for request {:?}: {e}",
-                    request.id
-                );
+                error!(withdrawal_request_id = %request.id, "Failed to build withdrawal commitment certificate: {e}");
                 return;
             }
         };
@@ -710,10 +687,7 @@ impl LeaderService {
                     .sui_tx_submissions_total
                     .with_label_values(&["commit_withdrawal", "failure"])
                     .inc();
-                error!(
-                    "Failed to submit commit_withdrawal_tx for request {:?}: {e}",
-                    request.id
-                );
+                error!(withdrawal_request_id = %request.id, "Failed to submit commit_withdrawal_tx: {e}");
             });
     }
 
@@ -733,7 +707,7 @@ impl LeaderService {
     }
 
     async fn process_unsigned_pending_withdrawal(&self, pending: &PendingWithdrawal) {
-        info!("MPC signing pending withdrawal: {:?}", pending.id);
+        info!(pending_withdrawal_id = %pending.id, "MPC signing pending withdrawal");
 
         let members = self
             .inner
@@ -784,27 +758,21 @@ impl LeaderService {
         let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
         for sig in bls_signatures {
             if let Err(e) = aggregator.add_signature(sig) {
-                error!("Failed to add withdrawal sign message signature: {e}");
+                error!(pending_withdrawal_id = %pending.id, "Failed to add withdrawal sign message signature: {e}");
             }
         }
 
         let weight = aggregator.weight();
         let required_weight = certificate_threshold(committee.total_weight());
         if weight < required_weight {
-            error!(
-                "Insufficient signatures for sign_withdrawal {:?}: weight {weight} < {required_weight}",
-                pending.id
-            );
+            error!(pending_withdrawal_id = %pending.id, "Insufficient signatures for sign_withdrawal: weight {weight} < {required_weight}");
             return;
         }
 
         let signed = match aggregator.finish() {
             Ok(s) => s,
             Err(e) => {
-                error!(
-                    "Failed to build sign_withdrawal certificate for {:?}: {e}",
-                    pending.id
-                );
+                error!(pending_withdrawal_id = %pending.id, "Failed to build sign_withdrawal certificate: {e}");
                 return;
             }
         };
@@ -832,7 +800,7 @@ impl LeaderService {
                     .sui_tx_submissions_total
                     .with_label_values(&["sign_withdrawal", "failure"])
                     .inc();
-                error!("Failed to submit sign_withdrawal for {:?}: {e}", pending.id);
+                error!(pending_withdrawal_id = %pending.id, "Failed to submit sign_withdrawal: {e}");
             });
     }
 
@@ -860,35 +828,21 @@ impl LeaderService {
             Ok(TxStatus::Confirmed { confirmations })
                 if confirmations >= confirmation_threshold =>
             {
-                info!(
-                    "Withdrawal tx {} confirmed with {confirmations} confirmations, \
-                     proceeding to on-chain confirmation for {:?}",
-                    txid, pending.id
-                );
+                info!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx confirmed with {confirmations} confirmations, proceeding to on-chain confirmation");
                 self.confirm_withdrawal_on_sui(pending).await;
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
-                debug!(
-                    "Withdrawal tx {} has {confirmations}/{confirmation_threshold} \
-                     confirmations, waiting for more",
-                    txid
-                );
+                debug!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx has {confirmations}/{confirmation_threshold} confirmations, waiting for more");
             }
             Ok(TxStatus::InMempool) => {
-                debug!(
-                    "Withdrawal tx {} in mempool for {:?}, waiting for confirmations",
-                    txid, pending.id
-                );
+                debug!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx in mempool, waiting for confirmations");
             }
             Ok(TxStatus::NotFound) => {
                 self.rebuild_and_broadcast_withdrawal_btc_tx(pending, txid)
                     .await;
             }
             Err(e) => {
-                error!(
-                    "Failed to query transaction status for {:?} (txid {}): {e}",
-                    pending.id, txid
-                );
+                error!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Failed to query transaction status: {e}");
             }
         }
     }
@@ -900,31 +854,22 @@ impl LeaderService {
         pending: &PendingWithdrawal,
         txid: bitcoin::Txid,
     ) {
-        warn!(
-            "Withdrawal tx {} not found for {:?}, re-broadcasting from on-chain signatures",
-            txid, pending.id
-        );
+        warn!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx not found, re-broadcasting from on-chain signatures");
 
         let tx = match self.rebuild_signed_tx_from_onchain(pending) {
             Ok(tx) => tx,
             Err(e) => {
-                error!(
-                    "Failed to rebuild signed withdrawal tx for {:?}: {e}",
-                    pending.id
-                );
+                error!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Failed to rebuild signed withdrawal tx: {e}");
                 return;
             }
         };
 
         match self.inner.btc_monitor().broadcast_transaction(tx).await {
             Ok(()) => {
-                info!("Re-broadcast withdrawal tx {} for {:?}", txid, pending.id);
+                info!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Re-broadcast withdrawal tx");
             }
             Err(e) => {
-                error!(
-                    "Failed to re-broadcast withdrawal tx {} for {:?}: {e}",
-                    txid, pending.id
-                );
+                error!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Failed to re-broadcast withdrawal tx: {e}");
             }
         }
     }
@@ -979,7 +924,7 @@ impl LeaderService {
         let members = match self.inner.onchain_state().current_committee_members() {
             Some(m) => m,
             None => {
-                error!("No current committee members for confirmation");
+                error!(pending_withdrawal_id = %pending.id, "No current committee members for confirmation");
                 return;
             }
         };
@@ -990,10 +935,7 @@ impl LeaderService {
         {
             Ok(cert) => cert,
             Err(e) => {
-                error!(
-                    "Failed to collect withdrawal confirmation signatures for {:?}: {e}",
-                    pending.id
-                );
+                error!(pending_withdrawal_id = %pending.id, "Failed to collect withdrawal confirmation signatures: {e}");
                 return;
             }
         };
@@ -1015,10 +957,7 @@ impl LeaderService {
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_withdrawal", "failure"])
                     .inc();
-                error!(
-                    "Failed to submit confirm_withdrawal for {:?}: {e}",
-                    pending.id
-                );
+                error!(pending_withdrawal_id = %pending.id, "Failed to submit confirm_withdrawal: {e}");
             });
     }
 
@@ -1048,7 +987,7 @@ impl LeaderService {
         let mut signature_aggregator = BlsSignatureAggregator::new(&committee, confirmation);
         for signature in signatures {
             if let Err(e) = signature_aggregator.add_signature(signature) {
-                error!("Failed to add withdrawal confirmation signature: {e}");
+                error!(pending_withdrawal_id = %pending_id, "Failed to add withdrawal confirmation signature: {e}");
             }
         }
 

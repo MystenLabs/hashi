@@ -103,16 +103,16 @@ impl BridgeService for HttpService {
             .map_err(|e| {
             Status::invalid_argument(format!("invalid pending_withdrawal_id: {e}"))
         })?;
-        tracing::info!("sign_withdrawal_transaction called for {pending_withdrawal_id}");
+        tracing::info!(pending_withdrawal_id = %pending_withdrawal_id, "sign_withdrawal_transaction called");
         let signatures = self
             .inner
             .validate_and_sign_withdrawal_tx(&pending_withdrawal_id)
             .await
             .map_err(|e| {
-                tracing::error!("sign_withdrawal_transaction failed: {e}");
+                tracing::error!(pending_withdrawal_id = %pending_withdrawal_id, "sign_withdrawal_transaction failed: {e}");
                 Status::failed_precondition(e.to_string())
             })?;
-        tracing::info!("sign_withdrawal_transaction succeeded for {pending_withdrawal_id}");
+        tracing::info!(pending_withdrawal_id = %pending_withdrawal_id, "sign_withdrawal_transaction succeeded");
         Ok(Response::new(SignWithdrawalTransactionResponse {
             signatures_by_input: signatures
                 .iter()

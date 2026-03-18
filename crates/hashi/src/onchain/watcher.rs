@@ -208,6 +208,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 refresh_treasury_cap_supply(client, state, coin_type).await;
             }
             HashiEvent::DepositRequestedEvent(deposit_requested_event) => {
+                tracing::info!(deposit_request_id = %deposit_requested_event.request_id, "Deposit request detected");
                 let deposit_request = DepositRequest {
                     id: deposit_requested_event.request_id,
                     utxo: super::types::Utxo {
@@ -226,6 +227,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 // TODO notify
             }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
+                tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
                 let mut state = state.state_mut();
 
                 let utxo = super::types::Utxo {
@@ -243,6 +245,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 // TODO notify
             }
             HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
+                tracing::info!(deposit_request_id = %expired_deposit_deleted_event.request_id, "Expired deposit deleted");
                 state
                     .state_mut()
                     .hashi
@@ -251,6 +254,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .remove(&expired_deposit_deleted_event.request_id);
             }
             HashiEvent::WithdrawalRequestedEvent(withdrawal_requested_event) => {
+                tracing::info!(withdrawal_request_id = %withdrawal_requested_event.request_id, "Withdrawal request detected");
                 let withdrawal_request = WithdrawalRequest {
                     id: withdrawal_requested_event.request_id,
                     btc_amount: withdrawal_requested_event.btc_amount,
@@ -268,6 +272,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .insert(withdrawal_request.id, withdrawal_request);
             }
             HashiEvent::WithdrawalApprovedEvent(event) => {
+                tracing::info!(withdrawal_request_id = %event.request_id, "Withdrawal approved");
                 if let Some(request) = state
                     .state_mut()
                     .hashi
@@ -279,6 +284,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 }
             }
             HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
+                tracing::info!(pending_withdrawal_id = %event.pending_id, "Withdrawal picked for processing");
                 // Remove requests from the queue
                 {
                     let mut state = state.state_mut();
@@ -311,13 +317,14 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     }
                     Err(e) => {
                         tracing::error!(
-                            "failed to fetch pending withdrawal {}: {e}",
-                            event.pending_id
+                            pending_withdrawal_id = %event.pending_id,
+                            "Failed to fetch pending withdrawal: {e}",
                         );
                     }
                 }
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
+                tracing::info!(pending_withdrawal_id = %event.withdrawal_id, "Withdrawal signatures stored on-chain");
                 let mut state = state.state_mut();
                 if let Some(pending) = state
                     .hashi
@@ -329,6 +336,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
+                tracing::info!(pending_withdrawal_id = %event.pending_id, "Withdrawal confirmed on-chain");
                 let mut state = state.state_mut();
 
                 // If a change UTXO was created, add it to the active pool.
