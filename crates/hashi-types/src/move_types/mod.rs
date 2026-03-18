@@ -937,6 +937,7 @@ pub struct WithdrawalConfirmedEvent {
     pub pending_id: Address,
     pub txid: Address,
     pub change_utxo_id: Option<UtxoId>,
+    pub request_ids: Vec<Address>,
     pub change_utxo_amount: Option<u64>,
 }
 
