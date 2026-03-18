@@ -7,6 +7,7 @@ use crate::onchain::types::ProposalType;
 use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
 use sui_sdk_types::Address;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 
@@ -76,6 +77,7 @@ impl LeaderService {
     /// Check for and delete expired proposals.
     /// Proposals are sorted by timestamp and deleted if they are older than MAX_PROPOSAL_AGE_MS.
     pub(crate) async fn check_delete_proposals(&self, checkpoint_timestamp_ms: u64) {
+        debug!("Entering check_delete_proposals");
         let mut proposals = self.inner.onchain_state().proposals();
         // Sort proposals by timestamp, from earliest to latest
         proposals.sort_by_key(|p| p.timestamp_ms);
@@ -207,6 +209,7 @@ impl LeaderService {
     /// Check for and delete expired spent UTXOs.
     /// Spent UTXOs are sorted by spent_epoch and deleted if they are older than MAX_SPENT_UTXO_AGE_EPOCHS.
     pub(crate) async fn check_delete_spent_utxos(&self) {
+        debug!("Entering check_delete_spent_utxos");
         let mut spent_utxos_sorted = self.inner.onchain_state().spent_utxos_entries();
         spent_utxos_sorted.sort_by_key(|(_, epoch)| *epoch);
         let current_epoch = self.inner.onchain_state().epoch();
