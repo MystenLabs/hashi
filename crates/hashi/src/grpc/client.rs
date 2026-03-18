@@ -54,6 +54,7 @@ impl Client {
             .map_err(Into::into)
             .map_err(tonic::Status::from_error)?
             .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(40))
             .http2_keep_alive_interval(Duration::from_secs(5))
             .connect_lazy();
 
