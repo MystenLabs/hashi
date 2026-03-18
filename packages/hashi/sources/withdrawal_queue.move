@@ -330,6 +330,7 @@ public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
         pending_id: self.id,
         txid: self.txid,
         change_utxo_id,
+        request_ids: self.requests.map_ref!(|info| info.id),
         change_utxo_amount,
     });
 }
@@ -423,6 +424,7 @@ public struct WithdrawalConfirmedEvent has copy, drop {
     pending_id: address,
     txid: address,
     change_utxo_id: Option<UtxoId>,
+    request_ids: vector<address>,
     change_utxo_amount: Option<u64>,
 }
 
