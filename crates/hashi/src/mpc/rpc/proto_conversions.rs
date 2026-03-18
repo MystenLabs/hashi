@@ -157,9 +157,9 @@ impl TryFrom<&proto::SendMessagesResponse> for types::SendMessagesResponse {
 //
 
 impl types::RetrieveMessagesRequest {
-    pub fn to_proto(&self, epoch: u64) -> proto::RetrieveMessagesRequest {
+    pub fn to_proto(&self) -> proto::RetrieveMessagesRequest {
         proto::RetrieveMessagesRequest {
-            epoch: Some(epoch),
+            epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
         }
@@ -170,6 +170,7 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::RetrieveMessagesRequest) -> Result<Self, Self::Error> {
+        let epoch = *required(value.epoch.as_ref(), "epoch")?;
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
         let protocol_type = mpc_protocol_type_from_proto(*required(
             value.protocol_type.as_ref(),
@@ -178,6 +179,7 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
         Ok(Self {
             dealer,
             protocol_type,
+            epoch,
         })
     }
 }

@@ -194,6 +194,7 @@ pub enum ProtocolTypeIndicator {
 pub struct RetrieveMessagesRequest {
     pub dealer: Address,
     pub protocol_type: ProtocolTypeIndicator,
+    pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -113,10 +113,9 @@ impl Client {
 
     pub async fn retrieve_messages(
         &self,
-        epoch: u64,
         request: &RetrieveMessagesRequest,
     ) -> Result<RetrieveMessagesResponse> {
-        let proto_request = request.to_proto(epoch);
+        let proto_request = request.to_proto();
         let response = self
             .mpc_service_client()
             .retrieve_messages(proto_request)

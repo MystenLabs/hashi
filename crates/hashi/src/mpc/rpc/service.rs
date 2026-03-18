@@ -53,7 +53,15 @@ impl MpcService for HttpService {
         let response = {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
-            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
+            let epoch = external_request
+                .epoch
+                .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+            if epoch != mgr.dkg_config.epoch && epoch != mgr.source_epoch {
+                return Err(Status::failed_precondition(format!(
+                    "epoch mismatch: expected {} or {}, got {}",
+                    mgr.dkg_config.epoch, mgr.source_epoch, epoch
+                )));
+            }
             mgr.handle_retrieve_messages_request(&internal_request)
                 .map_err(dkg_error_to_status)?
         };

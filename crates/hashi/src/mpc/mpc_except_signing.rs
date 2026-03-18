@@ -277,12 +277,26 @@ impl MpcManager {
         &self,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
-        let messages = self
-            .get_dealer_messages(request.protocol_type, &request.dealer)
-            .ok_or_else(|| {
-                MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer))
-            })?;
-        Ok(RetrieveMessagesResponse { messages })
+        if let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer) {
+            return Ok(RetrieveMessagesResponse { messages });
+        }
+        // Mainly for last-epoch retrieval
+        let messages = match request.protocol_type {
+            ProtocolTypeIndicator::Dkg => self
+                .public_messages_store
+                .get_dealer_message(request.epoch, &request.dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(Messages::Dkg),
+            ProtocolTypeIndicator::KeyRotation => self
+                .public_messages_store
+                .get_rotation_messages(request.epoch, &request.dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(Messages::Rotation),
+            ProtocolTypeIndicator::NonceGeneration => None,
+        };
+        messages
+            .map(|m| RetrieveMessagesResponse { messages: m })
+            .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
     }
 
     pub fn handle_complain_request(
@@ -1558,6 +1572,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type: ProtocolTypeIndicator::Dkg,
+                epoch: mgr.dkg_config.epoch,
             };
             let signers = certificate
                 .signers(&mgr.committee)
@@ -1620,6 +1635,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type: ProtocolTypeIndicator::NonceGeneration,
+                epoch: mgr.dkg_config.epoch,
             };
             let signers = certificate
                 .signers(&mgr.committee)
@@ -1774,6 +1790,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type: ProtocolTypeIndicator::KeyRotation,
+                epoch: mgr.dkg_config.epoch,
             };
             let signers = certificate.signers(&mgr.committee).map_err(|_| {
                 MpcError::ProtocolFailed(
@@ -2772,6 +2789,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type,
+                epoch: mgr.source_epoch,
             };
             let signers = certificate.signers(previous_committee).map_err(|_| {
                 MpcError::ProtocolFailed(
@@ -5816,6 +5834,7 @@ mod tests {
         let request = RetrieveMessagesRequest {
             dealer: dealer_address,
             protocol_type: ProtocolTypeIndicator::Dkg,
+            epoch: dealer_manager.dkg_config.epoch,
         };
         let response = dealer_manager
             .handle_retrieve_messages_request(&request)
@@ -5838,6 +5857,7 @@ mod tests {
         let request = RetrieveMessagesRequest {
             dealer: dealer_address,
             protocol_type: ProtocolTypeIndicator::Dkg,
+            epoch: dealer_manager.dkg_config.epoch,
         };
         let result = dealer_manager.handle_retrieve_messages_request(&request);
 
@@ -5845,6 +5865,102 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, MpcError::NotFound(_)));
         assert!(err.to_string().contains("Messages for dealer"));
+    }
+
+    #[test]
+    fn test_handle_retrieve_messages_request_db_fallback_dkg() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+
+        let dealer_address = setup.address(0);
+        let mut manager =
+            setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+
+        // Store message in DB only (not in dkg_messages in-memory map).
+        let dealer_message = manager.create_dealer_message(&mut rng);
+        manager
+            .public_messages_store
+            .store_dealer_message(&dealer_address, &dealer_message)
+            .unwrap();
+        // Verify it's NOT in the in-memory map.
+        assert!(!manager.dkg_messages.contains_key(&dealer_address));
+
+        // Request with the current epoch — DB fallback should serve it.
+        let request = RetrieveMessagesRequest {
+            dealer: dealer_address,
+            protocol_type: ProtocolTypeIndicator::Dkg,
+            epoch: manager.dkg_config.epoch,
+        };
+        let response = manager.handle_retrieve_messages_request(&request).unwrap();
+
+        let expected_hash = compute_messages_hash(&Messages::Dkg(dealer_message));
+        let received_hash = compute_messages_hash(&response.messages);
+        assert_eq!(
+            received_hash, expected_hash,
+            "DB fallback should serve the correct message"
+        );
+    }
+
+    #[test]
+    fn test_handle_retrieve_messages_request_db_fallback_rotation() {
+        let mut rng = rand::thread_rng();
+        let rotation_setup = RotationTestSetup::new();
+
+        let dealer_address = rotation_setup.setup.address(0);
+        let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+
+        // Create rotation messages and store in DB only.
+        manager.session_id = SessionId::new(
+            TEST_CHAIN_ID,
+            rotation_setup.setup.epoch(),
+            &ProtocolType::KeyRotation,
+        );
+        let rotation_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+        manager
+            .public_messages_store
+            .store_rotation_messages(&dealer_address, &rotation_msgs)
+            .unwrap();
+        // Verify NOT in in-memory map.
+        assert!(!manager.rotation_messages.contains_key(&dealer_address));
+
+        let request = RetrieveMessagesRequest {
+            dealer: dealer_address,
+            protocol_type: ProtocolTypeIndicator::KeyRotation,
+            epoch: manager.dkg_config.epoch,
+        };
+        let response = manager.handle_retrieve_messages_request(&request).unwrap();
+        assert!(
+            matches!(response.messages, Messages::Rotation(_)),
+            "DB fallback should serve rotation messages"
+        );
+    }
+
+    #[test]
+    fn test_handle_retrieve_messages_request_nonce_no_db_fallback() {
+        let mut rng = rand::thread_rng();
+        let setup = TestSetup::new(5);
+        let dealer_address = setup.address(0);
+        let mut manager =
+            setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+
+        // Store a nonce message in the DB store (but not in-memory map).
+        let nonce_msg = create_nonce_dealer_message(&setup, 0, 0, &mut rng);
+        manager
+            .public_messages_store
+            .store_nonce_message(0, &dealer_address, &nonce_msg.message)
+            .unwrap();
+        assert!(!manager.nonce_messages.contains_key(&dealer_address));
+
+        // Should return NotFound — DB is NOT consulted for nonce gen.
+        let result = manager.handle_retrieve_messages_request(&RetrieveMessagesRequest {
+            dealer: dealer_address,
+            protocol_type: ProtocolTypeIndicator::NonceGeneration,
+            epoch: manager.dkg_config.epoch,
+        });
+        assert!(
+            matches!(result.unwrap_err(), MpcError::NotFound(_)),
+            "nonce gen must not fall back to DB"
+        );
     }
 
     #[test]
@@ -7111,6 +7227,7 @@ mod tests {
         let retrieve_request = RetrieveMessagesRequest {
             dealer: dealer_addr,
             protocol_type: ProtocolTypeIndicator::Dkg,
+            epoch: receiver_manager.dkg_config.epoch,
         };
         let retrieve_response = receiver_manager
             .handle_retrieve_messages_request(&retrieve_request)
@@ -10221,6 +10338,7 @@ mod tests {
         let request = RetrieveMessagesRequest {
             dealer: dealer_address,
             protocol_type,
+            epoch: manager.dkg_config.epoch,
         };
         let response = manager.handle_retrieve_messages_request(&request).unwrap();
         assert_eq!(

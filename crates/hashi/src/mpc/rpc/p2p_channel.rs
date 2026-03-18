@@ -58,7 +58,7 @@ impl P2PChannel for RpcP2PChannel {
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
         self.get_client(party)?
-            .retrieve_messages(self.epoch, request)
+            .retrieve_messages(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }

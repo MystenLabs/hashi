@@ -98,6 +98,12 @@ impl HashiNodeHandle {
         hashi::db::Database::open(db_path)
     }
 
+    pub fn validator_address(&self) -> sui_sdk_types::Address {
+        self.config
+            .validator_address()
+            .expect("validator_address not set")
+    }
+
     pub fn hashi(&self) -> &Arc<Hashi> {
         &self.service.as_ref().expect("Hashi node not started").1
     }

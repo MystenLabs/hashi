@@ -1145,71 +1145,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_rotation_with_missing_previous_dkg_messages() -> Result<()> {
-        const TEST_NUM_NODES: usize = 4;
-
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
-
-        let mut test_networks = TestNetworksBuilder::new()
-            .with_nodes(TEST_NUM_NODES)
-            .build()
-            .await?;
-
-        // Wait for DKG completion
-        {
-            let nodes = test_networks.hashi_network().nodes();
-            let mpc_key_futures: Vec<_> = nodes
-                .iter()
-                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
-                .collect();
-            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
-            for (i, result) in results.into_iter().enumerate() {
-                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
-            }
-        }
-
-        let initial_epoch = test_networks.hashi_network().nodes()[0]
-            .current_epoch()
-            .unwrap();
-
-        // Shutdown node 0, delete ONE dealer's DKG messages from DB.
-        // This simulates a node that missed a SendMessages RPC during the
-        // initial DKG. When the first rotation starts, prepare_previous_output
-        // should retrieve the missing DKG messages from peers.
-        let node0 = &mut test_networks.hashi_network_mut().nodes_mut()[0];
-        node0.shutdown().await;
-        {
-            let db = node0.open_db()?;
-            let dkg_msgs = db.list_all_dealer_messages(initial_epoch)?;
-            assert!(
-                !dkg_msgs.is_empty(),
-                "Node 0 should have DKG messages from epoch {initial_epoch}"
-            );
-            let (dealer_to_delete, _) = &dkg_msgs[0];
-            db.delete_dealer_message(initial_epoch, dealer_to_delete)?;
-        }
-
-        test_networks.hashi_network_mut().nodes_mut()[0]
-            .start()
-            .await?;
-        test_networks.hashi_network().nodes()[0]
-            .wait_for_mpc_key(DKG_TIMEOUT)
-            .await
-            .expect("Node 0 should recover MPC key after restart");
-        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_rotation_with_missing_previous_rotation_messages() -> Result<()> {
+    async fn test_second_rotation_retrieves_missing_previous_rotation_message() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         tracing_subscriber::fmt()
@@ -1247,20 +1183,15 @@ mod tests {
         let epoch =
             force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
 
-        // Shutdown node 0, delete ONE dealer's rotation messages from DB.
-        // This simulates a node that missed a SendMessages RPC during the
-        // first rotation (the devnet server-0 bug).
+        // Delete node 1's rotation messages from node 0's DB. Nodes 1, 2, 3 all
+        // have this message, guaranteeing retrieval always succeeds.
+        let node1_address = test_networks.hashi_network().nodes()[1].validator_address();
+
         let node0 = &mut test_networks.hashi_network_mut().nodes_mut()[0];
         node0.shutdown().await;
         {
             let db = node0.open_db()?;
-            let rotation_msgs = db.list_all_rotation_messages(epoch)?;
-            assert!(
-                !rotation_msgs.is_empty(),
-                "Node 0 should have rotation messages from epoch {epoch}"
-            );
-            let (dealer_to_delete, _) = &rotation_msgs[0];
-            db.delete_rotation_messages(epoch, dealer_to_delete)?;
+            db.delete_rotation_messages(epoch, &node1_address)?;
         }
 
         // Start node 0 and trigger a second rotation.
@@ -1269,7 +1200,7 @@ mod tests {
             .start()
             .await?;
         test_networks.hashi_network().nodes()[0]
-            .wait_for_mpc_key(DKG_TIMEOUT)
+            .wait_for_mpc_key(ROTATION_TIMEOUT)
             .await
             .expect("Node 0 should recover MPC key after restart");
         force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
