@@ -98,7 +98,7 @@ const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type";
 
 //
-// Config Key's
+// Config keys
 //
 
 const BITCOIN_CHAIN_ID_KEY: vector<u8> = b"bitcoin_chain_id";
