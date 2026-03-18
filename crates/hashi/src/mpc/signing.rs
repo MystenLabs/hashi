@@ -155,47 +155,53 @@ impl SigningManager {
         let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
             let mut mgr = signing_manager.write().unwrap();
             let mgr = &mut *mgr;
-            let (public_nonce, partial_sigs) = match generate_partial_signatures(
-                message,
-                &mut mgr.presignatures,
-                beacon_value,
-                &mgr.key_shares,
-                &mgr.verifying_key,
-                derivation_address,
-            ) {
-                Ok(result) => result,
-                Err(FastCryptoError::OutOfPresigs) => {
-                    if let Some(next) = mgr.next_batch.take() {
-                        mgr.presignatures = next;
-                        mgr.batch_index += 1;
-                        mgr.initial_presig_count = mgr.presignatures.len();
-                        generate_partial_signatures(
-                            message,
-                            &mut mgr.presignatures,
-                            beacon_value,
-                            &mgr.key_shares,
-                            &mgr.verifying_key,
-                            derivation_address,
-                        )
-                        .map_err(|e| SigningError::CryptoError(e.to_string()))?
-                    } else {
-                        let _ = mgr.recovery_tx.send(true);
-                        return Err(SigningError::PoolExhausted);
+            let (public_nonce, partial_sigs) =
+                if let Some(existing) = mgr.partial_signing_outputs.get(&sui_request_id) {
+                    (existing.public_nonce, existing.partial_sigs.clone())
+                } else {
+                    let result = match generate_partial_signatures(
+                        message,
+                        &mut mgr.presignatures,
+                        beacon_value,
+                        &mgr.key_shares,
+                        &mgr.verifying_key,
+                        derivation_address,
+                    ) {
+                        Ok(result) => result,
+                        Err(FastCryptoError::OutOfPresigs) => {
+                            if let Some(next) = mgr.next_batch.take() {
+                                mgr.presignatures = next;
+                                mgr.batch_index += 1;
+                                mgr.initial_presig_count = mgr.presignatures.len();
+                                generate_partial_signatures(
+                                    message,
+                                    &mut mgr.presignatures,
+                                    beacon_value,
+                                    &mgr.key_shares,
+                                    &mgr.verifying_key,
+                                    derivation_address,
+                                )
+                                .map_err(|e| SigningError::CryptoError(e.to_string()))?
+                            } else {
+                                let _ = mgr.recovery_tx.send(true);
+                                return Err(SigningError::PoolExhausted);
+                            }
+                        }
+                        Err(e) => return Err(SigningError::CryptoError(e.to_string())),
+                    };
+                    let refill_at = mgr.initial_presig_count / mgr.refill_divisor;
+                    if mgr.presignatures.len() <= refill_at {
+                        let _ = mgr.refill_tx.send(mgr.batch_index + 1);
                     }
-                }
-                Err(e) => return Err(SigningError::CryptoError(e.to_string())),
-            };
-            let refill_at = mgr.initial_presig_count / mgr.refill_divisor;
-            if mgr.presignatures.len() <= refill_at {
-                let _ = mgr.refill_tx.send(mgr.batch_index + 1);
-            }
-            mgr.partial_signing_outputs.insert(
-                sui_request_id,
-                PartialSigningOutput {
-                    public_nonce,
-                    partial_sigs: partial_sigs.clone(),
-                },
-            );
+                    mgr.partial_signing_outputs.insert(
+                        sui_request_id,
+                        PartialSigningOutput {
+                            public_nonce: result.0,
+                            partial_sigs: result.1.clone(),
+                        },
+                    );
+                    result
+                };
             let threshold = mgr.threshold;
             let address = mgr.address;
             let committee = mgr.committee.clone();
@@ -424,6 +430,7 @@ mod tests {
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
+    use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::AllowedRng;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use fastcrypto_tbls::types::ShareIndex;
@@ -1385,6 +1392,115 @@ mod tests {
         assert_eq!(
             setup.managers[0].read().unwrap().consecutive_sign_failures,
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_retry_reuses_cached_partial_sigs() {
+        let setup = SigningTestSetup::new(4);
+        let message = b"retry-test";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        // Record presig pool size before first sign.
+        let pool_before = setup.managers[0].read().unwrap().presignatures.len();
+
+        // First sign — consumes one presig, caches partial sigs.
+        setup.prepare_all(message, &beacon, req_id, Some(0));
+        let p2p = setup.mock_p2p_for(0);
+        let sig1 = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        let pool_after_first = setup.managers[0].read().unwrap().presignatures.len();
+        assert_eq!(
+            pool_after_first,
+            pool_before - 1,
+            "first sign should consume one presig"
+        );
+
+        // Second sign with SAME request_id — should reuse cached partial sigs.
+        let sig2 = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        let pool_after_second = setup.managers[0].read().unwrap().presignatures.len();
+        assert_eq!(
+            pool_after_second, pool_after_first,
+            "retry should NOT consume another presig"
+        );
+
+        // Both calls produce the same signature.
+        assert_eq!(
+            sig1.to_byte_array(),
+            sig2.to_byte_array(),
+            "retry should produce identical signature"
+        );
+
+        // Verify the signature is valid.
+        verify_schnorr(&setup.verifying_key, message, &sig1);
+    }
+
+    #[tokio::test]
+    async fn test_sign_different_request_consumes_new_presig() {
+        let setup = SigningTestSetup::new(4);
+        let beacon = S::zero();
+
+        let req1 = Address::new([0x10; 32]);
+        let req2 = Address::new([0x20; 32]);
+
+        let pool_before = setup.managers[0].read().unwrap().presignatures.len();
+
+        // First request.
+        setup.prepare_all(b"msg1", &beacon, req1, Some(0));
+        let p2p = setup.mock_p2p_for(0);
+        SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req1,
+            b"msg1",
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        // Second request with different ID.
+        setup.prepare_all(b"msg2", &beacon, req2, Some(0));
+        SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req2,
+            b"msg2",
+            &beacon,
+            None,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        let pool_after = setup.managers[0].read().unwrap().presignatures.len();
+        assert_eq!(
+            pool_after,
+            pool_before - 2,
+            "two different requests should consume two presigs"
         );
     }
 }
