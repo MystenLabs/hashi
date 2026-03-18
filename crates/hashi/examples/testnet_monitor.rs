@@ -152,7 +152,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and start the monitor
     info!("Starting monitor...");
-    let (monitor_client, _service) = Monitor::run(config)?;
+    let metrics = std::sync::Arc::new(hashi::metrics::Metrics::new_default());
+    let (monitor_client, _service) = Monitor::run(config, metrics)?;
 
     info!("Monitor is running.");
     info!("Enter Bitcoin OutPoints in the format 'txid:vout' to confirm deposits.");

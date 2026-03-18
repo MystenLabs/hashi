@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use bitcoincore_rpc::RpcApi;
 use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
+use kyoto::Warning;
+use kyoto::builder::NodeDefault;
 use sui_futures::service::Service;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -13,9 +16,16 @@ use tracing::info;
 use tracing::warn;
 
 use super::config::MonitorConfig;
+use crate::metrics::Metrics;
 
 /// 1 sat/vB expressed as sat/kwu.
 const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
+
+/// Number of consecutive connection failures before restarting Kyoto.
+const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 30;
+
+/// Delay before restarting Kyoto after connectivity loss.
+const KYOTO_RESTART_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxStatus {
@@ -24,12 +34,18 @@ pub enum TxStatus {
     NotFound,
 }
 
+enum KyotoEventLoopExit {
+    ConnectivityLost,
+    Shutdown,
+}
+
 /// Monitor loop that tracks the state of the Bitcoin chain.
 ///
 /// Client provides functions for querying for specific transactions,
 /// fee information, and transaction submission.
 pub struct Monitor {
     config: MonitorConfig,
+    metrics: Arc<Metrics>,
     bitcoind_rpc: Arc<bitcoincore_rpc::Client>,
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
@@ -39,11 +55,11 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    /// Run a BTC monitor with the given configuration.
-    /// Returns the client for interacting with the monitor and a Service for lifecycle management.
-    pub fn run(config: MonitorConfig) -> Result<(MonitorClient, Service)> {
+    fn build_kyoto_node(config: &MonitorConfig) -> Result<(NodeDefault, kyoto::Client)> {
         let mut node_builder = kyoto::NodeBuilder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
+            // Prevent Kyoto from storing additional peers via GetAddr.
+            .peer_db_size(kyoto::PeerStoreSizeConfig::Limit(0))
             // TODO: should we set this higher than default?
             // .required_peers(num_peers)
             // Need a dummy script to prevent default match on every single block.
@@ -58,68 +74,206 @@ impl Monitor {
         if let Some(data_dir) = &config.data_dir {
             node_builder = node_builder.data_dir(data_dir.clone());
         }
-        let (kyoto_node, mut kyoto_client) = node_builder.build()?;
+        Ok(node_builder.build()?)
+    }
 
+    /// Run a BTC monitor with the given configuration.
+    /// Returns the client for interacting with the monitor and a Service for lifecycle management.
+    pub fn run(config: MonitorConfig, metrics: Arc<Metrics>) -> Result<(MonitorClient, Service)> {
         let bitcoind_rpc = bitcoincore_rpc::Client::new(
             config.bitcoind_rpc_url.as_str(),
             config.bitcoind_rpc_auth.clone(),
         )?;
 
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(100);
-        let mut monitor = Self {
-            config,
-            bitcoind_rpc: Arc::new(bitcoind_rpc),
-            requester: kyoto_client.requester.clone(),
-            client_tx: client_tx.clone(),
-            tip: None,
-            pending_deposits: vec![],
-            pending_deposit_workers: JoinSet::new(),
-        };
 
-        // Spawn tasks with graceful shutdown support.
-        let service = Service::new()
-            .spawn_aborting(async move {
-                info!("Starting Kyoto node");
-                if let Err(e) = kyoto_node.run().await {
-                    error!("Kyoto node error: {}", e);
-                    anyhow::bail!(e);
+        let service = Service::new().spawn_aborting({
+            let client_tx = client_tx.clone();
+            async move {
+                let bitcoind_rpc = Arc::new(bitcoind_rpc);
+
+                // Build initial Kyoto node.
+                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config)?;
+
+                let mut monitor = Monitor {
+                    config,
+                    metrics,
+                    bitcoind_rpc,
+                    requester: kyoto_client.requester.clone(),
+                    client_tx,
+                    tip: None,
+                    pending_deposits: vec![],
+                    pending_deposit_workers: JoinSet::new(),
+                };
+
+                monitor
+                    .run_with_supervision(kyoto_node, kyoto_client, &mut client_rx)
+                    .await
+            }
+        });
+
+        Ok((MonitorClient { tx: client_tx }, service))
+    }
+
+    /// Run the monitor with automatic Kyoto restart on connectivity loss.
+    async fn run_with_supervision(
+        &mut self,
+        kyoto_node: NodeDefault,
+        kyoto_client: kyoto::Client,
+        client_rx: &mut tokio::sync::mpsc::Receiver<MonitorMessage>,
+    ) -> Result<()> {
+        let mut current_node = kyoto_node;
+        let mut current_client = kyoto_client;
+
+        loop {
+            info!(
+                "Starting Bitcoin monitor for network: {:?}",
+                self.config.network
+            );
+
+            // Spawn the Kyoto node as a background task. Node::run() takes
+            // ownership, so we move it in and get a JoinHandle back.
+            let kyoto_handle = tokio::spawn(async move { current_node.run().await });
+
+            let result = self.run_event_loop(&mut current_client, client_rx).await;
+
+            // Abort the Kyoto node task regardless of exit reason.
+            kyoto_handle.abort();
+
+            match result {
+                KyotoEventLoopExit::ConnectivityLost => {
+                    warn!(
+                        "Lost connectivity to Bitcoin peers after {KYOTO_MAX_CONSECUTIVE_FAILURES} \
+                         consecutive failures. Restarting Kyoto node..."
+                    );
+
+                    self.metrics.kyoto_restarts.inc();
+                    self.metrics.kyoto_connected_peers.set(0);
+                    self.metrics.kyoto_synced.set(0);
+                    self.metrics.kyoto_consecutive_failures.set(0);
+
+                    // Wait before restarting to avoid tight restart loops.
+                    tokio::time::sleep(KYOTO_RESTART_DELAY).await;
+
+                    // Build a fresh Kyoto node with the trusted peers re-added
+                    // to the whitelist.
+                    let (new_node, new_client) = Self::build_kyoto_node(&self.config)?;
+                    current_node = new_node;
+                    current_client = new_client;
+                    self.requester = current_client.requester.clone();
+
+                    info!("Kyoto node rebuilt, resuming monitor");
                 }
-                Ok(())
-            })
-            .spawn_aborting(async move {
-                info!(
-                    "Starting Bitcoin monitor for network: {:?}",
-                    monitor.config.network
-                );
-                loop {
-                    tokio::select! {
-                        Some(event) = kyoto_client.event_rx.recv() => {
-                            monitor.process_kyoto_event(event);
-                        }
-                        Some(msg) = client_rx.recv() => {
-                            monitor.process_client_message(msg);
-                        }
-                        Some(msg) = kyoto_client.info_rx.recv() => {
-                            info!("Kyoto: {msg}");
-                        }
-                        Some(msg) = kyoto_client.warn_rx.recv() => {
-                            warn!("Kyoto: {msg}");
-                        }
-                        Some(join_result) = monitor.pending_deposit_workers.join_next(), if !monitor.pending_deposit_workers.is_empty() => {
-                            if let Err(e) = join_result {
-                                error!("Pending deposit worker task failed: {e}");
-                            }
-                        }
-                        else => {
-                            break;
+                KyotoEventLoopExit::Shutdown => {
+                    info!("Bitcoin monitor stopped");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Map a Kyoto `Warning` variant to a short label for metrics.
+    fn warning_label(warning: &Warning) -> &'static str {
+        match warning {
+            Warning::NeedConnections { .. } => "need_connections",
+            Warning::PeerTimedOut => "peer_timed_out",
+            Warning::CouldNotConnect => "could_not_connect",
+            Warning::NoCompactFilters => "no_compact_filters",
+            Warning::PotentialStaleTip => "potential_stale_tip",
+            Warning::UnsolicitedMessage => "unsolicited_message",
+            Warning::InvalidStartHeight => "invalid_start_height",
+            Warning::CorruptedHeaders => "corrupted_headers",
+            Warning::TransactionRejected { .. } => "transaction_rejected",
+            Warning::FailedPersistence { .. } => "failed_persistence",
+            Warning::EvaluatingFork => "evaluating_fork",
+            Warning::EmptyPeerDatabase => "empty_peer_database",
+            Warning::UnexpectedSyncError { .. } => "unexpected_sync_error",
+            Warning::ChannelDropped => "channel_dropped",
+        }
+    }
+
+    /// Run the main event loop, returning the reason it exited.
+    async fn run_event_loop(
+        &mut self,
+        kyoto_client: &mut kyoto::Client,
+        client_rx: &mut tokio::sync::mpsc::Receiver<MonitorMessage>,
+    ) -> KyotoEventLoopExit {
+        let mut consecutive_failures: u32 = 0;
+        let mut required_peers: usize = 0;
+
+        loop {
+            tokio::select! {
+                Some(event) = kyoto_client.event_rx.recv() => {
+                    self.process_kyoto_event(event);
+                }
+                Some(msg) = client_rx.recv() => {
+                    self.process_client_message(msg);
+                }
+                Some(msg) = kyoto_client.log_rx.recv() => {
+                    debug!("Kyoto log: {msg}");
+                }
+                Some(msg) = kyoto_client.info_rx.recv() => {
+                    info!("Kyoto: {msg}");
+                    // Reset failure counter on any info message (successful
+                    // activity like syncing, handshakes, etc).
+                    consecutive_failures = 0;
+                    self.metrics.kyoto_consecutive_failures.set(0);
+
+                    // Parse info messages for metrics where possible.
+                    Self::update_info_metrics(&self.metrics, &msg, required_peers);
+                }
+                Some(warning) = kyoto_client.warn_rx.recv() => {
+                    warn!("Kyoto: {warning}");
+                    self.metrics.kyoto_warnings.with_label_values(&[Self::warning_label(&warning)]).inc();
+
+                    // Track connected peer count from NeedConnections
+                    if let Warning::NeedConnections { connected, required } = &warning {
+                        self.metrics.kyoto_connected_peers.set(*connected as i64);
+                        required_peers = *required;
+                    }
+
+                    let is_connectivity_failure = matches!(
+                        warning,
+                        Warning::CouldNotConnect
+                        | Warning::PeerTimedOut
+                        | Warning::NeedConnections { connected: 0, .. }
+                    );
+                    if is_connectivity_failure {
+                        consecutive_failures += 1;
+                        self.metrics.kyoto_consecutive_failures.set(consecutive_failures as i64);
+                        if consecutive_failures >= KYOTO_MAX_CONSECUTIVE_FAILURES {
+                            return KyotoEventLoopExit::ConnectivityLost;
                         }
                     }
                 }
-                info!("Bitcoin monitor stopped");
-                Ok(())
-            });
+                Some(join_result) = self.pending_deposit_workers.join_next(), if !self.pending_deposit_workers.is_empty() => {
+                    if let Err(e) = join_result {
+                        error!("Pending deposit worker task failed: {e}");
+                    }
+                }
+                else => {
+                    return KyotoEventLoopExit::Shutdown;
+                }
+            }
+        }
+    }
 
-        Ok((MonitorClient { tx: client_tx }, service))
+    /// Extract metrics from Kyoto info messages.
+    fn update_info_metrics(metrics: &Metrics, msg: &kyoto::Info, required_peers: usize) {
+        match msg {
+            kyoto::Info::ConnectionsMet => {
+                metrics.kyoto_connected_peers.set(required_peers as i64);
+            }
+            kyoto::Info::Progress(progress) => {
+                metrics
+                    .kyoto_sync_percent
+                    .set(progress.percentage_complete() as i64);
+            }
+            kyoto::Info::NewChainHeight(height) => {
+                metrics.kyoto_best_height.set(*height as i64);
+            }
+            _ => {}
+        }
     }
 
     fn process_kyoto_event(&mut self, event: kyoto::Event) {
@@ -140,6 +294,8 @@ impl Monitor {
             block.height,
             block.block.txdata.len()
         );
+        self.metrics.kyoto_blocks_received.inc();
+        self.metrics.kyoto_best_height.set(block.height as i64);
     }
 
     fn process_synced(&mut self, sync_update: kyoto::messages::SyncUpdate) {
@@ -150,6 +306,9 @@ impl Monitor {
             tip.hash,
             sync_update.recent_history.len()
         );
+        self.metrics.kyoto_synced.set(1);
+        self.metrics.kyoto_best_height.set(tip.height as i64);
+        self.metrics.kyoto_sync_percent.set(100);
         self.tip = Some(tip);
         self.process_pending_deposits();
     }
@@ -164,6 +323,7 @@ impl Monitor {
             accepted.len(),
             disconnected.len()
         );
+        self.metrics.kyoto_reorgs.inc();
     }
 
     fn process_client_message(&mut self, msg: MonitorMessage) {

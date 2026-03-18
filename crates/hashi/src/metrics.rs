@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use prometheus::HistogramVec;
+use prometheus::IntCounter;
 use prometheus::IntCounterVec;
 use prometheus::IntGauge;
 use prometheus::IntGaugeVec;
 use prometheus::Registry;
 use prometheus::register_histogram_vec_with_registry;
 use prometheus::register_int_counter_vec_with_registry;
+use prometheus::register_int_counter_with_registry;
 use prometheus::register_int_gauge_vec_with_registry;
 use prometheus::register_int_gauge_with_registry;
 use sui_http::middleware::callback::MakeCallbackHandler;
@@ -23,6 +25,17 @@ pub struct Metrics {
     request_latency: HistogramVec,
 
     pub screener_enabled: IntGauge,
+
+    // Kyoto (Bitcoin light client) metrics
+    pub kyoto_connected_peers: IntGauge,
+    pub kyoto_synced: IntGauge,
+    pub kyoto_best_height: IntGauge,
+    pub kyoto_warnings: IntCounterVec,
+    pub kyoto_restarts: IntCounter,
+    pub kyoto_blocks_received: IntCounter,
+    pub kyoto_reorgs: IntCounter,
+    pub kyoto_consecutive_failures: IntGauge,
+    pub kyoto_sync_percent: IntGauge,
 
     // General Sui metrics
     sui_epoch: IntGauge,
@@ -80,6 +93,63 @@ impl Metrics {
             screener_enabled: register_int_gauge_with_registry!(
                 "hashi_screener_enabled",
                 "Whether AML screening is enabled (1) or disabled (0)",
+                registry,
+            )
+            .unwrap(),
+
+            // Kyoto metrics
+            kyoto_connected_peers: register_int_gauge_with_registry!(
+                "hashi_kyoto_connected_peers",
+                "Number of currently connected Bitcoin P2P peers",
+                registry,
+            )
+            .unwrap(),
+            kyoto_synced: register_int_gauge_with_registry!(
+                "hashi_kyoto_synced",
+                "Whether the Kyoto light client is fully synced (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            kyoto_best_height: register_int_gauge_with_registry!(
+                "hashi_kyoto_best_height",
+                "Best known Bitcoin block height from the Kyoto light client",
+                registry,
+            )
+            .unwrap(),
+            kyoto_warnings: register_int_counter_vec_with_registry!(
+                "hashi_kyoto_warnings_total",
+                "Total Kyoto warnings by type",
+                &["type"],
+                registry,
+            )
+            .unwrap(),
+            kyoto_restarts: register_int_counter_with_registry!(
+                "hashi_kyoto_restarts_total",
+                "Total number of Kyoto node restarts due to connectivity loss",
+                registry,
+            )
+            .unwrap(),
+            kyoto_blocks_received: register_int_counter_with_registry!(
+                "hashi_kyoto_blocks_received_total",
+                "Total number of Bitcoin blocks received by the Kyoto light client",
+                registry,
+            )
+            .unwrap(),
+            kyoto_reorgs: register_int_counter_with_registry!(
+                "hashi_kyoto_reorgs_total",
+                "Total number of Bitcoin chain reorganizations observed",
+                registry,
+            )
+            .unwrap(),
+            kyoto_consecutive_failures: register_int_gauge_with_registry!(
+                "hashi_kyoto_consecutive_failures",
+                "Current number of consecutive peer connection failures",
+                registry,
+            )
+            .unwrap(),
+            kyoto_sync_percent: register_int_gauge_with_registry!(
+                "hashi_kyoto_sync_percent",
+                "Compact block filter sync progress (0-100)",
                 registry,
             )
             .unwrap(),
