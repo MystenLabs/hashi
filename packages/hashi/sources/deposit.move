@@ -38,7 +38,7 @@ public fun deposit(
 public fun confirm_deposit(
     hashi: &mut Hashi,
     request_id: address,
-    // Committe signature over the deposit request
+    // Committee signature over the deposit request.
     signature: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
