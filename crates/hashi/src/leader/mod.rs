@@ -160,6 +160,15 @@ impl LeaderService {
                 .await;
         }
 
+        self.inner
+            .metrics
+            .leader_items_in_backoff
+            .with_label_values(&["deposit"])
+            .set(
+                self.deposit_retry_tracker
+                    .in_backoff_count(checkpoint_timestamp_ms) as i64,
+            );
+
         self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms)
             .await;
     }
@@ -187,8 +196,14 @@ impl LeaderService {
                 self.deposit_retry_tracker.clear(&deposit_request.id);
             }
             Err(e) => {
+                let kind = e.kind();
+                self.inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["deposit", &format!("{kind:?}")])
+                    .inc();
                 self.deposit_retry_tracker.record_failure(
-                    e.kind(),
+                    kind,
                     deposit_request.id,
                     checkpoint_timestamp_ms,
                 );
@@ -319,12 +334,26 @@ impl LeaderService {
         let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
         executor
             .execute_confirm_deposit(&deposit_request, signed_message)
-            .await?;
-        info!(
-            "Successfully submitted deposit confirmation for request: {:?}",
-            deposit_request.id
-        );
-        Ok(())
+            .await
+            .inspect(|()| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["confirm_deposit", "success"])
+                    .inc();
+                self.inner.metrics.deposits_confirmed_total.inc();
+                info!(
+                    "Successfully submitted deposit confirmation for request: {:?}",
+                    deposit_request.id
+                );
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["confirm_deposit", "failure"])
+                    .inc();
+            })
     }
 
     // ========================================================================
@@ -393,8 +422,14 @@ impl LeaderService {
                     parse_member_signature(sig).unwrap()
                 }
                 Err(e) => {
+                    let kind = e.kind();
+                    self.inner
+                        .metrics
+                        .leader_retries_total
+                        .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
+                        .inc();
                     self.withdrawal_approval_retry_tracker.record_failure(
-                        e.kind(),
+                        kind,
                         request.id,
                         checkpoint_timestamp_ms,
                     );
@@ -426,6 +461,11 @@ impl LeaderService {
             let weight = aggregator.weight();
             let required_weight = certificate_threshold(committee.total_weight());
             if weight < required_weight {
+                self.inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_approval", "FailedQuorum"])
+                    .inc();
                 self.withdrawal_approval_retry_tracker.record_failure(
                     WithdrawalApprovalErrorKind::FailedQuorum,
                     request.id,
@@ -451,6 +491,15 @@ impl LeaderService {
             }
         }
 
+        self.inner
+            .metrics
+            .leader_items_in_backoff
+            .with_label_values(&["withdrawal_approval"])
+            .set(
+                self.withdrawal_approval_retry_tracker
+                    .in_backoff_count(checkpoint_timestamp_ms) as i64,
+            );
+
         if certified.is_empty() {
             return;
         }
@@ -470,33 +519,45 @@ impl LeaderService {
             let approvals: Vec<(Address, &CommitteeSignature)> =
                 certified.iter().map(|(id, cert)| (*id, cert)).collect();
 
-            match self.submit_approve_withdrawal_requests(&approvals).await {
-                Ok(()) => return,
-                Err(e) => {
-                    let err_msg = format!("{e}");
-                    error!("approve_request PTB failed: {err_msg}");
+            let result = self
+                .submit_approve_withdrawal_requests(&approvals)
+                .await
+                .inspect(|()| {
+                    self.inner
+                        .metrics
+                        .sui_tx_submissions_total
+                        .with_label_values(&["approve_withdrawal", "success"])
+                        .inc();
+                })
+                .inspect_err(|_| {
+                    self.inner
+                        .metrics
+                        .sui_tx_submissions_total
+                        .with_label_values(&["approve_withdrawal", "failure"])
+                        .inc();
+                });
+            let Err(e) = result else { return };
 
-                    // Try to identify which request caused the failure by checking
-                    // which ones no longer exist in the queue (canceled).
-                    let before_len = certified.len();
-                    certified.retain(|(id, _)| {
-                        self.inner.onchain_state().withdrawal_request(id).is_some()
-                    });
+            let err_msg = format!("{e}");
+            error!("approve_request PTB failed: {err_msg}");
 
-                    if certified.len() == before_len {
-                        error!("Could not identify failed request, aborting retry");
-                        return;
-                    }
-                    if certified.is_empty() {
-                        return;
-                    }
+            // Try to identify which request caused the failure by checking
+            // which ones no longer exist in the queue (canceled).
+            let before_len = certified.len();
+            certified.retain(|(id, _)| self.inner.onchain_state().withdrawal_request(id).is_some());
 
-                    info!(
-                        "Retrying approve_request with {} remaining requests",
-                        certified.len()
-                    );
-                }
+            if certified.len() == before_len {
+                error!("Could not identify failed request, aborting retry");
+                return;
             }
+            if certified.is_empty() {
+                return;
+            }
+
+            info!(
+                "Retrying approve_request with {} remaining requests",
+                certified.len()
+            );
         }
     }
 
@@ -530,6 +591,15 @@ impl LeaderService {
                 .await;
             break;
         }
+
+        self.inner
+            .metrics
+            .leader_items_in_backoff
+            .with_label_values(&["withdrawal_commitment"])
+            .set(
+                self.withdrawal_commitment_retry_tracker
+                    .in_backoff_count(checkpoint_timestamp_ms) as i64,
+            );
     }
 
     async fn process_approved_withdrawal_request(
@@ -546,8 +616,14 @@ impl LeaderService {
                 approval
             }
             Err(e) => {
+                let kind = e.kind();
+                self.inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
+                    .inc();
                 self.withdrawal_commitment_retry_tracker.record_failure(
-                    e.kind(),
+                    kind,
                     request.id,
                     checkpoint_timestamp_ms,
                 );
@@ -589,6 +665,11 @@ impl LeaderService {
         let weight = signature_aggregator.weight();
         let required_weight = certificate_threshold(committee.total_weight());
         if weight < required_weight {
+            self.inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_commitment", "FailedQuorum"])
+                .inc();
             self.withdrawal_commitment_retry_tracker.record_failure(
                 WithdrawalCommitmentErrorKind::FailedQuorum,
                 request.id,
@@ -613,15 +694,27 @@ impl LeaderService {
         };
 
         // 5. Submit commit_withdrawal_tx to Sui
-        if let Err(e) = self
+        let _ = self
             .submit_commit_withdrawal_tx(&approval, signed_approval.committee_signature())
             .await
-        {
-            error!(
-                "Failed to submit commit_withdrawal_tx for request {:?}: {e}",
-                request.id
-            );
-        }
+            .inspect(|()| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["commit_withdrawal", "success"])
+                    .inc();
+            })
+            .inspect_err(|e| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["commit_withdrawal", "failure"])
+                    .inc();
+                error!(
+                    "Failed to submit commit_withdrawal_tx for request {:?}: {e}",
+                    request.id
+                );
+            });
     }
 
     // ========================================================================
@@ -718,7 +811,7 @@ impl LeaderService {
 
         // 4. Submit sign_withdrawal to Sui (writes signatures on-chain).
         // Broadcast + confirm happens via process_signed_pending_withdrawals on the next tick.
-        if let Err(e) = self
+        let _ = self
             .submit_sign_withdrawal(
                 &pending.id,
                 &pending.request_ids(),
@@ -726,9 +819,21 @@ impl LeaderService {
                 signed.committee_signature(),
             )
             .await
-        {
-            error!("Failed to submit sign_withdrawal for {:?}: {e}", pending.id);
-        }
+            .inspect(|()| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["sign_withdrawal", "success"])
+                    .inc();
+            })
+            .inspect_err(|e| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["sign_withdrawal", "failure"])
+                    .inc();
+                error!("Failed to submit sign_withdrawal for {:?}: {e}", pending.id);
+            });
     }
 
     // ========================================================================
@@ -893,15 +998,28 @@ impl LeaderService {
             }
         };
 
-        if let Err(e) = self
+        let _ = self
             .submit_confirm_withdrawal(&pending.id, &confirmation_cert)
             .await
-        {
-            error!(
-                "Failed to submit confirm_withdrawal for {:?}: {e}",
-                pending.id
-            );
-        }
+            .inspect(|()| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["confirm_withdrawal", "success"])
+                    .inc();
+                self.inner.metrics.withdrawals_finalized_total.inc();
+            })
+            .inspect_err(|e| {
+                self.inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["confirm_withdrawal", "failure"])
+                    .inc();
+                error!(
+                    "Failed to submit confirm_withdrawal for {:?}: {e}",
+                    pending.id
+                );
+            });
     }
 
     async fn collect_withdrawal_confirmation_signature(

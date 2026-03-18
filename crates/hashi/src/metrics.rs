@@ -55,11 +55,26 @@ pub struct Metrics {
     num_consumed_presigs: IntGauge,
     treasury_supply: IntGaugeVec,
     package_version_enabled: IntGaugeVec,
+
+    pub deposits_confirmed_total: IntCounter,
+    pub withdrawals_finalized_total: IntCounter,
+    pub presig_pool_remaining: IntGauge,
+    pub sui_tx_submissions_total: IntCounterVec,
+
+    pub leader_retries_total: IntCounterVec,
+    pub leader_items_in_backoff: IntGaugeVec,
+
+    pub btc_fee_rate_sat_per_kvb: IntGauge,
+
+    pub mpc_sign_duration_seconds: HistogramVec,
+    pub mpc_sign_failures_total: IntCounterVec,
 }
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 20., 30., 60., 90.,
 ];
+
+const MPC_SIGN_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 1.5, 2., 2.5, 3., 4., 5., 7.5, 10.];
 
 impl Metrics {
     pub fn new_default() -> Self {
@@ -246,6 +261,66 @@ impl Metrics {
                 "hashi_package_version_enabled",
                 "enabled package versions (1 = enabled)",
                 &["version", "package_id"],
+                registry,
+            )
+            .unwrap(),
+            deposits_confirmed_total: register_int_counter_with_registry!(
+                "hashi_deposits_confirmed_total",
+                "Total number of deposits successfully confirmed on Sui",
+                registry,
+            )
+            .unwrap(),
+            withdrawals_finalized_total: register_int_counter_with_registry!(
+                "hashi_withdrawals_finalized_total",
+                "Total number of withdrawals successfully finalized on Sui",
+                registry,
+            )
+            .unwrap(),
+            presig_pool_remaining: register_int_gauge_with_registry!(
+                "hashi_presig_pool_remaining",
+                "Number of presignatures remaining in the local MPC signing pool",
+                registry,
+            )
+            .unwrap(),
+            sui_tx_submissions_total: register_int_counter_vec_with_registry!(
+                "hashi_sui_tx_submissions_total",
+                "Total Sui transaction submissions by operation and outcome",
+                &["operation", "status"],
+                registry,
+            )
+            .unwrap(),
+            leader_retries_total: register_int_counter_vec_with_registry!(
+                "hashi_leader_retries_total",
+                "Total leader retry attempts by operation and error kind",
+                &["operation", "error_kind"],
+                registry,
+            )
+            .unwrap(),
+            leader_items_in_backoff: register_int_gauge_vec_with_registry!(
+                "hashi_leader_items_in_backoff",
+                "Number of requests currently in retry backoff by operation",
+                &["operation"],
+                registry,
+            )
+            .unwrap(),
+            btc_fee_rate_sat_per_kvb: register_int_gauge_with_registry!(
+                "hashi_btc_fee_rate_sat_per_kvb",
+                "Current estimated Bitcoin fee rate in sat/kvB used for withdrawals",
+                registry,
+            )
+            .unwrap(),
+            mpc_sign_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_sign_duration_seconds",
+                "Duration of MPC signing operations",
+                &["outcome"],
+                MPC_SIGN_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_sign_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_sign_failures_total",
+                "Total MPC signing failures by reason",
+                &["reason"],
                 registry,
             )
             .unwrap(),
