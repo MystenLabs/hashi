@@ -1,6 +1,6 @@
 module hashi::deposit;
 
-use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, utxo::UtxoId};
+use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, threshold, utxo::UtxoId};
 use sui::{coin::{Self, Coin}, sui::SUI};
 
 public fun deposit(
@@ -58,10 +58,12 @@ public fun confirm_deposit(
         // signature,
     };
 
-    // verify the Certificate over the request
+    // Verify the certificate over the request.
+    let threshold =
+        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
     let request = hashi
         .current_committee()
-        .verify_certificate(request, signature, 6667 /* TODO fill in real value */)
+        .verify_certificate(request, signature, threshold)
         .into_message();
 
     let utxo = request.into_utxo();
