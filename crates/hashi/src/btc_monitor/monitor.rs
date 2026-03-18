@@ -702,7 +702,12 @@ impl MonitorClient {
             .send(MonitorMessage::ConfirmDeposit(pending_deposit))
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("confirm_deposit timed out waiting for Bitcoin confirmation")
+            })?
+            .map_err(|e| anyhow::anyhow!(e))?
     }
 
     pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
