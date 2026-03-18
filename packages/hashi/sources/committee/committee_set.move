@@ -357,15 +357,15 @@ public(package) fun start_reconfig(
 
     let committee = self.new_committee_from_validator_set(sui_system, ctx);
 
-    // assert voting weight
+    // Ensure 95% of stake has registered.
     let mut sui_system_weight = 0;
     let (_, weights) = sui_system.active_validator_voting_powers().into_keys_values();
     weights.do!(|weight| {
         sui_system_weight = sui_system_weight + weight;
     });
-
-    // Ensure 95% of stake has registered
-    assert!(committee.total_weight() >= ((9500 * sui_system_weight) / 10000));
+    assert!(
+        committee.total_weight() >= hashi::threshold::weight_threshold(sui_system_weight, 9500),
+    );
 
     let epoch = committee.epoch();
     self.pending_epoch_change = option::some(epoch);
