@@ -121,6 +121,21 @@ impl Hashi {
                 }
             }
         }
+
+        let utxo_pool = &state.hashi().utxo_pool;
+        if utxo_pool
+            .active_utxos()
+            .contains_key(&deposit_request.utxo.id)
+            || utxo_pool
+                .spent_utxos()
+                .contains_key(&deposit_request.utxo.id)
+        {
+            return Err(DepositValidationError::NeverRetry(anyhow!(
+                "UTXO {:?} is already active or spent",
+                deposit_request.utxo.id
+            )));
+        }
+
         Ok(())
     }
 
