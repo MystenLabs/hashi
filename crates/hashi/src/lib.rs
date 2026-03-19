@@ -133,10 +133,6 @@ impl Hashi {
             .clone()
     }
 
-    pub fn try_signing_manager(&self) -> Option<Arc<RwLock<mpc::SigningManager>>> {
-        self.signing_manager.get().cloned()
-    }
-
     pub fn signing_verifying_key(&self) -> Option<fastcrypto_tbls::threshold_schnorr::G> {
         self.signing_manager
             .get()

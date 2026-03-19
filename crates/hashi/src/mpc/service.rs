@@ -418,12 +418,6 @@ impl MpcService {
             self.recovery_tx.clone(),
         );
         signing_manager.skip_consumed_presigs(index_in_batch);
-        if let Some(sm) = self.inner.try_signing_manager() {
-            let cache = sm.write().unwrap().take_cache();
-            let cache_len = cache.len();
-            signing_manager.set_cache(cache);
-            info!("Preserved {cache_len} cached partial signing outputs across recovery");
-        }
         self.inner.set_or_init_signing_manager(signing_manager);
         info!(
             "Recovered presigning state: batch_index={batch_index}, \
