@@ -181,6 +181,13 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
+    pub async fn rescrape(&self) -> Result<()> {
+        let (checkpoint_info, hashi) = scrape_hashi(self.client(), self.hashi_id()).await?;
+        self.replace_hashi_state(hashi);
+        self.update_latest_checkpoint_info(checkpoint_info);
+        Ok(())
+    }
+
     /// Apply committee config from `Inner` to the given hashi state and replace the current
     /// state in a single write lock acquisition.
     fn replace_hashi_state(&self, mut hashi: types::Hashi) {
