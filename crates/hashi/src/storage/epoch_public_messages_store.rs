@@ -97,6 +97,12 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to store nonce message: {e}"))
     }
 
+    fn delete_nonce_message(&mut self, batch_index: u32, dealer: &Address) -> anyhow::Result<()> {
+        self.db
+            .delete_nonce_message(self.epoch, batch_index, dealer)
+            .map_err(|e| anyhow::anyhow!("failed to delete nonce message: {e}"))
+    }
+
     fn list_nonce_messages(
         &self,
         batch_index: u32,

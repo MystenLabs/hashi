@@ -108,6 +108,10 @@ pub struct MpcManager {
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_nonce_outputs: BTreeMap<Address, batch_avss::ReceiverOutput>,
+    /// Batch indices for which nonce generation has completed.
+    /// Used to prevent late P2P messages from re-persisting uncertified
+    /// dealer messages to DB after they've been cleaned up.
+    completed_nonce_batches: HashSet<u32>,
 }
 
 impl MpcManager {
@@ -224,6 +228,7 @@ impl MpcManager {
             previous_output: None,
             batch_size_per_weight,
             dealer_nonce_outputs: BTreeMap::new(),
+            completed_nonce_batches: HashSet::new(),
         };
         manager.load_stored_messages()?;
         Ok(manager)
@@ -572,14 +577,31 @@ impl MpcManager {
         // `try_sign_nonce_message` may have inserted additional outputs
         // concurrently — discard them so all nodes use the same deterministic set.
         let pre_filter = mgr.dealer_nonce_outputs.len();
-        mgr.dealer_nonce_outputs
-            .retain(|addr, _| certified.contains(addr));
+        // Remove uncertified dealers from both in-memory map and DB so that
+        // `reconstruct_presignatures` produces the same presigs as this run.
+        let uncertified: Vec<Address> = mgr
+            .dealer_nonce_outputs
+            .keys()
+            .filter(|addr| !certified.contains(addr))
+            .copied()
+            .collect();
+        for addr in &uncertified {
+            mgr.dealer_nonce_outputs.remove(addr);
+            if let Err(e) = mgr
+                .public_messages_store
+                .delete_nonce_message(batch_index, addr)
+            {
+                tracing::error!("Failed to delete uncertified nonce message for {addr}: {e}");
+            }
+        }
         let dealers: Vec<_> = mgr.dealer_nonce_outputs.keys().collect();
         tracing::info!(
-            "run_nonce_generation: {pre_filter} outputs before filter, {} after. \
-             dealers={dealers:?}",
+            "run_nonce_generation: {pre_filter} outputs before filter, {} after \
+             (removed {} uncertified). dealers={dealers:?}",
             dealers.len(),
+            uncertified.len(),
         );
+        mgr.completed_nonce_batches.insert(batch_index);
         Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
             .into_values()
             .collect())
@@ -1222,6 +1244,12 @@ impl MpcManager {
 
     fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) {
         self.nonce_messages.insert(dealer, nonce.clone());
+        if self.completed_nonce_batches.contains(&nonce.batch_index) {
+            // Nonce generation already completed for this batch — the certified
+            // dealer set is finalized and uncertified messages were deleted from DB.
+            // Don't re-persist this message or it could contaminate reconstruction.
+            return;
+        }
         if let Err(e) = self.public_messages_store.store_nonce_message(
             nonce.batch_index,
             &dealer,
@@ -3039,6 +3067,14 @@ mod tests {
             Ok(())
         }
 
+        fn delete_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn list_nonce_messages(
             &self,
             _batch_index: u32,
@@ -4043,6 +4079,15 @@ mod tests {
             Ok(())
         }
 
+        fn delete_nonce_message(
+            &mut self,
+            batch_index: u32,
+            dealer: &Address,
+        ) -> anyhow::Result<()> {
+            self.nonce_stored.remove(&(batch_index, *dealer));
+            Ok(())
+        }
+
         fn list_nonce_messages(
             &self,
             batch_index: u32,
@@ -4104,6 +4149,14 @@ mod tests {
             _batch_index: u32,
             _dealer: &Address,
             _message: &batch_avss::Message,
+        ) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("Storage failure"))
+        }
+
+        fn delete_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
         ) -> anyhow::Result<()> {
             Err(anyhow::anyhow!("Storage failure"))
         }
@@ -7440,6 +7493,14 @@ mod tests {
             Ok(())
         }
 
+        fn delete_nonce_message(
+            &mut self,
+            _batch_index: u32,
+            _dealer: &Address,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn list_nonce_messages(
             &self,
             _batch_index: u32,
@@ -9346,6 +9407,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .store_nonce_message(batch_index, dealer, message)
+        }
+
+        fn delete_nonce_message(
+            &mut self,
+            batch_index: u32,
+            dealer: &Address,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .lock()
+                .unwrap()
+                .delete_nonce_message(batch_index, dealer)
         }
 
         fn list_nonce_messages(

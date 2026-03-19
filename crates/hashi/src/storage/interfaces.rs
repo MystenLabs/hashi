@@ -56,6 +56,9 @@ pub trait PublicMessagesStore: Send + Sync {
         message: &batch_avss::Message,
     ) -> Result<()>;
 
+    /// Delete a dealer's nonce message for the given batch.
+    fn delete_nonce_message(&mut self, batch_index: u32, dealer: &Address) -> Result<()>;
+
     /// List all nonce messages for the current epoch and given batch.
     fn list_nonce_messages(&self, batch_index: u32) -> Result<Vec<(Address, batch_avss::Message)>>;
 }
