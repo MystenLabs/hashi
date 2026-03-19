@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;

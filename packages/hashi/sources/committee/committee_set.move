@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 #[allow(unused_function, unused_field)]
 module hashi::committee_set;
 

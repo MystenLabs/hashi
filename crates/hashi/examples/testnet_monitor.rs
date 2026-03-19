@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Example binary that demonstrates running a Bitcoin monitor on testnet4.
 //! It uses hardcoded known-working testnet4 seed nodes for peer discovery.
 //!

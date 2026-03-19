@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Build and publish the Hashi Move package.
 //!
 //! Provides a reusable [`build_package`] + [`publish_and_init`] workflow that can be called
@@ -73,7 +76,9 @@ pub fn build_package(params: &BuildParams<'_>) -> Result<sui_sdk_types::Publish>
 
     if !output.status.success() {
         return Err(anyhow::anyhow!(
-            "sui move build failed\nstdout: {}\nstderr: {}",
+            "sui move build failed
+stdout: {}
+stderr: {}",
             output.stdout.escape_ascii(),
             output.stderr.escape_ascii()
         ));

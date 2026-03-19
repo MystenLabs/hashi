@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Generic communication primitives for distributed protocols
 //!
 //! This module provides protocol-agnostic communication channels:

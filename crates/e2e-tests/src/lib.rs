@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Test infrastructure to stand up a Sui localnet, a bitcoin regtest, and hashi nodes.
 //!
 //! The general bootstrapping process is as follows:

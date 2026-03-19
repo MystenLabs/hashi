@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Auditor implementations.
 //! Goal: Attempt to match all withdrawals with a guardian event inside the input time window,
 //!       even if some corresponding events for that withdrawal occur outside the window.

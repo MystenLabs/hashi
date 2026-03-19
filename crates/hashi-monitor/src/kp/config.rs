@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Context;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::GuardianInfo;

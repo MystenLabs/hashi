@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sui Transaction Executor
 //!
 //! Provides a reusable executor for submitting Sui transactions with sensible defaults.

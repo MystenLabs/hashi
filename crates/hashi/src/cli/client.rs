@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sui RPC client for interacting with the Hashi on-chain state
 //!
 //! This module provides a client for reading Hashi state and building/executing

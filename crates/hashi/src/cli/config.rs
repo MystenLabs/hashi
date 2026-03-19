@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Configuration for the Hashi CLI
 //!
 //! Configuration can be loaded from a TOML file and/or environment variables.

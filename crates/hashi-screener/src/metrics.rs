@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use prometheus::IntCounter;
 use prometheus::Registry;
 use prometheus::register_int_counter_with_registry;

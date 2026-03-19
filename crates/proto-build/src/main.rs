@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use prost_types::FileDescriptorSet;
 use protox::prost::Message as _;
 use std::collections::HashMap;

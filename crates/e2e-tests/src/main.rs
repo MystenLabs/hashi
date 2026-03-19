@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! CLI binary for managing a local Hashi development environment.
 //!
 //! This reuses the existing e2e-tests infrastructure (bitcoin node, Sui network,

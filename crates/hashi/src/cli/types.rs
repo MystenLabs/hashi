@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Type re-exports and display helpers for the CLI
 //!
 //! This module re-exports types from `crate::onchain::types` and provides

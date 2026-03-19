@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;

@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::domain::now_unix_seconds;
 use crate::rpc::guardian::GuardianLogDir;
 use crate::rpc::guardian::GuardianPollerCore;

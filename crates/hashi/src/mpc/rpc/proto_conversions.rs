@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::mpc::types;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;

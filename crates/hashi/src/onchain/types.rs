@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 #![allow(unused)] // TODO remove this
 
 //! Usable definitions of the onchain state of hashi

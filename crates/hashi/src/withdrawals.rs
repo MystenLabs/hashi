@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::anyhow;
 use bdk_coin_select::Candidate;
 use bdk_coin_select::ChangePolicy;

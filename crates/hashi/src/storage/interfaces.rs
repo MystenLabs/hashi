@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;

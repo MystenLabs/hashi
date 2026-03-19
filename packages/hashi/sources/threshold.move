@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 module hashi::threshold;
 
 const MAX_BPS: u64 = 10000;

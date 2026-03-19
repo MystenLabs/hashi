@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Hashi Screener - AML/Sanctions screening service for cross-chain transactions.
 //!
 //! This crate provides a gRPC service that checks transactions against the MerkleScience
