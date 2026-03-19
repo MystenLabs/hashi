@@ -220,8 +220,12 @@ impl SigningManager {
                     result
                 };
             tracing::info!(
-                "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}",
+                "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}, \
+                 verifying_key={:?}, first_partial_sig_index={}, first_partial_sig_value={:?}",
                 hex::encode(message),
+                mgr.verifying_key,
+                partial_sigs[0].index,
+                partial_sigs[0].value,
             );
             let threshold = mgr.threshold;
             let address = mgr.address;
