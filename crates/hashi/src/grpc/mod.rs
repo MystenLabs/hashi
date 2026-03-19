@@ -134,8 +134,12 @@ impl HttpService {
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 
-    pub fn signing_manager(&self) -> Arc<std::sync::RwLock<crate::mpc::SigningManager>> {
-        self.inner.signing_manager()
+    pub fn signing_manager(
+        &self,
+    ) -> Result<Arc<std::sync::RwLock<crate::mpc::SigningManager>>, tonic::Status> {
+        self.inner
+            .try_signing_manager()
+            .ok_or_else(|| tonic::Status::unavailable("SigningManager not yet initialized"))
     }
 
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
