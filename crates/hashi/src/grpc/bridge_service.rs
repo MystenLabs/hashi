@@ -179,6 +179,15 @@ fn parse_deposit_request(
         .map(|bytes| parse_address(bytes))
         .transpose()?;
 
+    let requester_address = parse_address(&request.requester_address)?;
+    let sui_tx_digest = sui_sdk_types::Digest::new(
+        request
+            .sui_tx_digest
+            .as_ref()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("sui_tx_digest must be 32 bytes"))?,
+    );
+
     Ok(DepositRequest {
         id,
         utxo: Utxo {
@@ -190,6 +199,8 @@ fn parse_deposit_request(
             derivation_path,
         },
         timestamp_ms: request.timestamp_ms,
+        requester_address,
+        sui_tx_digest,
     })
 }
 

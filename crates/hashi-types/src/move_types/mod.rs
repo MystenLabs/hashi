@@ -263,6 +263,8 @@ pub struct DepositRequest {
     pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
+    pub requester_address: Address,
+    pub sui_tx_digest: Digest,
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
@@ -808,6 +810,8 @@ pub struct DepositRequestedEvent {
     pub amount: u64,
     pub derivation_path: Option<Address>,
     pub timestamp_ms: u64,
+    pub requester_address: Address,
+    pub sui_tx_digest: Digest,
 }
 
 impl MoveType for DepositRequestedEvent {

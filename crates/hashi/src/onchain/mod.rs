@@ -965,6 +965,8 @@ async fn scrape_deposit_requests(
                  id,
                  utxo,
                  timestamp_ms,
+                 requester_address,
+                 sui_tx_digest,
              }| {
                 let utxo = convert_move_utxo(utxo);
                 (
@@ -973,6 +975,8 @@ async fn scrape_deposit_requests(
                         id,
                         utxo,
                         timestamp_ms,
+                        requester_address,
+                        sui_tx_digest,
                     },
                 )
             },

@@ -645,6 +645,8 @@ pub struct DepositRequest {
     pub id: Address,
     pub utxo: Utxo,
     pub timestamp_ms: u64,
+    pub requester_address: Address,
+    pub sui_tx_digest: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]

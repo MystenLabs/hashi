@@ -76,6 +76,12 @@ message SignDepositConfirmationRequest {
 
   // Timestamp of the deposit request
   uint64 timestamp_ms = 6;
+
+  // Requester Sui address (32 bytes).
+  bytes requester_address = 7;
+
+  // Sui transaction digest (32 bytes).
+  bytes sui_tx_digest = 8;
 }
 
 message SignDepositConfirmationResponse {

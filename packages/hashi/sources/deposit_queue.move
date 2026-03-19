@@ -20,6 +20,8 @@ public struct DepositRequest has store {
     id: address,
     utxo: Utxo,
     timestamp_ms: u64,
+    requester_address: address,
+    sui_tx_digest: vector<u8>,
 }
 
 public fun deposit_request(utxo: Utxo, clock: &Clock, ctx: &mut TxContext): DepositRequest {
@@ -29,6 +31,8 @@ public fun deposit_request(utxo: Utxo, clock: &Clock, ctx: &mut TxContext): Depo
         id: ctx.fresh_object_address(),
         utxo,
         timestamp_ms: clock.timestamp_ms(),
+        requester_address: ctx.sender(),
+        sui_tx_digest: *ctx.digest(),
     }
 }
 
@@ -45,7 +49,8 @@ public(package) fun insert(self: &mut DepositRequestQueue, request: DepositReque
 }
 
 public(package) fun into_utxo(self: DepositRequest): Utxo {
-    let DepositRequest { id: _, utxo, timestamp_ms: _ } = self;
+    let DepositRequest { id: _, utxo, timestamp_ms: _, requester_address: _, sui_tx_digest: _ } =
+        self;
     utxo
 }
 
@@ -59,6 +64,14 @@ public(package) fun id(self: &DepositRequest): address {
 
 public(package) fun timestamp_ms(self: &DepositRequest): u64 {
     self.timestamp_ms
+}
+
+public(package) fun requester_address(self: &DepositRequest): address {
+    self.requester_address
+}
+
+public(package) fun sui_tx_digest(self: &DepositRequest): vector<u8> {
+    self.sui_tx_digest
 }
 
 public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
@@ -87,6 +100,8 @@ public(package) fun delete(deposit_request: DepositRequest) {
         id: _,
         utxo,
         timestamp_ms: _,
+        requester_address: _,
+        sui_tx_digest: _,
     } = deposit_request;
     utxo.delete();
 }

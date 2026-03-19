@@ -229,17 +229,18 @@ async fn list(config: &CliConfig) -> Result<()> {
     let deposits = client.fetch_deposit_requests();
 
     println!("\n{}", "Deposit Requests".bold());
-    println!("{}", "━".repeat(80).dimmed());
+    println!("{}", "━".repeat(100).dimmed());
 
     if deposits.is_empty() {
         print_info("No pending deposit requests.");
     } else {
         println!(
-            "  {:<20} {:<14} {:<12} {:<10} {}",
+            "  {:<20} {:<14} {:<12} {:<10} {:<20} {}",
             "Request ID".bold(),
             "Amount (sats)".bold(),
             "UTXO".bold(),
             "Status".bold(),
+            "Caller".bold(),
             "Requested".bold()
         );
         for dep in &deposits {
@@ -247,18 +248,19 @@ async fn list(config: &CliConfig) -> Result<()> {
             let txid = bitcoin::Txid::from_byte_array(txid_bytes);
             let txid_str = txid.to_string();
             println!(
-                "  {:<20} {:<14} {}:{:<3} {:<10} {}",
+                "  {:<20} {:<14} {}:{:<3} {:<10} {:<20} {}",
                 display::format_address(&dep.id),
                 dep.utxo.amount,
                 &txid_str[..8],
                 dep.utxo.id.vout,
                 "Pending".yellow(),
+                display::format_address(&dep.requester_address),
                 display::format_timestamp(dep.timestamp_ms)
             );
         }
         println!("\n  {} deposit(s)", deposits.len());
     }
 
-    println!("{}", "━".repeat(80).dimmed());
+    println!("{}", "━".repeat(100).dimmed());
     Ok(())
 }

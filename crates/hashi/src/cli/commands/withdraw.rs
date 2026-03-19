@@ -242,7 +242,7 @@ async fn list(config: &CliConfig) -> Result<()> {
     let pending = client.fetch_pending_withdrawals();
 
     println!("\n{}", "Withdrawal Requests".bold());
-    println!("{}", "━".repeat(80).dimmed());
+    println!("{}", "━".repeat(100).dimmed());
 
     if requests.is_empty() && pending.is_empty() {
         print_info("No withdrawal requests found.");
@@ -250,19 +250,21 @@ async fn list(config: &CliConfig) -> Result<()> {
         if !requests.is_empty() {
             println!("  {}", "Queued:".bold().underline());
             println!(
-                "  {:<20} {:<14} {:<10} {}",
+                "  {:<20} {:<14} {:<10} {:<20} {}",
                 "Request ID".bold(),
                 "Amount (sats)".bold(),
                 "Status".bold(),
+                "Caller".bold(),
                 "Requested".bold()
             );
             for wr in &requests {
                 let status = if wr.approved { "Approved" } else { "Requested" };
                 println!(
-                    "  {:<20} {:<14} {:<10} {}",
+                    "  {:<20} {:<14} {:<10} {:<20} {}",
                     display::format_address(&wr.id),
                     wr.btc_amount,
                     status,
+                    display::format_address(&wr.requester_address),
                     display::format_timestamp(wr.timestamp_ms)
                 );
             }
@@ -297,6 +299,6 @@ async fn list(config: &CliConfig) -> Result<()> {
         );
     }
 
-    println!("{}", "━".repeat(80).dimmed());
+    println!("{}", "━".repeat(100).dimmed());
     Ok(())
 }

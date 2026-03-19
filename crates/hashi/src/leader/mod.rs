@@ -1408,6 +1408,8 @@ impl DepositRequest {
                 .derivation_path
                 .map(|p| p.as_bytes().to_vec().into()),
             timestamp_ms: self.timestamp_ms,
+            requester_address: self.requester_address.as_bytes().to_vec().into(),
+            sui_tx_digest: self.sui_tx_digest.as_bytes().to_vec().into(),
         }
     }
 }

@@ -32,6 +32,8 @@ public fun deposit(
         amount: request.utxo().amount(),
         derivation_path: request.utxo().derivation_path(),
         timestamp_ms: request.timestamp_ms(),
+        requester_address: request.requester_address(),
+        sui_tx_digest: request.sui_tx_digest(),
     };
 
     hashi.deposit_queue_mut().insert(request);
@@ -104,6 +106,8 @@ public struct DepositRequestedEvent has copy, drop {
     amount: u64,
     derivation_path: Option<address>,
     timestamp_ms: u64,
+    requester_address: address,
+    sui_tx_digest: vector<u8>,
 }
 
 public struct DepositConfirmedEvent has copy, drop {

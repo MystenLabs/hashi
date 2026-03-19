@@ -220,6 +220,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         derivation_path: deposit_requested_event.derivation_path,
                     },
                     timestamp_ms: deposit_requested_event.timestamp_ms,
+                    requester_address: deposit_requested_event.requester_address,
+                    sui_tx_digest: deposit_requested_event.sui_tx_digest,
                 };
                 state
                     .state_mut()

@@ -54,6 +54,12 @@ pub struct SignDepositConfirmationRequest {
     /// Timestamp of the deposit request
     #[prost(uint64, tag = "6")]
     pub timestamp_ms: u64,
+    /// Requester Sui address (32 bytes).
+    #[prost(bytes = "bytes", tag = "7")]
+    pub requester_address: ::prost::bytes::Bytes,
+    /// Sui transaction digest (32 bytes).
+    #[prost(bytes = "bytes", tag = "8")]
+    pub sui_tx_digest: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignDepositConfirmationResponse {
