@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod bitcoin_utils;
 pub mod crypto;
 pub mod epoch_store;

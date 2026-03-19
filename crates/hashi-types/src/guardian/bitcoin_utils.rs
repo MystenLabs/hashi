@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bitcoin utilities shared between Hashi and Guardian.
 //!
 //! Two classes of types exist in this file:

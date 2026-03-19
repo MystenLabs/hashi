@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::path::Path;
 
 use fastcrypto::groups::ristretto255::RistrettoScalar;

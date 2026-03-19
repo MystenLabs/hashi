@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Definitions of the raw Move structs in the hashi package
 
 use fastcrypto::traits::ToFromBytes;

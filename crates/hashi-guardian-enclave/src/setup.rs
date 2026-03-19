@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::Enclave;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::encrypt_share;

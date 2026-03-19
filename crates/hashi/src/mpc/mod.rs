@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 mod mpc_except_signing;
 pub mod rpc;
 pub mod service;

@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sui-backed Total Order Broadcast (TOB) Channel
 
 use std::collections::HashSet;

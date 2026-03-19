@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 // Include the generated proto definitions
 include!("generated/sui.hashi.v1alpha.rs");
 

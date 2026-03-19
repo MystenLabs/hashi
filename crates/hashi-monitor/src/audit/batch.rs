@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::audit::AuditWindow;
 use crate::audit::AuditorCore;
 use crate::audit::log_findings;

@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Test utilities for spinning up a mock screener gRPC server.
 
 use std::collections::HashSet;

@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Domain model for the monitor.
 //!
 //! We model the cross-system withdrawal flow as a sequence of events:

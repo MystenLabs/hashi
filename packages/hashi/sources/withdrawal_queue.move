@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 module hashi::withdrawal_queue;
 
 use hashi::{btc::BTC, config::Config, utxo::{Utxo, UtxoId, UtxoInfo}};

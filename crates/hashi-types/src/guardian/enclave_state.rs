@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use super::GuardianError::InternalError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianError::RateLimitExceeded;

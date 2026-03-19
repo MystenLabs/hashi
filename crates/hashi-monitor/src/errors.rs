@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventType;
 use hashi_types::guardian::time_utils::UnixSeconds;

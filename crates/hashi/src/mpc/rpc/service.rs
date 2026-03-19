@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::grpc::HttpService;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;

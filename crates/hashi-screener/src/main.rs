@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Result;
 use hashi_screener::cache::ScreenerCache;
 use hashi_screener::chain::ChainName;

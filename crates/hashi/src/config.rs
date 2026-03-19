@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::Path;
