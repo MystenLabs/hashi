@@ -136,7 +136,7 @@ impl MpcService for HttpService {
         let internal_request = types::GetPartialSignaturesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
-            let signing_manager = self.signing_manager();
+            let signing_manager = self.signing_manager()?;
             let mgr = signing_manager.read().unwrap();
             validate_epoch(mgr.epoch(), external_request.epoch)?;
             mgr.handle_get_partial_signatures_request(&internal_request)
