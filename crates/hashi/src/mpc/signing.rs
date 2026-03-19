@@ -146,11 +146,13 @@ impl SigningManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn sign(
         signing_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         sui_request_id: Address,
         message: &[u8],
+        global_presig_index: u64,
         beacon_value: &S,
         derivation_address: Option<&DerivationAddress>,
         timeout: Duration,
@@ -158,67 +160,86 @@ impl SigningManager {
         let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
             let mut mgr = signing_manager.write().unwrap();
             let mgr = &mut *mgr;
-            let (public_nonce, partial_sigs) =
-                if let Some(existing) = mgr.partial_signing_outputs.get(&sui_request_id) {
-                    let presig_index = mgr.initial_presig_count - mgr.presignatures.len();
-                    tracing::info!(
-                        "Cache hit for {sui_request_id}, reusing cached partial sigs \
-                         (batch_index={}, presig_index={presig_index}, presigs_remaining={})",
+            let (public_nonce, partial_sigs) = if let Some(existing) =
+                mgr.partial_signing_outputs.get(&sui_request_id)
+            {
+                tracing::info!(
+                    "Cache hit for {sui_request_id} (global_presig_index={global_presig_index}), \
+                         reusing cached partial sigs (batch_index={}, presigs_remaining={})",
+                    mgr.batch_index,
+                    mgr.presignatures.len(),
+                );
+                (existing.public_nonce, existing.partial_sigs.clone())
+            } else {
+                // TODO: Replace forward-only seeking with random access once
+                // fastcrypto exposes a `generate_partial_signatures` variant
+                // that accepts a presig tuple directly. This would eliminate
+                // the batch transition, forward seek, and backward seek edge cases.
+                let batch_size = mgr.initial_presig_count as u64;
+                let target_batch = (global_presig_index / batch_size) as u32;
+                let target_position = (global_presig_index % batch_size) as usize;
+                if target_batch > mgr.batch_index + 1 {
+                    tracing::error!(
+                        "Target batch {target_batch} is more than one ahead of \
+                             current batch {}. Cannot seek.",
                         mgr.batch_index,
-                        mgr.presignatures.len(),
                     );
-                    (existing.public_nonce, existing.partial_sigs.clone())
-                } else {
-                    let presig_index = mgr.initial_presig_count - mgr.presignatures.len();
-                    tracing::info!(
-                        "Cache miss for {sui_request_id}, consuming presig \
-                         (batch_index={}, presig_index={presig_index}, presigs_remaining={})",
-                        mgr.batch_index,
-                        mgr.presignatures.len(),
-                    );
-                    let result = match generate_partial_signatures(
-                        message,
-                        &mut mgr.presignatures,
-                        beacon_value,
-                        &mgr.key_shares,
-                        &mgr.verifying_key,
-                        derivation_address,
-                    ) {
-                        Ok(result) => result,
-                        Err(FastCryptoError::OutOfPresigs) => {
-                            if let Some(next) = mgr.next_batch.take() {
-                                mgr.presignatures = next;
-                                mgr.batch_index += 1;
-                                mgr.initial_presig_count = mgr.presignatures.len();
-                                generate_partial_signatures(
-                                    message,
-                                    &mut mgr.presignatures,
-                                    beacon_value,
-                                    &mgr.key_shares,
-                                    &mgr.verifying_key,
-                                    derivation_address,
-                                )
-                                .map_err(|e| SigningError::CryptoError(e.to_string()))?
-                            } else {
-                                let _ = mgr.recovery_tx.send(true);
-                                return Err(SigningError::PoolExhausted);
-                            }
-                        }
-                        Err(e) => return Err(SigningError::CryptoError(e.to_string())),
-                    };
-                    let refill_at = mgr.initial_presig_count / mgr.refill_divisor;
-                    if mgr.presignatures.len() <= refill_at {
-                        let _ = mgr.refill_tx.send(mgr.batch_index + 1);
+                    let _ = mgr.recovery_tx.send(true);
+                    return Err(SigningError::PoolExhausted);
+                }
+                if target_batch > mgr.batch_index {
+                    if let Some(next) = mgr.next_batch.take() {
+                        mgr.presignatures = next;
+                        mgr.batch_index += 1;
+                        mgr.initial_presig_count = mgr.presignatures.len();
+                    } else {
+                        let _ = mgr.recovery_tx.send(true);
+                        return Err(SigningError::PoolExhausted);
                     }
-                    mgr.partial_signing_outputs.insert(
-                        sui_request_id,
-                        PartialSigningOutput {
-                            public_nonce: result.0,
-                            partial_sigs: result.1.clone(),
-                        },
+                }
+                let current_position = mgr.initial_presig_count - mgr.presignatures.len();
+                if target_position < current_position {
+                    tracing::error!(
+                        "Cannot seek backward: target_position={target_position}, \
+                             current_position={current_position}. Triggering recovery."
                     );
-                    result
-                };
+                    let _ = mgr.recovery_tx.send(true);
+                    return Err(SigningError::CryptoError(
+                        "Presig index is behind current position".into(),
+                    ));
+                }
+                if target_position > current_position {
+                    mgr.skip_consumed_presigs(target_position - current_position);
+                }
+                tracing::info!(
+                    "Cache miss for {sui_request_id}, consuming presig \
+                         (global_presig_index={global_presig_index}, batch_index={}, \
+                         target_position={target_position}, presigs_remaining={})",
+                    mgr.batch_index,
+                    mgr.presignatures.len(),
+                );
+                let result = generate_partial_signatures(
+                    message,
+                    &mut mgr.presignatures,
+                    beacon_value,
+                    &mgr.key_shares,
+                    &mgr.verifying_key,
+                    derivation_address,
+                )
+                .map_err(|e| SigningError::CryptoError(e.to_string()))?;
+                let refill_at = mgr.initial_presig_count / mgr.refill_divisor;
+                if mgr.presignatures.len() <= refill_at {
+                    let _ = mgr.refill_tx.send(mgr.batch_index + 1);
+                }
+                mgr.partial_signing_outputs.insert(
+                    sui_request_id,
+                    PartialSigningOutput {
+                        public_nonce: result.0,
+                        partial_sigs: result.1.clone(),
+                    },
+                );
+                result
+            };
             tracing::info!(
                 "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}",
                 hex::encode(message),
@@ -987,6 +1008,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1035,6 +1057,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1062,6 +1085,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1089,6 +1113,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1120,6 +1145,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1155,6 +1181,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_millis(1), // very short timeout
@@ -1220,6 +1247,7 @@ mod tests {
     async fn test_sign_pool_exhausted_with_next_batch() {
         // Exhaust batch 0, set next_batch, verify sign() swaps to batch 1.
         let setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
         setup.exhaust_pool();
         setup.set_next_batch_on_all();
         setup.swap_peers_to_next_batch(0);
@@ -1227,11 +1255,13 @@ mod tests {
         let req_id = Address::new([0xFF; 32]);
         setup.prepare_all(b"swap", &S::zero(), req_id, Some(0));
         let p2p = setup.mock_p2p_for(0);
+        // Use an index in batch 1 to trigger the batch transition.
         let sig = SigningManager::sign(
             &setup.managers[0],
             &p2p,
             req_id,
             b"swap",
+            pool_size as u64,
             &S::zero(),
             None,
             Duration::from_secs(30),
@@ -1249,14 +1279,17 @@ mod tests {
     async fn test_sign_pool_exhausted_no_next_batch() {
         // Exhaust pool without setting next_batch → PoolExhausted.
         let setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
         setup.exhaust_pool();
 
         let p2p = setup.mock_p2p_for(0);
+        // Use an index in the next batch to trigger PoolExhausted.
         let result = SigningManager::sign(
             &setup.managers[0],
             &p2p,
             Address::new([0xFF; 32]),
             b"fail",
+            pool_size as u64,
             &S::zero(),
             None,
             Duration::from_secs(30),
@@ -1301,14 +1334,17 @@ mod tests {
     #[tokio::test]
     async fn test_pool_exhausted_triggers_recovery_signal() {
         let setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
         setup.exhaust_pool();
 
         let p2p = setup.mock_p2p_for(0);
+        // Use an index in the next batch to trigger PoolExhausted (no next_batch available).
         let result = SigningManager::sign(
             &setup.managers[0],
             &p2p,
             Address::new([0xFF; 32]),
             b"fail",
+            pool_size as u64,
             &S::zero(),
             None,
             Duration::from_secs(30),
@@ -1337,6 +1373,7 @@ mod tests {
             &p2p1,
             req1,
             b"msg1",
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1365,6 +1402,7 @@ mod tests {
             &p2p2,
             req2,
             b"msg2",
+            1,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1393,6 +1431,7 @@ mod tests {
             &p2p1,
             req1,
             b"msg1",
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1412,6 +1451,7 @@ mod tests {
             &p2p2,
             req2,
             b"msg2",
+            1,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1444,6 +1484,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1464,6 +1505,7 @@ mod tests {
             &p2p,
             req_id,
             message,
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1506,6 +1548,7 @@ mod tests {
             &p2p,
             req1,
             b"msg1",
+            0,
             &beacon,
             None,
             Duration::from_secs(30),
@@ -1513,13 +1556,14 @@ mod tests {
         .await
         .unwrap();
 
-        // Second request with different ID.
+        // Second request with different ID — uses next presig index.
         setup.prepare_all(b"msg2", &beacon, req2, Some(0));
         SigningManager::sign(
             &setup.managers[0],
             &p2p,
             req2,
             b"msg2",
+            1,
             &beacon,
             None,
             Duration::from_secs(30),

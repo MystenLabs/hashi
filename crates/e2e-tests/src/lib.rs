@@ -483,6 +483,7 @@ mod tests {
                         &p2p_channel,
                         sui_request_id,
                         &message,
+                        0,
                         &beacon,
                         None,
                         SIGNING_TIMEOUT,

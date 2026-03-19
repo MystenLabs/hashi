@@ -56,6 +56,9 @@ public struct PendingWithdrawal has store {
     timestamp_ms: u64,
     randomness: vector<u8>,
     signatures: Option<vector<vector<u8>>>,
+    /// Global presignature start index assigned at construction time.
+    /// Input `i` uses presig at index `presig_start_index + i`.
+    presig_start_index: u64,
 }
 
 public struct OutputUtxo has copy, drop, store {
@@ -100,6 +103,7 @@ public(package) fun new_pending_withdrawal(
     inputs: vector<Utxo>,
     mut outputs: vector<OutputUtxo>,
     txid: address,
+    presig_start_index: u64,
     config: &Config,
     clock: &Clock,
     randomness: vector<u8>,
@@ -167,6 +171,7 @@ public(package) fun new_pending_withdrawal(
         timestamp_ms: clock.timestamp_ms(),
         randomness,
         signatures: option::none(),
+        presig_start_index,
     }
 }
 
@@ -263,6 +268,7 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<
         timestamp_ms: _,
         randomness: _,
         signatures: _,
+        presig_start_index: _,
     } = self;
 
     inputs.destroy!(|utxo| {
@@ -366,6 +372,7 @@ public(package) fun new_pending_withdrawal_for_testing(
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signatures: option::none(),
+        presig_start_index: 0,
     }
 }
 

@@ -160,6 +160,7 @@ entry fun commit_withdrawal_tx(
     let selected_utxos = selected_utxos.map!(|raw| hashi::utxo::utxo_id_from_bcs(raw));
     let inputs = selected_utxos.map!(|utxo_id| hashi.utxo_pool_mut().spend(utxo_id, epoch));
 
+    let presig_start_index = hashi.withdrawal_queue().num_consumed_presigs();
     hashi.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
 
     // outputs
@@ -200,6 +201,7 @@ entry fun commit_withdrawal_tx(
         inputs,
         outputs,
         txid,
+        presig_start_index,
         hashi.config(),
         clock,
         randomness,

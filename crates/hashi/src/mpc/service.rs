@@ -391,7 +391,6 @@ impl MpcService {
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         let batch_size = batch_0_presigs.len();
         let batch_index = (num_consumed / batch_size as u64) as u32;
-        let index_in_batch = (num_consumed % batch_size as u64) as usize;
         let presignatures = if batch_index == 0 {
             batch_0_presigs
         } else {
@@ -408,7 +407,7 @@ impl MpcService {
                 .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?
         };
         let address = self.inner.config.validator_address()?;
-        let mut signing_manager = SigningManager::new(
+        let signing_manager = SigningManager::new(
             address,
             committee,
             output.threshold,
@@ -420,12 +419,11 @@ impl MpcService {
             self.refill_tx.clone(),
             self.recovery_tx.clone(),
         );
-        signing_manager.skip_consumed_presigs(index_in_batch);
         self.inner.set_or_init_signing_manager(signing_manager);
         info!(
             "Recovered presigning state: batch_index={batch_index}, \
-             skipped {index_in_batch}/{batch_size} presignatures \
-             (num_consumed_presigs={num_consumed})"
+             batch_size={batch_size} (num_consumed_presigs={num_consumed}). \
+             Exact position will be determined by explicit presig index on first sign request."
         );
         Ok(())
     }
