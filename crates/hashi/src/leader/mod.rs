@@ -218,6 +218,7 @@ impl LeaderService {
                 self.deposit_retry_tracker.clear(&deposit_request.id);
             }
             Err(e) => {
+                debug!(request_id = ?deposit_request.id, "Deposit validation failed: {e}");
                 let kind = e.kind();
                 self.inner
                     .metrics
