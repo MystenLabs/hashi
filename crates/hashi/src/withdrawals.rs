@@ -18,6 +18,7 @@ use bitcoin::TxOut;
 use bitcoin::blockdata::script::witness_program::WitnessProgram;
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
 use bitcoin::hashes::Hash;
+use bitcoin::policy::DEFAULT_MIN_RELAY_TX_FEE;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::sighash::TapSighashType;
@@ -745,11 +746,12 @@ impl Hashi {
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
         let onchain_max_fee_rate =
             FeeRate::from_sat_per_vb(self.onchain_state().max_fee_rate() as f32);
+        let min_fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as f32 / 1000.0);
         // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
         let node_fee_rate =
             FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
         // Cap at the on-chain configured maximum
-        let fee_rate = std::cmp::min(node_fee_rate, onchain_max_fee_rate);
+        let fee_rate = node_fee_rate.clamp(min_fee_rate, onchain_max_fee_rate);
 
         // request.btc_amount is already net of the protocol fee (deducted at request time)
         let max_user_output = request.btc_amount;
