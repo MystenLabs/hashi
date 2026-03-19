@@ -165,8 +165,22 @@ impl SigningManager {
             let mgr = &mut *mgr;
             let (public_nonce, partial_sigs) =
                 if let Some(existing) = mgr.partial_signing_outputs.get(&sui_request_id) {
+                    let presig_index = mgr.initial_presig_count - mgr.presignatures.len();
+                    tracing::info!(
+                        "Cache hit for {sui_request_id}, reusing cached partial sigs \
+                         (batch_index={}, presig_index={presig_index}, presigs_remaining={})",
+                        mgr.batch_index,
+                        mgr.presignatures.len(),
+                    );
                     (existing.public_nonce, existing.partial_sigs.clone())
                 } else {
+                    let presig_index = mgr.initial_presig_count - mgr.presignatures.len();
+                    tracing::info!(
+                        "Cache miss for {sui_request_id}, consuming presig \
+                         (batch_index={}, presig_index={presig_index}, presigs_remaining={})",
+                        mgr.batch_index,
+                        mgr.presignatures.len(),
+                    );
                     let result = match generate_partial_signatures(
                         message,
                         &mut mgr.presignatures,
@@ -293,7 +307,17 @@ impl SigningManager {
             Err(SigningError::TooManyInvalidSignatures { .. }) => {
                 let mut mgr = signing_manager.write().unwrap();
                 mgr.consecutive_sign_failures += 1;
+                tracing::warn!(
+                    "Signing failed for {sui_request_id}: consecutive_sign_failures={}, \
+                     presigs_remaining={}, batch_index={}",
+                    mgr.consecutive_sign_failures,
+                    mgr.presignatures.len(),
+                    mgr.batch_index,
+                );
                 if mgr.consecutive_sign_failures >= DESYNC_RECOVERY_THRESHOLD {
+                    tracing::info!(
+                        "Triggering presig desync recovery (threshold={DESYNC_RECOVERY_THRESHOLD})"
+                    );
                     let _ = mgr.recovery_tx.send(true);
                 }
             }
