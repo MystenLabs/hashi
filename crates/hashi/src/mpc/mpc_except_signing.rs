@@ -568,8 +568,15 @@ impl MpcManager {
         // Keep only the outputs selected by the party phase. The RPC handler's
         // `try_sign_nonce_message` may have inserted additional outputs
         // concurrently — discard them so all nodes use the same deterministic set.
+        let pre_filter = mgr.dealer_nonce_outputs.len();
         mgr.dealer_nonce_outputs
             .retain(|addr, _| certified.contains(addr));
+        let dealers: Vec<_> = mgr.dealer_nonce_outputs.keys().collect();
+        tracing::info!(
+            "run_nonce_generation: {pre_filter} outputs before filter, {} after. \
+             dealers={dealers:?}",
+            dealers.len(),
+        );
         Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
             .into_values()
             .collect())
@@ -597,6 +604,11 @@ impl MpcManager {
                 }
             }
         }
+        let dealers: Vec<_> = outputs.keys().collect();
+        tracing::info!(
+            "reconstruct_presignatures(batch_index={batch_index}): {} dealers={dealers:?}",
+            dealers.len(),
+        );
         Ok(outputs.into_values().collect())
     }
 

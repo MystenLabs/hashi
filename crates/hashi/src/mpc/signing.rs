@@ -216,6 +216,10 @@ impl SigningManager {
                     );
                     result
                 };
+            tracing::info!(
+                "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}",
+                hex::encode(message),
+            );
             let threshold = mgr.threshold;
             let address = mgr.address;
             let committee = mgr.committee.clone();
