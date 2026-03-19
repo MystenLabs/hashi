@@ -41,7 +41,9 @@ pub struct SigningManager {
     threshold: u16,
     key_shares: avss::SharesForNode,
     verifying_key: G,
-    presig_pool: Vec<(Vec<S>, G)>,
+    /// Each presig is wrapped in Option so it can be taken exactly once,
+    /// preventing nonce reuse even if the same index is assigned twice.
+    presig_pool: Vec<Option<(Vec<S>, G)>>,
     /// Key: Sui address identifying the signing request
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     batch_index: u32,
@@ -67,7 +69,7 @@ impl SigningManager {
         refill_tx: Arc<watch::Sender<u32>>,
         recovery_tx: Arc<watch::Sender<bool>>,
     ) -> Self {
-        let presig_pool: Vec<(Vec<S>, G)> = presignatures.collect();
+        let presig_pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
         let batch_size = presig_pool.len();
         Self {
             address,
@@ -100,7 +102,7 @@ impl SigningManager {
     }
 
     pub fn presignatures_remaining(&self) -> usize {
-        self.presig_pool.len()
+        self.presig_pool.iter().filter(|s| s.is_some()).count()
     }
 
     /// Clear the presig pool, simulating exhaustion. Test only.
@@ -174,25 +176,38 @@ impl SigningManager {
                 let target_batch = (global_presig_index / batch_size) as u32;
                 let target_position = (global_presig_index % batch_size) as usize;
                 if target_batch > mgr.batch_index {
-                    if let Some(next) = mgr.next_batch.take() {
-                        mgr.presig_pool = next.collect();
-                        mgr.batch_index += 1;
-                        mgr.batch_size = mgr.presig_pool.len();
+                    if target_batch == mgr.batch_index + 1 {
+                        if let Some(next) = mgr.next_batch.take() {
+                            mgr.presig_pool = next.map(Some).collect();
+                            mgr.batch_index += 1;
+                            mgr.batch_size = mgr.presig_pool.len();
+                        } else {
+                            let _ = mgr.recovery_tx.send(true);
+                            return Err(SigningError::PoolExhausted);
+                        }
                     } else {
+                        tracing::error!(
+                            "Target batch {target_batch} is more than one ahead of \
+                             current batch {}. Triggering recovery.",
+                            mgr.batch_index,
+                        );
                         let _ = mgr.recovery_tx.send(true);
                         return Err(SigningError::PoolExhausted);
                     }
                 }
-                let presig = mgr.presig_pool.get(target_position).ok_or_else(|| {
-                    tracing::error!(
-                        "Presig index {target_position} out of range for batch {} \
-                         (pool_size={}). Triggering recovery.",
-                        mgr.batch_index,
-                        mgr.presig_pool.len(),
-                    );
-                    let _ = mgr.recovery_tx.send(true);
-                    SigningError::PoolExhausted
-                })?;
+                let presig = mgr
+                    .presig_pool
+                    .get_mut(target_position)
+                    .and_then(|slot| slot.take())
+                    .ok_or_else(|| {
+                        tracing::error!(
+                            "Presig at position {target_position} unavailable for batch {} \
+                             (already consumed or out of range). Triggering recovery.",
+                            mgr.batch_index,
+                        );
+                        let _ = mgr.recovery_tx.send(true);
+                        SigningError::PoolExhausted
+                    })?;
                 tracing::info!(
                     "Cache miss for {sui_request_id}, using presig \
                          (global_presig_index={global_presig_index}, batch_index={}, \
@@ -202,7 +217,7 @@ impl SigningManager {
                 );
                 let result = generate_partial_signatures(
                     message,
-                    presig.clone(),
+                    presig,
                     beacon_value,
                     &mgr.key_shares,
                     &mgr.verifying_key,
@@ -757,7 +772,7 @@ mod tests {
                     continue;
                 }
                 let mgr = mgr_lock.read().unwrap();
-                let presig = mgr.presig_pool[presig_index].clone();
+                let presig = mgr.presig_pool[presig_index].clone().unwrap();
                 let (pn, sigs) = generate_partial_signatures(
                     message,
                     presig,
@@ -858,7 +873,7 @@ mod tests {
                 }
                 let mut mgr = mgr_lock.write().unwrap();
                 let next = mgr.next_batch.take().unwrap();
-                mgr.presig_pool = next.collect();
+                mgr.presig_pool = next.map(Some).collect();
                 mgr.batch_size = mgr.presig_pool.len();
             }
         }
@@ -1023,7 +1038,7 @@ mod tests {
         // Only peers 1 and 2 prepare partial sigs.
         for i in [1, 2] {
             let mgr = setup.managers[i].read().unwrap();
-            let presig = mgr.presig_pool[0].clone();
+            let presig = mgr.presig_pool[0].clone().unwrap();
             let (pn, sigs) = generate_partial_signatures(
                 message,
                 presig,
@@ -1291,6 +1306,32 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(SigningError::PoolExhausted)));
+    }
+
+    #[tokio::test]
+    async fn test_sign_target_batch_two_ahead_returns_pool_exhausted() {
+        // If target batch is 2+ ahead of current, return PoolExhausted
+        // instead of silently indexing into the wrong batch.
+        let setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
+
+        let p2p = setup.mock_p2p_for(0);
+        // Index 2 * pool_size maps to batch 2, but we're on batch 0 with
+        // at most next_batch for batch 1 — batch 2 is unreachable.
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"far-ahead",
+            (2 * pool_size) as u64,
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+        assert!(setup.recovery_rx.has_changed().unwrap());
     }
 
     #[test]

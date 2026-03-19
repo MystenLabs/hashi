@@ -52,6 +52,7 @@ entry fun end_reconfig(
     let threshold = threshold::certificate_threshold(next_committee.total_weight() as u16) as u64;
     let _cert = next_committee.verify_certificate(message, sig, threshold);
     self.withdrawal_queue_mut().reset_num_consumed_presigs();
+    self.withdrawal_queue_mut().reassign_pending_presigs(next_epoch);
     let epoch = self.committee_set_mut().end_reconfig(mpc_public_key, ctx);
     sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
 }

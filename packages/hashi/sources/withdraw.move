@@ -202,6 +202,7 @@ entry fun commit_withdrawal_tx(
         outputs,
         txid,
         presig_start_index,
+        epoch,
         hashi.config(),
         clock,
         randomness,
