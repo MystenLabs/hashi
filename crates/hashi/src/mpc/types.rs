@@ -4,9 +4,9 @@
 //! Core types for the DKG protocol
 
 use fastcrypto::error::FastCryptoError;
-use fastcrypto::random_oracle::RandomOracle;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::polynomial::Eval;
+use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
