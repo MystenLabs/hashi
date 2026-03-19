@@ -91,6 +91,14 @@ impl SigningManager {
         self.next_batch.is_some()
     }
 
+    pub fn take_cache(&mut self) -> HashMap<Address, PartialSigningOutput> {
+        std::mem::take(&mut self.partial_signing_outputs)
+    }
+
+    pub fn set_cache(&mut self, cache: HashMap<Address, PartialSigningOutput>) {
+        self.partial_signing_outputs = cache;
+    }
+
     pub fn skip_consumed_presigs(&mut self, n: usize) {
         for _ in 0..n {
             self.presignatures.next();
