@@ -249,12 +249,12 @@ async fn list(config: &CliConfig) -> Result<()> {
             let txid_str = txid.to_string();
             println!(
                 "  {:<20} {:<14} {}:{:<3} {:<10} {:<20} {}",
-                display::format_address(&dep.id),
+                display::format_address_full(&dep.id),
                 dep.utxo.amount,
-                &txid_str[..8],
+                txid_str,
                 dep.utxo.id.vout,
                 "Pending".yellow(),
-                display::format_address(&dep.requester_address),
+                display::format_address_full(&dep.requester_address),
                 display::format_timestamp(dep.timestamp_ms)
             );
         }

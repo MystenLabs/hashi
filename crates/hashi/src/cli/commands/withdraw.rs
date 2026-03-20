@@ -261,10 +261,10 @@ async fn list(config: &CliConfig) -> Result<()> {
                 let status = if wr.approved { "Approved" } else { "Requested" };
                 println!(
                     "  {:<20} {:<14} {:<10} {:<20} {}",
-                    display::format_address(&wr.id),
+                    display::format_address_full(&wr.id),
                     wr.btc_amount,
                     status,
-                    display::format_address(&wr.requester_address),
+                    display::format_address_full(&wr.requester_address),
                     display::format_timestamp(wr.timestamp_ms)
                 );
             }
@@ -285,7 +285,7 @@ async fn list(config: &CliConfig) -> Result<()> {
                 };
                 println!(
                     "  txid: {}  status: {}  requests: {}",
-                    &txid.to_string()[..16],
+                    txid,
                     status,
                     pw.request_ids().len()
                 );
