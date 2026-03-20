@@ -883,21 +883,17 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<DkgOutput> {
-        let mut certified_share_indices: Vec<ShareIndex> = {
-            let mgr = mpc_manager.read().unwrap();
+        // Clear pre-populated rotation outputs from the dealer phase RPC handler.
+        // The party phase must build the certified set from TOB certificates only.
+        {
+            let mut mgr = mpc_manager.write().unwrap();
             mgr.dealer_outputs
-                .keys()
-                .filter_map(|k| match k {
-                    DealerOutputsKey::Rotation(idx) => Some(*idx),
-                    DealerOutputsKey::Dkg(_) => None,
-                })
-                .collect()
-        };
+                .retain(|k, _| !matches!(k, DealerOutputsKey::Rotation(_)));
+        }
+        let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
         tracing::info!(
-            "run_key_rotation_as_party: pre-populated {} share indices from dealer_outputs: {:?}, \
+            "run_key_rotation_as_party: starting with 0 share indices (cleared pre-populated), \
              threshold={}",
-            certified_share_indices.len(),
-            certified_share_indices,
             previous.threshold,
         );
         let mut certified_dealers = HashSet::new();
