@@ -741,8 +741,7 @@ mod tests {
         // Exhaust all presigs on every node.
         for node in networks.hashi_network.nodes() {
             let sm = node.hashi().signing_manager();
-            let pool_size = sm.read().unwrap().initial_presig_count();
-            sm.write().unwrap().skip_consumed_presigs(pool_size);
+            sm.write().unwrap().clear_presig_pool();
         }
 
         // Submit withdrawal — the leader will fail MPC signing (`PoolExhausted`),
@@ -827,15 +826,14 @@ mod tests {
             .await?;
         }
 
-        // Desync each node's presig index by a unique amount.
-        // With 4 unique offsets, every node uses a different nonce,
-        // guaranteeing `TooManyInvalidSignatures` on all nodes.
-        for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+        // Corrupt each node's presig pool to simulate desync.
+        // Clear the pool so signing fails with PoolExhausted, triggering recovery.
+        for node in networks.hashi_network.nodes() {
             node.hashi()
                 .signing_manager()
                 .write()
                 .unwrap()
-                .skip_consumed_presigs(i + 1);
+                .clear_presig_pool();
         }
 
         // Second deposit + withdrawal. The leader's first signing attempts

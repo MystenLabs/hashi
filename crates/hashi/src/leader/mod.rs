@@ -736,6 +736,16 @@ impl LeaderService {
     }
 
     async fn process_unsigned_pending_withdrawal(&self, pending: &PendingWithdrawal) {
+        let current_epoch = self.inner.onchain_state().epoch();
+        if pending.epoch != current_epoch {
+            tracing::debug!(
+                pending_withdrawal_id = %pending.id,
+                "Skipping pending withdrawal with stale epoch {} (current is {current_epoch})",
+                pending.epoch,
+            );
+            return;
+        }
+
         info!(pending_withdrawal_id = %pending.id, "MPC signing pending withdrawal");
 
         let members = self

@@ -617,6 +617,8 @@ pub struct PendingWithdrawal {
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
+    pub presig_start_index: u64,
+    pub epoch: u64,
 }
 
 impl PendingWithdrawal {

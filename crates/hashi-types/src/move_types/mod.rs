@@ -213,6 +213,7 @@ pub struct DepositRequestQueue {
 pub struct WithdrawalRequestQueue {
     pub requests: Bag,
     pub pending_withdrawals: Bag,
+    pub pending_withdrawal_ids: Vec<Address>,
     pub num_consumed_presigs: u64,
 }
 
@@ -247,6 +248,8 @@ pub struct PendingWithdrawal {
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     pub signatures: Option<Vec<Vec<u8>>>,
+    pub presig_start_index: u64,
+    pub epoch: u64,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.

@@ -26,6 +26,8 @@ const EOutputCountMismatch: vector<u8> =
 public struct WithdrawalRequestQueue has store {
     requests: Bag,
     pending_withdrawals: Bag,
+    /// Tracks pending withdrawal IDs for iteration (Bag doesn't support iteration).
+    pending_withdrawal_ids: vector<address>,
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
     num_consumed_presigs: u64,
@@ -56,6 +58,13 @@ public struct PendingWithdrawal has store {
     timestamp_ms: u64,
     randomness: vector<u8>,
     signatures: Option<vector<vector<u8>>>,
+    /// Global presignature start index assigned at construction time.
+    /// Input `i` uses presig at index `presig_start_index + i`.
+    presig_start_index: u64,
+    /// Epoch when this withdrawal was committed. Used to detect stale
+    /// presig assignments after reconfig — signing code must check
+    /// epoch matches current epoch to prevent nonce reuse.
+    epoch: u64,
 }
 
 public struct OutputUtxo has copy, drop, store {
@@ -100,6 +109,8 @@ public(package) fun new_pending_withdrawal(
     inputs: vector<Utxo>,
     mut outputs: vector<OutputUtxo>,
     txid: address,
+    presig_start_index: u64,
+    epoch: u64,
     config: &Config,
     clock: &Clock,
     randomness: vector<u8>,
@@ -167,6 +178,8 @@ public(package) fun new_pending_withdrawal(
         timestamp_ms: clock.timestamp_ms(),
         randomness,
         signatures: option::none(),
+        presig_start_index,
+        epoch,
     }
 }
 
@@ -204,13 +217,16 @@ public(package) fun insert_pending_withdrawal(
     self: &mut WithdrawalRequestQueue,
     pending: PendingWithdrawal,
 ) {
-    self.pending_withdrawals.add(pending.id, pending)
+    self.pending_withdrawal_ids.push_back(pending.id);
+    self.pending_withdrawals.add(pending.id, pending);
 }
 
 public(package) fun remove_pending_withdrawal(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
 ): PendingWithdrawal {
+    let (_, idx) = self.pending_withdrawal_ids.index_of(&withdrawal_id);
+    self.pending_withdrawal_ids.remove(idx);
     self.pending_withdrawals.remove(withdrawal_id)
 }
 
@@ -228,6 +244,7 @@ public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
     WithdrawalRequestQueue {
         requests: sui::bag::new(ctx),
         pending_withdrawals: sui::bag::new(ctx),
+        pending_withdrawal_ids: vector[],
         num_consumed_presigs: 0,
     }
 }
@@ -242,6 +259,22 @@ public(package) fun increment_num_consumed_presigs(self: &mut WithdrawalRequestQ
 
 public(package) fun reset_num_consumed_presigs(self: &mut WithdrawalRequestQueue) {
     self.num_consumed_presigs = 0;
+}
+
+/// Reassign presig indices for all pending withdrawals during reconfig.
+/// Called after resetting num_consumed_presigs to 0. Each pending withdrawal
+/// gets new indices from the fresh counter, ensuring no overlap with new
+/// withdrawals in the new epoch.
+public(package) fun reassign_pending_presigs(self: &mut WithdrawalRequestQueue, epoch: u64) {
+    let ids = self.pending_withdrawal_ids;
+    ids.do!(|id| {
+        let mut pending: PendingWithdrawal = self.pending_withdrawals.remove(id);
+        let num_inputs = pending.inputs.length();
+        pending.presig_start_index = self.num_consumed_presigs;
+        pending.epoch = epoch;
+        self.num_consumed_presigs = self.num_consumed_presigs + num_inputs;
+        self.pending_withdrawals.add(pending.id, pending);
+    });
 }
 
 public(package) fun request_into_parts(
@@ -263,6 +296,8 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<
         timestamp_ms: _,
         randomness: _,
         signatures: _,
+        presig_start_index: _,
+        epoch: _,
     } = self;
 
     inputs.destroy!(|utxo| {
@@ -366,6 +401,8 @@ public(package) fun new_pending_withdrawal_for_testing(
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signatures: option::none(),
+        presig_start_index: 0,
+        epoch: 0,
     }
 }
 

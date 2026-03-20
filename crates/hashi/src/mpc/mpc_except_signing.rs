@@ -3046,9 +3046,9 @@ mod tests {
     use fastcrypto::encoding::Encoding;
     use fastcrypto::encoding::Hex;
     use fastcrypto::groups::Scalar;
-    use fastcrypto::random_oracle::RandomOracle;
     use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
     use fastcrypto_tbls::polynomial::Poly;
+    use fastcrypto_tbls::random_oracle::RandomOracle;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;

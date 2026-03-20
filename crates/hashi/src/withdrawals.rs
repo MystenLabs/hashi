@@ -512,11 +512,13 @@ impl Hashi {
                 .get(input_index)
                 .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
             let sign_start = std::time::Instant::now();
+            let global_presig_index = pending.presig_start_index + input_index as u64;
             let sign_result = SigningManager::sign(
                 &signing_manager,
                 &p2p_channel,
                 request_id,
                 message,
+                global_presig_index,
                 &beacon,
                 derivation_address.as_ref(),
                 WITHDRAWAL_SIGNING_TIMEOUT,
