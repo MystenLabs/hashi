@@ -893,6 +893,13 @@ impl MpcManager {
                 })
                 .collect()
         };
+        tracing::info!(
+            "run_key_rotation_as_party: pre-populated {} share indices from dealer_outputs: {:?}, \
+             threshold={}",
+            certified_share_indices.len(),
+            certified_share_indices,
+            previous.threshold,
+        );
         let mut certified_dealers = HashSet::new();
         loop {
             if certified_share_indices.len() >= previous.threshold as usize {
@@ -1559,7 +1566,15 @@ impl MpcManager {
         certified_dealers: impl Iterator<Item = Address>,
     ) -> MpcResult<DkgOutput> {
         let threshold = self.dkg_config.threshold;
+        let certified_dealers: Vec<Address> = certified_dealers.collect();
+        tracing::info!(
+            "complete_dkg: {} certified dealers={:?}, dealer_outputs has {} entries",
+            certified_dealers.len(),
+            certified_dealers,
+            self.dealer_outputs.len(),
+        );
         let outputs: HashMap<PartyId, avss::PartialOutput> = certified_dealers
+            .into_iter()
             .map(|dealer| {
                 let dealer_party_id = self
                     .committee
@@ -1582,6 +1597,7 @@ impl MpcManager {
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
+        tracing::info!("complete_dkg: result vk={:?}", combined_output.vk);
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
@@ -2366,6 +2382,13 @@ impl MpcManager {
         certified_share_indices: &[ShareIndex],
     ) -> MpcResult<DkgOutput> {
         let threshold = previous_dkg_output.threshold;
+        tracing::info!(
+            "complete_key_rotation: {} certified_share_indices={:?}, \
+             previous_vk={:?}, threshold={threshold}",
+            certified_share_indices.len(),
+            certified_share_indices,
+            previous_dkg_output.public_key,
+        );
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
             .take(threshold as usize)
@@ -2392,6 +2415,11 @@ impl MpcManager {
             &indexed_outputs,
         )
         .expect(EXPECT_THRESHOLD_MET);
+        tracing::info!(
+            "complete_key_rotation: result vk={:?}, matches_previous={}",
+            combined.vk,
+            combined.vk == previous_dkg_output.public_key,
+        );
         if combined.vk != previous_dkg_output.public_key {
             return Err(MpcError::ProtocolFailed(
                 "Key rotation produced different public key".into(),
@@ -2517,9 +2545,20 @@ impl MpcManager {
                 got: dealer_weight_sum as usize,
             });
         }
+        let dealer_ids: Vec<_> = outputs.keys().copied().collect();
+        tracing::info!(
+            "reconstruct_from_dkg_certificates: {} dealers (party_ids={:?}), \
+             dealer_weight_sum={dealer_weight_sum}, threshold={previous_threshold}",
+            dealer_ids.len(),
+            dealer_ids,
+        );
         let combined_output =
             avss::ReceiverOutput::complete_dkg(previous_threshold, &previous_nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
+        tracing::info!(
+            "reconstruct_from_dkg_certificates: result vk={:?}",
+            combined_output.vk,
+        );
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
@@ -2633,6 +2672,13 @@ impl MpcManager {
                 })
             })
             .collect::<Result<_, MpcError>>()?;
+        let used_indices: Vec<_> = indexed_outputs.iter().map(|o| o.index).collect();
+        tracing::info!(
+            "reconstruct_from_rotation_certificates: {} share_indices={:?}, \
+             threshold={previous_threshold}",
+            used_indices.len(),
+            used_indices,
+        );
         let combined = avss::ReceiverOutput::complete_key_rotation(
             previous_threshold,
             previous_party_id,
@@ -2640,6 +2686,10 @@ impl MpcManager {
             &indexed_outputs,
         )
         .expect(EXPECT_THRESHOLD_MET);
+        tracing::info!(
+            "reconstruct_from_rotation_certificates: result vk={:?}",
+            combined.vk,
+        );
         Ok(DkgOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
@@ -2754,6 +2804,11 @@ impl MpcManager {
                 threshold,
             }
         };
+        tracing::info!(
+            "prepare_previous_output: is_member_of_previous_committee={is_member_of_previous_committee}, \
+             previous_vk={:?}",
+            previous.public_key,
+        );
         Ok((previous, is_member_of_previous_committee))
     }
 

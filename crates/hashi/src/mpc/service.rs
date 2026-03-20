@@ -261,7 +261,13 @@ impl MpcService {
             .fetch_certs(epoch, None)
             .await?
             .map(|(pt, _)| pt);
-        match protocol_type {
+        let onchain_mpc_key = onchain_state.mpc_public_key();
+        info!(
+            "recover_mpc_state: epoch={epoch}, protocol_type={protocol_type:?}, \
+             onchain_mpc_key_len={}",
+            onchain_mpc_key.len(),
+        );
+        let output = match protocol_type {
             Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
                 self.setup_key_rotation(epoch)?;
                 self.run_key_rotation(epoch).await
@@ -270,7 +276,9 @@ impl MpcService {
                 self.setup_initial_dkg(epoch)?;
                 self.run_dkg(epoch).await
             }
-        }
+        }?;
+        info!("recover_mpc_state: recovered vk={:?}", output.public_key,);
+        Ok(output)
     }
 
     async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
