@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConfigValue","ProposalType"],"struct":["Coin","CommitteeSet","Config","DepositRequest","DepositRequestQueue","Hashi","MemberInfo","MetadataCap","OutputUtxo","PendingWithdrawal","Proposal","Proposals","Treasury","TreasuryCap","UpgradeCap","Utxo","UtxoId","UtxoPool","WithdrawalRequest","WithdrawalRequestInfo","WithdrawalRequestQueue"]};

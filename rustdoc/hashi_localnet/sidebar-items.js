@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Commands","KeygenCommands"],"fn":["cli_config_path","cmd_deposit","cmd_faucet_btc","cmd_faucet_sui","cmd_info","cmd_keygen","cmd_mine","cmd_start","cmd_status","cmd_stop","main","print_connection_details","print_info","print_success","print_warning","write_cli_config"],"struct":["Cli","LocalnetOpts","LocalnetState"]};

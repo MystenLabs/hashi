@@ -1,0 +1,1241 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>hashi</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="custom-b5e46735.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-de28791b.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-29793ec6.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">hashi</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="overview"><a class="header" href="#overview">Overview</a></h1>
+<p>This is a high level overview and design doc for <code>hashi</code> the Sui native Bitcoin
+orchestrator. This is intended to be a living document that should be updated
+as new decisions and features are made with the goal of this being a canonical
+description for how hashi is designed and operates.</p>
+<p>At a high level <code>hashi</code> is a protocol for securing and managing BTC for use on
+the Sui blockchain leveraging threshold cryptography.</p>
+<p>The first feature that hashi supports is the ability to deposit and withdrawal
+BTC to a managed pool with ownership represented as a fungible <code>Coin&lt;BTC&gt;</code> on
+Sui.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="user-flows"><a class="header" href="#user-flows">User Flows</a></h1>
+<p>There are two main user flows for interacting with <code>hashi</code>, deposits and
+withdrawals.</p>
+<h2 id="deposit-flow"><a class="header" href="#deposit-flow">Deposit Flow</a></h2>
+<p>In order for a user to leverage their <code>BTC</code> on Sui (e.g. as collateral for a
+loan), they’ll need to deposit the <code>BTC</code> they want to leverage to a hashi mpc
+controlled bitcoin address.</p>
+<div style="zoom: 1.5;">
+<pre class="mermaid">---
+title: Deposit Flow
+config:
+  sequence:
+    diagramMarginX: 0
+---
+sequenceDiagram
+    autonumber
+
+    participant User
+    participant Hashi as Sui / Hashi
+    participant Bitcoin
+
+    User    -&gt;&gt;     Bitcoin:    Deposit native BTC
+    User    -&gt;&gt;     Hashi:      Notify hashi of deposit
+    Hashi   -&gt;&gt;     Bitcoin:    Query for deposit
+    Hashi   -&gt;&gt;     Hashi:      Quorum agreement on deposit
+    Hashi   -&gt;&gt;     User:       hBTC sent to User
+</pre>
+
+</div>
+
+<h3 id="btc-deposit-address"><a class="header" href="#btc-deposit-address">BTC deposit address</a></h3>
+<p>Every Sui address has its own unique Hashi Bitcoin deposit address. See
+<a href="#bitcoin-address-scheme">address scheme</a> for the full derivation details.</p>
+<h3 id="deposit"><a class="header" href="#deposit">Deposit</a></h3>
+<p>Once a user’s deposit address has been determined, they can initiate a deposit to
+hashi.</p>
+<ol>
+<li>Broadcast a Bitcoin transaction depositing <code>BTC</code> into the user’s unique
+deposit address.</li>
+<li>Notify hashi of the deposit by submitting a transaction to Sui including the
+deposit transaction id.</li>
+<li>Hashi nodes will query Bitcoin and watch for confirmation of the deposit
+transaction.</li>
+<li>Hashi nodes communicate, waiting till a quorum has confirmed the deposit
+(after X block confirmations).</li>
+<li>Hashi confirms the deposit on chain, minting the equivalent amount of <code>hBTC</code>
+and transferring it to the user’s Sui address. The user can then immediately
+use the <code>hBTC</code> to interact with a defi protocol to, for example, leverage the
+<code>hBTC</code> as collateral for a loan in <code>USDC</code>.</li>
+</ol>
+<p>For a detailed breakdown of each phase, see <a href="#deposit-1">deposit</a>.</p>
+<h2 id="withdraw-flow"><a class="header" href="#withdraw-flow">Withdraw Flow</a></h2>
+<p>Once a user has decided they want their <code>BTC</code> back on Bitcoin (e.g. they’ve paid
+off their loan) they can initiate a withdrawal.</p>
+<div style="zoom: 1.5;">
+<pre class="mermaid">---
+title: Withdraw Flow
+config:
+  sequence:
+    diagramMarginX: 0
+---
+sequenceDiagram
+    autonumber
+
+    participant User
+    participant Hashi as Sui / Hashi
+    participant Bitcoin
+
+    User    -&gt;&gt;     Hashi:   Request withdrawal
+    Hashi   -&gt;&gt;     Hashi:   Craft and sign Bitcoin transaction using MPC
+    Hashi   -&gt;&gt;     Bitcoin: Broadcast transaction
+</pre>
+
+</div>
+
+<h3 id="withdraw"><a class="header" href="#withdraw">Withdraw</a></h3>
+<ol>
+<li>User sends a transaction to Sui with the amount of <code>hBTC</code> they would like to
+withdraw and the Bitcoin address they want to withdraw to.</li>
+<li>Hashi will pick up the withdrawal request and will craft a bitcoin
+transaction that sends the requested <code>BTC</code> (minus fees) to the provided
+Bitcoin address and uses MPC to sign the transaction.</li>
+<li>The transaction is broadcast to the Bitcoin network.</li>
+</ol>
+<p>For a detailed breakdown of each phase, see <a href="#withdraw-1">withdraw</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="committee"><a class="header" href="#committee">Committee</a></h1>
+<p>Hashi is intended to be “native”, meaning the expectation is that the members
+of the hashi committee are a subset of the Sui validators. Being a member of
+the hashi committee is restricted to members of Sui’s validator set but is
+essentially optional as it requires a separate on-chain registration and
+running extra services. In practice we expect the % of Sui validators who are
+members of the hashi committee to be &gt;90%.</p>
+<h2 id="registration-info"><a class="header" href="#registration-info">Registration Info</a></h2>
+<p>Each Sui validator will need to register themselves before they’ll be able to
+join the hashi committee. Each committee member will need to provide the
+following additional information:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>struct HashiNodeInfo {
+    /// Sui Validator Address of this node
+    validator_address: address,
+
+    /// Sui Address of an operations account 
+    operator_address: address,
+
+    /// bls12381 public key to be used in the next epoch.
+    ///
+    /// This public key can be rotated but will only take effect at the
+    /// beginning of the next epoch.
+    next_epoch_public_key: Element&lt;UncompressedG1&gt;,
+
+    /// The publicly reachable URL where the `hashi` service for this validator
+    /// can be reached.
+    ///
+    /// This URL can be rotated and any such updates will take effect
+    /// immediately.
+    endpoint_url: String,
+
+    /// ed25519 public key used to verify TLS self-signed x509 certs
+    ///
+    /// This public key can be rotated and any such updates will take effect
+    /// immediately.
+    tls_public_key: vector&lt;u8&gt;,
+}
+<span class="boring">}</span></code></pre>
+<p>The voting weight each validator possesses will be mirrored from the
+<code>SuiSystemState</code>.</p>
+<h2 id="why-is-the-committee-not-exactly-the-set-of-sui-validators"><a class="header" href="#why-is-the-committee-not-exactly-the-set-of-sui-validators">Why is the committee not exactly the set of Sui Validators?</a></h2>
+<p>Above it’s mentioned that the hashi committee is a subset of the Sui Validators
+instead of being strictly the same set. There are a few challenges with forcing
+these sets to be identical:</p>
+<ul>
+<li>Being a member of the committee is strictly optional since hashi’s system
+state is separate from sui’s system state. When someone registers to become a
+Sui Validator the set of metadata (public keys, network addresses, etc) they
+are required to submit only includes information necessary for running the
+<code>sui-node</code> validator service. Without changes, there is no way of preventing
+a new validator from becoming a validator without also registering to join
+the hashi committee.</li>
+<li>If we enforce tight coupling we’d likely need to change sui’s epoch
+change/reconfiguration process in a few ways:
+<ul>
+<li>Given the mpc hand-off protocol takes non-trivial amount of time to
+execute, the new set of validators would need to be locked-in some time
+period before the closing of the epoch to give the mpc committee time to
+reconfigure and</li>
+<li>We’d need to block Sui’s epoch change and reconfiguration on successful
+reconfiguration of the mpc committee.</li>
+</ul>
+</li>
+</ul>
+<p>Addressing any of the above would require deep changes to sui’s reconfiguration
+process some of which would be directly opposed by the core team and regardless
+would take a significant amount of time itself to implement correctly.</p>
+<p>The one downside of not having tight coupling is needing to handle the hand-off
+from an old committee to a newer committee as it would require that 2f+1
+stake-weighted members of the old committee are alive and willing to
+participate in the hand-off protocol. This design makes this assumption given
+the challenges we’d need to overcome to enforce tight coupling and we can
+likely find some other economic mechanism for motivating older committee
+members in participating in the hand-off process.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="governance-actions"><a class="header" href="#governance-actions">Governance Actions</a></h1>
+<p>Governance actions are all defined by their own unique <code>Proposal&lt;T&gt;</code> type.
+Proposals are used to adjust protocol parameters, pause or unpause operations,
+or perform sensitive operations like package upgrades. Only members of the
+current hashi committee are able to create proposals. Each proposal type will
+have its own threshold which will need to be reached by a quorum of validators
+voting in support of the proposal.</p>
+<p>The following is the current set of available proposal types:</p>
+<h3 id="upgrade"><a class="header" href="#upgrade"><code>Upgrade</code></a></h3>
+<p>Authorizes a package upgrade.</p>
+<h3 id="enableversion"><a class="header" href="#enableversion"><code>EnableVersion</code></a></h3>
+<p>Re-enables a previously disabled package version, allowing it to be used by the
+protocol again.</p>
+<h3 id="disableversion"><a class="header" href="#disableversion"><code>DisableVersion</code></a></h3>
+<p>Disables a package version, preventing it from being used. The currently active
+version cannot be disabled to avoid bricking the protocol.</p>
+<h3 id="updateconfig"><a class="header" href="#updateconfig"><code>UpdateConfig</code></a></h3>
+<p>Updates a protocol configuration parameter by key. Supports any config
+key-value pair (e.g. deposit fee, rate limits).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="handling-sanctioned-addresses"><a class="header" href="#handling-sanctioned-addresses">Handling Sanctioned Addresses</a></h1>
+<p>The decision to facilitate a transaction from/to bitcoin must take into account
+sanctioned addresses.</p>
+<h2 id="checking-if-an-address-is-sanctioned"><a class="header" href="#checking-if-an-address-is-sanctioned">Checking if an Address is Sanctioned</a></h2>
+<p>Each member of the committee may have different risk tolerances or policies for
+which set of addresses they don’t want to serve. In order to accommodate
+different validator preferences the hashi node software will have a
+configurable mechanism for it determining if servicing a particular address
+should be denied.</p>
+<p>In order to enable custom policies, the hashi node software supports
+configuration of a transaction screening endpoint defined by the gRPC service
+in
+<a href="https://github.com/MystenLabs/hashi/blob/main/crates/hashi-types/proto/sui/hashi/v1alpha/screener_service.proto"><code>screener_service.proto</code></a></p>
+<p>One benefit of this interface is the ability for the service to be arbitrarily
+simple, by checking a predefined sanctions list like this one
+<a href="https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses/blob/lists/sanctioned_addresses_XBT.txt">here</a>,
+or allow for making calls to third-party risk services like TRM labs or
+chainalysis.</p>
+<h2 id="when-are-sanctions-checks-applied"><a class="header" href="#when-are-sanctions-checks-applied">When are sanctions checks applied</a></h2>
+<p><strong>Deposits</strong>: When a user submits a Deposit request, their request sits
+in a queue or waiting room till the validators vote on accepting that deposit
+and minting an appropriate amount of <code>hBTC</code>. Sanctions checking will happen at
+the time a validator is deciding to vote for accepting a deposit. If a
+validator decides that it doesn’t want to service that deposit, it will not
+vote for it and will simply ignore that the deposit exists. If a quorum decides
+to accept a deposit that a particular validator did not want to accept, per
+protocol it will need to recognize (and subsequently make use of in the future)
+the deposited BTC.</p>
+<p><strong>Withdrawals</strong>: When a user submits a Withdraw request, their request sits in
+a queue or waiting room till the validators picks it up for processing. Before
+selecting a request for processing the validators will vote on approving the
+request. One of the required checks as a part of voting for approval is
+performing sanctions checking. Once a quorum of validators has voted to approve
+a request, it can be picked up for processing. If a quorum decides to approve a
+request for processing, per protocol all validators will be required to assist
+in driving the request to completion.</p>
+<h2 id="tainted-utxos"><a class="header" href="#tainted-utxos">Tainted UTXOs</a></h2>
+<p>While we intend to have a rigorous implementation of sanctions enforcement, it
+is ultimately best-effort. A quorum of validators may accept a deposit that one
+validator may have preferred to not accept, or a previous committee accepted a
+deposit that the current committee may have rejected. In either case, once a
+UTXO has been accepted into hashi’s pool, the protocol treats it as its own and
+it must be able to be used during coin selection to process withdraw requests.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="service"><a class="header" href="#service">Service</a></h1>
+<p>Every committee member will be responsible for running a hashi node service.
+Each hashi node will expose an http service, secured by TLS leveraging a
+self-signed cert (ed25519 public key can be found in the Hashi System State
+object) which will serve a gRPC <code>HashiService</code>.</p>
+<h2 id="sui-contracts"><a class="header" href="#sui-contracts">Sui Contracts</a></h2>
+<ul>
+<li>The hashi move package(s) will be published as normal packages. In other
+words, the hashi packages will <em>not</em> be system packages and will <em>not</em> be a
+part of sui’s framework.</li>
+</ul>
+<h2 id="stateless"><a class="header" href="#stateless">Stateless</a></h2>
+<p>A main goal of this design is to make the hashi service as stateless as
+possible. Outside of any cryptographic material required for participating in
+the protocol, any state critical for the functioning of the service must be
+stored on Sui as a part of the live object set and knowledge of any historical
+transactions or events previously emitted must not be needed for correct
+operations of the service.</p>
+<p>The set of data structures and state that are kept on chain are as follows:</p>
+<pre class="mermaid">block-beta
+  columns 1
+
+  block
+    committee
+    config
+  end
+
+  pool["UTXO pool"]
+
+  block
+    gov["Governance Requests"]
+    deposits["Deposit Request Queue"]
+    withdrawals["Withdrawal Request Queue"]
+  end
+
+  broadcast["Ordered broadcast channel"]
+</pre>
+
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="mpc-protocol"><a class="header" href="#mpc-protocol">MPC Protocol</a></h1>
+<p>Sui validators use several MPC protocols for realizing a threshold schnorr
+signer: Distributed Key Generation for generating a key, Key Rotation for
+redistributing the key on committee changes, and a distributed signing protocol
+for signing transactions. Those protocols are parametrized by two parameters,
+<code>f</code> and <code>t</code>, such that hashi can operate as long as <code>&lt;f</code> of the staking power
+is not responsive (“liveness”), and is secure as long as <code>&lt;t</code> of the staking
+power is colluding. In the first version of hashi we expect <code>t</code> to be in the
+range of 33%-50% and <code>f</code> in the range of 20%-33%. Those values may increase in
+future versions of hashi. The protocols are based on prior published work,
+modified and improved by our crypto team.</p>
+<p>In addition to the MPC signer, hashi will also use a second signer implemented
+with a cloud enclave that enforces policies independently of the MPC protocols,
+reducing the risk of collusion or supply chain attacks.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="guardian"><a class="header" href="#guardian">Guardian</a></h1>
+<p>In order to protect against vulnerabilities as well as against malicious past
+committees, hashi will make use of a withdrawal guardian, which is a second
+signatory on the managed Bitcoin deposits. All deposits will only be spendable
+with a 2-of-2 multisig with the guardian as one party and the hashi MPC
+committee as the other.</p>
+<p>Additional details around the guardian integration will be added before
+testnet.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="bitcoin-address-scheme"><a class="header" href="#bitcoin-address-scheme">Bitcoin address scheme</a></h1>
+<p>Every Sui address has its own unique Hashi Bitcoin deposit address, this allows
+hashi a lightweight way to know which address on sui to credit for a deposit.
+All Hashi deposit addresses are <code>P2TR</code> (Pay-to-Taproot) where the 2-of-2 multisig
+script between Hashi and the Guardian is encoded as the sole leaf in the
+Taproot tree.</p>
+<p>The exact <a href="https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md">descriptor</a>
+is:</p>
+<pre><code>tr({i}, multi_a(2, {g}, {h}))
+</code></pre>
+<p>where:</p>
+<ul>
+<li><code>H</code> is the base Hashi MPC public key and can be found on-chain.</li>
+<li><code>h = derive(H, d)</code> – the child public key derived from <code>H</code> using
+derivation path <code>d</code> (the depositor’s Sui address)</li>
+<li><code>g</code> is the guardian’s fixed public key</li>
+<li><code>i</code> is the NUMS (nothing-up-my-sleeve) internal key defined in BIP-341
+(<code>50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0</code>)
+with no known private key, ensuring all spends occur via the script path</li>
+</ul>
+<p>The key derivation is not BIP-32. It is a purpose-built unhardened derivation
+over secp256k1, keyed by the Sui address, giving each depositor a unique
+Bitcoin address while the master signing key remains shared across the MPC
+committee.</p>
+<blockquote>
+<p><strong>Note:</strong> for <code>devnet</code> the deposit address omits the guardian key and uses a
+single-key script path:</p>
+<pre><code>tr({i}, pk({h}))
+</code></pre>
+</blockquote>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="rate-limiting-withdrawals"><a class="header" href="#rate-limiting-withdrawals">Rate Limiting Withdrawals</a></h1>
+<p>In order to protect against vulnerabilities or other exceptional scenarios,
+hashi will implement a Rate Limiter on out flows via the Guardian.</p>
+<p>The limit will be a configurable value denominated in <code>BTC</code> and implemented as
+a token bucket rate limiter, that is capacity will be replenished continuously
+over a fixed duration.</p>
+<p>When a user wishes to withdraw their <code>BTC</code> back to Bitcoin, they initiate a
+withdraw request. All withdraw requests are tagged with a timestamp of when
+the request was made and placed in a queue to wait for hashi to process the
+withdrawal.</p>
+<p>In order to process a withdrawal request hashi will select a request from the
+queue and perform a number of checks, one of which is communicating with the
+Guardian to ensure there is sufficient capacity for the request. If all checks
+are satisfied and there is capacity, hashi will work with the Guardian to sign
+and broadcast a Bitcoin transaction to satisfy the request.</p>
+<p>When a withdraw request comes in and it would exceed the rate limit, hashi will
+wait to process it until sufficient capacity is replenished.</p>
+<p>Withdrawals will generally be processed in FIFO order, but this is not a strict
+requirement and there are some scenarios where they may be processed out of
+order.</p>
+<p>User withdrawal requests can be canceled, by the Sui address that initiated
+them, anytime prior to hashi selecting a request for processing.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="fees"><a class="header" href="#fees">Fees</a></h1>
+<p>Hashi charges two kinds of fees: a flat <strong>deposit fee</strong> paid in <code>SUI</code>, and
+a <strong>withdrawal fee</strong> paid in <code>BTC</code>. Both are governance-configurable. In
+addition to the protocol fee, every withdrawal absorbs the Bitcoin
+<strong>miner fee</strong> required to get the transaction confirmed on-chain.</p>
+<h2 id="deposit-fee"><a class="header" href="#deposit-fee">Deposit fee</a></h2>
+<p>Deposits pay a flat <code>SUI</code> fee at request time (<code>deposit_fee</code> config key,
+initially <code>0 SUI</code>). The fee must match exactly; it is transferred to
+the Hashi balance on Sui. Deposits must also meet the dust minimum
+(<code>546 sats</code>) to avoid creating unspendable UTXOs on Bitcoin.</p>
+<h2 id="withdrawal-fees"><a class="header" href="#withdrawal-fees">Withdrawal fees</a></h2>
+<p>Withdrawal fees have two components that serve different purposes:</p>
+<ol>
+<li>
+<p><strong>Protocol fee</strong> (<code>withdrawal_fee_btc</code>, initially <code>546 sats</code>) – a
+flat <code>BTC</code> amount deducted upfront when the user submits a withdrawal
+request. This fee is non-refundable and goes to the Hashi treasury.
+It covers protocol operating costs and deters spam. The floor is
+the dust relay minimum (<code>546 sats</code>) to prevent misconfiguration.</p>
+</li>
+<li>
+<p><strong>Miner fee</strong> – the actual Bitcoin transaction fee required for
+on-chain confirmation. This is not a fixed value; it depends on the
+current network fee rate and the transaction’s weight. The user
+pays this fee through a reduction in their withdrawal output
+amount.</p>
+</li>
+</ol>
+<h3 id="why-the-user-pays-the-miner-fee"><a class="header" href="#why-the-user-pays-the-miner-fee">Why the user pays the miner fee</a></h3>
+<p>The UTXO pool belongs to the protocol. If the pool absorbed miner fees,
+every withdrawal would shrink the pool by more than the withdrawn
+amount, effectively socializing costs across all future users. Shifting
+the miner fee to the withdrawing user keeps the pool whole: the
+invariant <code>input_total = user_output + change</code> holds, so the change
+output that returns to the pool is undiminished.</p>
+<h3 id="withdrawal-minimum"><a class="header" href="#withdrawal-minimum">Withdrawal minimum</a></h3>
+<p>The protocol enforces a minimum withdrawal amount to guarantee
+that every request can produce a valid Bitcoin transaction even under
+worst-case fee conditions:</p>
+<pre><code>withdrawal_minimum = withdrawal_fee_btc
+                   + worst_case_network_fee
+                   + DUST_RELAY_MIN_VALUE
+</code></pre>
+<ul>
+<li><code>withdrawal_fee_btc</code> is the protocol fee deducted upfront.</li>
+<li><code>worst_case_network_fee</code> is the maximum miner fee the protocol would
+ever charge (see below).</li>
+<li><code>DUST_RELAY_MIN_VALUE</code> (<code>546 sats</code>) ensures the user’s output remains
+above Bitcoin’s dust threshold after all deductions.</li>
+</ul>
+<p>This means a user who withdraws exactly the minimum will, in the worst
+case, receive a <code>546 sats</code> output. In practice, actual miner fees are
+usually well below the worst case, so the user receives more.</p>
+<h2 id="fee-rate-estimation"><a class="header" href="#fee-rate-estimation">Fee rate estimation</a></h2>
+<p>Hashi obtains the current fee rate from the connected Bitcoin Core
+node via <code>estimatesmartfee</code>, targeting confirmation within 3 blocks
+(~30 minutes).</p>
+<p>The estimated fee rate is then capped at the governance-configured
+<code>max_fee_rate</code> (initially <code>25 sat/vB</code>). This cap serves two purposes:</p>
+<ul>
+<li>It bounds the miner fee the user can be charged, ensuring it stays
+within the worst-case budget the Move contract computed at request
+time.</li>
+<li>It prevents a single fee spike from producing unexpectedly expensive
+withdrawals.</li>
+</ul>
+<h2 id="worst-case-network-fee"><a class="header" href="#worst-case-network-fee">Worst-case network fee</a></h2>
+<p>Every withdrawal is required to cover not just its own on-chain
+footprint but also a share of UTXO pool maintenance. At minimum, a
+withdrawal must pay for the fixed transaction overhead, its own
+recipient output, and a change output back to the pool. On top of
+that, the protocol requires each withdrawal to budget for up to
+<code>input_budget</code> input weights. This headroom allows the coin selector to
+consolidate many small UTXOs into fewer large ones during normal
+withdrawal traffic – a form of opportunistic UTXO smashing that keeps
+the pool healthy without requiring dedicated consolidation
+transactions.</p>
+<p>The Move contract and the Rust validator both compute this worst-case
+miner fee using conservative transaction size estimates:</p>
+<pre><code>tx_vbytes    = TX_FIXED_VB + (input_budget * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB)
+network_fee  = max_fee_rate * tx_vbytes
+</code></pre>
+<p>The constants assume a taproot script-path 2-of-2 spend (the heaviest
+input type Hashi uses):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Constant</th><th>Value</th><th>Rationale</th></tr>
+</thead>
+<tbody>
+<tr><td><code>TX_FIXED_VB</code></td><td><code>11 vB</code></td><td>nVersion (4) + nLockTime (4) + varint counts (3)</td></tr>
+<tr><td><code>INPUT_VB</code></td><td><code>100 vB</code></td><td>2-of-2 taproot script-path input (398 WU / 4)</td></tr>
+<tr><td><code>OUTPUT_VB</code></td><td><code>43 vB</code></td><td>P2TR output (172 WU / 4)</td></tr>
+<tr><td><code>OUTPUT_BUDGET</code></td><td><code>2</code></td><td>One recipient output + one change output</td></tr>
+<tr><td><code>input_budget</code></td><td><code>10</code></td><td>Per-request worst case, governance-configurable</td></tr>
+<tr><td><code>max_fee_rate</code></td><td><code>25 sat/vB</code></td><td>Governance-configurable (initially 25)</td></tr>
+</tbody>
+</table>
+</div>
+<p>With defaults: <code>(11 + 10*100 + 2*43) * 25 = 27,425</code> sats.</p>
+<p>These estimates are intentionally pessimistic. Most transactions use
+fewer inputs and pay a lower fee rate, so the actual miner fee is
+usually a fraction of the worst case. The difference stays in the
+user’s output – users are only charged for the real transaction
+weight, not the worst-case budget.</p>
+<h2 id="transaction-validation-fee-bounds"><a class="header" href="#transaction-validation-fee-bounds">Transaction validation fee bounds</a></h2>
+<p>When validators verify a proposed withdrawal transaction, they check
+the fee from two directions:</p>
+<ul>
+<li><strong>Floor</strong>: the fee must be at least <code>1 sat/vB</code> (the minimum relay fee),
+or the Bitcoin network will not propagate the transaction.</li>
+<li><strong>Ceiling</strong>: the fee must not exceed 3x the validator’s own fee
+estimate for the same transaction weight. This prevents a malicious
+leader from overpaying fees to extract value from users.</li>
+<li><strong>Per-user cap</strong>: the per-user share of the miner fee must not exceed
+the worst-case network fee computed from the on-chain config. This
+ensures the Move contract’s upfront minimum calculation was
+sufficient.</li>
+</ul>
+<h2 id="stuck-transactions"><a class="header" href="#stuck-transactions">Stuck transactions</a></h2>
+<p>Hashi does not attempt to replace stuck transactions with higher-fee
+replacements (RBF). Instead, if a transaction is not confirmed within
+a reasonable time, fee bumping relies on CPFP (child pays for parent):</p>
+<ul>
+<li>The withdrawal recipient can spend their output with a high-fee
+child transaction.</li>
+<li>Hashi can spend the change UTXO that returned to the pool, which
+also bumps the parent.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
+<p>Hashi maintains a set of on-chain configuration parameters stored in the
+<code>Config</code> object. These parameters control protocol behavior for deposits,
+withdrawals, fee estimation, and system operations.</p>
+<p>All configurable parameters can be updated via the <code>UpdateConfig</code> governance
+proposal, which requires 2/3 of committee weight (see
+<a href="#governance-actions">governance actions</a>). Each key is validated against
+its expected type on update.</p>
+<h2 id="parameters"><a class="header" href="#parameters">Parameters</a></h2>
+<h3 id="deposit_fee"><a class="header" href="#deposit_fee"><code>deposit_fee</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>u64</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>0</code></td></tr>
+<tr><td><strong>Unit</strong></td><td>SUI (MIST)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Flat fee in SUI charged to the user when submitting a deposit request.</p>
+<h3 id="withdrawal_fee_btc"><a class="header" href="#withdrawal_fee_btc"><code>withdrawal_fee_btc</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>u64</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>546</code></td></tr>
+<tr><td><strong>Unit</strong></td><td>satoshis</td></tr>
+<tr><td><strong>Floor</strong></td><td><code>546</code> (dust relay minimum)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Flat protocol fee in BTC deducted from the user’s withdrawal amount upfront.
+The effective value is always at least <code>546 sats</code> regardless of what is
+configured, preventing misconfiguration from producing unspendable outputs.</p>
+<h3 id="max_fee_rate"><a class="header" href="#max_fee_rate"><code>max_fee_rate</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>u64</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>25</code></td></tr>
+<tr><td><strong>Unit</strong></td><td>sat/vB</td></tr>
+<tr><td><strong>Floor</strong></td><td><code>1</code> (minimum relay fee rate)</td></tr>
+</tbody>
+</table>
+</div>
+<p>The worst-case fee rate used to compute the withdrawal minimum and to cap the
+actual miner fee charged to users. This should reflect the highest sustained
+fee environment the protocol expects to operate in without pausing
+withdrawals. The effective value is always at least <code>1 sat/vB</code>.</p>
+<h3 id="input_budget"><a class="header" href="#input_budget"><code>input_budget</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>u64</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>10</code></td></tr>
+<tr><td><strong>Floor</strong></td><td><code>1</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>The worst-case number of UTXO inputs assumed per individual withdrawal request
+for fee estimation purposes. This is not a hard cap on the number of inputs in
+a Bitcoin transaction – batched transactions that serve multiple requests may
+use more inputs than this value. More inputs means a heavier assumed weight and
+a higher worst-case miner fee charged to each user. This headroom also allows
+the coin selector to consolidate small UTXOs during normal withdrawal traffic.
+The effective value is always at least <code>1</code>.</p>
+<h3 id="bitcoin_confirmation_threshold"><a class="header" href="#bitcoin_confirmation_threshold"><code>bitcoin_confirmation_threshold</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>u64</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>1</code> (will be set to <code>6</code> before mainnet)</td></tr>
+<tr><td><strong>Unit</strong></td><td>blocks</td></tr>
+</tbody>
+</table>
+</div>
+<p>The number of Bitcoin block confirmations required before a deposit is
+considered final. Guards against chain reorganizations.</p>
+<h3 id="paused"><a class="header" href="#paused"><code>paused</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>bool</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>false</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>When <code>true</code>, the protocol pauses processing of deposits and withdrawals.
+Requests already in the queue remain queued and will resume processing when the
+system is unpaused. Reconfiguration and governance actions are not affected.</p>
+<h3 id="withdrawal_cancellation_cooldown_ms"><a class="header" href="#withdrawal_cancellation_cooldown_ms"><code>withdrawal_cancellation_cooldown_ms</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>u64</code></td></tr>
+<tr><td><strong>Default</strong></td><td><code>3600000</code> (1 hour)</td></tr>
+<tr><td><strong>Unit</strong></td><td>milliseconds</td></tr>
+</tbody>
+</table>
+</div>
+<p>The minimum time a withdrawal request must remain in the queue before the user
+is allowed to cancel it. Prevents users from using rapid submit-cancel cycles
+to interfere with processing.</p>
+<h2 id="read-only--genesis-only-parameters"><a class="header" href="#read-only--genesis-only-parameters">Read-only / genesis-only parameters</a></h2>
+<h3 id="bitcoin_chain_id"><a class="header" href="#bitcoin_chain_id"><code>bitcoin_chain_id</code></a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Type</strong></td><td><code>address</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>The 32-byte Bitcoin chain identifier as defined by
+<a href="https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki">BIP-122</a>
+(the genesis block hash). Set at genesis and not updatable via the
+<code>UpdateConfig</code> proposal.</p>
+<h2 id="derived-values"><a class="header" href="#derived-values">Derived values</a></h2>
+<p>Several values are computed from the configurable parameters above rather than
+stored directly.</p>
+<h3 id="deposit_minimum"><a class="header" href="#deposit_minimum"><code>deposit_minimum</code></a></h3>
+<pre><code>deposit_minimum = 546 sats
+</code></pre>
+<p>The minimum deposit amount. Fixed at the dust relay minimum to prevent
+creating unspendable UTXOs.</p>
+<h3 id="worst_case_network_fee"><a class="header" href="#worst_case_network_fee"><code>worst_case_network_fee</code></a></h3>
+<pre><code>worst_case_network_fee = max_fee_rate * (11 + input_budget * 100 + 2 * 43)
+</code></pre>
+<p>The maximum miner fee the contract will accept for a withdrawal transaction,
+assuming the worst-case transaction weight. With defaults: <code>25 * 1097 = 27,425 sats</code>.</p>
+<h3 id="withdrawal_minimum"><a class="header" href="#withdrawal_minimum"><code>withdrawal_minimum</code></a></h3>
+<pre><code>withdrawal_minimum = withdrawal_fee_btc + worst_case_network_fee + 546
+</code></pre>
+<p>The minimum withdrawal amount, ensuring that even under worst-case fee
+conditions the user’s output stays above the dust threshold. With defaults:
+<code>546 + 27,425 + 546 = 28,517 sats</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="reconfiguration"><a class="header" href="#reconfiguration">Reconfiguration</a></h1>
+<p>One of the most important parts of the hashi protocol is reconfiguration. This
+is because one of the key parts of reconfiguration is the old committee
+sharing key shares of the MPC key with the new committee.</p>
+<p>The hashi service will monitor the Sui epoch change and will immediately kick
+off hashi reconfig once Sui’s epoch change completes. During hashi’s reconfig,
+in progress operations (e.g. processing of withdrawals) will be paused and will
+be resumed and processed by the new committee upon the completion of
+reconfiguration.</p>
+<pre class="mermaid">graph LR
+    A[Start Reconfig] --&gt; B[DKG or Key Rotation] --&gt; C[End Reconfig]
+</pre>
+
+<h3 id="start-reconfig"><a class="header" href="#start-reconfig">Start Reconfig</a></h3>
+<pre class="mermaid">graph LR
+    A[Start Reconfig]:::active --&gt; B[DKG or Key Rotation] --&gt; C[End Reconfig]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>Each hashi node monitors Sui for epoch changes. When a new Sui epoch is
+detected and the hashi epoch has not yet advanced to match, the node knows that
+a reconfiguration is needed. A committee member submits an on-chain transaction
+by calling <code>hashi::reconfig::start_reconfig</code> to signal that reconfiguration
+should begin for the target epoch:</p>
+<pre><code class="language-move">entry fun start_reconfig(
+    self: &amp;mut Hashi,
+    sui_system: &amp;SuiSystemState,
+    ctx: &amp;TxContext,
+)
+</code></pre>
+<p>This sets a pending epoch change flag in the on-chain state, which pauses
+normal operations (deposits, withdrawals) until reconfiguration completes. The
+new committee membership is determined by the set of validators who have
+registered with hashi for the new epoch, determining stake-weights from the Sui
+Validator set stake-weights.</p>
+<h3 id="dkg-or-key-rotation"><a class="header" href="#dkg-or-key-rotation">DKG or Key Rotation</a></h3>
+<pre class="mermaid">graph LR
+    A[Start Reconfig] --&gt; B[DKG or Key Rotation]:::active --&gt; C[End Reconfig]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>The MPC key protocol runs among the new committee members. Which protocol is
+used depends on whether this is the first hashi epoch or a subsequent one:</p>
+<ul>
+<li><strong>Initial DKG</strong> – if there is no existing MPC public key (i.e. this is
+the genesis epoch), the committee runs the distributed key generation
+protocol to produce a fresh master key.</li>
+<li><strong>Key Rotation</strong> – if an MPC public key already exists, the old
+committee’s key shares are redistributed to the new committee. The old
+committee members act as dealers and the new committee members act as
+receivers.</li>
+</ul>
+<p>In both cases, the output is a <code>DkgOutput</code> containing the new committee’s key
+shares and the MPC public key. See <a href="#mpc-protocol">MPC protocol</a> for
+details.</p>
+<p>Each committee member then signs a <code>ReconfigCompletionMessage</code> containing
+the target epoch and the MPC public key using their BLS12-381 key. Nodes
+collect signatures from each other via RPC until a quorum (2/3 of committee
+weight) is reached, producing a BLS aggregate signature certificate. This
+ensures that a supermajority of the new committee agrees on the key protocol
+output before the epoch transition is finalized on-chain.</p>
+<h3 id="end-reconfig"><a class="header" href="#end-reconfig">End Reconfig</a></h3>
+<pre class="mermaid">graph LR
+    A[Start Reconfig] --&gt; B[DKG or Key Rotation] --&gt; C[End Reconfig]:::active
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>A committee member submits the aggregate signature certificate on-chain by
+calling <code>hashi::reconfig::end_reconfig</code>:</p>
+<pre><code class="language-move">entry fun end_reconfig(
+    self: &amp;mut Hashi,
+    mpc_public_key: vector&lt;u8&gt;,
+    signature: vector&lt;u8&gt;,
+    signers_bitmap: vector&lt;u8&gt;,
+    ctx: &amp;TxContext,
+)
+</code></pre>
+<p>The on-chain contract verifies the certificate, commits the generated MPC
+public key if DKG was run or verifies that the key remains unchanged from the
+previous epoch, advances the hashi epoch, and clears the pending epoch change
+flag.</p>
+<p>Once the new epoch begins the new committee then initializes the signing state
+for the epoch by running the presigning protocol to generate a batch of
+presignatures needed for the threshold Schnorr signing protocol (see <a href="#mpc-protocol">MPC
+protocol</a>). Once presignatures are ready, normal operations
+resume for processing deposits and withdrawals.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="deposit-1"><a class="header" href="#deposit-1">Deposit</a></h1>
+<p>A deposit moves BTC from a user’s Bitcoin wallet into the Hashi-managed UTXO
+pool, minting a corresponding amount of <code>hBTC</code> into the user’s account on Sui.
+The process has three phases:</p>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Confirm] --&gt; C[Mint]
+</pre>
+
+<h2 id="request"><a class="header" href="#request">Request</a></h2>
+<pre class="mermaid">graph LR
+    A[Request]:::active --&gt; B[Confirm] --&gt; C[Mint]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
+address. Each deposit address is a unique Taproot address derived from the
+target destination address on Sui (see <a href="#bitcoin-address-scheme">address scheme</a>).
+The deposit must meet the dust minimum (<code>546 sats</code>) to avoid creating
+unspendable UTXOs on Bitcoin.</p>
+<p>Once the Bitcoin transaction is broadcast, the user notifies Hashi by
+constructing a <code>DepositRequest</code> and calling <code>hashi::deposit::deposit</code> on Sui.</p>
+<p>First, the user creates the request by calling <code>hashi::deposit_queue::deposit_request</code>:</p>
+<pre><code class="language-move">public fun deposit_request(
+    utxo: Utxo,
+    clock: &amp;Clock,
+    ctx: &amp;mut TxContext,
+): DepositRequest
+</code></pre>
+<p>The <code>Utxo</code> is constructed from the Bitcoin transaction details:</p>
+<pre><code class="language-move">public fun utxo(
+    utxo_id: UtxoId,
+    amount: u64,
+    derivation_path: Option&lt;address&gt;,
+): Utxo
+
+public fun utxo_id(
+    txid: address,
+    vout: u32,
+): UtxoId
+</code></pre>
+<ul>
+<li><code>txid</code> – the 32-byte Bitcoin transaction hash</li>
+<li><code>vout</code> – the output index within that transaction</li>
+<li><code>amount</code> – the deposit amount in satoshis</li>
+<li><code>derivation_path</code> – the Sui address used to derive the deposit address</li>
+</ul>
+<p>The user then submits the request along with the required <a href="#deposit_fee">deposit
+fee</a>:</p>
+<pre><code class="language-move">public fun deposit(
+    hashi: &amp;mut Hashi,
+    request: DepositRequest,
+    fee: Coin&lt;SUI&gt;,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<p>The function validates that the fee is exact, the deposit meets the dust
+minimum, and the UTXO has not been previously deposited. The request is then
+placed in the deposit queue for committee members to begin monitoring for
+confirmation on Bitcoin.</p>
+<h2 id="confirm"><a class="header" href="#confirm">Confirm</a></h2>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Confirm]:::active --&gt; C[Mint]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>Committee members monitor the Bitcoin network for the deposit transaction. The
+transaction must reach a sufficient number of block confirmations (see
+<a href="#bitcoin_confirmation_threshold"><code>bitcoin_confirmation_threshold</code></a>)
+before it is considered final. This guards against chain reorganizations where
+a confirmed transaction could be reversed. If the transaction is never
+confirmed or is invalidated by a reorg, the deposit is ignored.</p>
+<p>Once confirmed, each committee member independently screens the deposit’s
+source address by making a request to its configured sanctions-checking
+endpoint (see <a href="#handling-sanctioned-addresses">handling sanctions</a>). A member that considers
+the address sanctioned will not vote to accept the deposit.</p>
+<p>Once a node has determined that a deposit request is both confirmed on bitcoin
+and passes its own screening checks, it will communicate with the other members
+of the hashi committee and collect signatures from validators who agree that
+the deposit should be confirmed. If a quorum of validators cannot agree that a
+deposit should be confirmed, it will either be retried at a later point or
+ignored if the request is invalid.</p>
+<h2 id="mint"><a class="header" href="#mint">Mint</a></h2>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Confirm] --&gt; C[Mint]:::active
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>Once a quorum of validators have agreed that a deposit should be confirmed,
+one validator submits the certificate on-chain by calling <code>hashi::deposit::confirm_deposit</code>:</p>
+<pre><code class="language-move">public fun confirm_deposit(
+    hashi: &amp;mut Hashi,
+    request_id: address,
+    signature: CommitteeSignature,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<p>The function verifies the committee certificate, removes the request from the
+deposit queue, mints the corresponding amount of <code>hBTC</code>, and sends it to the
+user’s Sui address. The deposited UTXO is added to the Hashi-managed UTXO
+pool, making it available for future withdrawal coin selection.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="withdraw-1"><a class="header" href="#withdraw-1">Withdraw</a></h1>
+<p>A withdrawal allows a user to redeem their <code>hBTC</code> on Sui for native BTC,
+sent to a user-specified address on Bitcoin. The process has four phases:</p>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Approve] --&gt; C[Build TX] --&gt; D[Sign] --&gt; E[Broadcast]
+</pre>
+
+<h2 id="request-1"><a class="header" href="#request-1">Request</a></h2>
+<pre class="mermaid">graph LR
+    A[Request]:::active --&gt; B[Approve] --&gt; C[Build TX] --&gt; D[Sign] --&gt; E[Broadcast]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>A user submits an on-chain Sui transaction to request a withdrawal by calling
+<code>hashi::withdraw::request_withdrawal</code>:</p>
+<pre><code class="language-move">public fun request_withdrawal(
+    hashi: &amp;mut Hashi,
+    clock: &amp;Clock,
+    btc: Coin&lt;BTC&gt;,
+    bitcoin_address: vector&lt;u8&gt;,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<ul>
+<li><code>btc</code> – the <code>hBTC</code> to withdraw. Must be at least the
+<a href="#withdrawal_minimum"><code>withdrawal_minimum</code></a>.</li>
+<li><code>bitcoin_address</code> – the destination witness program, either <code>P2WPKH</code> (20
+bytes) or <code>P2TR</code> (32 bytes).</li>
+</ul>
+<p>The protocol enforces a minimum withdrawal amount to guarantee that every
+request can produce a valid Bitcoin transaction even under worst-case fee
+conditions. This minimum covers the flat protocol fee, the worst-case miner
+fee (which pays for both the user’s transaction weight and opportunistic UTXO
+pool consolidation), and the dust threshold for the user’s output. See
+<a href="#fees">fees</a> for the full breakdown.</p>
+<p>The flat protocol fee
+(<a href="#withdrawal_fee_btc"><code>withdrawal_fee_btc</code></a>) is deducted upfront
+from the provided <code>hBTC</code> and the remainder is stored with the request. The
+request is placed in a queue with a timestamp. The user can cancel their
+request at any point before it has been approved, subject to a cooldown period
+(<a href="#withdrawal_cancellation_cooldown_ms"><code>withdrawal_cancellation_cooldown_ms</code></a>).</p>
+<h2 id="approve"><a class="header" href="#approve">Approve</a></h2>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Approve]:::active --&gt; C[Build TX] --&gt; D[Sign] --&gt; E[Broadcast]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>Before a queued request can advance, the Guardian’s token-bucket rate limiter
+must have sufficient capacity. If the request would exceed the current limit it
+remains in the queue until capacity is replenished. Requests are generally
+processed in FIFO order, but this is not a strict requirement.</p>
+<p>Each committee member independently screens the destination address against
+its configured sanctions-checking endpoint (see
+<a href="#handling-sanctioned-addresses">handling sanctions</a>). A member that considers the address
+sanctioned will not vote to approve the request. If a quorum still approves,
+all members are required to assist in completing the withdrawal.</p>
+<p>Committee members communicate with each other to collect signatures to approve
+the request. Once a quorum is reached one member will submit the certificate
+on-chain by calling <code>hashi::withdraw::approve_request</code>:</p>
+<pre><code class="language-move">entry fun approve_request(
+    hashi: &amp;mut Hashi,
+    request_id: address,
+    epoch: u64,
+    signature: vector&lt;u8&gt;,
+    signers_bitmap: vector&lt;u8&gt;,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<p>The function verifies the committee certificate and marks the request as
+approved, allowing it to be picked up for transaction construction.</p>
+<h2 id="build-tx"><a class="header" href="#build-tx">Build TX</a></h2>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Approve] --&gt; C[Build TX]:::active --&gt; D[Sign] --&gt; E[Broadcast]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>Multiple approved requests are batched into a single Bitcoin transaction to
+amortize the fixed transaction overhead across users. The leader waits for
+approved requests to buffer up before constructing a transaction – either
+until a request has been waiting for roughly 10 minutes, or until a threshold
+number of approved requests have accumulated, whichever comes first. This
+balances latency for individual users against efficiency for the protocol.</p>
+<p>The leader then constructs an unsigned Bitcoin transaction:</p>
+<ol>
+<li><strong>Coin selection</strong> – select UTXOs from the pool to cover the total
+withdrawal amount (miner fees will be taken out of the user’s withdrawn
+amount). The coin selector may include extra inputs to opportunistically
+consolidate small UTXOs (see <a href="#fees">fees</a>).</li>
+<li><strong>Outputs</strong> – one output per withdrawal request to each user’s destination
+address, plus one change output back to a Hashi-controlled address.</li>
+<li><strong>Fee calculation</strong> – the miner fee is estimated via <code>estimatesmartfee</code>,
+capped at <code>max_fee_rate</code>. Each user’s share of the miner fee is deducted
+from their output. Validators independently verify that the fee is within
+acceptable bounds (at least <code>1 sat/vB</code>, at most 3x their own estimate).</li>
+</ol>
+<p>The resulting unsigned transaction and its txid are committed on-chain by
+calling <code>hashi::withdraw::commit_withdrawal_tx</code>:</p>
+<pre><code class="language-move">entry fun commit_withdrawal_tx(
+    hashi: &amp;mut Hashi,
+    request_ids: vector&lt;address&gt;,
+    selected_utxos: vector&lt;vector&lt;u8&gt;&gt;,
+    outputs: vector&lt;vector&lt;u8&gt;&gt;,
+    txid: address,
+    epoch: u64,
+    signature: vector&lt;u8&gt;,
+    signers_bitmap: vector&lt;u8&gt;,
+    clock: &amp;Clock,
+    r: &amp;Random,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<p>The function verifies the committee certificate, burns the <code>hBTC</code> from each
+request, spends the selected UTXOs from the pool, and creates a pending
+withdrawal record that all validators can independently verify.</p>
+<h2 id="sign"><a class="header" href="#sign">Sign</a></h2>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Approve] --&gt; C[Build TX] --&gt; D[Sign]:::active --&gt; E[Broadcast]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>Signing is a two-step process matching the 2-of-2 Taproot script (see
+<a href="#bitcoin-address-scheme">address scheme</a>):</p>
+<ol>
+<li><strong>Guardian signature</strong> – the unsigned transaction and metadata are sent to
+the Guardian enclave, which independently validates the request and produces
+a Schnorr signature for each input.</li>
+<li><strong>MPC signature</strong> – the committee runs the threshold Schnorr signing
+protocol (see <a href="#mpc-protocol">MPC protocol</a>) to produce the second
+signature for each input.</li>
+</ol>
+<p>Both signatures are combined into the taproot script-path witness for each
+input.</p>
+<blockquote>
+<p><strong>Note:</strong> for devnet there is no guardian configured. Only the MPC signature
+is used.</p>
+</blockquote>
+<p>The signed transaction is committed on-chain by calling
+<code>hashi::withdraw::sign_withdrawal</code>:</p>
+<pre><code class="language-move">entry fun sign_withdrawal(
+    hashi: &amp;mut Hashi,
+    withdrawal_id: address,
+    request_ids: vector&lt;address&gt;,
+    signatures: vector&lt;vector&lt;u8&gt;&gt;,
+    epoch: u64,
+    signature: vector&lt;u8&gt;,
+    signers_bitmap: vector&lt;u8&gt;,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<p>The function verifies the committee certificate and attaches the Schnorr
+signatures to the pending withdrawal.</p>
+<h2 id="broadcast"><a class="header" href="#broadcast">Broadcast</a></h2>
+<pre class="mermaid">graph LR
+    A[Request] --&gt; B[Approve] --&gt; C[Build TX] --&gt; D[Sign] --&gt; E[Broadcast]:::active
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+</pre>
+
+<p>The fully signed transaction is broadcast to the Bitcoin network. The
+committee monitors the transaction until it reaches the configured number of
+block confirmations (see
+<a href="#bitcoin_confirmation_threshold"><code>bitcoin_confirmation_threshold</code></a>).
+Once confirmed, a committee member calls
+<code>hashi::withdraw::confirm_withdrawal</code>:</p>
+<pre><code class="language-move">entry fun confirm_withdrawal(
+    hashi: &amp;mut Hashi,
+    withdrawal_id: address,
+    epoch: u64,
+    signature: vector&lt;u8&gt;,
+    signers_bitmap: vector&lt;u8&gt;,
+    ctx: &amp;mut TxContext,
+)
+</code></pre>
+<p>The function verifies the committee certificate and removes the pending
+withdrawal, returning the spent UTXOs’ change output to the pool.</p>
+<p>If a transaction gets stuck, fee bumping is handled via CPFP – either the
+withdrawal recipient spends their output with a high-fee child, or Hashi
+spends the change UTXO (see <a href="#stuck-transactions">fees – stuck transactions</a>).</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-ccf746f1.js"></script>
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>

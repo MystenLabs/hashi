@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["certificate_threshold"],"struct":["BLS12381AggregateSignature","BLS12381PublicKey","BLS12381Signature","Bls12381PrivateKey","BlsSignatureAggregator","Committee","CommitteeMember","CommitteeSignature","MemberSignature","SignedMessage"],"type":["EncryptionPrivateKey","EncryptionPublicKey"]};

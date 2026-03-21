@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["committee","guardian","move_types","proto","utils"]};

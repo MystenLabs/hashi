@@ -1,0 +1,101 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi/src/mpc/rpc/p2p_channel.rs`."><title>p2p_channel.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="hashi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">hashi/mpc/rpc/</div>p2p_channel.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="kw">use </span><a href="../../communication/interfaces.rs.html#25-40"><span class="kw">crate</span>::communication::ChannelError</a>;
+<a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span><a href="../../communication/interfaces.rs.html#21"><span class="kw">crate</span>::communication::ChannelResult</a>;
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span><a href="../../communication/interfaces.rs.html#44-74"><span class="kw">crate</span>::communication::P2PChannel</a>;
+<a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span><a href="../../grpc/client.rs.html#34-38"><span class="kw">crate</span>::grpc::Client</a>;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span><a href="../types.rs.html#209-214"><span class="kw">crate</span>::mpc::types::ComplainRequest</a>;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span><a href="../types.rs.html#217-221"><span class="kw">crate</span>::mpc::types::ComplaintResponses</a>;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span><a href="../types.rs.html#459-461"><span class="kw">crate</span>::mpc::types::GetPartialSignaturesRequest</a>;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span><a href="../types.rs.html#464-466"><span class="kw">crate</span>::mpc::types::GetPartialSignaturesResponse</a>;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><a href="../types.rs.html#152-154"><span class="kw">crate</span>::mpc::types::GetPublicDkgOutputRequest</a>;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><a href="../types.rs.html#157-159"><span class="kw">crate</span>::mpc::types::GetPublicDkgOutputResponse</a>;
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><a href="../types.rs.html#197-201"><span class="kw">crate</span>::mpc::types::RetrieveMessagesRequest</a>;
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span><a href="../types.rs.html#204-206"><span class="kw">crate</span>::mpc::types::RetrieveMessagesResponse</a>;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span><a href="../types.rs.html#180-182"><span class="kw">crate</span>::mpc::types::SendMessagesRequest</a>;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><a href="../types.rs.html#185-187"><span class="kw">crate</span>::mpc::types::SendMessagesResponse</a>;
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><a href="../../onchain/mod.rs.html#49"><span class="kw">crate</span>::onchain::OnchainState</a>;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span><a href="https://docs.rs/async-trait/0.1.89/async_trait/attr.async_trait.html">async_trait::async_trait</a>;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span>sui_sdk_types::Address;
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub struct </span><a href="../../../../hashi/mpc/rpc/struct.RpcP2PChannel.html">RpcP2PChannel</a> {
+<a href=#23 id=23 data-nosnippet>23</a>    onchain_state: <a href="../../onchain/mod.rs.html#49">OnchainState</a>,
+<a href=#24 id=24 data-nosnippet>24</a>    epoch: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#25 id=25 data-nosnippet>25</a>}
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">impl </span><a href="#22-25">RpcP2PChannel</a> {
+<a href=#28 id=28 data-nosnippet>28</a>    <span class="kw">pub fn </span>new(onchain_state: <a href="../../onchain/mod.rs.html#49">OnchainState</a>, epoch: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>) -&gt; <span class="self">Self </span>{
+<a href=#29 id=29 data-nosnippet>29</a>        <span class="self">Self </span>{
+<a href=#30 id=30 data-nosnippet>30</a>            <a href="#28">onchain_state</a>,
+<a href=#31 id=31 data-nosnippet>31</a>            <a href="#28">epoch</a>,
+<a href=#32 id=32 data-nosnippet>32</a>        }
+<a href=#33 id=33 data-nosnippet>33</a>    }
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a>    <span class="kw">fn </span>get_client(<span class="kw-2">&amp;</span><span class="self">self</span>, address: <span class="kw-2">&amp;</span>Address) -&gt; <a href="../../communication/interfaces.rs.html#21">ChannelResult</a>&lt;<a href="../../grpc/client.rs.html#34-38">Client</a>&gt; {
+<a href=#36 id=36 data-nosnippet>36</a>        <a class="self" href="#35">self</a>.onchain_state
+<a href=#37 id=37 data-nosnippet>37</a>            .<a href="../../onchain/mod.rs.html#157-159">state</a>()
+<a href=#38 id=38 data-nosnippet>38</a>            .<a href="../../onchain/mod.rs.html#514-516">hashi</a>()
+<a href=#39 id=39 data-nosnippet>39</a>            .committees
+<a href=#40 id=40 data-nosnippet>40</a>            .<a href="../../onchain/types.rs.html#158-160">client</a>(<a href="#35">address</a>)
+<a href=#41 id=41 data-nosnippet>41</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.ok_or">ok_or</a>(<a href="../../communication/interfaces.rs.html#30">ChannelError::ClientNotFound</a>(<span class="kw-2">*</span><a href="#35">address</a>))
+<a href=#42 id=42 data-nosnippet>42</a>    }
+<a href=#43 id=43 data-nosnippet>43</a>}
+<a href=#44 id=44 data-nosnippet>44</a>
+<a href=#45 id=45 data-nosnippet>45</a><span class="attr">#[async_trait]
+<a href=#46 id=46 data-nosnippet>46</a></span><span class="kw">impl </span><a href="../../communication/interfaces.rs.html#44-74">P2PChannel</a> <span class="kw">for </span><a href="#22-25">RpcP2PChannel</a> {
+<a href=#47 id=47 data-nosnippet>47</a>    <span class="kw">async fn </span>send_messages(
+<a href=#48 id=48 data-nosnippet>48</a>        <span class="kw-2">&amp;</span><a class="self" href="#48">self</a>,
+<a href=#49 id=49 data-nosnippet>49</a>        recipient: <span class="kw-2">&amp;</span>Address,
+<a href=#50 id=50 data-nosnippet>50</a>        request: <span class="kw-2">&amp;</span><a href="../types.rs.html#180-182">SendMessagesRequest</a>,
+<a href=#51 id=51 data-nosnippet>51</a>    ) -&gt; <a href="../../communication/interfaces.rs.html#21">ChannelResult</a>&lt;<a href="../types.rs.html#185-187">SendMessagesResponse</a>&gt; {
+<a href=#52 id=52 data-nosnippet>52</a>        <a class="self" href="#48">self</a>.<a href="#35-42">get_client</a>(<a href="#49">recipient</a>)<span class="question-mark">?
+<a href=#53 id=53 data-nosnippet>53</a>            </span>.<a href="../../grpc/client.rs.html#104-116">send_messages</a>(<a class="self" href="#48">self</a>.epoch, <a href="#50">request</a>)
+<a href=#54 id=54 data-nosnippet>54</a>            .<span class="kw">await
+<a href=#55 id=55 data-nosnippet>55</a>            </span>.<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.map_err">map_err</a>(|e| <a href="../../communication/interfaces.rs.html#27">ChannelError::RequestFailed</a>(<a href="#55">e</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()))
+<a href=#56 id=56 data-nosnippet>56</a>    }
+<a href=#57 id=57 data-nosnippet>57</a>
+<a href=#58 id=58 data-nosnippet>58</a>    <span class="kw">async fn </span>retrieve_messages(
+<a href=#59 id=59 data-nosnippet>59</a>        <span class="kw-2">&amp;</span><a class="self" href="#59">self</a>,
+<a href=#60 id=60 data-nosnippet>60</a>        party: <span class="kw-2">&amp;</span>Address,
+<a href=#61 id=61 data-nosnippet>61</a>        request: <span class="kw-2">&amp;</span><a href="../types.rs.html#197-201">RetrieveMessagesRequest</a>,
+<a href=#62 id=62 data-nosnippet>62</a>    ) -&gt; <a href="../../communication/interfaces.rs.html#21">ChannelResult</a>&lt;<a href="../types.rs.html#204-206">RetrieveMessagesResponse</a>&gt; {
+<a href=#63 id=63 data-nosnippet>63</a>        <a class="self" href="#59">self</a>.<a href="#35-42">get_client</a>(<a href="#60">party</a>)<span class="question-mark">?
+<a href=#64 id=64 data-nosnippet>64</a>            </span>.<a href="../../grpc/client.rs.html#118-129">retrieve_messages</a>(<a href="#61">request</a>)
+<a href=#65 id=65 data-nosnippet>65</a>            .<span class="kw">await
+<a href=#66 id=66 data-nosnippet>66</a>            </span>.<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.map_err">map_err</a>(|e| <a href="../../communication/interfaces.rs.html#27">ChannelError::RequestFailed</a>(<a href="#66">e</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()))
+<a href=#67 id=67 data-nosnippet>67</a>    }
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a>    <span class="kw">async fn </span>complain(
+<a href=#70 id=70 data-nosnippet>70</a>        <span class="kw-2">&amp;</span><a class="self" href="#70">self</a>,
+<a href=#71 id=71 data-nosnippet>71</a>        party: <span class="kw-2">&amp;</span>Address,
+<a href=#72 id=72 data-nosnippet>72</a>        request: <span class="kw-2">&amp;</span><a href="../types.rs.html#209-214">ComplainRequest</a>,
+<a href=#73 id=73 data-nosnippet>73</a>    ) -&gt; <a href="../../communication/interfaces.rs.html#21">ChannelResult</a>&lt;<a href="../types.rs.html#217-221">ComplaintResponses</a>&gt; {
+<a href=#74 id=74 data-nosnippet>74</a>        <a class="self" href="#70">self</a>.<a href="#35-42">get_client</a>(<a href="#71">party</a>)<span class="question-mark">?
+<a href=#75 id=75 data-nosnippet>75</a>            </span>.<a href="../../grpc/client.rs.html#131-140">complain</a>(<a class="self" href="#70">self</a>.epoch, <a href="#72">request</a>)
+<a href=#76 id=76 data-nosnippet>76</a>            .<span class="kw">await
+<a href=#77 id=77 data-nosnippet>77</a>            </span>.<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.map_err">map_err</a>(|e| <a href="../../communication/interfaces.rs.html#27">ChannelError::RequestFailed</a>(<a href="#77">e</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()))
+<a href=#78 id=78 data-nosnippet>78</a>    }
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="kw">async fn </span>get_public_dkg_output(
+<a href=#81 id=81 data-nosnippet>81</a>        <span class="kw-2">&amp;</span><a class="self" href="#81">self</a>,
+<a href=#82 id=82 data-nosnippet>82</a>        party: <span class="kw-2">&amp;</span>Address,
+<a href=#83 id=83 data-nosnippet>83</a>        request: <span class="kw-2">&amp;</span><a href="../types.rs.html#152-154">GetPublicDkgOutputRequest</a>,
+<a href=#84 id=84 data-nosnippet>84</a>    ) -&gt; <a href="../../communication/interfaces.rs.html#21">ChannelResult</a>&lt;<a href="../types.rs.html#157-159">GetPublicDkgOutputResponse</a>&gt; {
+<a href=#85 id=85 data-nosnippet>85</a>        <a class="self" href="#81">self</a>.<a href="#35-42">get_client</a>(<a href="#82">party</a>)<span class="question-mark">?
+<a href=#86 id=86 data-nosnippet>86</a>            </span>.<a href="../../grpc/client.rs.html#142-153">get_public_dkg_output</a>(<a href="#83">request</a>)
+<a href=#87 id=87 data-nosnippet>87</a>            .<span class="kw">await
+<a href=#88 id=88 data-nosnippet>88</a>            </span>.<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.map_err">map_err</a>(|e| <a href="../../communication/interfaces.rs.html#27">ChannelError::RequestFailed</a>(<a href="#88">e</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()))
+<a href=#89 id=89 data-nosnippet>89</a>    }
+<a href=#90 id=90 data-nosnippet>90</a>
+<a href=#91 id=91 data-nosnippet>91</a>    <span class="kw">async fn </span>get_partial_signatures(
+<a href=#92 id=92 data-nosnippet>92</a>        <span class="kw-2">&amp;</span><a class="self" href="#92">self</a>,
+<a href=#93 id=93 data-nosnippet>93</a>        party: <span class="kw-2">&amp;</span>Address,
+<a href=#94 id=94 data-nosnippet>94</a>        request: <span class="kw-2">&amp;</span><a href="../types.rs.html#459-461">GetPartialSignaturesRequest</a>,
+<a href=#95 id=95 data-nosnippet>95</a>    ) -&gt; <a href="../../communication/interfaces.rs.html#21">ChannelResult</a>&lt;<a href="../types.rs.html#464-466">GetPartialSignaturesResponse</a>&gt; {
+<a href=#96 id=96 data-nosnippet>96</a>        <a class="self" href="#92">self</a>.<a href="#35-42">get_client</a>(<a href="#93">party</a>)<span class="question-mark">?
+<a href=#97 id=97 data-nosnippet>97</a>            </span>.<a href="../../grpc/client.rs.html#155-167">get_partial_signatures</a>(<a class="self" href="#92">self</a>.epoch, <a href="#94">request</a>)
+<a href=#98 id=98 data-nosnippet>98</a>            .<span class="kw">await
+<a href=#99 id=99 data-nosnippet>99</a>            </span>.<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.map_err">map_err</a>(|e| <a href="../../communication/interfaces.rs.html#27">ChannelError::RequestFailed</a>(<a href="#99">e</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()))
+<a href=#100 id=100 data-nosnippet>100</a>    }
+<a href=#101 id=101 data-nosnippet>101</a>}</code></pre></div></section></main></body></html>

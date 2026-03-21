@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WithdrawalApprovalError","WithdrawalApprovalErrorKind","WithdrawalCommitmentError","WithdrawalCommitmentErrorKind"],"fn":["witness_program_from_address"],"struct":["UtxoSelection","WithdrawalConfirmation","WithdrawalRequestApproval","WithdrawalTxCommitment","WithdrawalTxSigning"]};

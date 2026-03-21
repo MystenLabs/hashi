@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CreateProposalParams"],"fn":["build_create_proposal_transaction","get_proposal_type_arg"],"struct":["HashiClient","SimulationResult"]};
