@@ -140,7 +140,7 @@ impl OnchainState {
         let watcher_state = state.clone();
         let service = Service::new().spawn_aborting(async move {
             watcher::watcher(client, watcher_state, metrics).await;
-            Ok(())
+            anyhow::bail!("Sui checkpoint watcher exited unexpectedly");
         });
 
         Ok((state, service))

@@ -71,7 +71,7 @@ impl LeaderService {
     pub fn start(self) -> Service {
         Service::new().spawn_aborting(async move {
             self.run().await;
-            Ok(())
+            anyhow::bail!("Leader service exited unexpectedly");
         })
     }
 
