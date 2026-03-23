@@ -5,8 +5,7 @@
 /// Operates on the shared Config store via public(package) get/upsert.
 module hashi::btc_config;
 
-use hashi::config::Config;
-use hashi::config_value;
+use hashi::{config::Config, config_value};
 
 // ======== Bitcoin Network Constants ========
 
