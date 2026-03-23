@@ -25,6 +25,7 @@ pub mod publish;
 pub mod storage;
 pub mod sui_tx_executor;
 pub mod tls;
+pub mod utxo_pool;
 pub mod withdrawals;
 
 /// The allowed delta for weight reduction in basis points (800 means 8%).
