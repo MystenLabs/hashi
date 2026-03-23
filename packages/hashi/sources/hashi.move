@@ -5,10 +5,11 @@
 module hashi::hashi;
 
 use hashi::{
-    committee::Committee,
+    committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
     deposit_queue::DepositRequestQueue,
+    threshold,
     treasury::Treasury,
     utxo_pool::UtxoPool,
     withdrawal_queue::WithdrawalRequestQueue
@@ -48,6 +49,30 @@ fun init(ctx: &mut TxContext) {
 public(package) fun assert_unpaused(self: &Hashi) {
     // Check if state is PAUSED
     assert!(!self.config().paused());
+}
+
+/// Verify a committee signature over a message.
+/// Returns the certified message (message + signature + stake support).
+public(package) fun verify<T>(
+    self: &Hashi,
+    message: T,
+    sig: CommitteeSignature,
+): CertifiedMessage<T> {
+    let threshold =
+        threshold::certificate_threshold(self.current_committee().total_weight() as u16) as u64;
+    self.current_committee().verify_certificate(message, sig, threshold)
+}
+
+/// Verify a committee signature against a specific committee (not necessarily current).
+/// Used by reconfig which verifies against the next epoch's committee.
+public(package) fun verify_with_committee<T>(
+    _self: &Hashi,
+    committee: &Committee,
+    message: T,
+    sig: CommitteeSignature,
+): CertifiedMessage<T> {
+    let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
+    committee.verify_certificate(message, sig, threshold)
 }
 
 public(package) fun assert_not_reconfiguring(self: &Hashi) {

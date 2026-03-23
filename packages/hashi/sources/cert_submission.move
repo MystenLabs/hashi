@@ -3,15 +3,14 @@
 
 module hashi::cert_submission;
 
-use hashi::{hashi::Hashi, tob::ProtocolType};
+use hashi::{committee::CommitteeSignature, hashi::Hashi, tob::ProtocolType};
 
 entry fun submit_dkg_cert(
     hashi: &mut Hashi,
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
     let key = hashi::tob::tob_key(epoch, option::none());
@@ -22,8 +21,7 @@ entry fun submit_dkg_cert(
         hashi::tob::protocol_type_dkg(),
         dealer,
         messages_hash,
-        signature,
-        signers_bitmap,
+        &cert,
         ctx,
     );
 }
@@ -33,8 +31,7 @@ entry fun submit_rotation_cert(
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
     let key = hashi::tob::tob_key(epoch, option::none());
@@ -45,8 +42,7 @@ entry fun submit_rotation_cert(
         hashi::tob::protocol_type_key_rotation(),
         dealer,
         messages_hash,
-        signature,
-        signers_bitmap,
+        &cert,
         ctx,
     );
 }
@@ -57,8 +53,7 @@ entry fun submit_nonce_cert(
     batch_index: u32,
     dealer: address,
     messages_hash: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
     let key = hashi::tob::tob_key(epoch, option::some(batch_index));
@@ -69,8 +64,7 @@ entry fun submit_nonce_cert(
         hashi::tob::protocol_type_nonce_generation(),
         dealer,
         messages_hash,
-        signature,
-        signers_bitmap,
+        &cert,
         ctx,
     );
 }
@@ -82,8 +76,7 @@ fun submit_cert_internal(
     protocol_type: ProtocolType,
     dealer: address,
     messages_hash: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: &CommitteeSignature,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
@@ -92,13 +85,12 @@ fun submit_cert_internal(
     let pending = hashi.committee_set().pending_epoch_change();
     assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
     let epoch_certs = hashi.epoch_certs(key, protocol_type, ctx);
-    hashi::tob::submit_cert(
+    hashi::tob::submit_cert_with_signature(
         epoch_certs,
         epoch,
         dealer,
         messages_hash,
-        signature,
-        signers_bitmap,
+        cert,
     );
 }
 

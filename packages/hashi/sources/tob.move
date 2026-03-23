@@ -100,3 +100,20 @@ public(package) fun submit_cert(
     let submission = DealerSubmissionV1 { message, signature: sig };
     epoch_certs.certs.push_back(dealer, submission);
 }
+
+/// Submit a certificate using a CommitteeSignature (deferred verification).
+public(package) fun submit_cert_with_signature(
+    epoch_certs: &mut EpochCertsV1,
+    epoch: u64,
+    dealer: address,
+    messages_hash: vector<u8>,
+    sig: &CommitteeSignature,
+) {
+    assert!(epoch == epoch_certs.epoch, EWrongEpoch);
+    if (epoch_certs.certs.contains(dealer)) {
+        return
+    };
+    let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
+    let submission = DealerSubmissionV1 { message, signature: *sig };
+    epoch_certs.certs.push_back(dealer, submission);
+}

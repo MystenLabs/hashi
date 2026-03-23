@@ -123,13 +123,13 @@ fun test_approve_request_with_certificate() {
     // Approve each request individually with its own certificate
     let approval1 = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes1 = build_cert_message(epoch, &approval1);
-    let (sig1, bitmap1) = test_utils::sign_with_committee(&message_bytes1, 3);
-    hashi::withdraw::approve_request(&mut hashi, id1, epoch, sig1, bitmap1);
+    let cert1 = test_utils::sign_certificate(epoch, &message_bytes1, 3);
+    hashi::withdraw::approve_request(&mut hashi, id1, cert1);
 
     let approval2 = hashi::withdraw::new_request_approval_message(id2);
     let message_bytes2 = build_cert_message(epoch, &approval2);
-    let (sig2, bitmap2) = test_utils::sign_with_committee(&message_bytes2, 3);
-    hashi::withdraw::approve_request(&mut hashi, id2, epoch, sig2, bitmap2);
+    let cert2 = test_utils::sign_certificate(epoch, &message_bytes2, 3);
+    hashi::withdraw::approve_request(&mut hashi, id2, cert2);
 
     // Verify both requests are now approved by removing them as approved
     let r1 = hashi.withdrawal_queue_mut().remove_approved_request(id1);
@@ -159,10 +159,10 @@ fun test_approve_request_bad_signature() {
 
     // Sign over WRONG data (empty message instead of actual approval message)
     let wrong_bytes = bcs::to_bytes(&epoch);
-    let (bad_signature, signers_bitmap) = test_utils::sign_with_committee(&wrong_bytes, 3);
+    let bad_cert = test_utils::sign_certificate(epoch, &wrong_bytes, 3);
 
     // Should fail signature verification
-    hashi::withdraw::approve_request(&mut hashi, id1, epoch, bad_signature, signers_bitmap);
+    hashi::withdraw::approve_request(&mut hashi, id1, bad_cert);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -182,8 +182,8 @@ fun test_approve_then_cancel() {
     // Approve via certificate
     let approval = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes = build_cert_message(epoch, &approval);
-    let (signature, signers_bitmap) = test_utils::sign_with_committee(&message_bytes, 3);
-    hashi::withdraw::approve_request(&mut hashi, id1, epoch, signature, signers_bitmap);
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+    hashi::withdraw::approve_request(&mut hashi, id1, cert);
 
     // Cancelling an approved request should fail
     let one_hour_ms = 1000 * 60 * 60;

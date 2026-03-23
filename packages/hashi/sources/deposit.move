@@ -3,7 +3,7 @@
 
 module hashi::deposit;
 
-use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, threshold, utxo::UtxoId};
+use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, utxo::UtxoId};
 use sui::{coin::{Self, Coin}, sui::SUI};
 
 public fun deposit(
@@ -43,8 +43,7 @@ public fun deposit(
 public fun confirm_deposit(
     hashi: &mut Hashi,
     request_id: address,
-    // Committee signature over the deposit request.
-    signature: CommitteeSignature,
+    cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
@@ -60,16 +59,10 @@ public fun confirm_deposit(
         utxo_id: request.utxo().id(),
         amount: request.utxo().amount(),
         derivation_path: request.utxo().derivation_path(),
-        // signature,
     };
 
     // Verify the certificate over the request.
-    let threshold =
-        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    let request = hashi
-        .current_committee()
-        .verify_certificate(request, signature, threshold)
-        .into_message();
+    let request = hashi.verify(request, cert).into_message();
 
     let utxo = request.into_utxo();
     let derivation_path = utxo.derivation_path();

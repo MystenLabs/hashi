@@ -6,9 +6,8 @@ module hashi::withdraw;
 
 use hashi::{
     btc::BTC,
-    committee,
+    committee::CommitteeSignature,
     hashi::Hashi,
-    threshold,
     utxo::UtxoId,
     withdrawal_queue::{OutputUtxo, withdrawal_request}
 };
@@ -110,24 +109,11 @@ public fun request_withdrawal(
     hashi.withdrawal_queue_mut().insert_request(request);
 }
 
-entry fun approve_request(
-    hashi: &mut Hashi,
-    request_id: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-) {
+entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: CommitteeSignature) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
-
-    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
-
-    let approval = RequestApprovalMessage { request_id };
-
-    let threshold =
-        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
+    hashi.verify(RequestApprovalMessage { request_id }, cert);
 
     hashi.withdrawal_queue_mut().approve_request(request_id);
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
@@ -138,12 +124,10 @@ entry fun approve_request(
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
-    selected_utxos: vector<vector<u8>>,
-    outputs: vector<vector<u8>>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
     txid: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -153,17 +137,11 @@ entry fun commit_withdrawal_tx(
     // Do not allow scheduling of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
-    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
-
     // Selected UTXOs
     let epoch = hashi.committee_set().epoch();
-    let selected_utxos = selected_utxos.map!(|raw| hashi::utxo::utxo_id_from_bcs(raw));
     let inputs = selected_utxos.map!(|utxo_id| hashi.utxo_pool_mut().spend(utxo_id, epoch));
 
     hashi.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
-
-    // outputs
-    let outputs = outputs.map!(|raw| hashi::withdrawal_queue::output_utxo_from_bcs(raw));
 
     let approval = WithdrawalCommitmentMessage {
         request_ids,
@@ -172,9 +150,7 @@ entry fun commit_withdrawal_tx(
         txid,
     };
 
-    let threshold =
-        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
+    hashi.verify(approval, cert);
 
     let WithdrawalCommitmentMessage {
         outputs,
@@ -215,17 +191,12 @@ entry fun sign_withdrawal(
     withdrawal_id: address,
     request_ids: vector<address>,
     signatures: vector<vector<u8>>,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    _ctx: &mut TxContext,
+    cert: CommitteeSignature,
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
-    // Do not allow scheduling of withdrawals during a reconfiguration.
+    // Do not allow signing of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
-
-    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
 
     let approval = WithdrawalSignedMessage {
         withdrawal_id,
@@ -233,35 +204,17 @@ entry fun sign_withdrawal(
         signatures,
     };
 
-    let threshold =
-        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    hashi.current_committee().verify_certificate(approval, cert, threshold).into_message();
+    hashi.verify(approval, cert);
 
     let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
 
     hashi.withdrawal_queue_mut().sign_pending_withdrawal(withdrawal_id, signatures);
 }
 
-entry fun confirm_withdrawal(
-    hashi: &mut Hashi,
-    withdrawal_id: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    _ctx: &mut TxContext,
-) {
+entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: CommitteeSignature) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
-
-    let cert = committee::new_committee_signature(epoch, signature, signers_bitmap);
-
-    let threshold =
-        threshold::certificate_threshold(hashi.current_committee().total_weight() as u16) as u64;
-    let confirmation = WithdrawalConfirmationMessage { withdrawal_id };
-    let _ = hashi
-        .current_committee()
-        .verify_certificate(confirmation, cert, threshold)
-        .into_message();
+    hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
 
     let withdrawal = hashi.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
 
@@ -307,9 +260,8 @@ public fun cancel_withdrawal(
     coin::from_balance(btc, ctx)
 }
 
-public fun delete_expired_spent_utxo(hashi: &mut Hashi, txid: address, vout: u32) {
+public fun delete_expired_spent_utxo(hashi: &mut Hashi, utxo_id: UtxoId) {
     hashi.config().assert_version_enabled();
-    let utxo_id = hashi::utxo::utxo_id(txid, vout);
     let current_epoch = hashi.committee_set().epoch();
     hashi.utxo_pool_mut().delete_expired_spent_utxo(utxo_id, current_epoch);
 }

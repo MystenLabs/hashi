@@ -37,6 +37,28 @@ use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
 use hashi_types::move_types::WithdrawalRequestedEvent;
+
+/// Construct a `CommitteeSignature` via a Move call in the PTB.
+///
+/// Custom structs cannot be passed as pure BCS args in a PTB, so we construct
+/// the struct via `committee::new_committee_signature()` and use the result.
+fn build_committee_signature_arg(
+    builder: &mut TransactionBuilder,
+    package_id: Address,
+    sig: &CommitteeSignature,
+) -> sui_transaction_builder::Argument {
+    let epoch_arg = builder.pure(&sig.epoch());
+    let signature_arg = builder.pure(&sig.signature_bytes().to_vec());
+    let bitmap_arg = builder.pure(&sig.signers_bitmap_bytes().to_vec());
+    builder.move_call(
+        Function::new(
+            package_id,
+            Identifier::from_static("committee"),
+            Identifier::from_static("new_committee_signature"),
+        ),
+        vec![epoch_arg, signature_arg, bitmap_arg],
+    )
+}
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
@@ -175,49 +197,33 @@ impl SuiTxExecutor {
 
     /// Execute a deposit confirmation transaction.
     ///
-    /// This builds and executes a PTB that:
-    /// 1. Calls `committee::new_committee_signature` to construct the CommitteeSignature
-    /// 2. Calls `deposit::confirm_deposit` with the Hashi object, request ID, and signature
+    /// Passes a `Certificate` (BCS-encoded struct) to `deposit::confirm_deposit`.
     pub async fn execute_confirm_deposit(
         &mut self,
         deposit_request: &DepositRequest,
         signed_message: SignedMessage<DepositRequest>,
     ) -> anyhow::Result<()> {
-        let committee_sig = signed_message.committee_signature();
-
-        // Build a PTB that:
-        // 1. Calls committee::new_committee_signature to construct the CommitteeSignature
-        // 2. Passes the result to deposit::confirm_deposit
         let mut builder = TransactionBuilder::new();
 
-        let request_id_arg = builder.pure(&deposit_request.id);
-        let epoch_arg = builder.pure(&committee_sig.epoch());
-        let signature_arg = builder.pure(&committee_sig.signature_bytes());
-        let bitmap_arg = builder.pure(&committee_sig.signers_bitmap_bytes());
-
-        // Call new_committee_signature to get the properly serialized CommitteeSignature
-        let committee_sig_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("committee"),
-                Identifier::from_static("new_committee_signature"),
-            ),
-            vec![epoch_arg, signature_arg, bitmap_arg],
-        );
-
-        // Call confirm deposit - server will resolve the shared object version
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
                 .as_shared()
                 .with_mutable(true),
         );
+        let request_id_arg = builder.pure(&deposit_request.id);
+        let cert_arg = build_committee_signature_arg(
+            &mut builder,
+            self.hashi_ids.package_id,
+            signed_message.committee_signature(),
+        );
+
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("confirm_deposit"),
             ),
-            vec![hashi_arg, request_id_arg, committee_sig_arg],
+            vec![hashi_arg, request_id_arg, cert_arg],
         );
 
         let response = self.execute(builder).await?;
@@ -482,8 +488,7 @@ impl SuiTxExecutor {
     pub async fn execute_end_reconfig(
         &mut self,
         mpc_public_key: &[u8],
-        signature: &[u8],
-        signers_bitmap: &[u8],
+        cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -492,20 +497,14 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
-        let signature_arg = builder.pure(&signature.to_vec());
-        let signers_bitmap_arg = builder.pure(&signers_bitmap.to_vec());
+        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("end_reconfig"),
             ),
-            vec![
-                hashi_arg,
-                mpc_public_key_arg,
-                signature_arg,
-                signers_bitmap_arg,
-            ],
+            vec![hashi_arg, mpc_public_key_arg, cert_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
@@ -580,8 +579,7 @@ impl SuiTxExecutor {
         let dealer = message.dealer_address;
         let message_hash = message.messages_hash.inner().to_vec();
         let epoch = inner_cert.epoch();
-        let signature = inner_cert.signature_bytes().to_vec();
-        let signers_bitmap = inner_cert.signers_bitmap_bytes().to_vec();
+        let committee_sig = inner_cert.committee_signature();
 
         let mut builder = TransactionBuilder::new();
 
@@ -598,14 +596,9 @@ impl SuiTxExecutor {
         }
         let dealer_arg = builder.pure(&dealer);
         let message_hash_arg = builder.pure(&message_hash);
-        let signature_arg = builder.pure(&signature);
-        let signers_bitmap_arg = builder.pure(&signers_bitmap);
-        args.extend([
-            dealer_arg,
-            message_hash_arg,
-            signature_arg,
-            signers_bitmap_arg,
-        ]);
+        let cert_arg =
+            build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, committee_sig);
+        args.extend([dealer_arg, message_hash_arg, cert_arg]);
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
@@ -640,9 +633,8 @@ impl SuiTxExecutor {
 
         for (request_id, cert) in approvals {
             let request_id_arg = builder.pure(request_id);
-            let epoch_arg = builder.pure(&cert.epoch());
-            let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
-            let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+            let cert_arg =
+                build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
 
             builder.move_call(
                 Function::new(
@@ -650,13 +642,7 @@ impl SuiTxExecutor {
                     Identifier::from_static("withdraw"),
                     Identifier::from_static("approve_request"),
                 ),
-                vec![
-                    hashi_arg,
-                    request_id_arg,
-                    epoch_arg,
-                    signature_arg,
-                    signers_bitmap_arg,
-                ],
+                vec![hashi_arg, request_id_arg, cert_arg],
             );
         }
 
@@ -671,15 +657,6 @@ impl SuiTxExecutor {
     }
 
     /// Execute `withdraw::commit_withdrawal_tx` to commit to a withdrawal on-chain.
-    ///
-    /// The Move function expects:
-    /// - `hashi: &mut Hashi`
-    /// - `requests: vector<address>` — withdrawal request IDs
-    /// - `selected_utxos: vector<vector<u8>>` — BCS-encoded `UtxoId`s
-    /// - `outputs: vector<vector<u8>>` — BCS-encoded `OutputUtxo`s
-    /// - `txid: address` — bitcoin transaction ID
-    /// - `epoch, signature, signers_bitmap` — committee certificate
-    /// - `clock: &Clock`
     /// - `r: &Random`
     pub async fn execute_commit_withdrawal_tx(
         &mut self,
@@ -696,24 +673,56 @@ impl SuiTxExecutor {
 
         let requests_arg = builder.pure(&approval.request_ids);
 
-        let selected_utxos_bcs: Vec<Vec<u8>> = approval
+        let utxo_id_type = StructTag::new(
+            self.hashi_ids.package_id,
+            Identifier::from_static("utxo"),
+            Identifier::from_static("UtxoId"),
+            vec![],
+        );
+        let utxo_elements: Vec<_> = approval
             .selected_utxos
             .iter()
-            .map(|utxo_id| bcs::to_bytes(utxo_id).unwrap())
+            .map(|utxo_id| {
+                let txid_arg = builder.pure(&utxo_id.txid);
+                let vout_arg = builder.pure(&utxo_id.vout);
+                builder.move_call(
+                    Function::new(
+                        self.hashi_ids.package_id,
+                        Identifier::from_static("utxo"),
+                        Identifier::from_static("utxo_id"),
+                    ),
+                    vec![txid_arg, vout_arg],
+                )
+            })
             .collect();
-        let selected_utxos_arg = builder.pure(&selected_utxos_bcs);
+        let selected_utxos_arg = builder.make_move_vec(Some(utxo_id_type.into()), utxo_elements);
 
-        let outputs_bcs: Vec<Vec<u8>> = approval
+        let output_utxo_type = StructTag::new(
+            self.hashi_ids.package_id,
+            Identifier::from_static("withdrawal_queue"),
+            Identifier::from_static("OutputUtxo"),
+            vec![],
+        );
+        let output_elements: Vec<_> = approval
             .outputs
             .iter()
-            .map(|output| bcs::to_bytes(output).unwrap())
+            .map(|output| {
+                let amount_arg = builder.pure(&output.amount);
+                let address_arg = builder.pure(&output.bitcoin_address);
+                builder.move_call(
+                    Function::new(
+                        self.hashi_ids.package_id,
+                        Identifier::from_static("withdrawal_queue"),
+                        Identifier::from_static("output_utxo"),
+                    ),
+                    vec![amount_arg, address_arg],
+                )
+            })
             .collect();
-        let outputs_arg = builder.pure(&outputs_bcs);
+        let outputs_arg = builder.make_move_vec(Some(output_utxo_type.into()), output_elements);
 
         let txid_arg = builder.pure(&approval.txid);
-        let epoch_arg = builder.pure(&cert.epoch());
-        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
-        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
+        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
 
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
@@ -738,9 +747,7 @@ impl SuiTxExecutor {
                 selected_utxos_arg,
                 outputs_arg,
                 txid_arg,
-                epoch_arg,
-                signature_arg,
-                signers_bitmap_arg,
+                cert_arg,
                 clock_arg,
                 random_arg,
             ],
@@ -776,9 +783,7 @@ impl SuiTxExecutor {
         let request_ids_arg = builder.pure(&request_ids_vec);
         let signatures_vec = signatures.to_vec();
         let signatures_arg = builder.pure(&signatures_vec);
-        let epoch_arg = builder.pure(&cert.epoch());
-        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
-        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
 
         builder.move_call(
             Function::new(
@@ -791,9 +796,7 @@ impl SuiTxExecutor {
                 withdrawal_id_arg,
                 request_ids_arg,
                 signatures_arg,
-                epoch_arg,
-                signature_arg,
-                signers_bitmap_arg,
+                cert_arg,
             ],
         );
 
@@ -870,9 +873,7 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
-        let epoch_arg = builder.pure(&cert.epoch());
-        let signature_arg = builder.pure(&cert.signature_bytes().to_vec());
-        let signers_bitmap_arg = builder.pure(&cert.signers_bitmap_bytes().to_vec());
+        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
 
         builder.move_call(
             Function::new(
@@ -880,13 +881,7 @@ impl SuiTxExecutor {
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("confirm_withdrawal"),
             ),
-            vec![
-                hashi_arg,
-                withdrawal_id_arg,
-                epoch_arg,
-                signature_arg,
-                signers_bitmap_arg,
-            ],
+            vec![hashi_arg, withdrawal_id_arg, cert_arg],
         );
 
         let response = self.execute(builder).await?;
