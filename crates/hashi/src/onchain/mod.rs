@@ -23,6 +23,8 @@ use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
 use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::Address;
+use sui_sdk_types::Identifier;
+use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::ToBcs;
 use tap::Pipe;
@@ -185,7 +187,8 @@ impl OnchainState {
     }
 
     pub async fn rescrape(&self) -> Result<()> {
-        let (checkpoint_info, hashi) = scrape_hashi(self.client(), self.hashi_id()).await?;
+        let (checkpoint_info, hashi) =
+            scrape_hashi(self.client(), self.hashi_id(), self.0.ids.package_id).await?;
         self.replace_hashi_state(hashi);
         self.update_latest_checkpoint_info(checkpoint_info);
         Ok(())
@@ -226,6 +229,11 @@ impl OnchainState {
 
     pub fn hashi_id(&self) -> Address {
         self.state().hashi.id
+    }
+
+    /// Returns the original package id (used for type tag construction).
+    pub fn original_package_id(&self) -> Address {
+        self.0.ids.package_id
     }
 
     pub fn tob_id(&self) -> Address {
@@ -518,7 +526,7 @@ impl State {
     async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, CheckpointInfo)> {
         let (package_versions, (checkpoint_info, hashi)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
-            scrape_hashi(client, ids.hashi_object_id),
+            scrape_hashi(client, ids.hashi_object_id, ids.package_id),
         )?;
 
         let package_ids = package_versions.values().cloned().collect();
@@ -561,6 +569,7 @@ async fn scrape_package_versions(
 async fn scrape_hashi(
     mut client: Client,
     hashi_object_id: Address,
+    package_id: Address,
 ) -> Result<(CheckpointInfo, types::Hashi)> {
     let response = client
         .ledger_client()
@@ -590,12 +599,30 @@ async fn scrape_hashi(
         committees,
         config,
         treasury,
-        deposit_queue,
-        withdrawal_queue,
-        utxo_pool,
         proposals,
         tob,
     } = response.get_ref().object().contents().deserialize()?;
+
+    // Fetch BitcoinState dynamic field by deriving its child object ID.
+    let bitcoin_state_key = move_types::BitcoinStateKey::new();
+    let bitcoin_state_key_type = struct_type_tag(package_id, "bitcoin_state", "BitcoinStateKey");
+    let bitcoin_state_field_id = id.derive_dynamic_child_id(
+        &bitcoin_state_key_type,
+        &bitcoin_state_key.to_bcs().unwrap(),
+    );
+    let bitcoin_state = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&bitcoin_state_field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().contents().finish(),
+            ])),
+        )
+        .await?
+        .get_ref()
+        .object()
+        .contents()
+        .deserialize::<move_types::Field<move_types::BitcoinStateKey, move_types::BitcoinState>>()?
+        .value;
 
     let (
         member_info,
@@ -609,9 +636,9 @@ async fn scrape_hashi(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
-        scrape_deposit_requests(client.clone(), deposit_queue.requests.id),
-        scrape_withdrawal_queue(client.clone(), withdrawal_queue),
-        scrape_utxo_pool(client.clone(), utxo_pool),
+        scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue.requests.id),
+        scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
+        scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
         scrape_proposals(client.clone(), proposals),
     )?;
 
@@ -1396,6 +1423,15 @@ fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
+}
+
+fn struct_type_tag(package: Address, module: &str, name: &str) -> TypeTag {
+    TypeTag::Struct(Box::new(StructTag::new(
+        package,
+        Identifier::new(module).expect("valid identifier"),
+        Identifier::new(name).expect("valid identifier"),
+        vec![],
+    )))
 }
 
 pub trait MoveType {

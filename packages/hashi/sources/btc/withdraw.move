@@ -106,7 +106,7 @@ public fun request_withdrawal(
     // Store remaining BTC (net of protocol fee) in the withdrawal request.
     let request = withdrawal_request(btc.into_balance(), bitcoin_address, clock, ctx);
     request.emit_withdrawal_requested();
-    hashi.withdrawal_queue_mut().insert_request(request);
+    hashi.borrow_bitcoin_state_mut().withdrawal_queue_mut().insert_request(request);
 }
 
 entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: CommitteeSignature) {
@@ -115,7 +115,7 @@ entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: Committe
     hashi.assert_not_reconfiguring();
     hashi.verify(RequestApprovalMessage { request_id }, cert);
 
-    hashi.withdrawal_queue_mut().approve_request(request_id);
+    hashi.borrow_bitcoin_state_mut().withdrawal_queue_mut().approve_request(request_id);
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
 }
 
@@ -137,12 +137,7 @@ entry fun commit_withdrawal_tx(
     // Do not allow scheduling of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
-    // Selected UTXOs
     let epoch = hashi.committee_set().epoch();
-    let inputs = selected_utxos.map!(|utxo_id| hashi.utxo_pool_mut().spend(utxo_id, epoch));
-
-    let presig_start_index = hashi.withdrawal_queue().num_consumed_presigs();
-    hashi.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
 
     let approval = WithdrawalCommitmentMessage {
         request_ids,
@@ -159,15 +154,23 @@ entry fun commit_withdrawal_tx(
         ..,
     } = approval;
 
+    // Borrow BitcoinState: spend UTXOs and collect approved requests
+    let btc = hashi.borrow_bitcoin_state_mut();
+    let inputs = selected_utxos.map!(|utxo_id| btc.utxo_pool_mut().spend(utxo_id, epoch));
+    let presig_start_index = btc.withdrawal_queue().num_consumed_presigs();
+    btc.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
+
+    let mut balances_to_burn = vector[];
     let requests = request_ids.map!(|request_id| {
-        let request = hashi.withdrawal_queue_mut().remove_approved_request(request_id);
-        let (request, btc) = hashi::withdrawal_queue::request_into_parts(request);
-
-        // burn BTC
-        hashi.treasury_mut().burn(btc);
-
+        let request = btc.withdrawal_queue_mut().remove_approved_request(request_id);
+        let (request, btc_bal) = hashi::withdrawal_queue::request_into_parts(request);
+        balances_to_burn.push_back(btc_bal);
         request
     });
+    // btc borrow released (last use above)
+
+    // Burn BTC balances
+    balances_to_burn.do!(|bal| hashi.treasury_mut().burn(bal));
 
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(32);
@@ -186,7 +189,14 @@ entry fun commit_withdrawal_tx(
     );
 
     pending_withdrawal.emit_withdrawal_picked_for_processing();
-    hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending_withdrawal);
+
+    // Re-borrow BitcoinState to insert pending withdrawal
+    hashi
+        .borrow_bitcoin_state_mut()
+        .withdrawal_queue_mut()
+        .insert_pending_withdrawal(
+            pending_withdrawal,
+        );
 }
 
 entry fun allocate_presigs_for_pending_withdrawal(
@@ -221,7 +231,13 @@ entry fun sign_withdrawal(
 
     let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
 
-    hashi.withdrawal_queue_mut().sign_pending_withdrawal(withdrawal_id, signatures);
+    hashi
+        .borrow_bitcoin_state_mut()
+        .withdrawal_queue_mut()
+        .sign_pending_withdrawal(
+            withdrawal_id,
+            signatures,
+        );
 }
 
 entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: CommitteeSignature) {
@@ -229,14 +245,15 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
     hashi.assert_unpaused();
     hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
 
-    let withdrawal = hashi.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
+    let btc = hashi.borrow_bitcoin_state_mut();
+    let withdrawal = btc.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
 
     withdrawal.emit_withdrawal_confirmed();
     let change_utxo = withdrawal.destroy_pending_withdrawal();
 
     // Insert the change UTXO back into the active pool
     if (change_utxo.is_some()) {
-        hashi.utxo_pool_mut().insert_active(change_utxo.destroy_some());
+        btc.utxo_pool_mut().insert_active(change_utxo.destroy_some());
     } else {
         change_utxo.destroy_none();
     };
@@ -255,9 +272,15 @@ public fun cancel_withdrawal(
 ): Coin<BTC> {
     hashi.config().assert_version_enabled();
 
-    assert!(!hashi.withdrawal_queue().is_request_approved(request_id), ERequestAlreadyApproved);
+    assert!(
+        !hashi.borrow_bitcoin_state().withdrawal_queue().is_request_approved(request_id),
+        ERequestAlreadyApproved,
+    );
 
-    let request = hashi.withdrawal_queue_mut().remove_request(request_id);
+    let request = hashi
+        .borrow_bitcoin_state_mut()
+        .withdrawal_queue_mut()
+        .remove_request(request_id);
 
     // Only the original requester can cancel
     assert!(request.requester_address() == ctx.sender(), EUnauthorizedCancellation);
@@ -276,5 +299,11 @@ public fun cancel_withdrawal(
 public fun delete_expired_spent_utxo(hashi: &mut Hashi, utxo_id: UtxoId) {
     hashi.config().assert_version_enabled();
     let current_epoch = hashi.committee_set().epoch();
-    hashi.utxo_pool_mut().delete_expired_spent_utxo(utxo_id, current_epoch);
+    hashi
+        .borrow_bitcoin_state_mut()
+        .utxo_pool_mut()
+        .delete_expired_spent_utxo(
+            utxo_id,
+            current_epoch,
+        );
 }

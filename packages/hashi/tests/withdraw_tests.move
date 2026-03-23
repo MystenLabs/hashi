@@ -26,7 +26,7 @@ fun setup_withdrawal_request(
     let bitcoin_address = x"0000000000000000000000000000000000000000"; // 20 bytes
     let request = withdrawal_queue::withdrawal_request(btc, bitcoin_address, clock, ctx);
     let request_id = request.request_id();
-    hashi.withdrawal_queue_mut().insert_request(request);
+    hashi.borrow_bitcoin_state_mut().withdrawal_queue_mut().insert_request(request);
     request_id
 }
 
@@ -132,8 +132,8 @@ fun test_approve_request_with_certificate() {
     hashi::withdraw::approve_request(&mut hashi, id2, cert2);
 
     // Verify both requests are now approved by removing them as approved
-    let r1 = hashi.withdrawal_queue_mut().remove_approved_request(id1);
-    let r2 = hashi.withdrawal_queue_mut().remove_approved_request(id2);
+    let r1 = hashi.borrow_bitcoin_state_mut().withdrawal_queue_mut().remove_approved_request(id1);
+    let r2 = hashi.borrow_bitcoin_state_mut().withdrawal_queue_mut().remove_approved_request(id2);
 
     let (_, btc1) = withdrawal_queue::request_into_parts(r1);
     let (_, btc2) = withdrawal_queue::request_into_parts(r2);

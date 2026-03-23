@@ -40,12 +40,30 @@ pub struct Hashi {
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub deposit_queue: DepositRequestQueue,
-    pub withdrawal_queue: WithdrawalRequestQueue,
-    pub utxo_pool: UtxoPool,
     pub proposals: Bag,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
+}
+
+/// Rust version of the Move hashi::bitcoin_state::BitcoinStateKey type.
+/// The Move definition has no fields, however empty structs in Move are
+/// represented as a single byte 0 in BCS serialized data.
+#[derive(Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct BitcoinStateKey(u8);
+
+impl BitcoinStateKey {
+    pub fn new() -> Self {
+        Self(0)
+    }
+}
+
+/// Rust version of the Move hashi::bitcoin_state::BitcoinState type.
+/// Stored as a dynamic field on the Hashi object.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct BitcoinState {
+    pub deposit_queue: DepositRequestQueue,
+    pub withdrawal_queue: WithdrawalRequestQueue,
+    pub utxo_pool: UtxoPool,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.

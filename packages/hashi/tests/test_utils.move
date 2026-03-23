@@ -9,13 +9,10 @@ module hashi::test_utils;
 use hashi::{
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
-    deposit_queue,
     disable_version,
     enable_version,
     hashi::Hashi,
-    update_config,
-    utxo_pool,
-    withdrawal_queue
+    update_config
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
 
@@ -132,15 +129,6 @@ public fun create_hashi_with_weighted_committee(
     // Create treasury
     let treasury = hashi::treasury::create(ctx);
 
-    // Create deposit queue
-    let deposit_queue = deposit_queue::create(ctx);
-
-    // Create withdrawal queue
-    let withdrawal_queue = withdrawal_queue::create(ctx);
-
-    // Create utxo pool
-    let utxo_pool = utxo_pool::create(ctx);
-
     // Create proposals bag
     let proposals = bag::new(ctx);
 
@@ -151,9 +139,6 @@ public fun create_hashi_with_weighted_committee(
         committee_set,
         config,
         treasury,
-        deposit_queue,
-        withdrawal_queue,
-        utxo_pool,
         proposals,
         tob,
         ctx,
