@@ -236,7 +236,7 @@ fun test_execute_proposal_with_quorum() {
     let clock = clock::create_for_testing(ctx);
 
     // Verify initial deposit fee is 0
-    assert!(hashi.config().deposit_fee() == 0);
+    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 0);
 
     // VOTER1 creates proposal (auto-votes = 100% weight)
     let proposal_id = test_utils::create_deposit_fee_proposal(
@@ -250,7 +250,7 @@ fun test_execute_proposal_with_quorum() {
     hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
     // Verify the deposit fee was updated
-    assert!(hashi.config().deposit_fee() == 1000);
+    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -313,7 +313,7 @@ fun test_execute_after_gathering_votes() {
     hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
     // Verify the deposit fee was updated
-    assert!(hashi.config().deposit_fee() == 1000);
+    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -475,7 +475,7 @@ fun test_weighted_quorum() {
 
     // Execute should succeed
     hashi::update_config::execute(&mut hashi, proposal_id, &clock);
-    assert!(hashi.config().deposit_fee() == 1000);
+    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -515,11 +515,11 @@ fun test_multiple_concurrent_proposals() {
 
     // Execute first proposal
     hashi::update_config::execute(&mut hashi, proposal_id_1, &clock);
-    assert!(hashi.config().deposit_fee() == 1000);
+    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
 
     // Execute second proposal (overwrites first)
     hashi::update_config::execute(&mut hashi, proposal_id_2, &clock);
-    assert!(hashi.config().deposit_fee() == 2000);
+    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 2000);
 
     // Clean up
     clock::destroy_for_testing(clock);

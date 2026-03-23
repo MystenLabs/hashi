@@ -93,14 +93,14 @@ public fun request_withdrawal(
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
 
-    assert!(btc.value() >= hashi.config().withdrawal_minimum());
+    assert!(btc.value() >= hashi::btc_config::withdrawal_minimum(hashi.config()));
 
     // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
     let addr_len = bitcoin_address.length();
     assert!(addr_len == 20 || addr_len == 32);
 
     // Deduct protocol fee upfront and send to Hashi's address balance.
-    let fee_coin = btc.split(hashi.config().withdrawal_fee_btc(), ctx);
+    let fee_coin = btc.split(hashi::btc_config::withdrawal_fee_btc(hashi.config()), ctx);
     sui::coin::send_funds(fee_coin, hashi.id().to_address());
 
     // Store remaining BTC (net of protocol fee) in the withdrawal request.
@@ -263,7 +263,7 @@ public fun cancel_withdrawal(
     assert!(request.requester_address() == ctx.sender(), EUnauthorizedCancellation);
 
     // Enforce cooldown
-    let cooldown = hashi.config().withdrawal_cancellation_cooldown_ms();
+    let cooldown = hashi::btc_config::withdrawal_cancellation_cooldown_ms(hashi.config());
     assert!(clock.timestamp_ms() >= request.timestamp_ms() + cooldown, ECooldownNotElapsed);
 
     request.emit_withdrawal_cancelled();

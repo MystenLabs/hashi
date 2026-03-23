@@ -125,8 +125,9 @@ public fun create_hashi_with_weighted_committee(
         ctx,
     );
 
-    // Create config with version enabled
-    let config = hashi::config::create();
+    // Create config with version enabled + BTC defaults
+    let mut config = hashi::config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     // Create treasury
     let treasury = hashi::treasury::create(ctx);

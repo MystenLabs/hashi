@@ -34,7 +34,11 @@ fun init(ctx: &mut TxContext) {
     let hashi = Hashi {
         id: object::new(ctx),
         committee_set: hashi::committee_set::create(ctx),
-        config: hashi::config::create(),
+        config: {
+            let mut config = hashi::config::create();
+            hashi::btc_config::init_defaults(&mut config);
+            config
+        },
         treasury: hashi::treasury::create(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         withdrawal_queue: hashi::withdrawal_queue::create(ctx),
@@ -98,7 +102,7 @@ entry fun finish_publish(
     assert!(upgrade_cap.package() == this_package_id);
 
     self.config_mut().set_upgrade_cap(upgrade_cap);
-    self.config_mut().set_bitcoin_chain_id(bitcoin_chain_id);
+    hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);

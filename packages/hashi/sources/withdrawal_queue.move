@@ -107,7 +107,7 @@ public(package) fun new_pending_withdrawal(
     randomness: vector<u8>,
     ctx: &mut TxContext,
 ): PendingWithdrawal {
-    let max_network_fee = config.worst_case_network_fee();
+    let max_network_fee = hashi::btc_config::worst_case_network_fee(config);
 
     let mut input_amount = 0;
     inputs.do_ref!(|utxo| {
@@ -143,7 +143,7 @@ public(package) fun new_pending_withdrawal(
         let request = requests.borrow(i);
         let output = outputs.borrow(i);
         let expected = request.btc_amount - per_user_miner_fee;
-        assert!(expected >= hashi::config::dust_relay_min_value(), EOutputBelowDust);
+        assert!(expected >= hashi::btc_config::dust_relay_min_value(), EOutputBelowDust);
         assert!(output.amount == expected, EOutputAmountMismatch);
         assert!(output.bitcoin_address == request.bitcoin_address, EOutputAddressMismatch);
     });

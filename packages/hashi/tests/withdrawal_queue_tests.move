@@ -389,7 +389,8 @@ fun test_miner_fee_single_request() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     // btc_amount is net of protocol fee (already deducted at request time)
     let btc_amount = 30_000u64;
@@ -425,7 +426,8 @@ fun test_miner_fee_single_request_large_fee() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     let btc_amount = 40_000u64;
     let miner_fee = 5_000u64;
@@ -460,7 +462,8 @@ fun test_miner_fee_batched_even_split() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     let btc_amount = 30_000u64;
     let input_amount = 100_000u64;
@@ -501,7 +504,8 @@ fun test_miner_fee_batched_with_remainder() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     // 3 requests, miner_fee=1001 -> per_user=333, remainder=2 goes to miner
     let btc_amount = 40_000u64;
@@ -546,7 +550,8 @@ fun test_miner_fee_batched_unequal_amounts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     let btc_amount_1 = 50_000u64;
     let btc_amount_2 = 30_000u64;
@@ -589,7 +594,8 @@ fun test_miner_fee_zero() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     let btc_amount = 30_000u64;
     let user_output = btc_amount; // zero miner fee, btc_amount already net
@@ -623,12 +629,13 @@ fun test_miner_fee_output_at_dust_floor() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     // btc_amount is net of protocol fee. Choose so user output is exactly dust.
     let miner_fee = 5_000u64;
-    let btc_amount = miner_fee + config::dust_relay_min_value();
-    let user_output = config::dust_relay_min_value();
+    let btc_amount = miner_fee + hashi::btc_config::dust_relay_min_value();
+    let user_output = hashi::btc_config::dust_relay_min_value();
     let input_amount = user_output + miner_fee + 1_000;
     let change = 1_000u64;
 
@@ -660,7 +667,8 @@ fun test_miner_fee_output_below_dust_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     // btc_amount is net of protocol fee. user_output = 1000 - 600 = 400 < 546 (dust)
     let btc_amount = 1_000u64;
@@ -697,7 +705,8 @@ fun test_miner_fee_wrong_output_amount_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     let btc_amount = 30_000u64;
     let input_amount = 50_000u64;
@@ -736,7 +745,8 @@ fun test_miner_fee_wrong_address_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
-    let config = config::create();
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
 
     let btc_amount = 30_000u64;
     let miner_fee = 1_000u64;
@@ -775,10 +785,11 @@ fun test_miner_fee_exceeds_max_aborts() {
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
     // Set max_fee_rate=1, input_budget=1 to get a small max_network_fee:
     // tx_vbytes = 11 + 1*100 + 2*43 = 197, worst_case_fee = 1*197 = 197
-    config.set_max_fee_rate(1);
-    config.set_input_budget(1);
+    hashi::btc_config::set_max_fee_rate(&mut config, 1);
+    hashi::btc_config::set_input_budget(&mut config, 1);
 
     let btc_amount = 30_000u64;
     let miner_fee = 200u64; // exceeds max_network_fee of 197
