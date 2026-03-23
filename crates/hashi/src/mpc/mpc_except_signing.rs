@@ -596,8 +596,10 @@ impl MpcManager {
         }
         let dealers: Vec<_> = mgr.dealer_nonce_outputs.keys().collect();
         tracing::info!(
-            "run_nonce_generation: {pre_filter} outputs before filter, {} after \
+            "run_nonce_generation: epoch={}, batch_index={batch_index}, \
+             {pre_filter} outputs before filter, {} after \
              (removed {} uncertified). dealers={dealers:?}",
+            mgr.dkg_config.epoch,
             dealers.len(),
             uncertified.len(),
         );
@@ -883,19 +885,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<DkgOutput> {
-        // Clear pre-populated rotation outputs from the dealer phase RPC handler.
-        // The party phase must build the certified set from TOB certificates only.
-        {
-            let mut mgr = mpc_manager.write().unwrap();
-            mgr.dealer_outputs
-                .retain(|k, _| !matches!(k, DealerOutputsKey::Rotation(_)));
-        }
         let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
-        tracing::info!(
-            "run_key_rotation_as_party: starting with 0 share indices (cleared pre-populated), \
-             threshold={}",
-            previous.threshold,
-        );
         let mut certified_dealers = HashSet::new();
         loop {
             if certified_share_indices.len() >= previous.threshold as usize {
@@ -1564,7 +1554,8 @@ impl MpcManager {
         let threshold = self.dkg_config.threshold;
         let certified_dealers: Vec<Address> = certified_dealers.collect();
         tracing::info!(
-            "complete_dkg: {} certified dealers={:?}, dealer_outputs has {} entries",
+            "complete_dkg: epoch={}, {} certified dealers={:?}, dealer_outputs has {} entries",
+            self.dkg_config.epoch,
             certified_dealers.len(),
             certified_dealers,
             self.dealer_outputs.len(),
@@ -1593,7 +1584,11 @@ impl MpcManager {
         let combined_output =
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
-        tracing::info!("complete_dkg: result vk={:?}", combined_output.vk);
+        tracing::info!(
+            "complete_dkg: epoch={}, result vk={:?}",
+            self.dkg_config.epoch,
+            combined_output.vk
+        );
         Ok(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
@@ -2379,8 +2374,9 @@ impl MpcManager {
     ) -> MpcResult<DkgOutput> {
         let threshold = previous_dkg_output.threshold;
         tracing::info!(
-            "complete_key_rotation: {} certified_share_indices={:?}, \
+            "complete_key_rotation: epoch={}, {} certified_share_indices={:?}, \
              previous_vk={:?}, threshold={threshold}",
+            self.dkg_config.epoch,
             certified_share_indices.len(),
             certified_share_indices,
             previous_dkg_output.public_key,
@@ -2412,7 +2408,8 @@ impl MpcManager {
         )
         .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "complete_key_rotation: result vk={:?}, matches_previous={}",
+            "complete_key_rotation: epoch={}, result vk={:?}, matches_previous={}",
+            self.dkg_config.epoch,
             combined.vk,
             combined.vk == previous_dkg_output.public_key,
         );
