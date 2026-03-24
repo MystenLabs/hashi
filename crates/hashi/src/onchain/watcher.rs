@@ -98,7 +98,7 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             };
 
             let ckpt = checkpoint.cursor();
-            tracing::debug!("received checkpoint {ckpt}");
+            tracing::trace!("received checkpoint {ckpt}");
             let timestamp_ms = checkpoint
                 .checkpoint()
                 .summary()

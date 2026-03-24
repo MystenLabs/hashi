@@ -165,7 +165,7 @@ impl LeaderService {
         let current_turn = checkpoint_height / NUM_CONSECUTIVE_LEADER_CHECKPOINTS;
         let is_leader = (current_turn % num_validators) == this_validator_idx;
 
-        debug!("Node index {this_validator_idx} is leader node: {is_leader}");
+        trace!("Node index {this_validator_idx} is leader node: {is_leader}");
         is_leader
     }
 
