@@ -10,6 +10,7 @@ use bitcoin::secp256k1::XOnlyPublicKey;
 use colored::Colorize;
 
 use crate::cli::DepositCommands;
+use crate::cli::OutputFormat;
 use crate::cli::TxOptions;
 use crate::cli::client::HashiClient;
 use crate::cli::config::CliConfig;
@@ -29,7 +30,17 @@ pub async fn run(action: DepositCommands, config: &CliConfig, tx_opts: &TxOption
             recipient,
         } => request(config, tx_opts, &txid, vout, amount, recipient.as_deref()).await,
         DepositCommands::Status { request_id } => status(config, &request_id).await,
-        DepositCommands::List => list(config).await,
+        DepositCommands::List {
+            output_format,
+            json,
+        } => {
+            let output_format = if json {
+                OutputFormat::Json
+            } else {
+                output_format
+            };
+            list(config, output_format).await
+        }
     }
 }
 
@@ -223,44 +234,77 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn list(config: &CliConfig) -> Result<()> {
+async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let deposits = client.fetch_deposit_requests();
 
-    println!("\n{}", "Deposit Requests".bold());
-    println!("{}", "━".repeat(100).dimmed());
+    match output_format {
+        OutputFormat::Json => {
+            let rows: Vec<_> = deposits
+                .iter()
+                .map(|dep| {
+                    let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
+                    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+                    serde_json::json!({
+                        "request_id": dep.id.to_string(),
+                        "amount_sats": dep.utxo.amount,
+                        "utxo": {
+                            "txid": txid.to_string(),
+                            "vout": dep.utxo.id.vout,
+                        },
+                        "status": "pending",
+                        "caller": dep.requester_address.to_string(),
+                        "requested_ms": dep.timestamp_ms,
+                    })
+                })
+                .collect();
 
-    if deposits.is_empty() {
-        print_info("No pending deposit requests.");
-    } else {
-        println!(
-            "  {:<20} {:<14} {:<12} {:<10} {:<20} {}",
-            "Request ID".bold(),
-            "Amount (sats)".bold(),
-            "UTXO".bold(),
-            "Status".bold(),
-            "Caller".bold(),
-            "Requested".bold()
-        );
-        for dep in &deposits {
-            let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
-            let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-            let txid_str = txid.to_string();
             println!(
-                "  {:<20} {:<14} {}:{:<3} {:<10} {:<20} {}",
-                display::format_address_full(&dep.id),
-                dep.utxo.amount,
-                txid_str,
-                dep.utxo.id.vout,
-                "Pending".yellow(),
-                display::format_address_full(&dep.requester_address),
-                display::format_timestamp(dep.timestamp_ms)
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "deposits": rows,
+                    "count": deposits.len(),
+                }))?
             );
         }
-        println!("\n  {} deposit(s)", deposits.len());
+        OutputFormat::HumanTable => {
+            println!("\n{}", "Deposit Requests".bold());
+            println!("{}", "━".repeat(100).dimmed());
+
+            if deposits.is_empty() {
+                print_info("No pending deposit requests.");
+            } else {
+                println!(
+                    "  {:<20} {:<14} {:<12} {:<10} {:<20} {}",
+                    "Request ID".bold(),
+                    "Amount (sats)".bold(),
+                    "UTXO".bold(),
+                    "Status".bold(),
+                    "Caller".bold(),
+                    "Requested".bold()
+                );
+                for dep in &deposits {
+                    let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
+                    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+                    let txid_str = txid.to_string();
+                    println!(
+                        "  {:<20} {:<14} {}:{:<3} {:<10} {:<20} {}",
+                        display::format_address_full(&dep.id),
+                        dep.utxo.amount,
+                        txid_str,
+                        dep.utxo.id.vout,
+                        "Pending".yellow(),
+                        display::format_address_full(&dep.requester_address),
+                        display::format_timestamp(dep.timestamp_ms)
+                    );
+                }
+                println!("\n  {} deposit(s)", deposits.len());
+            }
+
+            println!("{}", "━".repeat(100).dimmed());
+        }
     }
 
-    println!("{}", "━".repeat(100).dimmed());
     Ok(())
 }

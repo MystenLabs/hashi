@@ -8,6 +8,7 @@ use anyhow::Result;
 use bitcoin::hashes::Hash;
 use colored::Colorize;
 
+use crate::cli::OutputFormat;
 use crate::cli::TxOptions;
 use crate::cli::WithdrawCommands;
 use crate::cli::client::HashiClient;
@@ -25,7 +26,17 @@ pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptio
         } => request(config, tx_opts, amount, &btc_address).await,
         WithdrawCommands::Cancel { request_id } => cancel(config, tx_opts, &request_id).await,
         WithdrawCommands::Status { request_id } => status(config, &request_id).await,
-        WithdrawCommands::List => list(config).await,
+        WithdrawCommands::List {
+            output_format,
+            json,
+        } => {
+            let output_format = if json {
+                OutputFormat::Json
+            } else {
+                output_format
+            };
+            list(config, output_format).await
+        }
     }
 }
 
@@ -235,70 +246,112 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn list(config: &CliConfig) -> Result<()> {
+async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let requests = client.fetch_withdrawal_requests();
     let pending = client.fetch_pending_withdrawals();
 
-    println!("\n{}", "Withdrawal Requests".bold());
-    println!("{}", "━".repeat(100).dimmed());
+    match output_format {
+        OutputFormat::Json => {
+            let queued: Vec<_> = requests
+                .iter()
+                .map(|wr| {
+                    serde_json::json!({
+                        "request_id": wr.id.to_string(),
+                        "amount_sats": wr.btc_amount,
+                        "status": if wr.approved { "approved" } else { "requested" },
+                        "caller": wr.requester_address.to_string(),
+                        "requested_ms": wr.timestamp_ms,
+                    })
+                })
+                .collect();
 
-    if requests.is_empty() && pending.is_empty() {
-        print_info("No withdrawal requests found.");
-    } else {
-        if !requests.is_empty() {
-            println!("  {}", "Queued:".bold().underline());
+            let committed_or_signed: Vec<_> = pending
+                .iter()
+                .map(|pw| {
+                    let txid_bytes: [u8; 32] = pw.id.into();
+                    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+                    serde_json::json!({
+                        "txid": txid.to_string(),
+                        "status": if pw.signatures.is_some() { "signed" } else { "committed" },
+                        "request_count": pw.request_ids().len(),
+                    })
+                })
+                .collect();
+
             println!(
-                "  {:<20} {:<14} {:<10} {:<20} {}",
-                "Request ID".bold(),
-                "Amount (sats)".bold(),
-                "Status".bold(),
-                "Caller".bold(),
-                "Requested".bold()
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "queued": queued,
+                    "committed_or_signed": committed_or_signed,
+                    "queued_count": requests.len(),
+                    "committed_or_signed_count": pending.len(),
+                }))?
             );
-            for wr in &requests {
-                let status = if wr.approved { "Approved" } else { "Requested" };
+        }
+        OutputFormat::HumanTable => {
+            println!("\n{}", "Withdrawal Requests".bold());
+            println!("{}", "━".repeat(100).dimmed());
+
+            if requests.is_empty() && pending.is_empty() {
+                print_info("No withdrawal requests found.");
+            } else {
+                if !requests.is_empty() {
+                    println!("  {}", "Queued:".bold().underline());
+                    println!(
+                        "  {:<20} {:<14} {:<10} {:<20} {}",
+                        "Request ID".bold(),
+                        "Amount (sats)".bold(),
+                        "Status".bold(),
+                        "Caller".bold(),
+                        "Requested".bold()
+                    );
+                    for wr in &requests {
+                        let status = if wr.approved { "Approved" } else { "Requested" };
+                        println!(
+                            "  {:<20} {:<14} {:<10} {:<20} {}",
+                            display::format_address_full(&wr.id),
+                            wr.btc_amount,
+                            status,
+                            display::format_address_full(&wr.requester_address),
+                            display::format_timestamp(wr.timestamp_ms)
+                        );
+                    }
+                }
+
+                if !pending.is_empty() {
+                    if !requests.is_empty() {
+                        println!();
+                    }
+                    println!("  {}", "Committed/Signed:".bold().underline());
+                    for pw in &pending {
+                        let txid_bytes: [u8; 32] = pw.id.into();
+                        let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+                        let status = if pw.signatures.is_some() {
+                            "Signed"
+                        } else {
+                            "Committed"
+                        };
+                        println!(
+                            "  txid: {}  status: {}  requests: {}",
+                            txid,
+                            status,
+                            pw.request_ids().len()
+                        );
+                    }
+                }
+
                 println!(
-                    "  {:<20} {:<14} {:<10} {:<20} {}",
-                    display::format_address_full(&wr.id),
-                    wr.btc_amount,
-                    status,
-                    display::format_address_full(&wr.requester_address),
-                    display::format_timestamp(wr.timestamp_ms)
+                    "\n  {} queued, {} committed/signed",
+                    requests.len(),
+                    pending.len()
                 );
             }
-        }
 
-        if !pending.is_empty() {
-            if !requests.is_empty() {
-                println!();
-            }
-            println!("  {}", "Committed/Signed:".bold().underline());
-            for pw in &pending {
-                let txid_bytes: [u8; 32] = pw.id.into();
-                let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-                let status = if pw.signatures.is_some() {
-                    "Signed"
-                } else {
-                    "Committed"
-                };
-                println!(
-                    "  txid: {}  status: {}  requests: {}",
-                    txid,
-                    status,
-                    pw.request_ids().len()
-                );
-            }
+            println!("{}", "━".repeat(100).dimmed());
         }
-
-        println!(
-            "\n  {} queued, {} committed/signed",
-            requests.len(),
-            pending.len()
-        );
     }
 
-    println!("{}", "━".repeat(100).dimmed());
     Ok(())
 }

@@ -9,9 +9,10 @@ use colored::Colorize;
 use sui_rpc::proto::sui::rpc::v2::GetBalanceRequest;
 use sui_sdk_types::StructTag;
 
+use crate::cli::OutputFormat;
 use crate::cli::config::CliConfig;
 
-pub async fn run(config: &CliConfig, address: &str) -> Result<()> {
+pub async fn run(config: &CliConfig, address: &str, output_format: OutputFormat) -> Result<()> {
     config.validate()?;
 
     let address = address
@@ -36,18 +37,33 @@ pub async fn run(config: &CliConfig, address: &str) -> Result<()> {
 
     let balance_sats = response.balance().balance_opt().unwrap_or(0);
 
-    let btc = balance_sats as f64 / 100_000_000.0;
+    match output_format {
+        OutputFormat::Json => {
+            let btc = format!("{:.8}", balance_sats as f64 / 100_000_000.0);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "address": address.to_string(),
+                    "balance_sats": balance_sats,
+                    "balance_btc": btc,
+                }))?
+            );
+        }
+        OutputFormat::HumanTable => {
+            let btc = balance_sats as f64 / 100_000_000.0;
 
-    println!("\n{}", "hBTC Balance".bold());
-    println!("{}", "━".repeat(50).dimmed());
-    println!("  {} {}", "Address:".bold(), address);
-    println!(
-        "  {} {} sats ({:.8} BTC)",
-        "Balance:".bold(),
-        balance_sats.to_string().green(),
-        btc
-    );
-    println!("{}", "━".repeat(50).dimmed());
+            println!("\n{}", "hBTC Balance".bold());
+            println!("{}", "━".repeat(50).dimmed());
+            println!("  {} {}", "Address:".bold(), address);
+            println!(
+                "  {} {} sats ({:.8} BTC)",
+                "Balance:".bold(),
+                balance_sats.to_string().green(),
+                btc
+            );
+            println!("{}", "━".repeat(50).dimmed());
+        }
+    }
 
     Ok(())
 }
