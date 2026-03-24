@@ -8,7 +8,7 @@ pub(crate) use retry::RetryPolicy;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
-use crate::deposits::DepositValidationErrorKind;
+use crate::deposits::DepositRequestErrorKind;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
@@ -36,10 +36,12 @@ use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
+use tokio::task::JoinSet;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -48,13 +50,16 @@ use tracing::warn;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
+const LEADER_PHASE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEPOSIT_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Clone)]
 pub struct LeaderService {
     inner: Arc<Hashi>,
-    deposit_retry_tracker: RetryTracker<DepositValidationErrorKind>,
+    deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: RetryTracker<WithdrawalCommitmentErrorKind>,
+    deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
+    inflight_deposits: HashSet<Address>,
 }
 
 impl LeaderService {
@@ -64,6 +69,8 @@ impl LeaderService {
             deposit_retry_tracker: RetryTracker::new(),
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: RetryTracker::new(),
+            deposit_tasks: JoinSet::new(),
+            inflight_deposits: HashSet::new(),
         }
     }
 
@@ -75,7 +82,7 @@ impl LeaderService {
         })
     }
 
-    async fn run(self) {
+    async fn run(mut self) {
         info!("Starting leader service");
 
         // Wait for DKG to complete before processing any checkpoints.
@@ -87,53 +94,86 @@ impl LeaderService {
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
 
         loop {
-            trace!("Waiting for next checkpoint...");
-            let wait_result = checkpoint_rx.changed().await;
-            if let Err(e) = wait_result {
-                error!("Error waiting for checkpoint change: {e}");
-                break;
+            trace!("Waiting for next checkpoint or deposit completion...");
+            tokio::select! {
+                wait_result = checkpoint_rx.changed() => {
+                    if let Err(e) = wait_result {
+                        error!("Error waiting for checkpoint change: {e}");
+                        break;
+                    }
+                    let (checkpoint_height, checkpoint_timestamp_ms) = {
+                        let checkpoint_info = checkpoint_rx.borrow_and_update();
+                        (checkpoint_info.height, checkpoint_info.timestamp_ms)
+                    };
+
+                    let is_leader = self.is_current_leader(checkpoint_height);
+                    self.inner.metrics.is_leader.set(i64::from(is_leader));
+
+                    if is_leader {
+                        debug!("Checkpoint {checkpoint_height}: We are the leader node");
+                    } else {
+                        trace!("We are not the leader node");
+                        continue;
+                    }
+
+                    self.process_deposit_requests(checkpoint_timestamp_ms).await;
+
+                    let _ = tokio::time::timeout(
+                        LEADER_PHASE_TIMEOUT,
+                        self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms),
+                    )
+                    .await;
+                    let _ = tokio::time::timeout(
+                        LEADER_PHASE_TIMEOUT,
+                        self.process_approved_withdrawal_requests(checkpoint_timestamp_ms),
+                    )
+                    .await;
+                    let _ = tokio::time::timeout(
+                        LEADER_PHASE_TIMEOUT,
+                        self.process_unsigned_pending_withdrawals(),
+                    )
+                    .await;
+                    let _ = tokio::time::timeout(
+                        LEADER_PHASE_TIMEOUT,
+                        self.process_signed_pending_withdrawals(),
+                    )
+                    .await;
+                    let _ = tokio::time::timeout(
+                        LEADER_PHASE_TIMEOUT,
+                        self.check_delete_proposals(checkpoint_timestamp_ms),
+                    )
+                    .await;
+                    let _ = tokio::time::timeout(
+                        LEADER_PHASE_TIMEOUT,
+                        self.check_delete_spent_utxos(),
+                    )
+                    .await;
+                }
+                Some(result) = self.deposit_tasks.join_next() => {
+                    self.handle_completed_deposit_task(result);
+                }
             }
-            let (checkpoint_height, checkpoint_timestamp_ms) = {
-                let checkpoint_info = checkpoint_rx.borrow_and_update();
-                (checkpoint_info.height, checkpoint_info.timestamp_ms)
-            };
+        }
+    }
 
-            let is_leader = self.is_current_leader(checkpoint_height);
-            self.inner.metrics.is_leader.set(i64::from(is_leader));
-
-            if is_leader {
-                debug!("Checkpoint {checkpoint_height}: We are the leader node");
-            } else {
-                trace!("We are not the leader node");
-                continue;
+    fn handle_completed_deposit_task(
+        &mut self,
+        result: Result<(Address, anyhow::Result<()>), tokio::task::JoinError>,
+    ) {
+        match result {
+            Ok((deposit_id, Ok(()))) => {
+                self.inflight_deposits.remove(&deposit_id);
             }
-
-            let timeout = Duration::from_secs(60);
-
-            let _ = tokio::time::timeout(
-                timeout,
-                self.process_deposit_requests(checkpoint_timestamp_ms),
-            )
-            .await;
-            let _ = tokio::time::timeout(
-                timeout,
-                self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms),
-            )
-            .await;
-            let _ = tokio::time::timeout(
-                timeout,
-                self.process_approved_withdrawal_requests(checkpoint_timestamp_ms),
-            )
-            .await;
-            let _ =
-                tokio::time::timeout(timeout, self.process_unsigned_pending_withdrawals()).await;
-            let _ = tokio::time::timeout(timeout, self.process_signed_pending_withdrawals()).await;
-            let _ = tokio::time::timeout(
-                timeout,
-                self.check_delete_proposals(checkpoint_timestamp_ms),
-            )
-            .await;
-            let _ = tokio::time::timeout(timeout, self.check_delete_spent_utxos()).await;
+            Ok((deposit_id, Err(err))) => {
+                self.inflight_deposits.remove(&deposit_id);
+                error!(deposit_request_id = %deposit_id, "Deposit task failed: {err:#}");
+            }
+            Err(err) if err.is_panic() => {
+                error!("Deposit task panicked: {err}");
+            }
+            Err(err) => {
+                error!("Deposit task failed to join: {err}");
+            }
         }
     }
 
@@ -169,20 +209,92 @@ impl LeaderService {
         is_leader
     }
 
-    async fn process_deposit_requests(&self, checkpoint_timestamp_ms: u64) {
+    async fn process_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_deposit_requests");
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
         let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
         self.deposit_retry_tracker.prune(&deposit_ids);
+        self.inflight_deposits
+            .retain(|deposit_id| deposit_ids.contains(deposit_id));
 
         debug!("Processing {} deposit requests", deposit_requests.len());
 
-        // TODO: parallelize?
-        for deposit_request in &deposit_requests {
-            self.process_deposit_request(deposit_request, checkpoint_timestamp_ms)
+        let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
+        for deposit_request in deposit_requests.iter().cloned() {
+            if self.deposit_tasks.len() >= max_concurrent {
+                break;
+            }
+            if self.inflight_deposits.contains(&deposit_request.id) {
+                continue;
+            }
+            if self
+                .deposit_retry_tracker
+                .should_skip(&deposit_request.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+
+            let deposit_id = deposit_request.id;
+            let inner = self.inner.clone();
+            let deposit_retry_tracker = self.deposit_retry_tracker.clone();
+
+            self.inflight_deposits.insert(deposit_id);
+            self.deposit_tasks.spawn(async move {
+                let task_result = tokio::time::timeout(
+                    DEPOSIT_TASK_TIMEOUT,
+                    Self::process_deposit_request(
+                        inner.clone(),
+                        deposit_retry_tracker.clone(),
+                        deposit_request,
+                        checkpoint_timestamp_ms,
+                    ),
+                )
                 .await;
+
+                let (result, failure_kind) = match task_result {
+                    Ok(result) => (result, None),
+                    Err(_) => {
+                        let kind = DepositRequestErrorKind::TimedOut;
+                        inner
+                            .metrics
+                            .leader_retries_total
+                            .with_label_values(&["deposit", &format!("{kind:?}")])
+                            .inc();
+                        deposit_retry_tracker.record_failure(
+                            kind,
+                            deposit_id,
+                            checkpoint_timestamp_ms,
+                        );
+                        (
+                            Err(anyhow::anyhow!(
+                                "deposit task timed out after {DEPOSIT_TASK_TIMEOUT:?}"
+                            )),
+                            Some(kind),
+                        )
+                    }
+                };
+
+                if let Err(err) = &result {
+                    if failure_kind.is_none() {
+                        let kind = DepositRequestErrorKind::TaskFailed;
+                        inner
+                            .metrics
+                            .leader_retries_total
+                            .with_label_values(&["deposit", &format!("{kind:?}")])
+                            .inc();
+                        deposit_retry_tracker.record_failure(
+                            kind,
+                            deposit_id,
+                            checkpoint_timestamp_ms,
+                        );
+                    }
+                    error!(deposit_request_id = %deposit_id, "Deposit task will retry after failure: {err:#}");
+                }
+
+                (deposit_id, result)
+            });
         }
 
         self.inner
@@ -199,73 +311,61 @@ impl LeaderService {
     }
 
     async fn process_deposit_request(
-        &self,
-        deposit_request: &DepositRequest,
+        inner: Arc<Hashi>,
+        deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
+        deposit_request: DepositRequest,
         checkpoint_timestamp_ms: u64,
-    ) {
+    ) -> anyhow::Result<()> {
         // TODO: parallelize, and after we have a quorum of sigs, stop waiting for sigs from any
         // additional validators
-
-        if self
-            .deposit_retry_tracker
-            .should_skip(&deposit_request.id, checkpoint_timestamp_ms)
-        {
-            return;
-        }
 
         info!(deposit_request_id = %deposit_request.id, "Processing deposit request");
 
         // Validate deposit_request before asking for signatures
-        match self.inner.validate_deposit_request(deposit_request).await {
-            Ok(()) => {
-                self.deposit_retry_tracker.clear(&deposit_request.id);
-            }
+        match inner.validate_deposit_request(&deposit_request).await {
+            Ok(()) => {}
             Err(e) => {
                 debug!(request_id = ?deposit_request.id, "Deposit validation failed: {e}");
                 let kind = e.kind();
-                self.inner
+                inner
                     .metrics
                     .leader_retries_total
                     .with_label_values(&["deposit", &format!("{kind:?}")])
                     .inc();
-                self.deposit_retry_tracker.record_failure(
+                deposit_retry_tracker.record_failure(
                     kind,
                     deposit_request.id,
                     checkpoint_timestamp_ms,
                 );
-                return;
+                return Ok(());
             }
         }
 
         info!(deposit_request_id = %deposit_request.id, "Deposit request validated successfully");
 
         let proto_request = deposit_request.to_proto();
-        let members = self
-            .inner
+        let members = inner
             .onchain_state()
             .current_committee_members()
             .expect("No current committee members");
 
         let mut signatures: Vec<MemberSignature> = Vec::new();
         for member in members {
-            if let Some(signature) = self
-                .request_deposit_confirmation_signature(proto_request.clone(), &member)
-                .await
+            if let Some(signature) =
+                Self::request_deposit_confirmation_signature(&inner, proto_request.clone(), &member)
+                    .await
             {
                 signatures.push(signature);
             }
         }
 
-        let result = self
-            .submit_deposit_confirmation(deposit_request.clone(), signatures)
-            .await;
-        if let Err(e) = result {
-            error!(deposit_request_id = %deposit_request.id, "Failed to submit deposit confirmation: {e}");
-        }
+        Self::submit_deposit_confirmation(&inner, deposit_request.clone(), signatures).await?;
+        deposit_retry_tracker.clear(&deposit_request.id);
+        Ok(())
     }
 
     async fn request_deposit_confirmation_signature(
-        &self,
+        inner: &Arc<Hashi>,
         proto_request: SignDepositConfirmationRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
@@ -275,8 +375,7 @@ impl LeaderService {
             validator_address
         );
 
-        let mut rpc_client = self
-            .inner
+        let mut rpc_client = inner
             .onchain_state()
             .bridge_service_client(&validator_address)
             .or_else(|| {
@@ -318,14 +417,13 @@ impl LeaderService {
     }
 
     async fn submit_deposit_confirmation(
-        &self,
+        inner: &Arc<Hashi>,
         deposit_request: DepositRequest,
         signatures: Vec<MemberSignature>,
     ) -> anyhow::Result<()> {
         info!(deposit_request_id = %deposit_request.id, "Aggregating signatures and submitting deposit confirmation");
 
-        let committee = self
-            .inner
+        let committee = inner
             .onchain_state()
             .current_committee()
             .expect("No current committee");
@@ -349,21 +447,21 @@ impl LeaderService {
 
         // Submit onchain
         let signed_message = signature_aggregator.finish()?;
-        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
             .execute_confirm_deposit(&deposit_request, signed_message)
             .await
             .inspect(|()| {
-                self.inner
+                inner
                     .metrics
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_deposit", "success"])
                     .inc();
-                self.inner.metrics.deposits_confirmed_total.inc();
+                inner.metrics.deposits_confirmed_total.inc();
                 info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
             })
             .inspect_err(|_| {
-                self.inner
+                inner
                     .metrics
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_deposit", "failure"])

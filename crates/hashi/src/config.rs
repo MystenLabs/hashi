@@ -141,6 +141,10 @@ pub struct Config {
     /// which is too small for large MPC round messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
+
+    /// Maximum number of deposit requests to process concurrently in the leader.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_leader_job_tasks: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -313,6 +317,10 @@ impl Config {
     pub fn grpc_max_decoding_message_size(&self) -> usize {
         self.grpc_max_decoding_message_size
             .unwrap_or(16 * 1024 * 1024)
+    }
+
+    pub fn max_concurrent_leader_job_tasks(&self) -> usize {
+        self.max_concurrent_leader_job_tasks.unwrap_or(32)
     }
 
     // Creates a new config suitable for testing. In particular this config will:
