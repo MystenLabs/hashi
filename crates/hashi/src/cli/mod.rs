@@ -7,6 +7,7 @@
 
 use clap::Args;
 use clap::Subcommand;
+use clap::ValueEnum;
 use clap::builder::styling::AnsiColor;
 use clap::builder::styling::Effects;
 use clap::builder::styling::Styles;
@@ -22,6 +23,12 @@ pub const STYLES: Styles = Styles::styled()
     .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
     .literal(AnsiColor::Green.on_default().effects(Effects::BOLD))
     .placeholder(AnsiColor::Cyan.on_default());
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum OutputFormat {
+    HumanTable,
+    Json,
+}
 
 /// CLI-specific global options, flattened into each CLI subcommand.
 #[derive(Args)]
@@ -254,7 +261,15 @@ pub enum DepositCommands {
     },
 
     /// List deposit requests
-    List,
+    List {
+        /// Output format
+        #[clap(long, value_enum, default_value_t = OutputFormat::HumanTable)]
+        output_format: OutputFormat,
+
+        /// Output as JSON (overrides --output-format)
+        #[clap(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -283,7 +298,15 @@ pub enum WithdrawCommands {
     },
 
     /// List withdrawal requests
-    List,
+    List {
+        /// Output format
+        #[clap(long, value_enum, default_value_t = OutputFormat::HumanTable)]
+        output_format: OutputFormat,
+
+        /// Output as JSON (overrides --output-format)
+        #[clap(long)]
+        json: bool,
+    },
 }
 
 /// Transaction options passed to commands
@@ -394,12 +417,26 @@ pub struct RegisterOpts {
 
 /// CLI command variants (without Server)
 pub enum CliCommand {
-    Proposal { action: ProposalCommands },
-    Committee { action: CommitteeCommands },
-    Config { action: ConfigCommands },
-    Deposit { action: DepositCommands },
-    Withdraw { action: WithdrawCommands },
-    Balance { address: String },
+    Proposal {
+        action: ProposalCommands,
+    },
+    Committee {
+        action: CommitteeCommands,
+    },
+    Config {
+        action: ConfigCommands,
+    },
+    Deposit {
+        action: DepositCommands,
+    },
+    Withdraw {
+        action: WithdrawCommands,
+    },
+    Balance {
+        address: String,
+        output_format: OutputFormat,
+        json: bool,
+    },
 }
 
 /// Run a CLI command
@@ -516,8 +553,17 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         CliCommand::Withdraw { action } => {
             commands::withdraw::run(action, &config, &tx_opts).await?;
         }
-        CliCommand::Balance { address } => {
-            commands::balance::run(&config, &address).await?;
+        CliCommand::Balance {
+            address,
+            output_format,
+            json,
+        } => {
+            let output_format = if json {
+                OutputFormat::Json
+            } else {
+                output_format
+            };
+            commands::balance::run(&config, &address, output_format).await?;
         }
     }
 

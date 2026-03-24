@@ -90,6 +90,14 @@ enum Commands {
         #[clap(flatten)]
         cli_opts: hashi::cli::CliGlobalOpts,
 
+        /// Output format
+        #[clap(long, value_enum, default_value_t = hashi::cli::OutputFormat::HumanTable)]
+        output_format: hashi::cli::OutputFormat,
+
+        /// Output as JSON (overrides --output-format)
+        #[clap(long)]
+        json: bool,
+
         /// Sui address to query
         address: String,
     },
@@ -118,8 +126,21 @@ async fn main() -> anyhow::Result<()> {
         Commands::Withdraw { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Withdraw { action }).await
         }
-        Commands::Balance { cli_opts, address } => {
-            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Balance { address }).await
+        Commands::Balance {
+            cli_opts,
+            output_format,
+            json,
+            address,
+        } => {
+            hashi::cli::run(
+                cli_opts,
+                hashi::cli::CliCommand::Balance {
+                    address,
+                    output_format,
+                    json,
+                },
+            )
+            .await
         }
     }
 }
