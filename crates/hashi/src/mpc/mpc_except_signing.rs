@@ -462,11 +462,11 @@ impl MpcManager {
             (weight, mgr.dkg_config.threshold)
         };
         if certified_reduced_weight < threshold
-            && let Err(e) = Self::run_as_dealer(mpc_manager, p2p_channel, tob_channel).await
+            && let Err(e) = Self::run_dkg_as_dealer(mpc_manager, p2p_channel, tob_channel).await
         {
             tracing::error!("Dealer phase failed: {}. Continuing as party only.", e);
         }
-        Self::run_as_party(mpc_manager, p2p_channel, tob_channel).await
+        Self::run_dkg_as_party(mpc_manager, p2p_channel, tob_channel).await
     }
 
     pub async fn run_key_rotation(
@@ -639,7 +639,7 @@ impl MpcManager {
         Ok(outputs.into_values().collect())
     }
 
-    async fn run_as_dealer(
+    async fn run_dkg_as_dealer(
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
@@ -692,7 +692,7 @@ impl MpcManager {
         Ok(())
     }
 
-    async fn run_as_party(
+    async fn run_dkg_as_party(
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
@@ -757,6 +757,13 @@ impl MpcManager {
                         );
                         e
                     })?;
+                // Delete stale output from the RPC handler so the party phase
+                // reprocesses with the retrieved (certified) message.
+                mpc_manager
+                    .write()
+                    .unwrap()
+                    .dealer_outputs
+                    .remove(&DealerOutputsKey::Dkg(dealer));
             }
             let has_complaint = {
                 let mgr = Arc::clone(mpc_manager);
@@ -966,6 +973,14 @@ impl MpcManager {
                         );
                         e
                     })?;
+                // Delete stale outputs from the RPC handler so the party phase
+                // reprocesses with the retrieved (certified) messages.
+                {
+                    let mut mgr = mpc_manager.write().unwrap();
+                    for idx in &dealer_share_indices {
+                        mgr.dealer_outputs.remove(&DealerOutputsKey::Rotation(*idx));
+                    }
+                }
             }
             {
                 let mgr = Arc::clone(mpc_manager);
@@ -1144,6 +1159,13 @@ impl MpcManager {
                         );
                         e
                     })?;
+                // Delete stale output from the RPC handler so the party phase
+                // reprocesses with the retrieved (certified) message.
+                mpc_manager
+                    .write()
+                    .unwrap()
+                    .dealer_nonce_outputs
+                    .remove(&dealer);
             }
             let has_complaint = {
                 let mgr = Arc::clone(mpc_manager);
