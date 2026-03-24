@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
 use sui_futures::service::Service;
@@ -277,7 +278,10 @@ impl MpcService {
                 self.run_dkg(epoch).await
             }
         }?;
-        info!("recover_mpc_state: recovered vk={:?}", output.public_key,);
+        info!(
+            "recover_mpc_state: recovered vk={}",
+            hex::encode(output.public_key.to_byte_array())
+        );
         Ok(output)
     }
 
