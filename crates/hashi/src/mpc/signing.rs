@@ -3,6 +3,7 @@
 
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
@@ -221,9 +222,9 @@ impl SigningManager {
                 };
             tracing::info!(
                 "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}, \
-                 verifying_key={:?}, first_partial_sig_index={}, first_partial_sig_value={:?}",
+                 verifying_key={}, first_partial_sig_index={}, first_partial_sig_value={:?}",
                 hex::encode(message),
-                mgr.verifying_key,
+                hex::encode(mgr.verifying_key.to_byte_array()),
                 partial_sigs[0].index,
                 partial_sigs[0].value,
             );

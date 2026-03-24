@@ -1585,9 +1585,9 @@ impl MpcManager {
             avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "complete_dkg: epoch={}, result vk={:?}",
+            "complete_dkg: epoch={}, result vk={}",
             self.dkg_config.epoch,
-            combined_output.vk
+            hex::encode(combined_output.vk.to_byte_array())
         );
         Ok(DkgOutput {
             public_key: combined_output.vk,
@@ -2375,11 +2375,11 @@ impl MpcManager {
         let threshold = previous_dkg_output.threshold;
         tracing::info!(
             "complete_key_rotation: epoch={}, {} certified_share_indices={:?}, \
-             previous_vk={:?}, threshold={threshold}",
+             previous_vk={}, threshold={threshold}",
             self.dkg_config.epoch,
             certified_share_indices.len(),
             certified_share_indices,
-            previous_dkg_output.public_key,
+            hex::encode(previous_dkg_output.public_key.to_byte_array()),
         );
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
@@ -2408,9 +2408,9 @@ impl MpcManager {
         )
         .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "complete_key_rotation: epoch={}, result vk={:?}, matches_previous={}",
+            "complete_key_rotation: epoch={}, result vk={}, matches_previous={}",
             self.dkg_config.epoch,
-            combined.vk,
+            hex::encode(combined.vk.to_byte_array()),
             combined.vk == previous_dkg_output.public_key,
         );
         if combined.vk != previous_dkg_output.public_key {
@@ -2549,8 +2549,8 @@ impl MpcManager {
             avss::ReceiverOutput::complete_dkg(previous_threshold, &previous_nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "reconstruct_from_dkg_certificates: result vk={:?}",
-            combined_output.vk,
+            "reconstruct_from_dkg_certificates: result vk={}",
+            hex::encode(combined_output.vk.to_byte_array()),
         );
         Ok(DkgOutput {
             public_key: combined_output.vk,
@@ -2680,8 +2680,8 @@ impl MpcManager {
         )
         .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "reconstruct_from_rotation_certificates: result vk={:?}",
-            combined.vk,
+            "reconstruct_from_rotation_certificates: result vk={}",
+            hex::encode(combined.vk.to_byte_array()),
         );
         Ok(DkgOutput {
             public_key: combined.vk,
@@ -2799,8 +2799,8 @@ impl MpcManager {
         };
         tracing::info!(
             "prepare_previous_output: is_member_of_previous_committee={is_member_of_previous_committee}, \
-             previous_vk={:?}",
-            previous.public_key,
+             previous_vk={}",
+            hex::encode(previous.public_key.to_byte_array()),
         );
         Ok((previous, is_member_of_previous_committee))
     }
