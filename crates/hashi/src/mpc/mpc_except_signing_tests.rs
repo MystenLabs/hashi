@@ -5507,9 +5507,13 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         // Collect certified share indices (same as party phase would)
         let prev_committee = ref_manager.previous_committee.as_ref().unwrap();
         let prev_nodes = ref_manager.previous_nodes.as_ref().unwrap();
+        // Use TOB order (validator 2 then 3) to match party phase behavior.
         let mut certified_share_indices = Vec::new();
-        for dealer in correct_rotation_msgs.keys() {
-            let party_id = prev_committee.index_of(dealer).unwrap() as u16;
+        for &addr in &[
+            rotation_setup.setup.address(2),
+            rotation_setup.setup.address(3),
+        ] {
+            let party_id = prev_committee.index_of(&addr).unwrap() as u16;
             certified_share_indices.extend(prev_nodes.share_ids_of(party_id).unwrap());
         }
         ref_manager
