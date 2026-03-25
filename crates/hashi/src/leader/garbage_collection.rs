@@ -9,6 +9,7 @@ use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
+use std::sync::Arc;
 use sui_sdk_types::Address;
 use tracing::debug;
 use tracing::error;
@@ -27,17 +28,17 @@ const MAX_SPENT_UTXO_DELETIONS_PER_GC: usize = 500;
 
 impl LeaderService {
     /// Check for and delete expired deposit requests.
-    /// Deposit requests are sorted by timestamp and deleted if they are older than MAX_DEPOSIT_REQUEST_AGE_MS.
-    pub(crate) async fn check_delete_expired_deposit_requests(
-        &self,
+    /// Deposit requests must be sorted by timestamp, and will be deleted if they are older
+    /// than MAX_DEPOSIT_REQUEST_AGE_MS.
+    pub(crate) fn check_delete_expired_deposit_requests(
+        &mut self,
         deposit_requests: &[DepositRequest],
         checkpoint_timestamp_ms: u64,
     ) {
-        // Check if it's time to delete
         let Some(oldest_request) = deposit_requests.first() else {
             return;
         };
-        // If there aren't any deposit requests at least 4 days old, don't do anything
+
         if checkpoint_timestamp_ms
             < oldest_request.timestamp_ms
                 + MAX_DEPOSIT_REQUEST_AGE_MS
@@ -46,35 +47,52 @@ impl LeaderService {
             return;
         }
 
-        // Find all expired requests (older than 3 days)
         let expired_requests = deposit_requests
             .iter()
-            .filter(|r| checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
+            .filter(|r| {
+                checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
+                    && !self.inflight_deposit_gc_requests.contains(&r.id)
+            })
             .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
             .cloned()
             .collect::<Vec<_>>();
+        if expired_requests.is_empty() {
+            return;
+        }
+
+        if self.deposit_gc_tasks.len() >= self.inner.config.max_concurrent_leader_job_tasks() {
+            return;
+        }
 
         info!(
-            "Deleting {} expired deposit requests",
+            "Scheduling deletion of {} expired deposit requests",
             expired_requests.len()
         );
 
-        let result = async {
-            let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-            executor
-                .execute_delete_expired_deposit_requests(&expired_requests)
-                .await
-        }
-        .await;
+        let deposit_ids = expired_requests
+            .iter()
+            .map(|request| request.id)
+            .collect::<Vec<_>>();
+        self.inflight_deposit_gc_requests
+            .extend(deposit_ids.iter().copied());
 
-        if let Err(e) = result {
-            error!("Failed to delete expired deposit requests: {e}");
-        } else {
-            info!(
-                "Successfully deleted {} expired deposit requests",
-                expired_requests.len()
-            );
-        }
+        let inner = self.inner.clone();
+        self.deposit_gc_tasks.spawn(async move {
+            let result = Self::delete_expired_deposit_requests(inner, expired_requests).await;
+            (deposit_ids, result)
+        });
+    }
+
+    async fn delete_expired_deposit_requests(
+        inner: Arc<crate::Hashi>,
+        expired_requests: Vec<DepositRequest>,
+    ) -> anyhow::Result<usize> {
+        let deleted_count = expired_requests.len();
+        let mut executor = SuiTxExecutor::from_hashi(inner)?;
+        executor
+            .execute_delete_expired_deposit_requests(&expired_requests)
+            .await?;
+        Ok(deleted_count)
     }
 
     /// Check for and delete expired proposals.

@@ -142,7 +142,7 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
 
-    /// Maximum number of deposit requests to process concurrently in the leader.
+    /// Maximum number of tasks to process concurrently for a leader job such as processing deposit requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_leader_job_tasks: Option<usize>,
 }

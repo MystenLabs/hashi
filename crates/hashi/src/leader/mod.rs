@@ -59,7 +59,9 @@ pub struct LeaderService {
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: RetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
+    deposit_gc_tasks: JoinSet<(Vec<Address>, anyhow::Result<usize>)>,
     inflight_deposits: HashSet<Address>,
+    inflight_deposit_gc_requests: HashSet<Address>,
 }
 
 impl LeaderService {
@@ -70,7 +72,9 @@ impl LeaderService {
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: RetryTracker::new(),
             deposit_tasks: JoinSet::new(),
+            deposit_gc_tasks: JoinSet::new(),
             inflight_deposits: HashSet::new(),
+            inflight_deposit_gc_requests: HashSet::new(),
         }
     }
 
@@ -116,7 +120,7 @@ impl LeaderService {
                         continue;
                     }
 
-                    self.process_deposit_requests(checkpoint_timestamp_ms).await;
+                    self.process_deposit_requests(checkpoint_timestamp_ms);
 
                     let _ = tokio::time::timeout(
                         LEADER_PHASE_TIMEOUT,
@@ -152,6 +156,9 @@ impl LeaderService {
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
                 }
+                Some(result) = self.deposit_gc_tasks.join_next() => {
+                    self.handle_completed_deposit_gc_task(result);
+                }
             }
         }
     }
@@ -173,6 +180,35 @@ impl LeaderService {
             }
             Err(err) => {
                 error!("Deposit task failed to join: {err}");
+            }
+        }
+    }
+
+    fn handle_completed_deposit_gc_task(
+        &mut self,
+        result: Result<(Vec<Address>, anyhow::Result<usize>), tokio::task::JoinError>,
+    ) {
+        match result {
+            Ok((deposit_ids, Ok(deleted_count))) => {
+                for deposit_id in deposit_ids {
+                    self.inflight_deposit_gc_requests.remove(&deposit_id);
+                }
+                info!(
+                    "Successfully deleted {} expired deposit requests",
+                    deleted_count
+                );
+            }
+            Ok((deposit_ids, Err(err))) => {
+                for deposit_id in deposit_ids {
+                    self.inflight_deposit_gc_requests.remove(&deposit_id);
+                }
+                error!("Failed to delete expired deposit requests: {err}");
+            }
+            Err(err) if err.is_panic() => {
+                error!("Deposit request GC task panicked: {err}");
+            }
+            Err(err) => {
+                error!("Deposit request GC task failed to join: {err}");
             }
         }
     }
@@ -209,13 +245,15 @@ impl LeaderService {
         is_leader
     }
 
-    async fn process_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
+    fn process_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_deposit_requests");
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
         let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
         self.deposit_retry_tracker.prune(&deposit_ids);
+        // TODO: If we keep AbortHandles for deposit tasks, explicitly abort tasks whose
+        // deposit IDs are no longer present here so they do not linger until timeout.
         self.inflight_deposits
             .retain(|deposit_id| deposit_ids.contains(deposit_id));
 
@@ -306,8 +344,7 @@ impl LeaderService {
                     .in_backoff_count(checkpoint_timestamp_ms) as i64,
             );
 
-        self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms)
-            .await;
+        self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms);
     }
 
     async fn process_deposit_request(
