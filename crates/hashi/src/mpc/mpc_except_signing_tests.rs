@@ -1889,96 +1889,85 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
 
 #[tokio::test]
 async fn test_run_as_party_recovers_from_hash_mismatch() {
-    // Test that run_as_party() recovers when stored message hash doesn't match certificate hash
-    // by retrieving the correct message from certificate signers
+    // Test that run_as_party() correctly reprocesses a certified dealer's message
+    // when the RPC handler previously stored an output from a different message.
+    //
+    // The mismatched dealer is one of the threshold-many certified dealers, so
+    // complete_dkg will use its output. Without the delete-on-mismatch fix,
+    // the stale output from the wrong message would be used, producing a
+    // different verifying key than other nodes.
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     // BFT threshold = (total_weight - 1) / 3 + 1 = (5-1)/3 + 1 = 2
     let threshold = setup.dkg_config().threshold as usize;
+    assert_eq!(threshold, 2);
 
     // Create all managers
     let mut managers: Vec<_> = (0..setup.num_validators())
         .map(|i| setup.create_manager(i))
         .collect();
 
-    // Create threshold valid certificates + some invalid ones
-    // Each dealer's message is wrapped with their share_index = party_id + 1
-    let dealer_messages: Vec<_> = managers
-        .iter()
-        .enumerate()
-        .take(threshold)
-        .map(|(_, mgr)| Messages::Dkg(mgr.create_dealer_message(&mut rng)))
-        .collect();
+    // Dealer 0: certified message M_correct. But test_manager (validator 0)
+    // has a stale output from a DIFFERENT message M_wrong via the RPC handler.
+    let correct_msg_0 = Messages::Dkg(managers[0].create_dealer_message(&mut rng));
+    let wrong_msg_0 = Messages::Dkg(managers[0].create_dealer_message(&mut rng));
+    let dealer_addr_0 = setup.address(0);
 
-    let mut valid_certificates = Vec::new();
-    for (dealer_idx, messages) in dealer_messages.iter().enumerate() {
-        let dealer_addr = setup.address(dealer_idx);
-
-        // All validators process dealer messages
-        let mut signatures = Vec::new();
-        for manager in managers.iter_mut() {
-            let sig = receive_dealer_messages(manager, messages, dealer_addr).unwrap();
-            signatures.push(sig);
-        }
-
-        // Create certificate using helper
-        let cert =
-            create_test_certificate(setup.committee(), messages, dealer_addr, signatures).unwrap();
-        valid_certificates.push(CertificateV1::Dkg(cert));
-    }
-
-    // Create certificate that will fail validation due to hash mismatch
-    // (test_manager processes a DIFFERENT message than what's in the cert)
-    // Dealer 3 has share_index = 4
-    let invalid_dealer_msg = Messages::Dkg(managers[3].create_dealer_message(&mut rng));
-    let different_dealer_msg = Messages::Dkg(managers[3].create_dealer_message(&mut rng));
-    let dealer_addr_3 = setup.address(3);
-
-    // test_manager processes the DIFFERENT message
-    receive_dealer_messages(&mut managers[0], &different_dealer_msg, dealer_addr_3).unwrap();
-    // Other managers process the actual message (for cert creation)
+    // test_manager (validator 0) processes the WRONG message (simulates RPC handler)
+    receive_dealer_messages(&mut managers[0], &wrong_msg_0, dealer_addr_0).unwrap();
+    // Other managers process the CORRECT message
     for manager in managers.iter_mut().skip(1) {
-        receive_dealer_messages(manager, &invalid_dealer_msg, dealer_addr_3).unwrap();
+        receive_dealer_messages(manager, &correct_msg_0, dealer_addr_0).unwrap();
     }
 
-    // Create certificate for invalid_dealer_msg (but test_manager has different_dealer_msg stored)
-    let invalid_signatures: Vec<_> = managers
+    // Create certificate for the CORRECT message
+    let signatures_0: Vec<_> = managers
         .iter()
         .skip(1) // Skip test_manager who has wrong message
         .map(|mgr| {
-            let messages_hash = compute_messages_hash(&invalid_dealer_msg);
+            let messages_hash = compute_messages_hash(&correct_msg_0);
             let dkg_message = DealerMessagesHash {
-                dealer_address: dealer_addr_3,
+                dealer_address: dealer_addr_0,
                 messages_hash,
             };
             setup.signing_keys[mgr.party_id as usize].sign(setup.epoch(), mgr.address, &dkg_message)
         })
         .collect();
-
-    let invalid_cert = create_test_certificate(
+    let cert_0 = create_test_certificate(
         setup.committee(),
-        &invalid_dealer_msg,
-        dealer_addr_3,
-        invalid_signatures,
+        &correct_msg_0,
+        dealer_addr_0,
+        signatures_0,
     )
     .unwrap();
 
-    // Mix valid and invalid certificates in TOB
-    // Order: valid[0], invalid (will be recovered), valid[1], ...
-    // With threshold=2, we need accumulated weight >= 2 from unique dealers
-    let mut all_certificates = vec![
-        valid_certificates[0].clone(),
-        CertificateV1::Dkg(invalid_cert), // hash mismatch - will be recovered from P2P
-    ];
-    // Add remaining valid certificates if any
-    for cert in valid_certificates.iter().skip(1) {
-        all_certificates.push(cert.clone());
+    // Dealer 1: normal certified message, no mismatch
+    let msg_1 = Messages::Dkg(managers[1].create_dealer_message(&mut rng));
+    let dealer_addr_1 = setup.address(1);
+    let mut signatures_1 = Vec::new();
+    for manager in managers.iter_mut() {
+        let sig = receive_dealer_messages(manager, &msg_1, dealer_addr_1).unwrap();
+        signatures_1.push(sig);
     }
+    let cert_1 =
+        create_test_certificate(setup.committee(), &msg_1, dealer_addr_1, signatures_1).unwrap();
 
-    let num_certs = all_certificates.len();
+    // TOB delivers both certificates. Both dealers are needed to reach threshold=2.
+    // Dealer 0 has a hash mismatch on test_manager → needs retrieval + delete.
+    let all_certificates = vec![
+        CertificateV1::Dkg(cert_0), // hash mismatch on test_manager
+        CertificateV1::Dkg(cert_1), // clean
+    ];
     let mut mock_tob = MockOrderedBroadcastChannel::new(all_certificates);
 
-    // Call run_as_party() for validator 0
+    // Compute the expected vk: what another manager (validator 1) would produce
+    // using the CORRECT messages from both dealers.
+    let expected_vk = managers[1]
+        .complete_dkg([dealer_addr_0, dealer_addr_1].into_iter())
+        .unwrap()
+        .public_key;
+
+    // Run as party for validator 0 (test_manager)
     let test_manager = Arc::new(RwLock::new(managers.remove(0)));
     let other_managers: HashMap<_, _> = managers
         .into_iter()
@@ -1990,17 +1979,12 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
         .await
         .unwrap();
 
-    // Verify success: the mismatched certificate's message was retrieved and processed
-    assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
-    assert_eq!(output.commitments.len(), setup.num_validators()); // total weight = 5
-
-    // TOB should have consumed at least threshold certificates
-    let remaining = mock_tob.pending_messages().unwrap();
-    assert!(
-        remaining < num_certs,
-        "TOB should have consumed at least {} certificates, remaining: {}",
-        threshold,
-        remaining
+    // The critical assertion: test_manager must produce the same vk as other nodes.
+    // Without the delete-on-mismatch fix, the stale output from wrong_msg_0 would
+    // be used for dealer 0, producing a different vk.
+    assert_eq!(
+        output.public_key, expected_vk,
+        "Verifying key mismatch: test_manager used stale output from wrong message"
     );
 }
 
@@ -5358,6 +5342,207 @@ async fn test_run_key_rotation_skips_dealer_phase() {
 }
 
 #[tokio::test]
+async fn test_run_key_rotation_recovers_from_hash_mismatch() {
+    // Test that run_key_rotation_as_party retrieves the correct message and reprocesses
+    // when the RPC handler previously stored outputs from a different message.
+    // The test_manager is validator 0 (weight=3) and is NOT a dealer —
+    // the TOB provides enough certs (validators 2+3, weight=4+1=5 >= threshold=4)
+    // to skip the dealer phase. Validator 2's cert has a hash mismatch on test_manager.
+    //
+    // Key rotation preserves the vk regardless of which message is used (same secret),
+    // so we compare key_shares instead — stale outputs produce wrong shares.
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    // weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+
+    // Create test_manager (validator 0, weight=3) with memory store
+    let (mut test_manager, test_dkg_output, _) =
+        rotation_setup.create_rotation_dealer_with_memory_store(0);
+    let test_addr = rotation_setup.setup.address(0);
+    test_manager.source_epoch = rotation_setup.setup.epoch();
+    test_manager.previous_output = Some(test_dkg_output.clone());
+
+    // Create other managers for MockP2PChannel (validators 1-4)
+    let mut other_managers_map = HashMap::new();
+    for i in 1..5 {
+        let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+        manager.previous_output = Some(output);
+        other_managers_map.insert(rotation_setup.setup.address(i), manager);
+    }
+
+    // Create rotation certificates from validators 2 (weight=4) and 3 (weight=1).
+    // Combined weight = 5 >= threshold (4), so dealer phase is skipped.
+    // Validator 2's cert has a hash mismatch on test_manager.
+    let mut rotation_certificates = Vec::new();
+
+    // Save correct rotation messages for building a reference output later.
+    let mut correct_rotation_msgs: HashMap<Address, Messages> = HashMap::new();
+
+    // Certificate for validator 2 (weight=4) — MISMATCHED on test_manager
+    {
+        let mut other_managers = other_managers_map.iter_mut().collect::<HashMap<_, _>>();
+        let addr_2 = rotation_setup.setup.address(2);
+
+        // Validator 2 creates two different rotation messages
+        let (correct_messages, wrong_messages) = {
+            let manager = other_managers.get_mut(&addr_2).unwrap();
+            let prev_output = manager.previous_output.clone().unwrap();
+            let correct_msgs = manager.create_rotation_messages(&prev_output, &mut rng);
+            let wrong_msgs = manager.create_rotation_messages(&prev_output, &mut rng);
+            (
+                Messages::Rotation(correct_msgs),
+                Messages::Rotation(wrong_msgs),
+            )
+        };
+
+        // test_manager processes the WRONG message (simulates RPC handler)
+        {
+            let prev_output = test_manager.previous_output.clone().unwrap();
+            if let Messages::Rotation(ref msgs) = wrong_messages {
+                test_manager.rotation_messages.insert(addr_2, msgs.clone());
+            }
+            test_manager
+                .try_sign_rotation_messages(&prev_output, addr_2, &wrong_messages)
+                .unwrap();
+        }
+
+        // Other managers process the CORRECT message
+        let epoch;
+        let own_sig;
+        {
+            let manager = other_managers.get_mut(&addr_2).unwrap();
+            let prev_output = manager.previous_output.clone().unwrap();
+            if let Messages::Rotation(ref msgs) = correct_messages {
+                manager.rotation_messages.insert(addr_2, msgs.clone());
+            }
+            own_sig = manager
+                .try_sign_rotation_messages(&prev_output, addr_2, &correct_messages)
+                .unwrap();
+            epoch = manager.dkg_config.epoch;
+        }
+
+        let addr_1 = rotation_setup.setup.address(1);
+        let signer_sig = {
+            let signer = other_managers.get_mut(&addr_1).unwrap();
+            let signer_prev = signer.previous_output.clone().unwrap();
+            if let Messages::Rotation(ref msgs) = correct_messages {
+                signer.rotation_messages.insert(addr_2, msgs.clone());
+            }
+            signer
+                .try_sign_rotation_messages(&signer_prev, addr_2, &correct_messages)
+                .unwrap()
+        };
+
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &correct_messages,
+            addr_2,
+            vec![
+                MemberSignature::new(epoch, addr_2, own_sig),
+                MemberSignature::new(epoch, addr_1, signer_sig),
+            ],
+        )
+        .unwrap();
+        rotation_certificates.push(CertificateV1::Rotation(cert));
+        correct_rotation_msgs.insert(addr_2, correct_messages);
+    }
+
+    // Certificate for validator 3 (weight=1) — clean, no mismatch
+    {
+        let mut other_managers = other_managers_map.iter_mut().collect::<HashMap<_, _>>();
+        let addr_3 = rotation_setup.setup.address(3);
+
+        let (rotation_messages, own_sig, epoch) = {
+            let manager = other_managers.get_mut(&addr_3).unwrap();
+            let prev_output = manager.previous_output.clone().unwrap();
+            let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
+            let rotation_messages = Messages::Rotation(msgs.clone());
+            manager.rotation_messages.insert(addr_3, msgs);
+            let own_sig = manager
+                .try_sign_rotation_messages(&prev_output, addr_3, &rotation_messages)
+                .unwrap();
+            (rotation_messages, own_sig, manager.dkg_config.epoch)
+        };
+
+        let addr_1 = rotation_setup.setup.address(1);
+        let signer_sig = {
+            let signer = other_managers.get_mut(&addr_1).unwrap();
+            let signer_prev = signer.previous_output.clone().unwrap();
+            if let Messages::Rotation(ref msgs) = rotation_messages {
+                signer.rotation_messages.insert(addr_3, msgs.clone());
+            }
+            signer
+                .try_sign_rotation_messages(&signer_prev, addr_3, &rotation_messages)
+                .unwrap()
+        };
+
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            addr_3,
+            vec![
+                MemberSignature::new(epoch, addr_3, own_sig),
+                MemberSignature::new(epoch, addr_1, signer_sig),
+            ],
+        )
+        .unwrap();
+        rotation_certificates.push(CertificateV1::Rotation(cert));
+        correct_rotation_msgs.insert(addr_3, rotation_messages);
+    }
+
+    // Build expected key_shares from a reference validator 0 that processes correct messages.
+    let expected_key_shares = {
+        let (mut ref_manager, ref_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+        ref_manager.previous_output = Some(ref_dkg_output.clone());
+        for (dealer, msgs) in &correct_rotation_msgs {
+            if let Messages::Rotation(rot_msgs) = msgs {
+                ref_manager
+                    .rotation_messages
+                    .insert(*dealer, rot_msgs.clone());
+            }
+            ref_manager
+                .try_sign_rotation_messages(&ref_dkg_output, *dealer, msgs)
+                .unwrap();
+        }
+        // Collect certified share indices (same as party phase would)
+        let prev_committee = ref_manager.previous_committee.as_ref().unwrap();
+        let prev_nodes = ref_manager.previous_nodes.as_ref().unwrap();
+        let mut certified_share_indices = Vec::new();
+        for dealer in correct_rotation_msgs.keys() {
+            let party_id = prev_committee.index_of(dealer).unwrap() as u16;
+            certified_share_indices.extend(prev_nodes.share_ids_of(party_id).unwrap());
+        }
+        ref_manager
+            .complete_key_rotation(&ref_dkg_output, &certified_share_indices)
+            .unwrap()
+            .key_shares
+    };
+
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let new_output = MpcManager::run_key_rotation(
+        &test_manager,
+        &rotation_setup.certificates(),
+        &mock_p2p,
+        &mut mock_tob,
+    )
+    .await
+    .unwrap();
+
+    // Compare key shares with the reference via serialization (SharesForNode
+    // doesn't implement PartialEq). Without the delete-on-mismatch fix,
+    // the stale rotation outputs produce different shares (vk is preserved but
+    // shares are wrong, causing signing failures).
+    assert_eq!(
+        bcs::to_bytes(&new_output.key_shares).unwrap(),
+        bcs::to_bytes(&expected_key_shares).unwrap(),
+        "Key shares mismatch: test_manager used stale rotation output from wrong message"
+    );
+}
+
+#[tokio::test]
 async fn test_run_key_rotation_with_complaint_recovery() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
@@ -7959,6 +8144,143 @@ async fn test_run_nonce_generation() {
             .keys()
             .any(|k| matches!(k, ComplaintsToProcessKey::NonceGeneration(_))),
         "Should have no nonce complaints after successful run"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
+    // Test that run_as_nonce_party correctly reprocesses a certified dealer's
+    // nonce message when the RPC handler previously stored an output from a
+    // different message. Without the delete-on-mismatch fix, the stale output
+    // stays and produces different presignatures than other nodes.
+    let mut rng = rand::thread_rng();
+    let weights: [u16; 5] = [1, 1, 1, 2, 2];
+    let num_validators = weights.len();
+    let setup = TestSetup::with_weights(&weights);
+    let batch_index = 0u32;
+
+    // Create all managers
+    let mut managers: Vec<_> = (0..num_validators)
+        .map(|i| setup.create_manager(i))
+        .collect();
+
+    // Create TWO different nonce messages for dealer 0 (the mismatched one)
+    let correct_msg_0 = create_nonce_dealer_message(&setup, 0, batch_index, &mut rng);
+    let wrong_msg_0 = create_nonce_dealer_message(&setup, 0, batch_index, &mut rng);
+    let dealer_addr_0 = setup.address(0);
+
+    // test_manager (validator 0) processes the WRONG message FIRST (simulates RPC handler)
+    {
+        let messages = Messages::NonceGeneration(wrong_msg_0.clone());
+        send_and_assert_ok(&mut managers[0], dealer_addr_0, &messages);
+    }
+
+    // Other managers process the CORRECT message from dealer 0
+    for manager in managers.iter_mut().skip(1) {
+        let messages = Messages::NonceGeneration(correct_msg_0.clone());
+        send_and_assert_ok(manager, dealer_addr_0, &messages);
+    }
+
+    // Create nonce messages for dealers 1-4 and have all managers process them
+    let mut other_dealer_messages = Vec::new();
+    for dealer_idx in 1..num_validators {
+        let nonce_msg = create_nonce_dealer_message(&setup, dealer_idx, batch_index, &mut rng);
+        let dealer_addr = setup.address(dealer_idx);
+        let messages = Messages::NonceGeneration(nonce_msg.clone());
+        for manager in managers.iter_mut() {
+            send_and_assert_ok(manager, dealer_addr, &messages);
+        }
+        other_dealer_messages.push((dealer_idx, nonce_msg));
+    }
+
+    // Create certificate for dealer 0 with the CORRECT message
+    let correct_messages_0 = Messages::NonceGeneration(correct_msg_0.clone());
+    let signatures_0: Vec<_> = managers
+        .iter()
+        .skip(1) // Skip test_manager who has wrong message
+        .map(|mgr| {
+            let messages_hash = compute_messages_hash(&correct_messages_0);
+            let dkg_message = DealerMessagesHash {
+                dealer_address: dealer_addr_0,
+                messages_hash,
+            };
+            setup.signing_keys[mgr.party_id as usize].sign(setup.epoch(), mgr.address, &dkg_message)
+        })
+        .collect();
+    let cert_0 = create_test_certificate(
+        setup.committee(),
+        &correct_messages_0,
+        dealer_addr_0,
+        signatures_0,
+    )
+    .unwrap();
+
+    // Create certificates for dealers 1-4 (clean)
+    let mut other_certs = Vec::new();
+    for &(dealer_idx, ref nonce_msg) in &other_dealer_messages {
+        let dealer_addr = setup.address(dealer_idx);
+        let messages = Messages::NonceGeneration(nonce_msg.clone());
+        let signatures: Vec<_> = managers
+            .iter()
+            .map(|mgr| {
+                let messages_hash = compute_messages_hash(&messages);
+                let dkg_message = DealerMessagesHash {
+                    dealer_address: dealer_addr,
+                    messages_hash,
+                };
+                setup.signing_keys[mgr.party_id as usize].sign(
+                    setup.epoch(),
+                    mgr.address,
+                    &dkg_message,
+                )
+            })
+            .collect();
+        let cert =
+            create_test_certificate(setup.committee(), &messages, dealer_addr, signatures).unwrap();
+        other_certs.push(CertificateV1::NonceGeneration { batch_index, cert });
+    }
+
+    // TOB: dealer 0 (mismatch) first, then clean dealers
+    let mut all_certs = vec![CertificateV1::NonceGeneration {
+        batch_index,
+        cert: cert_0,
+    }];
+    all_certs.extend(other_certs);
+
+    // Get the expected nonce output for dealer 0 from a clean manager (validator 1)
+    let expected_pks_0 = managers[1]
+        .dealer_nonce_outputs
+        .get(&dealer_addr_0)
+        .map(|o| o.public_keys.clone());
+
+    // Set up test_manager: it has wrong output in dealer_nonce_outputs for dealer 0
+    // and wrong message in nonce_messages. The party phase should detect hash mismatch,
+    // retrieve the correct message, and (with fix) delete the stale output.
+    let test_manager = managers.remove(0);
+    let other_managers: HashMap<_, _> = managers
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+        .collect();
+    let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(all_certs);
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
+        .await
+        .unwrap();
+
+    // Verify the nonce output for dealer 0 matches what a clean node has.
+    // Without the delete-on-mismatch fix, the stale output from the wrong
+    // message would remain, producing different presignatures.
+    let mgr = test_manager.read().unwrap();
+    let actual_pks_0 = mgr
+        .dealer_nonce_outputs
+        .get(&dealer_addr_0)
+        .map(|o| o.public_keys.clone());
+    assert_eq!(
+        actual_pks_0, expected_pks_0,
+        "Nonce output for dealer 0 should match clean node (stale output was not cleared)"
     );
 }
 
