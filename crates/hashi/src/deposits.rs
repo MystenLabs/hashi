@@ -276,19 +276,23 @@ impl Hashi {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DepositValidationErrorKind {
+pub enum DepositRequestErrorKind {
     BitcoinConfirmFailed,
     AmlServiceError,
     NotReady,
+    TimedOut,
+    TaskFailed,
     NeverRetry,
 }
 
-impl RetryPolicy for DepositValidationErrorKind {
+impl RetryPolicy for DepositRequestErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
         match self {
             Self::AmlServiceError => 5 * 1000,
             Self::NotReady => 5 * 1000,
             Self::BitcoinConfirmFailed => 60 * 1000,
+            Self::TimedOut => 60 * 1000,
+            Self::TaskFailed => 5 * 1000,
             Self::NeverRetry => u64::MAX,
         }
     }
@@ -299,8 +303,8 @@ impl RetryPolicy for DepositValidationErrorKind {
 
     fn max_retries(self) -> u32 {
         match self {
-            Self::AmlServiceError | Self::NotReady => u32::MAX,
-            Self::BitcoinConfirmFailed => 60 * 24,
+            Self::AmlServiceError | Self::NotReady | Self::TaskFailed => u32::MAX,
+            Self::BitcoinConfirmFailed | Self::TimedOut => 60 * 24,
             Self::NeverRetry => 0,
         }
     }
@@ -322,12 +326,12 @@ pub enum DepositValidationError {
 }
 
 impl DepositValidationError {
-    pub fn kind(&self) -> DepositValidationErrorKind {
+    pub fn kind(&self) -> DepositRequestErrorKind {
         match self {
-            Self::BitcoinConfirmFailed(_) => DepositValidationErrorKind::BitcoinConfirmFailed,
-            Self::AmlServiceError(_) => DepositValidationErrorKind::AmlServiceError,
-            Self::NotReady(_) => DepositValidationErrorKind::NotReady,
-            Self::NeverRetry(_) => DepositValidationErrorKind::NeverRetry,
+            Self::BitcoinConfirmFailed(_) => DepositRequestErrorKind::BitcoinConfirmFailed,
+            Self::AmlServiceError(_) => DepositRequestErrorKind::AmlServiceError,
+            Self::NotReady(_) => DepositRequestErrorKind::NotReady,
+            Self::NeverRetry(_) => DepositRequestErrorKind::NeverRetry,
         }
     }
 }
