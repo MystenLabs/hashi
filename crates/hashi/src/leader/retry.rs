@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::Mutex;
 use sui_sdk_types::Address;
-use tracing::error;
+use tracing::warn;
 
 pub(crate) trait RetryPolicy {
     fn retry_base_delay_ms(self) -> u64;
@@ -109,7 +109,7 @@ where
         states.insert(request_id, state);
 
         if state.attempt >= error_kind.max_retries() {
-            error!(
+            warn!(
                 "Request {:?} failed validation ({error_kind:?}). Reached max retries ({}), no further retries",
                 request_id, state.attempt,
             );
@@ -117,7 +117,7 @@ where
             let retry_delay_ms = state
                 .next_retry_at_ms
                 .saturating_sub(checkpoint_timestamp_ms);
-            error!(
+            warn!(
                 "Request {:?} failed validation ({error_kind:?}). Next retry in {} ms (attempt {})",
                 request_id, retry_delay_ms, state.attempt,
             );
