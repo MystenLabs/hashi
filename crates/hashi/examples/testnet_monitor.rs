@@ -19,7 +19,7 @@ use bitcoin::Network;
 use clap::Parser;
 use hashi::btc_monitor::config::MonitorConfig;
 use hashi::btc_monitor::monitor::Monitor;
-use kyoto::TrustedPeer;
+use bip157::TrustedPeer;
 use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;

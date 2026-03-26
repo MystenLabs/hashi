@@ -1028,6 +1028,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bip157"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8af7987396c76633777e335345347395cd383b46bd95c1534691ab717859482e"
+dependencies = [
+ "bip324",
+ "bitcoin",
+ "bitcoin-address-book",
+ "bitcoin_hashes 0.20.0",
+ "tokio",
+]
+
+[[package]]
 name = "bip324"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1059,6 +1072,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-address-book"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "060c05780195789a7b89bbfe7f57a1a8cd6ae0bb3daa9b96eeca4fbe0ba8014f"
+dependencies = [
+ "bitcoin",
+]
+
+[[package]]
+name = "bitcoin-consensus-encoding"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8d7ca3dc8ff835693ad73bf1596240c06f974a31eeb3f611aaedf855f1f2725"
+dependencies = [
+ "bitcoin-internals 0.5.0",
+]
+
+[[package]]
 name = "bitcoin-internals"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1072,6 +1103,12 @@ name = "bitcoin-internals"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a90bbbfa552b49101a230fb2668f3f9ef968c81e6f83cf577e1d4b80f689e1aa"
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a30a22d1f112dde8e16be7b45c63645dc165cef254f835b3e1e9553e485cfa64"
 
 [[package]]
 name = "bitcoin-io"
@@ -1131,6 +1168,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0982261c82a50d89d1a411602afee0498b3e0debe3d36693f0c661352809639"
 dependencies = [
  "bitcoin-io 0.2.0",
+ "hex-conservative 0.3.1",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a8a45c2b41c457a9a9e4670422fcbdf109afb3b22bc920b4045e8bdfd788a3d"
+dependencies = [
+ "bitcoin-consensus-encoding",
+ "bitcoin-internals 0.5.0",
  "hex-conservative 0.3.1",
 ]
 
@@ -2093,18 +2141,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
 name = "fastcrypto"
 version = "0.1.9"
 source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=8101176#810117610269a06061d792fa58166b24131d39c9"
@@ -2557,9 +2593,6 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
-]
 
 [[package]]
 name = "hashbrown"
@@ -2584,6 +2617,7 @@ dependencies = [
  "bcs",
  "bdk_coin_select",
  "bin-version",
+ "bip157",
  "bitcoin",
  "bitcoincore-rpc",
  "blst",
@@ -2598,7 +2632,6 @@ dependencies = [
  "hashi-types",
  "hex",
  "jiff",
- "kyoto-cbf",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
@@ -2745,15 +2778,6 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tracing",
-]
-
-[[package]]
-name = "hashlink"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
-dependencies = [
- "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3321,18 +3345,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kyoto-cbf"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805f16bcf1d4738529f230404e7d0ab6e9ecf9e265920c212d446a291a93297e"
-dependencies = [
- "bip324",
- "bitcoin",
- "rusqlite",
- "tokio",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3352,17 +3364,6 @@ name = "libm"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
-
-[[package]]
-name = "libsqlite3-sys"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
-dependencies = [
- "cc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "linux-raw-sys"
@@ -4562,20 +4563,6 @@ dependencies = [
  "signature 2.2.0",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "rusqlite"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
-dependencies = [
- "bitflags 2.10.0",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "hashlink",
- "libsqlite3-sys",
- "smallvec",
 ]
 
 [[package]]
@@ -6058,12 +6045,6 @@ name = "varint-rs"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f54a172d0620933a27a4360d3db3e2ae0dd6cceae9730751a036bbf182c4b23"
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

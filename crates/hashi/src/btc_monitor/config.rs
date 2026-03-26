@@ -20,7 +20,7 @@ pub struct MonitorConfig {
     pub confirmation_threshold: u32,
 
     /// Initial peer addresses for P2P connections
-    pub trusted_peers: Vec<kyoto::TrustedPeer>,
+    pub trusted_peers: Vec<bip157::TrustedPeer>,
 
     /// Starting block height for synchronization
     pub start_height: u32,
@@ -33,6 +33,10 @@ pub struct MonitorConfig {
 
     /// Directory for storing BTC light client data
     pub data_dir: Option<PathBuf>,
+
+    /// Optional checkpoint to start syncing from (height + block hash).
+    /// If None, defaults to taproot activation for mainnet or genesis for other networks.
+    pub start_checkpoint: Option<bip157::HeaderCheckpoint>,
 }
 
 impl Default for MonitorConfig {
@@ -45,6 +49,7 @@ impl Default for MonitorConfig {
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
             bitcoind_rpc_auth: bitcoincore_rpc::Auth::None,
             data_dir: None,
+            start_checkpoint: None,
         }
     }
 }
@@ -61,11 +66,12 @@ impl MonitorConfig {
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
     confirmation_threshold: Option<u32>,
-    trusted_peers: Vec<kyoto::TrustedPeer>,
+    trusted_peers: Vec<bip157::TrustedPeer>,
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
     bitcoind_rpc_auth: Option<bitcoincore_rpc::Auth>,
     data_dir: Option<PathBuf>,
+    start_checkpoint: Option<bip157::HeaderCheckpoint>,
 }
 
 impl MonitorConfigBuilder {
@@ -82,7 +88,7 @@ impl MonitorConfigBuilder {
     }
 
     /// Set peer addresses for P2P connections.
-    pub fn trusted_peers(mut self, addresses: Vec<kyoto::TrustedPeer>) -> Self {
+    pub fn trusted_peers(mut self, addresses: Vec<bip157::TrustedPeer>) -> Self {
         self.trusted_peers = addresses;
         self
     }
@@ -106,6 +112,12 @@ impl MonitorConfigBuilder {
         self
     }
 
+    /// Set a checkpoint to start syncing from.
+    pub fn start_checkpoint(mut self, checkpoint: bip157::HeaderCheckpoint) -> Self {
+        self.start_checkpoint = Some(checkpoint);
+        self
+    }
+
     pub fn build(self) -> MonitorConfig {
         let default = MonitorConfig::default();
 
@@ -123,6 +135,7 @@ impl MonitorConfigBuilder {
             bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
             bitcoind_rpc_auth: self.bitcoind_rpc_auth.unwrap_or(default.bitcoind_rpc_auth),
             data_dir: self.data_dir,
+            start_checkpoint: self.start_checkpoint,
         }
     }
 }

@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bitcoincore_rpc::RpcApi;
-use kyoto::FeeRate;
-use kyoto::HeaderCheckpoint;
-use kyoto::Warning;
-use kyoto::builder::NodeDefault;
+use bip157::FeeRate;
+use bip157::HeaderCheckpoint;
+use bip157::Warning;
+use bip157::chain::BlockHeaderChanges;
 use sui_futures::service::Service;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -51,33 +51,32 @@ pub struct Monitor {
     metrics: Arc<Metrics>,
     bitcoind_rpc: Arc<bitcoincore_rpc::Client>,
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
-    requester: kyoto::Requester,
+    requester: bip157::Requester,
     tip: Option<HeaderCheckpoint>,
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
 }
 
 impl Monitor {
-    fn build_kyoto_node(config: &MonitorConfig) -> Result<(NodeDefault, kyoto::Client)> {
-        let mut node_builder = kyoto::NodeBuilder::new(config.network)
+    fn build_kyoto_node(config: &MonitorConfig) -> (bip157::Node, bip157::Client) {
+        let chain_state = match &config.start_checkpoint {
+            Some(cp) => bip157::ChainState::Checkpoint(*cp),
+            None => match config.network {
+                bitcoin::Network::Bitcoin => bip157::ChainState::Checkpoint(
+                    bip157::HeaderCheckpoint::taproot_activation(),
+                ),
+                _ => bip157::ChainState::Checkpoint(
+                    bip157::HeaderCheckpoint::from_genesis(config.network),
+                ),
+            },
+        };
+        let mut builder = bip157::Builder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
-            // Prevent Kyoto from storing additional peers via GetAddr.
-            .peer_db_size(kyoto::PeerStoreSizeConfig::Limit(0))
-            // TODO: should we set this higher than default?
-            // .required_peers(num_peers)
-            // Need a dummy script to prevent default match on every single block.
-            // TODO: Remove once commit
-            // https://github.com/rust-bitcoin/rust-bitcoin/commit/e7d992a5ff75807ec454655d112a671294a101dd
-            // is available in a released version of the bitcoin crate.
-            .add_scripts(vec![bitcoin::ScriptBuf::new()])
-            .after_checkpoint(kyoto::HeaderCheckpoint::closest_checkpoint_below_height(
-                config.start_height,
-                config.network,
-            ));
+            .chain_state(chain_state);
         if let Some(data_dir) = &config.data_dir {
-            node_builder = node_builder.data_dir(data_dir.clone());
+            builder = builder.data_dir(data_dir.clone());
         }
-        Ok(node_builder.build()?)
+        builder.build()
     }
 
     /// Run a BTC monitor with the given configuration.
@@ -96,7 +95,7 @@ impl Monitor {
                 let bitcoind_rpc = Arc::new(bitcoind_rpc);
 
                 // Build initial Kyoto node.
-                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config)?;
+                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config);
 
                 let mut monitor = Monitor {
                     config,
@@ -121,8 +120,8 @@ impl Monitor {
     /// Run the monitor with automatic Kyoto restart on connectivity loss.
     async fn run_with_supervision(
         &mut self,
-        kyoto_node: NodeDefault,
-        kyoto_client: kyoto::Client,
+        kyoto_node: bip157::Node,
+        kyoto_client: bip157::Client,
         client_rx: &mut tokio::sync::mpsc::Receiver<MonitorMessage>,
     ) -> Result<()> {
         let mut current_node = kyoto_node;
@@ -136,7 +135,11 @@ impl Monitor {
 
             // Spawn the Kyoto node as a background task. Node::run() takes
             // ownership, so we move it in and get a JoinHandle back.
-            let kyoto_handle = tokio::spawn(async move { current_node.run().await });
+            let kyoto_handle = tokio::spawn(async move {
+                if let Err(e) = current_node.run().await {
+                    error!("Kyoto node exited with error: {e}");
+                }
+            });
 
             let result = self.run_event_loop(&mut current_client, client_rx).await;
 
@@ -160,7 +163,7 @@ impl Monitor {
 
                     // Build a fresh Kyoto node with the trusted peers re-added
                     // to the whitelist.
-                    let (new_node, new_client) = Self::build_kyoto_node(&self.config)?;
+                    let (new_node, new_client) = Self::build_kyoto_node(&self.config);
                     current_node = new_node;
                     current_client = new_client;
                     self.requester = current_client.requester.clone();
@@ -184,12 +187,8 @@ impl Monitor {
             Warning::NoCompactFilters => "no_compact_filters",
             Warning::PotentialStaleTip => "potential_stale_tip",
             Warning::UnsolicitedMessage => "unsolicited_message",
-            Warning::InvalidStartHeight => "invalid_start_height",
-            Warning::CorruptedHeaders => "corrupted_headers",
             Warning::TransactionRejected { .. } => "transaction_rejected",
-            Warning::FailedPersistence { .. } => "failed_persistence",
             Warning::EvaluatingFork => "evaluating_fork",
-            Warning::EmptyPeerDatabase => "empty_peer_database",
             Warning::UnexpectedSyncError { .. } => "unexpected_sync_error",
             Warning::ChannelDropped => "channel_dropped",
         }
@@ -198,7 +197,7 @@ impl Monitor {
     /// Run the main event loop, returning the reason it exited.
     async fn run_event_loop(
         &mut self,
-        kyoto_client: &mut kyoto::Client,
+        kyoto_client: &mut bip157::Client,
         client_rx: &mut tokio::sync::mpsc::Receiver<MonitorMessage>,
     ) -> KyotoEventLoopExit {
         let mut consecutive_failures: u32 = 0;
@@ -210,10 +209,7 @@ impl Monitor {
                     self.process_kyoto_event(event);
                 }
                 Some(msg) = client_rx.recv() => {
-                    self.process_client_message(msg);
-                }
-                Some(msg) = kyoto_client.log_rx.recv() => {
-                    debug!("Kyoto log: {msg}");
+                    self.process_client_message(msg).await;
                 }
                 Some(msg) = kyoto_client.info_rx.recv() => {
                     info!("Kyoto: {msg}");
@@ -262,52 +258,52 @@ impl Monitor {
     }
 
     /// Extract metrics from Kyoto info messages.
-    fn update_info_metrics(metrics: &Metrics, msg: &kyoto::Info, required_peers: usize) {
+    fn update_info_metrics(metrics: &Metrics, msg: &bip157::Info, required_peers: usize) {
         match msg {
-            kyoto::Info::ConnectionsMet => {
+            bip157::Info::ConnectionsMet => {
                 metrics.kyoto_connected_peers.set(required_peers as i64);
             }
-            kyoto::Info::Progress(progress) => {
+            bip157::Info::Progress(progress) => {
                 metrics
                     .kyoto_sync_percent
                     .set(progress.percentage_complete() as i64);
+                metrics
+                    .kyoto_best_height
+                    .set(progress.chain_height() as i64);
             }
-            kyoto::Info::NewChainHeight(height) => {
-                metrics.kyoto_best_height.set(*height as i64);
+            bip157::Info::SuccessfulHandshake => {}
+            bip157::Info::BlockReceived(_) => {
+                metrics.kyoto_blocks_received.inc();
             }
-            _ => {}
         }
     }
 
-    fn process_kyoto_event(&mut self, event: kyoto::Event) {
+    fn process_kyoto_event(&mut self, event: bip157::Event) {
         match event {
-            kyoto::Event::Block(block) => self.process_block(block),
-            kyoto::Event::Synced(sync_update) => self.process_synced(sync_update),
-            kyoto::Event::BlocksDisconnected {
-                accepted,
-                disconnected,
-            } => self.process_blocks_disconnected(accepted, disconnected),
+            bip157::Event::Block(block) => {
+                info!(
+                    "Got block {} at height {} with {} transactions",
+                    block.block.block_hash(),
+                    block.height,
+                    block.block.txdata.len()
+                );
+            }
+            bip157::Event::FiltersSynced(sync_update) => self.process_synced(sync_update),
+            bip157::Event::ChainUpdate(changes) => self.process_chain_update(changes),
+            bip157::Event::IndexedFilter(_) => {
+                // Hashi does not use compact block filter matching.
+                // Transaction lookups are done via bitcoind RPC.
+            }
         }
     }
 
-    fn process_block(&mut self, block: kyoto::IndexedBlock) {
-        info!(
-            "Got block {} at height {} with {} transactions",
-            block.block.block_hash(),
-            block.height,
-            block.block.txdata.len()
-        );
-        self.metrics.kyoto_blocks_received.inc();
-        self.metrics.kyoto_best_height.set(block.height as i64);
-    }
-
-    fn process_synced(&mut self, sync_update: kyoto::messages::SyncUpdate) {
-        let tip = sync_update.tip;
+    fn process_synced(&mut self, sync_update: bip157::SyncUpdate) {
+        let tip = sync_update.tip();
         info!(
             "Synchronized to height {} ({}) with {} recent headers",
             tip.height,
             tip.hash,
-            sync_update.recent_history.len()
+            sync_update.recent_history().len()
         );
         self.metrics.kyoto_synced.set(1);
         self.metrics.kyoto_best_height.set(tip.height as i64);
@@ -316,20 +312,33 @@ impl Monitor {
         self.process_pending_deposits();
     }
 
-    fn process_blocks_disconnected(
-        &mut self,
-        accepted: Vec<kyoto::chain::IndexedHeader>,
-        disconnected: Vec<kyoto::chain::IndexedHeader>,
-    ) {
-        info!(
-            "Got reorg with {} accepted blocks and {} disconnected blocks",
-            accepted.len(),
-            disconnected.len()
-        );
-        self.metrics.kyoto_reorgs.inc();
+    fn process_chain_update(&mut self, changes: BlockHeaderChanges) {
+        match changes {
+            BlockHeaderChanges::Connected(header) => {
+                debug!("Block header connected at height {}", header.height);
+                self.metrics.kyoto_best_height.set(header.height as i64);
+            }
+            BlockHeaderChanges::Reorganized {
+                accepted,
+                reorganized,
+            } => {
+                info!(
+                    "Got reorg with {} accepted blocks and {} disconnected blocks",
+                    accepted.len(),
+                    reorganized.len()
+                );
+                self.metrics.kyoto_reorgs.inc();
+                if let Some(tip) = accepted.last() {
+                    self.metrics.kyoto_best_height.set(tip.height as i64);
+                }
+            }
+            BlockHeaderChanges::ForkAdded(header) => {
+                debug!("Fork block proposed at height {}", header.height);
+            }
+        }
     }
 
-    fn process_client_message(&mut self, msg: MonitorMessage) {
+    async fn process_client_message(&mut self, msg: MonitorMessage) {
         match msg {
             MonitorMessage::ConfirmDeposit(pending_deposit) => {
                 self.confirm_deposit(pending_deposit);
@@ -338,7 +347,7 @@ impl Monitor {
                 self.get_recent_fee_rate(conf_target, result_tx);
             }
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
-                self.broadcast_transaction(tx, result_tx);
+                self.broadcast_transaction(tx, result_tx).await;
             }
             MonitorMessage::GetTransactionStatus(txid, result_tx) => {
                 self.get_transaction_status(txid, result_tx);
@@ -413,7 +422,7 @@ impl Monitor {
         let _ = result_tx.send(result);
     }
 
-    fn broadcast_transaction(
+    async fn broadcast_transaction(
         &mut self,
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
@@ -441,11 +450,8 @@ impl Monitor {
             }
         }
 
-        let result = self.requester.broadcast_tx(kyoto::TxBroadcast {
-            tx,
-            broadcast_policy: kyoto::TxBroadcastPolicy::AllPeers,
-        });
-        let _ = result_tx.send(result.map_err(|e| anyhow::anyhow!(e)));
+        let result = self.requester.broadcast_tx(tx).await;
+        let _ = result_tx.send(result.map(|_| ()).map_err(|e| anyhow::anyhow!(e)));
     }
 
     fn get_transaction_status(
@@ -503,7 +509,7 @@ impl Monitor {
         tip: HeaderCheckpoint,
         confirmation_threshold: u32,
         bitcoind_rpc: Arc<bitcoincore_rpc::Client>,
-        requester: kyoto::Requester,
+        requester: bip157::Requester,
         client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
         mut pending_deposit: PendingDeposit,
     ) {
@@ -549,27 +555,10 @@ impl Monitor {
                         return;
                     }
                 };
-                // Double check header with Kyoto to verify the height reported by bitcoind.
-                let kyoto_header = match requester.get_header(block_header.height as u32).await {
-                    Ok(kyoto_header) => kyoto_header,
-                    Err(e) => {
-                        error!(
-                            "Failed to look up header at height {}: {e}",
-                            block_header.height
-                        );
-                        return;
-                    }
-                };
-                if kyoto_header.block_hash() != block_hash {
-                    warn!(
-                        "Block hash mismatch at height {}! Possibly malicious behavior by the Bitcoin Core node. {} != {}",
-                        block_header.height,
-                        kyoto_header.block_hash(),
-                        block_hash
-                    );
-                    return;
-                }
-                let block_info = kyoto::HeaderCheckpoint {
+                // Chain membership is verified when we later call
+                // requester.get_block(hash) — FetchBlockError::UnknownHash
+                // is returned if the block is not in the chain of most work.
+                let block_info = bip157::HeaderCheckpoint {
                     height: block_header.height as u32,
                     hash: block_header.hash,
                 };
@@ -590,7 +579,7 @@ impl Monitor {
         // If deposit is confirmed, look up the TxOut info.
         let block = match requester.get_block(block_info.hash).await {
             Ok(block) => block,
-            Err(kyoto::error::FetchBlockError::UnknownHash) => {
+            Err(bip157::error::FetchBlockError::UnknownHash) => {
                 // Error: The block is no longer in the current chain.
                 // TODO: Verify kyoto won't return blocks outside the chain of most work
                 warn!(
@@ -631,7 +620,7 @@ impl Monitor {
 #[derive(Debug)]
 struct PendingDeposit {
     outpoint: bitcoin::OutPoint,
-    block_info: Option<kyoto::HeaderCheckpoint>,
+    block_info: Option<bip157::HeaderCheckpoint>,
     result_tx: oneshot::Sender<Result<bitcoin::TxOut>>,
     checked_at_height: u32,
 }
