@@ -871,6 +871,39 @@ impl LeaderService {
     }
 
     async fn process_unsigned_pending_withdrawal(&self, pending: &PendingWithdrawal) {
+        // If the pending withdrawal is from a previous epoch, reassign its presig
+        // indices from the new epoch's counter before signing.
+        let current_epoch = self.inner.onchain_state().epoch();
+        if pending.epoch != current_epoch {
+            info!(
+                pending_withdrawal_id = %pending.id,
+                "Pending withdrawal from epoch {} (current {}), reassigning presig indices",
+                pending.epoch, current_epoch,
+            );
+            let result = async {
+                let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+                executor
+                    .execute_allocate_presigs_for_pending_withdrawal(pending.id)
+                    .await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    info!(
+                        pending_withdrawal_id = %pending.id,
+                        "Presig indices reassigned, will sign on next checkpoint"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        pending_withdrawal_id = %pending.id,
+                        "Failed to reassign presig indices: {e}"
+                    );
+                }
+            }
+            // Return and let the next checkpoint iteration pick up the updated state.
+            return;
+        }
         info!(pending_withdrawal_id = %pending.id, "MPC signing pending withdrawal");
 
         let members = self

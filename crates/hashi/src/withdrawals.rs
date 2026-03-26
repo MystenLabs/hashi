@@ -500,6 +500,16 @@ impl Hashi {
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
+        if pending.epoch != epoch {
+            anyhow::bail!(
+                "Stale presig assignment: pending withdrawal {} has epoch {}, current is {}. \
+                 Either the leader hasn't called allocate_presigs_for_pending_withdrawal yet, \
+                 or this node's on-chain state is behind.",
+                pending.id,
+                pending.epoch,
+                epoch,
+            );
+        }
         let p2p_channel = RpcP2PChannel::new(onchain_state, epoch);
         let signing_manager = self.signing_manager();
         let beacon = S::zero();
@@ -512,11 +522,13 @@ impl Hashi {
                 .get(input_index)
                 .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
             let sign_start = std::time::Instant::now();
+            let global_presig_index = pending.presig_start_index + input_index as u64;
             let sign_result = SigningManager::sign(
                 &signing_manager,
                 &p2p_channel,
                 request_id,
                 message,
+                global_presig_index,
                 &beacon,
                 derivation_address.as_ref(),
                 WITHDRAWAL_SIGNING_TIMEOUT,

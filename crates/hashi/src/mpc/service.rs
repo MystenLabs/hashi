@@ -77,22 +77,17 @@ pub struct MpcService {
     key_ready_tx: watch::Sender<Option<G>>,
     refill_tx: Arc<watch::Sender<u32>>,
     refill_rx: watch::Receiver<u32>,
-    recovery_tx: Arc<watch::Sender<bool>>,
-    recovery_rx: watch::Receiver<bool>,
 }
 
 impl MpcService {
     pub fn new(hashi: Arc<Hashi>) -> (Self, MpcHandle) {
         let (key_ready_tx, key_ready_rx) = watch::channel(None);
         let (refill_tx, refill_rx) = watch::channel(0u32);
-        let (recovery_tx, recovery_rx) = watch::channel(false);
         let service = Self {
             inner: hashi,
             key_ready_tx,
             refill_tx: Arc::new(refill_tx),
             refill_rx,
-            recovery_tx: Arc::new(recovery_tx),
-            recovery_rx,
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -183,12 +178,6 @@ impl MpcService {
                                 }
                             }
                         }
-                    }
-                }
-                Ok(()) = self.recovery_rx.changed() => {
-                    if *self.recovery_rx.borrow() {
-                        self.recover_presignatures().await;
-                        let _ = self.recovery_tx.send(false);
                     }
                 }
             }
@@ -366,7 +355,6 @@ impl MpcService {
             0,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
-            self.recovery_tx.clone(),
         );
         self.inner.set_or_init_signing_manager(signing_manager);
         Ok(())
@@ -403,7 +391,6 @@ impl MpcService {
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         let batch_size = batch_0_presigs.len();
         let batch_index = (num_consumed / batch_size as u64) as u32;
-        let index_in_batch = (num_consumed % batch_size as u64) as usize;
         let presignatures = if batch_index == 0 {
             batch_0_presigs
         } else {
@@ -420,7 +407,7 @@ impl MpcService {
                 .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?
         };
         let address = self.inner.config.validator_address()?;
-        let mut signing_manager = SigningManager::new(
+        let signing_manager = SigningManager::new(
             address,
             committee,
             output.threshold,
@@ -430,43 +417,13 @@ impl MpcService {
             batch_index,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
-            self.recovery_tx.clone(),
         );
-        signing_manager.skip_consumed_presigs(index_in_batch);
         self.inner.set_or_init_signing_manager(signing_manager);
         info!(
             "Recovered presigning state: batch_index={batch_index}, \
-             skipped {index_in_batch}/{batch_size} presignatures \
-             (num_consumed_presigs={num_consumed})"
+             batch_size={batch_size} (num_consumed_presigs={num_consumed})."
         );
         Ok(())
-    }
-
-    async fn recover_presignatures(&self) {
-        let output = {
-            let sm = self.inner.signing_manager();
-            let sm = sm.read().unwrap();
-            DkgOutput {
-                public_key: sm.verifying_key(),
-                key_shares: sm.key_shares().clone(),
-                threshold: sm.threshold(),
-                commitments: std::collections::BTreeMap::new(),
-            }
-        };
-        info!("Presig desync recovery triggered, rescraping on-chain state");
-        if let Err(e) = self.inner.onchain_state().rescrape().await {
-            warn!("Failed to rescrape on-chain state before presig recovery: {e}");
-        }
-        let epoch = self.inner.onchain_state().epoch();
-        match self.recover_presigning_state(&output) {
-            Ok(()) => return,
-            Err(e) => {
-                warn!("Presig state recovery failed: {e}, falling back to fresh nonce generation");
-            }
-        }
-        if let Err(e) = self.prepare_signing(epoch, &output).await {
-            error!("Fresh nonce generation also failed: {e}. Node cannot sign.");
-        }
     }
 
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {

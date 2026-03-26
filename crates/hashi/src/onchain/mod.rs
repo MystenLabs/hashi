@@ -1083,6 +1083,8 @@ async fn scrape_pending_withdrawals(
                  timestamp_ms,
                  randomness,
                  signatures,
+                 presig_start_index,
+                 epoch,
              }| {
                 let requests = requests
                     .into_iter()
@@ -1112,6 +1114,8 @@ async fn scrape_pending_withdrawals(
                         timestamp_ms,
                         randomness,
                         signatures,
+                        presig_start_index,
+                        epoch,
                     },
                 )
             },
@@ -1160,6 +1164,8 @@ fn convert_move_pending_withdrawal(
         timestamp_ms,
         randomness,
         signatures,
+        presig_start_index,
+        epoch,
     }: move_types::PendingWithdrawal,
 ) -> types::PendingWithdrawal {
     let convert_output = |o: move_types::OutputUtxo| types::OutputUtxo {
@@ -1179,6 +1185,8 @@ fn convert_move_pending_withdrawal(
         timestamp_ms,
         randomness,
         signatures,
+        presig_start_index,
+        epoch,
     }
 }
 

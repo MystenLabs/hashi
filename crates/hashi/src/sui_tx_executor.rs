@@ -517,6 +517,36 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Reassign presig indices for a pending withdrawal from a previous epoch.
+    pub async fn execute_allocate_presigs_for_pending_withdrawal(
+        &mut self,
+        withdrawal_id: Address,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let withdrawal_id_arg = builder.pure(&withdrawal_id);
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("allocate_presigs_for_pending_withdrawal"),
+            ),
+            vec![hashi_arg, withdrawal_id_arg],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "allocate_presigs_for_pending_withdrawal transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
     /// Register and/or update validator metadata on-chain.
     ///
     /// Delegates to [`build_register_or_update_validator_tx`] to determine which
