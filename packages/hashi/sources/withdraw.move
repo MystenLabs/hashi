@@ -141,6 +141,7 @@ entry fun commit_withdrawal_tx(
     let epoch = hashi.committee_set().epoch();
     let inputs = selected_utxos.map!(|utxo_id| hashi.utxo_pool_mut().spend(utxo_id, epoch));
 
+    let presig_start_index = hashi.withdrawal_queue().num_consumed_presigs();
     hashi.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
 
     let approval = WithdrawalCommitmentMessage {
@@ -176,6 +177,8 @@ entry fun commit_withdrawal_tx(
         inputs,
         outputs,
         txid,
+        presig_start_index,
+        epoch,
         hashi.config(),
         clock,
         randomness,
@@ -184,6 +187,16 @@ entry fun commit_withdrawal_tx(
 
     pending_withdrawal.emit_withdrawal_picked_for_processing();
     hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending_withdrawal);
+}
+
+entry fun allocate_presigs_for_pending_withdrawal(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    _ctx: &mut TxContext,
+) {
+    hashi.config().assert_version_enabled();
+    let epoch = hashi.committee_set().epoch();
+    hashi.withdrawal_queue_mut().allocate_presigs_for_pending_withdrawal(withdrawal_id, epoch);
 }
 
 entry fun sign_withdrawal(

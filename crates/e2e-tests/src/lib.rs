@@ -441,7 +441,6 @@ mod tests {
                 mgr.committee.clone()
             };
             let (refill_tx, _) = tokio::sync::watch::channel(0u32);
-            let (recovery_tx, _) = tokio::sync::watch::channel(false);
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
                 committee,
@@ -452,7 +451,6 @@ mod tests {
                 0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
-                std::sync::Arc::new(recovery_tx),
             );
             node.hashi().set_signing_manager(signing_manager);
         }
@@ -465,6 +463,7 @@ mod tests {
         message: &[u8],
         epoch: u64,
         sui_request_id: sui_sdk_types::Address,
+        global_presig_index: u64,
     ) -> Vec<
         hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
     > {
@@ -483,6 +482,7 @@ mod tests {
                         &p2p_channel,
                         sui_request_id,
                         &message,
+                        global_presig_index,
                         &beacon,
                         None,
                         SIGNING_TIMEOUT,
@@ -549,7 +549,7 @@ mod tests {
 
         let message: &[u8] = b"Hello, Hashi signing!";
         let request_id = sui_sdk_types::Address::ZERO;
-        let results = sign_on_all_nodes(nodes, message, epoch, request_id).await;
+        let results = sign_on_all_nodes(nodes, message, epoch, request_id, 0).await;
         assert_all_signatures_match(results);
 
         Ok(())
@@ -1246,7 +1246,8 @@ mod tests {
 
         for i in 0..num_signings {
             let request_id = sui_sdk_types::Address::new([i as u8; 32]);
-            let results = sign_on_all_nodes(nodes, b"refill test", epoch, request_id).await;
+            let results =
+                sign_on_all_nodes(nodes, b"refill test", epoch, request_id, i as u64).await;
             assert_all_signatures_match(results);
 
             // After crossing the refill threshold, wait for the refill to
