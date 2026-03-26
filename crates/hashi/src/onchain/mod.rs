@@ -601,6 +601,7 @@ async fn scrape_hashi(
         treasury,
         proposals,
         tob,
+        num_consumed_presigs,
     } = response.get_ref().object().contents().deserialize()?;
 
     // Fetch BitcoinState dynamic field by deriving its child object ID.
@@ -663,6 +664,7 @@ async fn scrape_hashi(
             utxo_pool,
             proposals,
             tob_id: tob.id,
+            num_consumed_presigs,
         },
     ))
 }
@@ -1033,7 +1035,6 @@ async fn scrape_withdrawal_queue(
         requests,
         pending_withdrawals_id: withdrawal_queue.pending_withdrawals.id,
         pending_withdrawals,
-        num_consumed_presigs: withdrawal_queue.num_consumed_presigs,
     })
 }
 

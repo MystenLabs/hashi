@@ -157,8 +157,6 @@ entry fun commit_withdrawal_tx(
     // Borrow BitcoinState: spend UTXOs and collect approved requests
     let btc = hashi.borrow_bitcoin_state_mut();
     let inputs = selected_utxos.map!(|utxo_id| btc.utxo_pool_mut().spend(utxo_id, epoch));
-    let presig_start_index = btc.withdrawal_queue().num_consumed_presigs();
-    btc.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
 
     let mut balances_to_burn = vector[];
     let requests = request_ids.map!(|request_id| {
@@ -167,7 +165,10 @@ entry fun commit_withdrawal_tx(
         balances_to_burn.push_back(btc_bal);
         request
     });
-    // btc borrow released (last use above)
+    // btc borrow released
+
+    // Allocate presigs from core counter (must happen after btc borrow is released)
+    let presig_start_index = hashi.allocate_presigs(inputs.length());
 
     // Burn BTC balances
     balances_to_burn.do!(|bal| hashi.treasury_mut().burn(bal));
@@ -206,7 +207,19 @@ entry fun allocate_presigs_for_pending_withdrawal(
 ) {
     hashi.config().assert_version_enabled();
     let epoch = hashi.committee_set().epoch();
-    hashi.withdrawal_queue_mut().allocate_presigs_for_pending_withdrawal(withdrawal_id, epoch);
+    let num_inputs = hashi
+        .borrow_bitcoin_state()
+        .withdrawal_queue()
+        .pending_withdrawal_num_inputs(withdrawal_id);
+    let presig_start_index = hashi.allocate_presigs(num_inputs);
+    hashi
+        .borrow_bitcoin_state_mut()
+        .withdrawal_queue_mut()
+        .reassign_presigs_for_pending_withdrawal(
+            withdrawal_id,
+            presig_start_index,
+            epoch,
+        );
 }
 
 entry fun sign_withdrawal(
