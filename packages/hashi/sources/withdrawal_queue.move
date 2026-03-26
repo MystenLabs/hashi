@@ -258,6 +258,8 @@ public(package) fun allocate_presigs_for_pending_withdrawal(
     current_epoch: u64,
 ) {
     let pending: &mut PendingWithdrawal = self.pending_withdrawals.borrow_mut(withdrawal_id);
+    // Reassignment only — initial allocation is done in commit_withdrawal_tx.
+    // Also prevents double-allocation within the same epoch.
     assert!(pending.epoch != current_epoch);
     let num_inputs = pending.inputs.length();
     pending.presig_start_index = self.num_consumed_presigs;

@@ -873,6 +873,7 @@ impl LeaderService {
     async fn process_unsigned_pending_withdrawal(&self, pending: &PendingWithdrawal) {
         // If the pending withdrawal is from a previous epoch, reassign its presig
         // indices from the new epoch's counter before signing.
+        // TODO: Batch multiple stale-epoch withdrawals into a single PTB.
         let current_epoch = self.inner.onchain_state().epoch();
         if pending.epoch != current_epoch {
             info!(
