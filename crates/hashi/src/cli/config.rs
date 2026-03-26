@@ -28,7 +28,7 @@ pub struct BitcoinConfig {
     /// RPC authentication password
     pub rpc_password: Option<String>,
 
-    /// Bitcoin network: "regtest", "testnet4", or "mainnet"
+    /// Bitcoin network: "regtest", "testnet4", "signet", or "mainnet"
     pub network: Option<String>,
 
     /// Path to a WIF-encoded private key file for BTC operations

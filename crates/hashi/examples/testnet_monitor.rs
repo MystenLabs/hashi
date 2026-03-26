@@ -1,17 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Example binary that demonstrates running a Bitcoin monitor on testnet4.
-//! It uses hardcoded known-working testnet4 seed nodes for peer discovery.
+//! Example binary that demonstrates running a Bitcoin monitor on signet.
+//! It uses DNS seed nodes for peer discovery.
 //!
 //! # Usage Examples
 //!
-//! Monitor testnet4:
+//! Monitor signet:
 //! ```bash
-//! cargo run --example testnet_monitor -- --bitcoind-url http://localhost:18332 --bitcoind-user myuser --bitcoind-password mypass
+//! cargo run --example testnet_monitor -- --bitcoind-url http://localhost:38332 --bitcoind-user myuser --bitcoind-password mypass
 //! ```
 use std::io::Write;
-use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::str::FromStr;
 
@@ -26,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-/// Run a Bitcoin P2P monitor on testnet4
+/// Run a Bitcoin P2P monitor on signet
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -34,8 +33,8 @@ struct Args {
     #[arg(short = 'c', long, default_value = "6")]
     confirmations: u32,
 
-    /// Starting block height for synchronization (defaults to recent testnet4 height)
-    #[arg(short = 's', long, default_value = "70000")]
+    /// Starting block height for synchronization (defaults to recent signet height)
+    #[arg(short = 's', long, default_value = "290000")]
     start_height: u32,
 
     /// Enable verbose logging
@@ -43,7 +42,7 @@ struct Args {
     verbose: bool,
 
     /// bitcoind JSON-RPC URL
-    #[arg(long, default_value = "http://localhost:18332")]
+    #[arg(long, default_value = "http://localhost:38332")]
     bitcoind_url: String,
 
     /// bitcoind JSON-RPC username (optional)
@@ -72,21 +71,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(filter)
         .init();
 
-    info!("Starting BTC testnet4 monitor");
-    let mut testnet_peers = Vec::new();
+    info!("Starting BTC signet monitor");
+    let mut signet_peers = Vec::new();
 
     // Attempt to resolve DNS seeds
-    let dns_seeds = [
-        "seed.testnet4.bitcoin.sprovoost.nl",
-        "seed.testnet4.wiz.biz",
-    ];
+    let dns_seeds = ["seed.signet.bitcoin.sprovoost.nl"];
     for seed in dns_seeds {
         info!("Resolving seed: {}", seed);
-        match (seed, 48333).to_socket_addrs() {
+        match (seed, 38333).to_socket_addrs() {
             Ok(addrs) => {
                 let mut count = 0;
                 for addr in addrs {
-                    testnet_peers.push(TrustedPeer::from(addr));
+                    signet_peers.push(TrustedPeer::from(addr));
                     count += 1;
                 }
                 info!("  Found {} peers from {}", count, seed);
@@ -97,26 +93,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Fallback to hardcoded peers if DNS resolution yields few results
-    if testnet_peers.is_empty() {
-        info!("No peers found via DNS. using fallback hardcoded peers.");
-        let fallback_peers = vec![
-            "178.63.87.163:48333",
-            "91.83.65.73:48333",
-            "54.74.158.50:48333",
-            "148.135.67.253:48333",
-            "80.253.94.252:48333",
-        ];
-
-        for peer_str in fallback_peers {
-            if let Ok(addr) = peer_str.parse::<SocketAddr>() {
-                testnet_peers.push(TrustedPeer::from(addr));
-            }
-        }
-    }
-
-    if testnet_peers.is_empty() {
-        error!("No peers found. The monitor cannot start.");
+    if signet_peers.is_empty() {
+        error!("No peers found via DNS. The monitor cannot start.");
         return Err("No peers available".into());
     }
 
@@ -132,9 +110,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let config = MonitorConfig::builder()
-        .network(Network::Testnet4)
+        .network(Network::Signet)
         .confirmation_threshold(args.confirmations)
-        .trusted_peers(testnet_peers)
+        .trusted_peers(signet_peers)
         .start_height(args.start_height)
         .bitcoind_rpc_config(args.bitcoind_url.clone(), bitcoind_auth)
         .build();

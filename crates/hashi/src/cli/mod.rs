@@ -65,7 +65,7 @@ pub struct CliGlobalOpts {
     #[clap(long, env = "BTC_RPC_PASSWORD")]
     pub btc_rpc_password: Option<String>,
 
-    /// Bitcoin network: regtest, testnet4, or mainnet (overrides config file)
+    /// Bitcoin network: regtest, testnet4, signet, or mainnet (overrides config file)
     #[clap(long, env = "BTC_NETWORK")]
     pub btc_network: Option<String>,
 

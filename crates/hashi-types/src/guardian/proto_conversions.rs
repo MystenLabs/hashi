@@ -571,6 +571,7 @@ fn pb_to_network(n: i32) -> GuardianResult<super::Network> {
         Ok(pb::Network::Mainnet) => Ok(super::Network::Bitcoin),
         Ok(pb::Network::Testnet) => Ok(super::Network::Testnet),
         Ok(pb::Network::Regtest) => Ok(super::Network::Regtest),
+        Ok(pb::Network::Signet) => Ok(super::Network::Signet),
         Err(_) => Err(InvalidInputs(format!("invalid network: enum value {n}"))),
     }
 }
@@ -580,6 +581,7 @@ fn network_to_pb(n: super::Network) -> GuardianResult<i32> {
         super::Network::Bitcoin => Ok(pb::Network::Mainnet as i32),
         super::Network::Testnet => Ok(pb::Network::Testnet as i32),
         super::Network::Regtest => Ok(pb::Network::Regtest as i32),
+        super::Network::Signet => Ok(pb::Network::Signet as i32),
         _ => Err(InvalidInputs(format!("invalid network: enum value {n}"))),
     }
 }

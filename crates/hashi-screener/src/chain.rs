@@ -56,6 +56,8 @@ pub fn lookup_environment(chain: ChainName, suffix: &str) -> Option<Environment>
         (ChainName::Bitcoin, "000000000019d6689c085ae165831e93") => Some(Environment::Mainnet),
         // Bitcoin testnet3
         (ChainName::Bitcoin, "000000000933ea01ad0ee984209779ba") => Some(Environment::Testnet),
+        // Bitcoin signet
+        (ChainName::Bitcoin, "00000008819873e925422c1ff0f99f7c") => Some(Environment::Testnet),
         // Bitcoin regtest
         (ChainName::Bitcoin, "0f9188f13cb7b2c71f2a335e3a4fc328") => Some(Environment::Regtest),
         // Sui mainnet — first 4 bytes of genesis checkpoint digest
@@ -70,6 +72,7 @@ pub fn lookup_environment(chain: ChainName, suffix: &str) -> Option<Environment>
 pub mod caip2 {
     pub const BTC_MAINNET: &str = "bip122:000000000019d6689c085ae165831e93";
     pub const BTC_TESTNET3: &str = "bip122:000000000933ea01ad0ee984209779ba";
+    pub const BTC_SIGNET: &str = "bip122:00000008819873e925422c1ff0f99f7c";
     pub const BTC_REGTEST: &str = "bip122:0f9188f13cb7b2c71f2a335e3a4fc328";
 
     pub const SUI_MAINNET: &str = "sui:35834a8a";

@@ -510,9 +510,10 @@ fn cmd_keygen(action: KeygenCommands) -> Result<()> {
             let btc_network = match network.as_str() {
                 "mainnet" => bitcoin::Network::Bitcoin,
                 "testnet4" => bitcoin::Network::Testnet4,
+                "signet" => bitcoin::Network::Signet,
                 "regtest" => bitcoin::Network::Regtest,
                 other => anyhow::bail!(
-                    "Unknown Bitcoin network: {}. Use mainnet, testnet4, or regtest",
+                    "Unknown Bitcoin network: {}. Use mainnet, testnet4, signet, or regtest",
                     other
                 ),
             };

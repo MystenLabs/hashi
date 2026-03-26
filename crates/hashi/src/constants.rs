@@ -12,6 +12,9 @@ pub const BITCOIN_MAINNET_CHAIN_ID: &str =
 /// Bitcoin testnet4 genesis block hash.
 pub const BITCOIN_TESTNET4_CHAIN_ID: &str =
     "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043";
+/// Bitcoin signet genesis block hash.
+pub const BITCOIN_SIGNET_CHAIN_ID: &str =
+    "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6";
 /// Bitcoin regtest genesis block hash.
 pub const BITCOIN_REGTEST_CHAIN_ID: &str =
     "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
@@ -39,6 +42,14 @@ mod tests {
         assert_eq!(
             network_from_chain_id(BITCOIN_TESTNET4_CHAIN_ID),
             Some(Network::Testnet4),
+        );
+    }
+
+    #[test]
+    fn signet_chain_id_matches_network() {
+        assert_eq!(
+            network_from_chain_id(BITCOIN_SIGNET_CHAIN_ID),
+            Some(Network::Signet),
         );
     }
 

@@ -156,9 +156,10 @@ pub fn parse_btc_network(name: Option<&str>) -> anyhow::Result<Network> {
     match name {
         Some("mainnet") => Ok(Network::Bitcoin),
         Some("testnet4") => Ok(Network::Testnet4),
+        Some("signet") => Ok(Network::Signet),
         Some("regtest") | None => Ok(Network::Regtest),
         Some(other) => anyhow::bail!(
-            "Unknown BTC network '{}'. Use mainnet, testnet4, or regtest",
+            "Unknown BTC network '{}'. Use mainnet, testnet4, signet, or regtest",
             other
         ),
     }
@@ -167,9 +168,14 @@ pub fn parse_btc_network(name: Option<&str>) -> anyhow::Result<Network> {
 pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
     let hash = BlockHash::from_str(chain_id).ok()?;
 
-    [Network::Bitcoin, Network::Testnet4, Network::Regtest]
-        .into_iter()
-        .find(|&net| genesis_block(net).block_hash() == hash)
+    [
+        Network::Bitcoin,
+        Network::Testnet4,
+        Network::Signet,
+        Network::Regtest,
+    ]
+    .into_iter()
+    .find(|&net| genesis_block(net).block_hash() == hash)
 }
 
 #[cfg(test)]
@@ -186,6 +192,12 @@ mod tests {
     fn test_testnet4_genesis_mapping() {
         let network = network_from_chain_id(crate::constants::BITCOIN_TESTNET4_CHAIN_ID);
         assert_eq!(network, Some(Network::Testnet4));
+    }
+
+    #[test]
+    fn test_signet_genesis_mapping() {
+        let network = network_from_chain_id(crate::constants::BITCOIN_SIGNET_CHAIN_ID);
+        assert_eq!(network, Some(Network::Signet));
     }
 
     #[test]
