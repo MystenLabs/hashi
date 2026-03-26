@@ -114,7 +114,7 @@ impl MpcService {
                 match self.recover_mpc_state().await {
                     Ok(output) => {
                         let epoch = self.inner.onchain_state().epoch();
-                        match self.recover_presigning_state(&output) {
+                        match self.recover_presigning_state(&output).await {
                             Ok(()) => {
                                 info!("Recovered presigning state from DB");
                             }
@@ -360,17 +360,20 @@ impl MpcService {
         Ok(())
     }
 
-    fn recover_presigning_state(&self, output: &DkgOutput) -> anyhow::Result<()> {
-        let state = self.inner.onchain_state().state();
-        let hashi = state.hashi();
-        let num_consumed = hashi.withdrawal_queue.num_consumed_presigs();
-        let epoch = hashi.committees.epoch();
-        let committee = hashi
-            .committees
-            .committees()
-            .get(&epoch)
-            .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
-            .clone();
+    async fn recover_presigning_state(&self, output: &DkgOutput) -> anyhow::Result<()> {
+        let (num_consumed, epoch, committee) = {
+            let state = self.inner.onchain_state().state();
+            let hashi = state.hashi();
+            let num_consumed = hashi.withdrawal_queue.num_consumed_presigs();
+            let epoch = hashi.committees.epoch();
+            let committee = hashi
+                .committees
+                .committees()
+                .get(&epoch)
+                .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
+                .clone();
+            (num_consumed, epoch, committee)
+        };
         let mpc_manager = self
             .inner
             .mpc_manager()
@@ -382,29 +385,22 @@ impl MpcService {
                 mgr.dkg_config.max_faulty as usize,
             )
         };
-        // Reconstruct batch 0 to determine the actual batch size.
-        let batch_0_outputs = mpc_manager.read().unwrap().reconstruct_presignatures(0)?;
-        if batch_0_outputs.is_empty() {
-            return Err(anyhow::anyhow!("No persisted nonce messages for batch 0"));
-        }
-        let batch_0_presigs = Presignatures::new(batch_0_outputs, batch_size_per_weight, f)
-            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let batch_0_presigs = self
+            .reconstruct_presignatures_from_tob(&mpc_manager, epoch, 0, batch_size_per_weight, f)
+            .await?;
         let batch_size = batch_0_presigs.len();
         let batch_index = (num_consumed / batch_size as u64) as u32;
         let presignatures = if batch_index == 0 {
             batch_0_presigs
         } else {
-            let nonce_outputs = mpc_manager
-                .read()
-                .unwrap()
-                .reconstruct_presignatures(batch_index)?;
-            if nonce_outputs.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "No persisted nonce messages for batch {batch_index}"
-                ));
-            }
-            Presignatures::new(nonce_outputs, batch_size_per_weight, f)
-                .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?
+            self.reconstruct_presignatures_from_tob(
+                &mpc_manager,
+                epoch,
+                batch_index,
+                batch_size_per_weight,
+                f,
+            )
+            .await?
         };
         let address = self.inner.config.validator_address()?;
         let signing_manager = SigningManager::new(
@@ -438,6 +434,36 @@ impl MpcService {
             .unwrap()
             .set_next_batch(presignatures);
         Ok(())
+    }
+
+    async fn reconstruct_presignatures_from_tob(
+        &self,
+        mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+        epoch: u64,
+        batch_index: u32,
+        batch_size_per_weight: u16,
+        f: usize,
+    ) -> anyhow::Result<Presignatures> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let (_, certs) = onchain_state
+            .fetch_certs(epoch, Some(batch_index))
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
+                )
+            })?;
+        let outputs = mpc_manager
+            .read()
+            .unwrap()
+            .reconstruct_presignatures(batch_index, &certs)?;
+        if outputs.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
+            ));
+        }
+        Presignatures::new(outputs, batch_size_per_weight, f)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
     }
 
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {

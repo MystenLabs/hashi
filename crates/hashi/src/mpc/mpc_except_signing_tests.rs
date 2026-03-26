@@ -80,10 +80,6 @@ impl PublicMessagesStore for MockPublicMessagesStore {
         Ok(())
     }
 
-    fn delete_nonce_message(&mut self, _batch_index: u32, _dealer: &Address) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn list_nonce_messages(
         &self,
         _batch_index: u32,
@@ -1071,11 +1067,6 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         Ok(())
     }
 
-    fn delete_nonce_message(&mut self, batch_index: u32, dealer: &Address) -> anyhow::Result<()> {
-        self.nonce_stored.remove(&(batch_index, *dealer));
-        Ok(())
-    }
-
     fn list_nonce_messages(
         &self,
         batch_index: u32,
@@ -1138,10 +1129,6 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         _dealer: &Address,
         _message: &batch_avss::Message,
     ) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("Storage failure"))
-    }
-
-    fn delete_nonce_message(&mut self, _batch_index: u32, _dealer: &Address) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("Storage failure"))
     }
 
@@ -4437,10 +4424,6 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         Ok(())
     }
 
-    fn delete_nonce_message(&mut self, _batch_index: u32, _dealer: &Address) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn list_nonce_messages(
         &self,
         _batch_index: u32,
@@ -6530,13 +6513,6 @@ impl PublicMessagesStore for SharedMemoryStore {
             .lock()
             .unwrap()
             .store_nonce_message(batch_index, dealer, message)
-    }
-
-    fn delete_nonce_message(&mut self, batch_index: u32, dealer: &Address) -> anyhow::Result<()> {
-        self.inner
-            .lock()
-            .unwrap()
-            .delete_nonce_message(batch_index, dealer)
     }
 
     fn list_nonce_messages(
