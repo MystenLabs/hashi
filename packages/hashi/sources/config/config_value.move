@@ -13,7 +13,6 @@ public enum Value has copy, drop, store {
     String(String),
     Bool(bool),
     Bytes(vector<u8>),
-    // Dynamic(TypeName, vector<u8>)
 }
 
 public fun new_u64(value: u64): Value {

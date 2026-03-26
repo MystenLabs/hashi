@@ -297,6 +297,14 @@ impl LeaderService {
         for utxo_id in expired_utxo_ids {
             let txid_arg = builder.pure(&utxo_id.txid);
             let vout_arg = builder.pure(&utxo_id.vout);
+            let utxo_id_arg = builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("utxo"),
+                    Identifier::from_static("utxo_id"),
+                ),
+                vec![txid_arg, vout_arg],
+            );
 
             builder.move_call(
                 Function::new(
@@ -304,7 +312,7 @@ impl LeaderService {
                     Identifier::from_static("withdraw"),
                     Identifier::from_static("delete_expired_spent_utxo"),
                 ),
-                vec![hashi_arg, txid_arg, vout_arg],
+                vec![hashi_arg, utxo_id_arg],
             );
         }
 

@@ -715,11 +715,7 @@ impl MpcService {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
                 executor
-                    .execute_end_reconfig(
-                        &mpc_public_key,
-                        cert.signature_bytes(),
-                        cert.signers_bitmap_bytes(),
-                    )
+                    .execute_end_reconfig(&mpc_public_key, cert.committee_signature())
                     .await
             };
             match result.await {

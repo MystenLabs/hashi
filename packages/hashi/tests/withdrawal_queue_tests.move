@@ -51,12 +51,7 @@ fun make_test_output(amount: u64): withdrawal_queue::OutputUtxo {
 }
 
 fun make_test_output_with_address(amount: u64, addr: vector<u8>): withdrawal_queue::OutputUtxo {
-    withdrawal_queue::output_utxo_from_bcs({
-        let mut bytes = vector[];
-        bytes.append(sui::bcs::to_bytes(&amount));
-        bytes.append(sui::bcs::to_bytes(&addr));
-        bytes
-    })
+    withdrawal_queue::output_utxo(amount, addr)
 }
 
 /// Creates a request, approves it, removes it, and returns info + destroys BTC.

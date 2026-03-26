@@ -4,7 +4,7 @@
 /// Module: reconfig
 module hashi::reconfig;
 
-use hashi::{committee, hashi::Hashi, threshold};
+use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 const ENotReconfiguring: u64 = 0;
 const EAbortReconfigDisabled: u64 = 1;
@@ -39,8 +39,7 @@ entry fun start_reconfig(
 entry fun end_reconfig(
     self: &mut Hashi,
     mpc_public_key: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
     self.config().assert_version_enabled();
@@ -48,9 +47,7 @@ entry fun end_reconfig(
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     let next_committee = self.committee_set().get_committee(next_epoch);
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
-    let sig = committee::new_committee_signature(next_epoch, signature, signers_bitmap);
-    let threshold = threshold::certificate_threshold(next_committee.total_weight() as u16) as u64;
-    let _cert = next_committee.verify_certificate(message, sig, threshold);
+    self.verify_with_committee(next_committee, message, cert);
     self.withdrawal_queue_mut().reset_num_consumed_presigs();
     let epoch = self.committee_set_mut().end_reconfig(mpc_public_key, ctx);
     sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });

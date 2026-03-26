@@ -7,7 +7,7 @@
 module hashi::test_utils;
 
 use hashi::{
-    committee::{Self, CommitteeMember},
+    committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
     deposit_queue,
     disable_version,
@@ -206,6 +206,16 @@ public fun sign_with_committee(
     });
 
     (aggregated_sig, bitmap)
+}
+
+/// Signs a message and returns a CommitteeSignature for use in entry functions.
+public fun sign_certificate(
+    epoch: u64,
+    message_bytes: &vector<u8>,
+    n_signers: u64,
+): CommitteeSignature {
+    let (signature, signers_bitmap) = sign_with_committee(message_bytes, n_signers);
+    committee::new_committee_signature(epoch, signature, signers_bitmap)
 }
 
 // ======== Proposal Creation Helpers ========

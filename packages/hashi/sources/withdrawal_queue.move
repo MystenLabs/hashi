@@ -64,11 +64,7 @@ public struct OutputUtxo has copy, drop, store {
     bitcoin_address: vector<u8>,
 }
 
-public(package) fun output_utxo_from_bcs(raw: vector<u8>): OutputUtxo {
-    let mut bcs = sui::bcs::new(raw);
-    let amount = bcs.peel_u64();
-    let bitcoin_address = bcs.peel_vec!(|bcs| bcs.peel_u8());
-    bcs.into_remainder_bytes().destroy_empty();
+public fun output_utxo(amount: u64, bitcoin_address: vector<u8>): OutputUtxo {
     OutputUtxo { amount, bitcoin_address }
 }
 
