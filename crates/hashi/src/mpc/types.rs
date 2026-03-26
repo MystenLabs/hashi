@@ -488,11 +488,12 @@ pub enum SigningError {
     PoolExhausted,
 
     #[error(
-        "Presig batch mismatch: target batch {target_batch} is behind current batch {current_batch}"
+        "Presig index {presig_index} is behind current batch {current_batch} (starts at {batch_start})"
     )]
     StalePresigBatch {
-        target_batch: u32,
+        presig_index: u64,
         current_batch: u32,
+        batch_start: u64,
     },
 }
 

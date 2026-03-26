@@ -44,6 +44,7 @@ pub struct SigningManager {
     /// Key: Sui address identifying the signing request
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     batch_index: u32,
+    batch_start_index: u64,
     batch_size: usize,
     refill_divisor: usize,
     refill_tx: Arc<watch::Sender<u32>>,
@@ -60,6 +61,7 @@ impl SigningManager {
         verifying_key: G,
         presignatures: Presignatures,
         batch_index: u32,
+        batch_start_index: u64,
         refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
     ) -> Self {
@@ -74,6 +76,7 @@ impl SigningManager {
             presig_pool,
             partial_signing_outputs: HashMap::new(),
             batch_index,
+            batch_start_index,
             batch_size,
             refill_divisor,
             refill_tx,
@@ -159,38 +162,48 @@ impl SigningManager {
                 );
                 (existing.public_nonce, existing.partial_sigs.clone())
             } else {
-                let batch_size = mgr.batch_size as u64;
-                let target_batch = (global_presig_index / batch_size) as u32;
-                let target_position = (global_presig_index % batch_size) as usize;
-                if target_batch < mgr.batch_index {
+                if global_presig_index < mgr.batch_start_index {
                     tracing::error!(
-                        "Target batch {target_batch} is behind current batch {}. \
+                        "Presig index {global_presig_index} is behind current batch start {}. \
                          The presig for this withdrawal is no longer available.",
-                        mgr.batch_index,
+                        mgr.batch_start_index,
                     );
                     return Err(SigningError::StalePresigBatch {
-                        target_batch,
+                        presig_index: global_presig_index,
                         current_batch: mgr.batch_index,
+                        batch_start: mgr.batch_start_index,
                     });
                 }
-                if target_batch > mgr.batch_index {
-                    if target_batch == mgr.batch_index + 1 {
-                        if let Some(next) = mgr.next_batch.take() {
-                            mgr.presig_pool = next.map(Some).collect();
-                            mgr.batch_index += 1;
-                            mgr.batch_size = mgr.presig_pool.len();
-                        } else {
-                            return Err(SigningError::PoolExhausted);
-                        }
+                let batch_end = mgr.batch_start_index + mgr.batch_size as u64;
+                if global_presig_index >= batch_end {
+                    if let Some(next) = mgr.next_batch.take() {
+                        mgr.batch_start_index += mgr.batch_size as u64;
+                        mgr.presig_pool = next.map(Some).collect();
+                        mgr.batch_index += 1;
+                        mgr.batch_size = mgr.presig_pool.len();
                     } else {
                         tracing::error!(
-                            "Target batch {target_batch} is more than one ahead of \
-                             current batch {}. Cannot skip batches.",
+                            "Presig index {global_presig_index} is beyond current batch \
+                             (batch {}, range {}..{}) and no next batch available.",
                             mgr.batch_index,
+                            mgr.batch_start_index,
+                            batch_end,
+                        );
+                        return Err(SigningError::PoolExhausted);
+                    }
+                    let new_batch_end = mgr.batch_start_index + mgr.batch_size as u64;
+                    if global_presig_index >= new_batch_end {
+                        tracing::error!(
+                            "Presig index {global_presig_index} is beyond swapped batch \
+                             (batch {}, range {}..{}). Cannot skip batches.",
+                            mgr.batch_index,
+                            mgr.batch_start_index,
+                            new_batch_end,
                         );
                         return Err(SigningError::PoolExhausted);
                     }
                 }
+                let target_position = (global_presig_index - mgr.batch_start_index) as usize;
                 let presig = mgr
                     .presig_pool
                     .get_mut(target_position)
@@ -717,7 +730,8 @@ mod tests {
                         key_shares,
                         vk,
                         presignatures,
-                        0,
+                        0, // batch_index
+                        0, // batch_start_index
                         crate::constants::PRESIG_REFILL_DIVISOR,
                         refill_tx.clone(),
                     );
@@ -854,6 +868,7 @@ mod tests {
                     continue;
                 }
                 let mut mgr = mgr_lock.write().unwrap();
+                mgr.batch_start_index += mgr.batch_size as u64;
                 let next = mgr.next_batch.take().unwrap();
                 mgr.presig_pool = next.map(Some).collect();
                 mgr.batch_index += 1;
@@ -1352,6 +1367,7 @@ mod tests {
         setup.swap_peers_to_next_batch(0);
         {
             let mut mgr = setup.managers[0].write().unwrap();
+            mgr.batch_start_index += mgr.batch_size as u64;
             let next = mgr.next_batch.take().unwrap();
             mgr.presig_pool = next.map(Some).collect();
             mgr.batch_index += 1;
@@ -1375,8 +1391,9 @@ mod tests {
         assert!(matches!(
             result,
             Err(SigningError::StalePresigBatch {
-                target_batch: 0,
-                current_batch: 1
+                presig_index: 0,
+                current_batch: 1,
+                ..
             })
         ));
     }

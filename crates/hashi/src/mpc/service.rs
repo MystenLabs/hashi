@@ -352,7 +352,8 @@ impl MpcService {
             output.key_shares.clone(),
             output.public_key,
             presignatures,
-            0,
+            0, // batch_index
+            0, // batch_start_index
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
@@ -385,23 +386,28 @@ impl MpcService {
                 mgr.dkg_config.max_faulty as usize,
             )
         };
-        let batch_0_presigs = self
-            .reconstruct_presignatures_from_tob(&mpc_manager, epoch, 0, batch_size_per_weight, f)
-            .await?;
-        let batch_size = batch_0_presigs.len();
-        let batch_index = (num_consumed / batch_size as u64) as u32;
-        let presignatures = if batch_index == 0 {
-            batch_0_presigs
-        } else {
-            self.reconstruct_presignatures_from_tob(
-                &mpc_manager,
-                epoch,
-                batch_index,
-                batch_size_per_weight,
-                f,
-            )
-            .await?
+        // Walk through batches to find the one containing `num_consumed`.
+        // Each batch can have a different size with unequal committee weights.
+        let mut batch_start = 0u64;
+        let mut batch_index = 0u32;
+        let presignatures = loop {
+            let presigs = self
+                .reconstruct_presignatures_from_tob(
+                    &mpc_manager,
+                    epoch,
+                    batch_index,
+                    batch_size_per_weight,
+                    f,
+                )
+                .await?;
+            let size = presigs.len() as u64;
+            if num_consumed < batch_start + size {
+                break presigs;
+            }
+            batch_start += size;
+            batch_index += 1;
         };
+        let batch_size = presignatures.len();
         let address = self.inner.config.validator_address()?;
         let signing_manager = SigningManager::new(
             address,
@@ -411,13 +417,15 @@ impl MpcService {
             output.public_key,
             presignatures,
             batch_index,
+            batch_start,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
         self.inner.set_or_init_signing_manager(signing_manager);
         info!(
             "Recovered presigning state: batch_index={batch_index}, \
-             batch_size={batch_size} (num_consumed_presigs={num_consumed})."
+             batch_start={batch_start}, batch_size={batch_size} \
+             (num_consumed_presigs={num_consumed})."
         );
         Ok(())
     }

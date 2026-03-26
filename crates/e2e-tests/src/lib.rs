@@ -449,6 +449,7 @@ mod tests {
                 vk,
                 presignatures,
                 0,
+                0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
             );
