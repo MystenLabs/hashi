@@ -1139,7 +1139,7 @@ mod tests {
             .start()
             .await?;
         test_networks.hashi_network().nodes()[0]
-            .wait_for_mpc_key(DKG_TIMEOUT)
+            .wait_for_mpc_key(std::time::Duration::from_secs(180))
             .await
             .expect("Rotation recovery with partial state should complete");
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());

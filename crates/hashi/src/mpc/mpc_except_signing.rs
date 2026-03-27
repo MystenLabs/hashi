@@ -108,10 +108,6 @@ pub struct MpcManager {
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_nonce_outputs: BTreeMap<Address, batch_avss::ReceiverOutput>,
-    /// Batch indices for which nonce generation has completed.
-    /// Used to prevent late P2P messages from re-persisting uncertified
-    /// dealer messages to DB after they've been cleaned up.
-    completed_nonce_batches: HashSet<u32>,
 }
 
 impl MpcManager {
@@ -228,7 +224,6 @@ impl MpcManager {
             previous_output: None,
             batch_size_per_weight,
             dealer_nonce_outputs: BTreeMap::new(),
-            completed_nonce_batches: HashSet::new(),
         };
         manager.load_stored_messages()?;
         Ok(manager)
@@ -559,7 +554,7 @@ impl MpcManager {
                     mgr.dkg_config.nodes.weight_of(party_id).ok()
                 })
                 .sum();
-            (weight, 2 * mgr.dkg_config.max_faulty + 1)
+            (weight, mgr.required_nonce_weight() as u16)
         };
         if certified_reduced_weight < required_reduced_weight
             && let Err(e) =
@@ -577,33 +572,15 @@ impl MpcManager {
         // `try_sign_nonce_message` may have inserted additional outputs
         // concurrently — discard them so all nodes use the same deterministic set.
         let pre_filter = mgr.dealer_nonce_outputs.len();
-        // Remove uncertified dealers from both in-memory map and DB so that
-        // `reconstruct_presignatures` produces the same presigs as this run.
-        let uncertified: Vec<Address> = mgr
-            .dealer_nonce_outputs
-            .keys()
-            .filter(|addr| !certified.contains(addr))
-            .copied()
-            .collect();
-        for addr in &uncertified {
-            mgr.dealer_nonce_outputs.remove(addr);
-            if let Err(e) = mgr
-                .public_messages_store
-                .delete_nonce_message(batch_index, addr)
-            {
-                tracing::error!("Failed to delete uncertified nonce message for {addr}: {e}");
-            }
-        }
+        mgr.dealer_nonce_outputs
+            .retain(|addr, _| certified.contains(addr));
         let dealers: Vec<_> = mgr.dealer_nonce_outputs.keys().collect();
         tracing::info!(
             "run_nonce_generation: epoch={}, batch_index={batch_index}, \
-             {pre_filter} outputs before filter, {} after \
-             (removed {} uncertified). dealers={dealers:?}",
+             {pre_filter} outputs before filter, {} after. dealers={dealers:?}",
             mgr.dkg_config.epoch,
             dealers.len(),
-            uncertified.len(),
         );
-        mgr.completed_nonce_batches.insert(batch_index);
         Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
             .into_values()
             .collect())
@@ -612,13 +589,18 @@ impl MpcManager {
     pub fn reconstruct_presignatures(
         &self,
         batch_index: u32,
+        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+        let certified_dealers = self.certified_nonce_dealers_from_certs(certs);
         let messages = self
             .public_messages_store
             .list_nonce_messages(batch_index)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         let mut outputs = BTreeMap::new();
         for (dealer, message) in messages {
+            if !certified_dealers.contains(&dealer) {
+                continue;
+            }
             let receiver = self.create_nonce_receiver(dealer, batch_index)?;
             match receiver.process_message(&message)? {
                 batch_avss::ProcessedMessage::Valid(output) => {
@@ -637,6 +619,27 @@ impl MpcManager {
             dealers.len(),
         );
         Ok(outputs.into_values().collect())
+    }
+
+    fn certified_nonce_dealers_from_certs(
+        &self,
+        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+    ) -> HashSet<Address> {
+        let required_weight = self.required_nonce_weight();
+        let mut weight_sum = 0u32;
+        let mut certified = HashSet::new();
+        for (dealer, _) in certs {
+            if let Some(party_id) = self.committee.index_of(dealer)
+                && let Ok(w) = self.dkg_config.nodes.weight_of(party_id as u16)
+            {
+                weight_sum += w as u32;
+                certified.insert(*dealer);
+                if weight_sum >= required_weight {
+                    break;
+                }
+            }
+        }
+        certified
     }
 
     async fn run_dkg_as_dealer(
@@ -1100,12 +1103,12 @@ impl MpcManager {
     ) -> MpcResult<HashSet<Address>> {
         let required_weight = {
             let mgr = mpc_manager.read().unwrap();
-            2 * mgr.dkg_config.max_faulty + 1
+            mgr.required_nonce_weight()
         };
         let mut certified_dealers = HashSet::new();
         let mut dealer_weight_sum = 0u32;
         loop {
-            if dealer_weight_sum >= required_weight as u32 {
+            if dealer_weight_sum >= required_weight {
                 break;
             }
             let cert = tob_channel
@@ -1259,12 +1262,6 @@ impl MpcManager {
 
     fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) {
         self.nonce_messages.insert(dealer, nonce.clone());
-        if self.completed_nonce_batches.contains(&nonce.batch_index) {
-            // Nonce generation already completed for this batch — the certified
-            // dealer set is finalized and uncertified messages were deleted from DB.
-            // Don't re-persist this message or it could contaminate reconstruction.
-            return;
-        }
         if let Err(e) = self.public_messages_store.store_nonce_message(
             nonce.batch_index,
             &dealer,
@@ -2974,6 +2971,10 @@ impl MpcManager {
                 .get(dealer)
                 .map(|m| Messages::NonceGeneration(m.clone())),
         }
+    }
+
+    fn required_nonce_weight(&self) -> u32 {
+        2 * self.dkg_config.max_faulty as u32 + 1
     }
 }
 
