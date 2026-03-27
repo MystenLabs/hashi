@@ -10,8 +10,8 @@ use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::ShareID;
 use hashi_types::guardian::WithdrawalConfig;
-use hashi_types::guardian::enclave_state::CommitteeStoreRepr;
 use hashi_types::guardian::proto_conversions::pb_share_commitments_to_domain;
+use hashi_types::move_types::Committee as MoveCommittee;
 use hashi_types::proto as pb;
 use k256::FieldBytes;
 use k256::Scalar;
@@ -66,8 +66,8 @@ pub struct ProvisionerConfig {
     pub share_commitments: Vec<ShareCommitmentInput>,
 
     /// ProvisionerInitState
-    // Hashi BLS keys used to sign cert's
-    pub hashi_committees: CommitteeStoreRepr,
+    // Current Hashi committee
+    pub hashi_committee: MoveCommittee,
     // Withdrawal config
     pub withdrawal_config: WithdrawalConfig,
     // Hashi BTC pubkey

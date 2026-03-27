@@ -3,7 +3,6 @@
 
 pub mod bitcoin_utils;
 pub mod crypto;
-pub mod epoch_store;
 pub mod errors;
 pub mod proto_conversions;
 pub mod test_utils;
@@ -12,9 +11,7 @@ pub mod time_utils;
 pub mod enclave_state;
 pub mod s3_utils;
 
-pub use enclave_state::CommitteeStore;
 pub use enclave_state::RateLimiter;
-pub use enclave_state::WithdrawalState;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
 pub use time_utils::unix_millis_to_seconds;
@@ -23,7 +20,6 @@ use self::bitcoin_utils::InputUTXO;
 use self::bitcoin_utils::OutputUTXO;
 use self::bitcoin_utils::TxUTXOs;
 use self::bitcoin_utils::TxUTXOsWire;
-use self::enclave_state::CommitteeStoreRepr;
 use self::errors::GuardianError::*;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
@@ -161,12 +157,12 @@ pub struct ProvisionerInitRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitState {
-    /// Hashi BLS keys used to sign cert's
-    hashi_committees: CommitteeStore,
+    /// Current Hashi committee
+    committee: HashiCommittee,
     /// Withdrawal config
     withdrawal_config: WithdrawalConfig,
-    /// Withdrawal state
-    withdrawal_state: WithdrawalState,
+    /// Current rate limiter state
+    rate_limiter: RateLimiter,
     /// Hashi BTC master key used to derive child keys for diff inputs
     hashi_btc_master_pubkey: BitcoinPubkey,
 }
@@ -296,6 +292,8 @@ pub struct S3BucketInfo {
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
     pub committee_threshold: u64,
+    /// Maximum amount withdrawable per epoch, in sats
+    pub max_withdrawable_per_epoch_sats: u64,
 }
 
 // ---------------------------------
@@ -375,40 +373,24 @@ impl OperatorInitRequest {
 
 impl ProvisionerInitState {
     pub fn new(
-        hashi_committees: CommitteeStore,
+        committee: HashiCommittee,
         withdrawal_config: WithdrawalConfig,
-        withdrawal_state: WithdrawalState,
+        rate_limiter: RateLimiter,
         hashi_btc_master_pubkey: BitcoinPubkey,
-    ) -> GuardianResult<Self> {
-        if hashi_committees.epoch_window() != withdrawal_state.rate_limiter().epoch_window() {
-            return Err(InvalidInputs("epoch window mismatch".into()));
-        }
-        if hashi_committees.num_entries() != withdrawal_state.rate_limiter().num_entries() {
-            return Err(InvalidInputs(
-                "mismatch between number of committees and limiter size".into(),
-            ));
-        }
-
-        Ok(Self {
-            hashi_committees,
+    ) -> Self {
+        Self {
+            committee,
             withdrawal_config,
-            withdrawal_state,
+            rate_limiter,
             hashi_btc_master_pubkey,
-        })
+        }
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        CommitteeStore,
-        WithdrawalConfig,
-        WithdrawalState,
-        BitcoinPubkey,
-    ) {
+    pub fn into_parts(self) -> (HashiCommittee, WithdrawalConfig, RateLimiter, BitcoinPubkey) {
         (
-            self.hashi_committees,
+            self.committee,
             self.withdrawal_config,
-            self.withdrawal_state,
+            self.rate_limiter,
             self.hashi_btc_master_pubkey,
         )
     }
@@ -712,12 +694,12 @@ pub struct SignedStandardWithdrawalRequestWire {
     pub signature: CommitteeSignatureWire,
 }
 
-/// Mock of ProvisionerInitState with Serialize. Used for computing the digest of ProvisionerInitState.
+/// Serializable representation of ProvisionerInitState. Used for computing its digest.
 #[derive(Serialize)]
 struct ProvisionerInitStateRepr {
-    pub hashi_committees: CommitteeStoreRepr,
+    pub committee: crate::move_types::Committee,
     pub withdrawal_config: WithdrawalConfig,
-    pub withdrawal_state: WithdrawalState,
+    pub rate_limiter: RateLimiter,
     pub hashi_btc_master_pubkey: BitcoinPubkey,
 }
 
@@ -779,13 +761,12 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
 
 impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
     fn from(state: &ProvisionerInitState) -> Self {
-        let (a, b, c, d) = state.clone().into_parts();
-
+        let (committee, config, limiter, pubkey) = state.clone().into_parts();
         Self {
-            hashi_committees: CommitteeStoreRepr::from(a),
-            withdrawal_config: b,
-            withdrawal_state: c,
-            hashi_btc_master_pubkey: d,
+            committee: (&committee).into(),
+            withdrawal_config: config,
+            rate_limiter: limiter,
+            hashi_btc_master_pubkey: pubkey,
         }
     }
 }

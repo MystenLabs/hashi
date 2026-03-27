@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Ciphertext;
-use super::CommitteeStore;
 use super::EncPubKey;
 use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
@@ -25,7 +24,6 @@ use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawalConfig;
-use super::WithdrawalState;
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
 use super::bitcoin_utils::OutputUTXO;
@@ -35,7 +33,6 @@ use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
 use crate::committee::EncryptionPublicKey;
-use crate::guardian::epoch_store::EpochWindow;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::hashes::Hash as _;
@@ -194,52 +191,35 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
 impl ProvisionerInitState {
     pub fn from_parts_for_testing(
         withdrawal_config: WithdrawalConfig,
-        withdrawal_state: WithdrawalState,
-        hashi_committees: CommitteeStore,
+        rate_limiter: RateLimiter,
+        committee: HashiCommittee,
         hashi_btc_master_pubkey: super::BitcoinPubkey,
     ) -> Self {
         ProvisionerInitState::new(
-            hashi_committees,
+            committee,
             withdrawal_config,
-            withdrawal_state,
+            rate_limiter,
             hashi_btc_master_pubkey,
         )
-        .expect("valid ProvisionerInitState")
     }
 
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
-        let num_epochs_to_track = NonZeroU16::new(2).unwrap();
-        let epoch_window = super::epoch_store::EpochWindow::new(0, num_epochs_to_track);
-        let max_withdrawable_per_epoch = Amount::from_sat(1000);
+        let max_withdrawable_per_epoch_sats = 1000;
 
-        ProvisionerInitState {
-            withdrawal_config: WithdrawalConfig {
+        ProvisionerInitState::new(
+            mock_committee_with_one_member(0),
+            WithdrawalConfig {
                 committee_threshold: 0,
+                max_withdrawable_per_epoch_sats,
             },
-            withdrawal_state: WithdrawalState::mock_for_testing(
-                epoch_window,
-                max_withdrawable_per_epoch,
-            ),
-            hashi_committees: CommitteeStore::new(
-                epoch_window,
-                vec![mock_committee_with_one_member(epoch_window.first_epoch)],
-            )
-            .unwrap(),
-            hashi_btc_master_pubkey: kp.x_only_public_key().0,
-        }
-    }
-}
-
-impl WithdrawalState {
-    pub fn mock_for_testing(epoch_window: EpochWindow, max_withdrawable_per_epoch: Amount) -> Self {
-        WithdrawalState::new(
             RateLimiter::new(
-                epoch_window,
-                vec![Amount::from_sat(0)],
-                max_withdrawable_per_epoch,
+                0,
+                Amount::from_sat(0),
+                Amount::from_sat(max_withdrawable_per_epoch_sats),
             )
             .unwrap(),
+            kp.x_only_public_key().0,
         )
     }
 }

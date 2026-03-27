@@ -74,7 +74,7 @@ fn normal_withdrawal_inner(
     }
 
     let epoch = signed_request.epoch();
-    let committee = enclave.state.get_committee(epoch)?;
+    let committee = enclave.state.get_committee()?;
     let threshold = enclave
         .config
         .committee_threshold()
@@ -196,17 +196,13 @@ mod tests {
     use crate::OperatorInitTestArgs;
     use bitcoin::Amount;
     use bitcoin::Network;
-    use hashi_types::guardian::epoch_store::EpochWindow;
     use hashi_types::guardian::test_utils::create_btc_keypair;
-    use hashi_types::guardian::CommitteeStore;
     use hashi_types::guardian::ProvisionerInitState;
     use hashi_types::guardian::RateLimiter;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::WithdrawalConfig;
-    use hashi_types::guardian::WithdrawalState;
-    use std::num::NonZeroU16;
 
-    /// Sets up an enclave with a one-epoch window and provided committee, rate limits.
+    /// Sets up an enclave with a single committee and rate limiter.
     async fn setup_fully_initialized_enclave(
         network: Network,
         epoch: u64,
@@ -230,28 +226,21 @@ mod tests {
 
         let withdrawal_config = WithdrawalConfig {
             committee_threshold: 1,
+            max_withdrawable_per_epoch_sats: max_withdrawable_per_epoch.to_sat(),
         };
         enclave
             .config
             .set_withdrawal_config(withdrawal_config.clone())
             .unwrap();
 
-        let epoch_window = EpochWindow::new(epoch, NonZeroU16::new(1).unwrap());
-        let limiter = RateLimiter::new(
-            epoch_window,
-            vec![Amount::from_sat(0)],
-            max_withdrawable_per_epoch,
-        )
-        .unwrap();
-        let withdrawal_state = WithdrawalState::new(limiter);
-        let committee_store = CommitteeStore::new(epoch_window, vec![committee]).unwrap();
+        let limiter =
+            RateLimiter::new(epoch, Amount::from_sat(0), max_withdrawable_per_epoch).unwrap();
         let init_state = ProvisionerInitState::new(
-            committee_store,
+            committee,
             withdrawal_config,
-            withdrawal_state,
+            limiter,
             hashi_btc_master_pubkey,
-        )
-        .unwrap();
+        );
         enclave.state.init(init_state).unwrap();
 
         enclave

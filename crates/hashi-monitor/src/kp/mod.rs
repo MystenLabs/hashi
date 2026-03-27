@@ -14,7 +14,7 @@ use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
-use hashi_types::guardian::WithdrawalState;
+use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -39,17 +39,20 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     expected_guardian_config.ensure_matches_info(&guardian_info)?;
     info!(session_id, "init checks passed for selected session");
 
-    // TODO: replace mock withdrawal state with actual state from S3 logs.
-    let mock_withdrawal_state = WithdrawalState::mock_for_testing(
-        cfg.hashi_committees.epoch_window(),
-        Amount::from_sat(100_000),
-    );
+    // TODO: replace mock rate limiter with actual state from S3 logs.
+    let committee = cfg.hashi_committee.try_into()?;
+    let mock_rate_limiter = RateLimiter::new(
+        0,
+        Amount::from_sat(0),
+        Amount::from_sat(cfg.withdrawal_config.max_withdrawable_per_epoch_sats),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let state = ProvisionerInitState::new(
-        cfg.hashi_committees.try_into()?,
+        committee,
         cfg.withdrawal_config,
-        mock_withdrawal_state,
+        mock_rate_limiter,
         cfg.hashi_btc_master_pubkey,
-    )?;
+    );
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;

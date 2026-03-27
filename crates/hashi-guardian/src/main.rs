@@ -36,7 +36,6 @@ use crate::heartbeat::HeartbeatWriter;
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
 use hashi_types::committee::Committee as HashiCommittee;
-use hashi_types::guardian::epoch_store::ConsecutiveEpochStore;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
 /// Enclave's config & state
@@ -65,15 +64,13 @@ pub struct EnclaveConfig {
     withdrawal_config: OnceLock<WithdrawalConfig>,
 }
 
-pub type ArcCommitteeStore = ConsecutiveEpochStore<Arc<HashiCommittee>>;
-
 /// Mutable state that changes during operation.
 /// Note: State is initialized during provisioner_init.
 pub struct EnclaveState {
-    /// Hashi committees indexed by epoch.
-    hashi_committees: RwLock<Option<ArcCommitteeStore>>,
-    /// Withdrawal-related state.
-    withdraw_state: Mutex<Option<WithdrawalState>>,
+    /// Current Hashi committee.
+    committee: RwLock<Option<Arc<HashiCommittee>>>,
+    /// Rate limiter state.
+    rate_limiter: Mutex<Option<RateLimiter>>,
 }
 
 /// Scratchpad used only during initialization.
@@ -275,154 +272,112 @@ impl EnclaveConfig {
 
 impl EnclaveState {
     pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
-        let (hashi_committees, _, withdrawal_state, _) = incoming_state.into_parts();
+        let (committee, _, rate_limiter, _) = incoming_state.into_parts();
 
-        self.set_committees(hashi_committees)?;
-        self.set_withdrawal_state(withdrawal_state)?;
+        self.set_committee(committee)?;
+        self.set_rate_limiter(rate_limiter)?;
         Ok(())
-    }
-
-    fn with_committees<R>(&self, f: impl FnOnce(&ArcCommitteeStore) -> R) -> GuardianResult<R> {
-        let guard = self
-            .hashi_committees
-            .read()
-            .expect("rwlock should never throw an error");
-        let committees = guard
-            .as_ref()
-            .ok_or_else(|| InvalidInputs("committees not initialized".into()))?;
-        Ok(f(committees))
-    }
-
-    fn with_committees_mut<R>(
-        &self,
-        f: impl FnOnce(&mut ArcCommitteeStore) -> GuardianResult<R>,
-    ) -> GuardianResult<R> {
-        let mut guard = self
-            .hashi_committees
-            .write()
-            .expect("rwlock should never throw an error");
-        let committees = guard
-            .as_mut()
-            .ok_or_else(|| InvalidInputs("committees not initialized".into()))?;
-        f(committees)
-    }
-
-    fn with_withdraw_state_mut<R>(
-        &self,
-        f: impl FnOnce(&mut WithdrawalState) -> GuardianResult<R>,
-    ) -> GuardianResult<R> {
-        let mut guard = self.withdraw_state.lock().expect("should not be poisoned");
-        let state = guard
-            .as_mut()
-            .ok_or_else(|| InvalidInputs("withdraw_state not initialized".into()))?;
-        f(state)
     }
 
     // ========================================================================
     // Initialization Status
     // ========================================================================
 
-    fn status_check_inner(&self) -> (bool, bool) {
-        let committees_init = self
-            .hashi_committees
-            .read()
-            .expect("rwlock read should not fail")
-            .as_ref()
-            .is_some_and(|s| s.num_entries() > 0);
-
-        let withdraw_state_init = self
-            .withdraw_state
-            .lock()
-            .expect("mutex lock should not fail")
-            .as_ref()
-            .is_some_and(|s| s.rate_limiter().num_entries() > 0);
-
-        (committees_init, withdraw_state_init)
-    }
-
     /// Check if state init is complete
     pub fn is_provisioner_init_complete(&self) -> bool {
-        let (committees_init, withdraw_state_init) = self.status_check_inner();
-        committees_init && withdraw_state_init
+        let committee_init = self
+            .committee
+            .read()
+            .expect("rwlock read should not fail")
+            .is_some();
+
+        let limiter_init = self
+            .rate_limiter
+            .lock()
+            .expect("mutex lock should not fail")
+            .is_some();
+
+        committee_init && limiter_init
     }
 
     /// Check if any state has been set
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        let (committees_init, withdraw_state_init) = self.status_check_inner();
-        committees_init || withdraw_state_init
+        let committee_init = self
+            .committee
+            .read()
+            .expect("rwlock read should not fail")
+            .is_some();
+
+        let limiter_init = self
+            .rate_limiter
+            .lock()
+            .expect("mutex lock should not fail")
+            .is_some();
+
+        committee_init || limiter_init
     }
 
     // ========================================================================
     // Committee Management
     // ========================================================================
 
-    /// Get the current hashi committee.
-    pub fn get_committee(&self, epoch: u64) -> GuardianResult<Arc<HashiCommittee>> {
-        self.with_committees(|committee_map| committee_map.get_checked(epoch).map(Arc::clone))?
+    /// Get the current committee.
+    pub fn get_committee(&self) -> GuardianResult<Arc<HashiCommittee>> {
+        let guard = self
+            .committee
+            .read()
+            .expect("rwlock should never throw an error");
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
-    /// Adds one committee and prunes one if needed.
-    fn add_new_committee(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
-        let epoch = new_committee.epoch();
-        info!("Adding new epoch {} to committee map.", epoch);
+    /// Set committee. Called only from init(ProvisionerInitState)
+    fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
+        info!("Setting committee for epoch {}.", committee.epoch());
 
-        self.with_committees_mut(|committee_map| {
-            committee_map.insert(epoch, Arc::new(new_committee))
-        })
-    }
-
-    /// Set committees. Called only from init(ProvisionerInitState)
-    fn set_committees(&self, hashi_committees: CommitteeStore) -> GuardianResult<()> {
-        info!(
-            "Setting state with {} committees.",
-            hashi_committees.num_entries()
-        );
-
-        // Check if it is already initialized
         let mut guard = self
-            .hashi_committees
+            .committee
             .write()
             .expect("rwlock should never throw an error");
         if guard.is_some() {
-            return Err(InvalidInputs("committees already initialized".into()));
+            return Err(InvalidInputs("committee already initialized".into()));
         }
-
-        // Insert input committee. Iterate and create Arc's.
-        let window = hashi_committees.epoch_window();
-        let arc_entries = hashi_committees
-            .into_owned_iter()
-            .map(|(_, committee)| Arc::new(committee))
-            .collect::<Vec<_>>();
-        *guard = Some(ArcCommitteeStore::new(window, arc_entries)?);
+        *guard = Some(Arc::new(committee));
         Ok(())
     }
 
     // ========================================================================
-    // Withdrawal State Management
+    // Rate Limiter Management
     // ========================================================================
 
-    fn set_withdrawal_state(&self, state: WithdrawalState) -> GuardianResult<()> {
-        info!("Setting withdrawal state.");
+    fn set_rate_limiter(&self, limiter: RateLimiter) -> GuardianResult<()> {
+        info!("Setting rate limiter.");
 
-        let mut guard = self.withdraw_state.lock().expect("should not be poisoned");
+        let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
         if guard.is_some() {
-            Err(InvalidInputs("withdraw_state already initialized".into()))
+            Err(InvalidInputs("rate_limiter already initialized".into()))
         } else {
-            *guard = Some(state);
+            *guard = Some(limiter);
             Ok(())
         }
     }
 
     pub fn consume_from_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        self.with_withdraw_state_mut(|st| st.consume_from_limiter(epoch, amount))
+        let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
+        let limiter = guard
+            .as_mut()
+            .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
+        limiter.consume(epoch, amount)
     }
 
     pub fn revert_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        self.with_withdraw_state_mut(|st| st.revert_limiter(epoch, amount))
-    }
-
-    fn add_epoch_to_limiter(&self, epoch: u64) -> GuardianResult<()> {
-        self.with_withdraw_state_mut(|st| st.add_epoch_to_limiter(epoch))
+        let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
+        let limiter = guard
+            .as_mut()
+            .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
+        limiter.revert(epoch, amount)
     }
 }
 
@@ -435,8 +390,8 @@ impl Enclave {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
-                hashi_committees: RwLock::new(None),
-                withdraw_state: Mutex::new(None),
+                committee: RwLock::new(None),
+                rate_limiter: Mutex::new(None),
             },
             scratchpad: Scratchpad::default(),
         }
@@ -548,18 +503,6 @@ impl Enclave {
 
     pub async fn log_heartbeat(&self, seq: u64) -> GuardianResult<()> {
         self.write_log(LogMessage::Heartbeat { seq }).await
-    }
-
-    // ========================================================================
-    // Committee Rotation
-    // ========================================================================
-
-    /// Register a new epoch. Adds and (potentially) prunes an entry from limiter and committee map.
-    pub fn register_new_epoch(&self, new_committee: HashiCommittee) -> GuardianResult<()> {
-        let epoch = new_committee.epoch();
-        self.state.add_new_committee(new_committee)?;
-        self.state.add_epoch_to_limiter(epoch)?;
-        Ok(())
     }
 
     // ========================================================================
