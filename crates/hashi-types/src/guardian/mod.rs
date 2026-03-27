@@ -377,13 +377,27 @@ impl ProvisionerInitState {
         withdrawal_config: WithdrawalConfig,
         rate_limiter: RateLimiter,
         hashi_btc_master_pubkey: BitcoinPubkey,
-    ) -> Self {
-        Self {
+    ) -> GuardianResult<Self> {
+        if committee.epoch() != rate_limiter.epoch() {
+            return Err(InvalidInputs(format!(
+                "committee epoch {} != rate limiter epoch {}",
+                committee.epoch(),
+                rate_limiter.epoch()
+            )));
+        }
+        if rate_limiter.max_withdrawable_per_epoch()
+            != Amount::from_sat(withdrawal_config.max_withdrawable_per_epoch_sats)
+        {
+            return Err(InvalidInputs(
+                "rate limiter max does not match withdrawal config".into(),
+            ));
+        }
+        Ok(Self {
             committee,
             withdrawal_config,
             rate_limiter,
             hashi_btc_master_pubkey,
-        }
+        })
     }
 
     pub fn into_parts(self) -> (HashiCommittee, WithdrawalConfig, RateLimiter, BitcoinPubkey) {

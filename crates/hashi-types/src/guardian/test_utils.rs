@@ -201,6 +201,7 @@ impl ProvisionerInitState {
             rate_limiter,
             hashi_btc_master_pubkey,
         )
+        .expect("valid ProvisionerInitState")
     }
 
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
@@ -221,6 +222,7 @@ impl ProvisionerInitState {
             .unwrap(),
             kp.x_only_public_key().0,
         )
+        .expect("valid ProvisionerInitState")
     }
 }
 

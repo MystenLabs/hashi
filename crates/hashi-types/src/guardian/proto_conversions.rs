@@ -174,12 +174,12 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let hashi_btc_master_pubkey = XOnlyPublicKey::from_slice(master_pk_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e}")))?;
 
-        Ok(ProvisionerInitState::new(
+        ProvisionerInitState::new(
             committee,
             withdrawal_config,
             rate_limiter,
             hashi_btc_master_pubkey,
-        ))
+        )
     }
 }
 

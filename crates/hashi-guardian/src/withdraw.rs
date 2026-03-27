@@ -240,7 +240,8 @@ mod tests {
             withdrawal_config,
             limiter,
             hashi_btc_master_pubkey,
-        );
+        )
+        .unwrap();
         enclave.state.init(init_state).unwrap();
 
         enclave

@@ -52,7 +52,8 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         cfg.withdrawal_config,
         mock_rate_limiter,
         cfg.hashi_btc_master_pubkey,
-    );
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;
