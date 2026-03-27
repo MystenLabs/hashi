@@ -1,5 +1,5 @@
 [package]
-name = "hashi-guardian-enclave"
+name = "hashi-guardian"
 version = "0.1.0"
 edition = "2021"
 

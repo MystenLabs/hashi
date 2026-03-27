@@ -56,7 +56,6 @@ use hpke::Deserializable;
 use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
-use std::time::Duration;
 
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
@@ -641,25 +640,15 @@ fn pb_to_withdrawal_config(cfg: pb::WithdrawalConfig) -> GuardianResult<Withdraw
     let committee_threshold = cfg
         .committee_threshold
         .ok_or_else(|| missing("committee_threshold"))?;
-    let min_delay_secs = cfg
-        .delayed_withdrawals_min_delay
-        .ok_or_else(|| missing("delayed_withdrawals_min_delay"))?;
-    let timeout_secs = cfg
-        .delayed_withdrawals_timeout
-        .ok_or_else(|| missing("delayed_withdrawals_timeout"))?;
 
     Ok(WithdrawalConfig {
         committee_threshold,
-        delayed_withdrawals_min_delay: Duration::from_secs(min_delay_secs),
-        delayed_withdrawals_timeout: Duration::from_secs(timeout_secs),
     })
 }
 
 fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
     pb::WithdrawalConfig {
         committee_threshold: Some(cfg.committee_threshold),
-        delayed_withdrawals_min_delay: Some(cfg.delayed_withdrawals_min_delay.as_secs()),
-        delayed_withdrawals_timeout: Some(cfg.delayed_withdrawals_timeout.as_secs()),
     }
 }
 

@@ -60,7 +60,7 @@ pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(5 * 6
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
 
 /// S3 sub-prefixes used for guardian log streams.
-/// See `crates/hashi-guardian-enclave/README.md` for canonical key layout.
+/// See `crates/hashi-guardian/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
@@ -274,7 +274,7 @@ pub enum WithdrawalLogMessage {
 // ---------------------------------
 
 /// Unique identifier for a withdrawal request
-/// It is used to correlate events across sui & guardian. And to uniquely identify a delayed withdrawal.
+/// It is used to correlate events across sui & guardian.
 pub type WithdrawalID = u64;
 
 pub type Attestation = Vec<u8>;
@@ -296,10 +296,6 @@ pub struct S3BucketInfo {
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
     pub committee_threshold: u64,
-    /// The min delay after which any withdrawal is approved
-    pub delayed_withdrawals_min_delay: Duration,
-    /// The max delay after which pending withdrawals are cleaned up
-    pub delayed_withdrawals_timeout: Duration,
 }
 
 // ---------------------------------

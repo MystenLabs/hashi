@@ -6,9 +6,9 @@ use bitcoin::secp256k1::Keypair;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::Txid;
-use hashi_guardian_enclave::HEARTBEAT_INTERVAL;
-use hashi_guardian_enclave::HEARTBEAT_RETRY_INTERVAL;
-use hashi_guardian_enclave::MAX_HEARTBEAT_FAILURES_INTERVAL;
+use hashi_guardian::HEARTBEAT_INTERVAL;
+use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;
+use hashi_guardian::MAX_HEARTBEAT_FAILURES_INTERVAL;
 use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::time::Duration;
+
 use tonic::transport::Server;
 use tracing::info;
 
@@ -222,14 +222,6 @@ impl EnclaveConfig {
         self.withdrawal_config
             .set(config)
             .map_err(|_| InvalidInputs("WithdrawalConfig already set".into()))
-    }
-
-    pub fn delayed_withdrawals_min_delay(&self) -> GuardianResult<Duration> {
-        Ok(self.withdrawal_config()?.delayed_withdrawals_min_delay)
-    }
-
-    pub fn delayed_withdrawals_timeout(&self) -> GuardianResult<Duration> {
-        Ok(self.withdrawal_config()?.delayed_withdrawals_timeout)
     }
 
     pub fn committee_threshold(&self) -> GuardianResult<u64> {

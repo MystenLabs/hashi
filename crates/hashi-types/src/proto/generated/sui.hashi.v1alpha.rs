@@ -1180,12 +1180,6 @@ pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight.
     #[prost(uint64, optional, tag = "1")]
     pub committee_threshold: ::core::option::Option<u64>,
-    /// The min delay after which any withdrawal is approved.
-    #[prost(uint64, optional, tag = "2")]
-    pub delayed_withdrawals_min_delay: ::core::option::Option<u64>,
-    /// The max delay after which pending withdrawals are cleaned up.
-    #[prost(uint64, optional, tag = "3")]
-    pub delayed_withdrawals_timeout: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RateLimiter {

@@ -47,7 +47,6 @@ use bitcoin::taproot::TapLeafHash;
 use ed25519_consensus::SigningKey;
 use hpke::Deserializable;
 use std::num::NonZeroU16;
-use std::time::Duration;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
 // -------------------------------
@@ -217,8 +216,6 @@ impl ProvisionerInitState {
         ProvisionerInitState {
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 0,
-                delayed_withdrawals_min_delay: Duration::from_secs(10),
-                delayed_withdrawals_timeout: Duration::from_secs(60),
             },
             withdrawal_state: WithdrawalState::mock_for_testing(
                 epoch_window,

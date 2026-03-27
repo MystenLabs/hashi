@@ -4,7 +4,7 @@
 use crate::domain::now_unix_seconds;
 use crate::rpc::guardian::GuardianLogDir;
 use crate::rpc::guardian::GuardianPollerCore;
-use hashi_guardian_enclave::s3_logger::S3Logger;
+use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::time_utils::UnixSeconds;

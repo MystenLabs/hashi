@@ -8,7 +8,7 @@ mod heartbeat_checks;
 
 use crate::kp::config::GuardianConfig;
 use anyhow::Context;
-use hashi_guardian_enclave::s3_logger::S3Logger;
+use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;

@@ -2636,7 +2636,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashi-guardian-enclave"
+name = "hashi-guardian"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2668,7 +2668,7 @@ dependencies = [
  "bitcoincore-rpc",
  "clap",
  "e2e-tests",
- "hashi-guardian-enclave",
+ "hashi-guardian",
  "hashi-types",
  "hex",
  "hpke",

@@ -8,7 +8,7 @@ use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use anyhow::Context;
-use hashi_guardian_enclave::s3_logger::S3Logger;
+use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;

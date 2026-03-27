@@ -205,7 +205,7 @@ mod tests {
     use hashi_types::guardian::WithdrawalConfig;
     use hashi_types::guardian::WithdrawalState;
     use std::num::NonZeroU16;
-    use std::time::Duration;
+
 
     /// Sets up an enclave with a one-epoch window and provided committee, rate limits.
     async fn setup_fully_initialized_enclave(
@@ -231,8 +231,6 @@ mod tests {
 
         let withdrawal_config = WithdrawalConfig {
             committee_threshold: 1,
-            delayed_withdrawals_min_delay: Duration::from_secs(1),
-            delayed_withdrawals_timeout: Duration::from_secs(60),
         };
         enclave
             .config

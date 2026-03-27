@@ -197,12 +197,6 @@ message ProvisionerInitState {
 message WithdrawalConfig {
   // Committee threshold expressed in terms of weight.
   optional uint64 committee_threshold = 1;
-
-  // The min delay after which any withdrawal is approved.
-  optional uint64 delayed_withdrawals_min_delay = 2;
-
-  // The max delay after which pending withdrawals are cleaned up.
-  optional uint64 delayed_withdrawals_timeout = 3;
 }
 
 message RateLimiter {

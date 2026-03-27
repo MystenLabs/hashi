@@ -9,8 +9,8 @@ bitcoin.workspace = true
 bitcoincore-rpc.workspace = true
 clap.workspace = true
 hashi-types = { path = "../hashi-types" }
-# enclave imported for s3 logger
-hashi-guardian-enclave = { path = "../hashi-guardian-enclave" }
+# guardian imported for s3 logger
+hashi-guardian = { path = "../hashi-guardian" }
 hex.workspace = true
 hpke = "0.12.0"
 k256 = "0.13"

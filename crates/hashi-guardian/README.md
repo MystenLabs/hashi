@@ -1,4 +1,4 @@
-# hashi-guardian-enclave
+# hashi-guardian
 
 Guardian enclave service that emits immutable S3 logs for audit/state-restart workflows.
 
