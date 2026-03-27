@@ -570,6 +570,7 @@ impl MpcService {
             }
         };
         let _ = self.key_ready_tx.send(Some(output.public_key));
+        info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
         loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 break;
@@ -577,7 +578,7 @@ impl MpcService {
             match self.submit_end_reconfig(target_epoch, &output).await {
                 Ok(()) => break,
                 Err(e) => {
-                    error!(
+                    warn!(
                         "submit_end_reconfig for epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
@@ -585,6 +586,7 @@ impl MpcService {
                 }
             }
         }
+        info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             match self.prepare_signing(target_epoch, &output).await {
                 Ok(()) => break,
@@ -745,6 +747,11 @@ impl MpcService {
             .map_err(|e| anyhow::anyhow!("failed to add own signature: {e}"))?;
         let required_weight = certificate_threshold(committee.total_weight());
         while aggregator.weight() < required_weight {
+            if self.get_pending_epoch_change() != Some(epoch) {
+                return Err(anyhow::anyhow!(
+                    "epoch {epoch} no longer pending during signature collection"
+                ));
+            }
             let other_members: Vec<_> = committee
                 .members()
                 .iter()
