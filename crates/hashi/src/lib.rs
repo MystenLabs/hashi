@@ -246,6 +246,13 @@ impl Hashi {
             } else {
                 BATCH_SIZE_PER_WEIGHT
             };
+        if self.config.test_corrupt_shares_for.is_some() {
+            assert!(
+                chain_id != constants::SUI_MAINNET_CHAIN_ID
+                    && chain_id != constants::SUI_TESTNET_CHAIN_ID,
+                "test_corrupt_shares_for must not be set on mainnet or testnet"
+            );
+        }
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
@@ -257,6 +264,7 @@ impl Hashi {
             chain_id,
             self.config.test_weight_divisor,
             batch_size_per_weight,
+            self.config.test_corrupt_shares_for,
         )?)
     }
 

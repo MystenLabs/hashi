@@ -223,6 +223,18 @@ pub struct HashiNetworkBuilder {
     pub test_batch_size_per_weight: Option<u16>,
     /// `None` means full Sui voting power weights (no reduction).
     pub test_weight_divisor: Option<u16>,
+    /// Overrides `withdrawal_batching_delay_ms` in each node's config.
+    /// Defaults to `Some(0)` (no delay) for tests.
+    pub withdrawal_batching_delay_ms: Option<u64>,
+    /// Overrides `withdrawal_max_batch_size` in each node's config.
+    /// `None` uses the production default (50).
+    pub withdrawal_max_batch_size: Option<usize>,
+    /// Overrides `max_mempool_chain_depth` in each node's config.
+    /// `None` uses the production default (5).
+    pub max_mempool_chain_depth: Option<usize>,
+    /// Node index whose shares should be corrupted by all other nodes,
+    /// triggering the complaint recovery flow.
+    pub test_corrupt_shares_target: Option<usize>,
 }
 
 impl HashiNetworkBuilder {
@@ -232,6 +244,10 @@ impl HashiNetworkBuilder {
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
+            withdrawal_batching_delay_ms: Some(0),
+            withdrawal_max_batch_size: None,
+            max_mempool_chain_depth: None,
+            test_corrupt_shares_target: None,
         }
     }
 
@@ -247,6 +263,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_batch_size_per_weight(mut self, batch_size_per_weight: u16) -> Self {
         self.test_batch_size_per_weight = Some(batch_size_per_weight);
+        self
+    }
+
+    pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
+        self.test_corrupt_shares_target = Some(target_node_index);
         self
     }
 
@@ -277,11 +298,30 @@ impl HashiNetworkBuilder {
             .await?
             .into_inner();
 
+        // Resolve the corrupt shares target index to a validator address.
+        let corrupt_target_address = self.test_corrupt_shares_target.map(|idx| {
+            *sui.validator_keys
+                .keys()
+                .nth(idx)
+                .expect("corrupt target index out of range")
+        });
+
         let mut configs = Vec::with_capacity(self.num_nodes);
-        for (validator_address, private_key) in sui.validator_keys.iter().take(self.num_nodes) {
+        for (i, (validator_address, private_key)) in
+            sui.validator_keys.iter().take(self.num_nodes).enumerate()
+        {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = self.test_weight_divisor;
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
+            config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
+            config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
+            config.max_mempool_chain_depth = self.max_mempool_chain_depth;
+            // All nodes EXCEPT the target corrupt shares for the target.
+            if let Some(target_addr) = corrupt_target_address
+                && Some(i) != self.test_corrupt_shares_target
+            {
+                config.test_corrupt_shares_for = Some(target_addr);
+            }
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

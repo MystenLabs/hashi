@@ -139,6 +139,13 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
+        self.hashi_builder = self
+            .hashi_builder
+            .with_corrupt_shares_target(target_node_index);
+        self
+    }
+
     pub fn with_full_voting_power(mut self) -> Self {
         self.hashi_builder = self.hashi_builder.with_full_voting_power();
         self
@@ -1266,6 +1273,39 @@ mod tests {
         }
 
         assert_eq!(signing_manager.read().unwrap().batch_index(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dkg_complaint_recovery() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .with_corrupt_shares_target(0) // all others corrupt shares for node 0
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        assert_nodes_agree_on_mpc_key(nodes);
+
         Ok(())
     }
 }
