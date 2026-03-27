@@ -11,7 +11,7 @@ use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::ShareID;
 use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::guardian::proto_conversions::pb_share_commitments_to_domain;
-use hashi_types::move_types::Committee as MoveCommittee;
+use hashi_types::move_types::Committee as CommitteeRepr;
 use hashi_types::proto as pb;
 use k256::FieldBytes;
 use k256::Scalar;
@@ -67,7 +67,7 @@ pub struct ProvisionerConfig {
 
     /// ProvisionerInitState
     // Current Hashi committee
-    pub hashi_committee: MoveCommittee,
+    pub hashi_committee: CommitteeRepr,
     // Withdrawal config
     pub withdrawal_config: WithdrawalConfig,
     // Hashi BTC pubkey
