@@ -976,6 +976,177 @@ mod tests {
         Ok(())
     }
 
+    /// Waits for a `WithdrawalPickedForProcessingEvent` that contains at least
+    /// `min_requests` request IDs in a single batch, indicating that the new
+    /// multi-request coin selection algorithm batched them together.
+    async fn wait_for_batched_withdrawal_picked(
+        sui_client: &mut sui_rpc::Client,
+        min_requests: usize,
+        timeout: Duration,
+    ) -> Result<WithdrawalPickedForProcessingEvent> {
+        let start = std::time::Instant::now();
+        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
+            .transactions()
+            .events()
+            .events()
+            .contents()
+            .finish()]);
+        let mut subscription = sui_client
+            .subscription_client()
+            .subscribe_checkpoints(
+                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+            )
+            .await?
+            .into_inner();
+
+        while let Some(item) = subscription.next().await {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for batched WithdrawalPickedForProcessingEvent \
+                     (min_requests={min_requests}) after {:?}",
+                    timeout
+                ));
+            }
+            let checkpoint = match item {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {}", e);
+                    continue;
+                }
+            };
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    if event
+                        .contents()
+                        .name()
+                        .contains("WithdrawalPickedForProcessingEvent")
+                    {
+                        match WithdrawalPickedForProcessingEvent::from_bcs(event.contents().value())
+                        {
+                            Ok(data) if data.request_ids.len() >= min_requests => {
+                                info!(
+                                    "Batched withdrawal picked: pending_id={}, request_count={}",
+                                    data.pending_id,
+                                    data.request_ids.len(),
+                                );
+                                return Ok(data);
+                            }
+                            Ok(data) => {
+                                info!(
+                                    "WithdrawalPickedForProcessingEvent with {} request(s) \
+                                     (waiting for batch of ≥{})",
+                                    data.request_ids.len(),
+                                    min_requests,
+                                );
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse WithdrawalPickedForProcessingEvent: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
+    }
+
+    /// Verifies that the new multi-request coin selection algorithm batches
+    /// multiple approved withdrawal requests into a single Bitcoin transaction.
+    ///
+    /// Test outline:
+    /// 1. Deposit 200 000 sats → one confirmed UTXO in the pool.
+    /// 2. Submit two withdrawal requests (20 000 sats each) back-to-back on
+    ///    Sui, before either is committed. Both requests will be approved
+    ///    independently by the committee, then the leader picks up both
+    ///    approved requests and batches them into one Bitcoin tx.
+    /// 3. Wait for a `WithdrawalPickedForProcessingEvent` whose `request_ids`
+    ///    has length ≥ 2, confirming the batch.
+    /// 4. Assert the Bitcoin tx has two withdrawal outputs (one per request).
+    /// 5. Mine blocks and wait for the single `WithdrawalConfirmedEvent`.
+    #[tokio::test]
+    async fn test_batch_withdrawal() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Batch Withdrawal Test ===");
+
+        let mut networks = setup_test_networks().await?;
+
+        // Deposit enough to cover two withdrawals plus fees.
+        let deposit_amount_sats = 200_000u64;
+        let withdrawal_amount_sats = 20_000u64;
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+
+        // Submit two withdrawal requests back-to-back without waiting for either
+        // to be committed. The leader should approve both and then batch them
+        // together into a single Bitcoin transaction.
+        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes1 = extract_witness_program(&btc_destination1)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
+            .await?;
+        info!("Withdrawal request 1 submitted");
+
+        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes2 = extract_witness_program(&btc_destination2)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
+            .await?;
+        info!("Withdrawal request 2 submitted");
+
+        // Wait for a single WithdrawalPickedForProcessingEvent that batches both
+        // requests into one Bitcoin transaction.
+        let picked = wait_for_batched_withdrawal_picked(
+            &mut networks.sui_network.client,
+            2,
+            Duration::from_secs(60),
+        )
+        .await?;
+
+        info!(
+            "Batched withdrawal committed: pending_id={}, request_count={}",
+            picked.pending_id,
+            picked.request_ids.len(),
+        );
+
+        assert_eq!(
+            picked.request_ids.len(),
+            2,
+            "Expected both withdrawal requests to be batched into one transaction, \
+             but got {} request(s)",
+            picked.request_ids.len(),
+        );
+
+        // The Bitcoin tx should have exactly two withdrawal outputs (no change
+        // needed since we have plenty of UTXO value).
+        assert_eq!(
+            picked.withdrawal_outputs.len(),
+            2,
+            "Expected two withdrawal outputs in the batched transaction, \
+             but got {}",
+            picked.withdrawal_outputs.len(),
+        );
+
+        // Mine blocks and wait for the single confirmation event covering both
+        // requests.
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_n_withdrawal_confirmations(
+            &mut networks.sui_network.client,
+            1,
+            Duration::from_secs(90),
+        )
+        .await?;
+        drop(miner);
+
+        info!("Batch withdrawal confirmed on Sui");
+        info!("=== Batch Withdrawal Test Passed ===");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_create_update_config_proposal() -> Result<()> {
         init_test_logging();

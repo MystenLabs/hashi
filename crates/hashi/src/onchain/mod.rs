@@ -367,6 +367,10 @@ impl OnchainState {
             .map(|(_, utxo)| utxo.clone())
     }
 
+    pub fn utxo_records(&self) -> std::collections::BTreeMap<types::UtxoId, types::UtxoRecord> {
+        self.state().hashi().utxo_pool.utxo_records().clone()
+    }
+
     pub fn withdrawal_fee_btc(&self) -> u64 {
         self.state().hashi().config.withdrawal_fee_btc()
     }

@@ -678,7 +678,7 @@ impl From<hashi_types::move_types::UtxoId> for UtxoId {
 }
 
 /// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UtxoRecord {
     pub utxo: Utxo,
     /// The withdrawal_id that produced this UTXO as a change output; None if
