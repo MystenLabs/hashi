@@ -45,7 +45,6 @@ public struct WithdrawalConfirmationMessage has copy, drop, store {
     withdrawal_id: address,
 }
 
-// ======== Message Constructors ========
 
 public(package) fun new_request_approval_message(request_id: address): RequestApprovalMessage {
     RequestApprovalMessage { request_id }
@@ -115,6 +114,9 @@ public fun request_withdrawal(
     );
 
     hashi::withdrawal_queue::emit_withdrawal_requested(request_id, &request);
+
+    // Send a soul-bound receipt to the sender's wallet.
+    hashi::hashi::send_withdrawal_receipt(request_id, ctx);
 
     // Insert both the persistent request and operational balance.
     hashi

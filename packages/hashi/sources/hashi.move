@@ -48,6 +48,45 @@ fun init(ctx: &mut TxContext) {
     sui::transfer::share_object(hashi);
 }
 
+// ======== Receipt ========
+
+/// Direction of a cross-chain transfer.
+public enum TransferDirection has copy, drop, store {
+    Deposit, // BTC → Sui
+    Withdrawal, // Sui → BTC
+}
+
+/// Soul-bound receipt sent to the user's wallet at request time.
+/// Allows clients to discover all transfers for a given address
+/// via `getOwnedObjects`. Has `key` but not `store` — non-transferable.
+public struct HashiReceipt has key {
+    id: UID,
+    request_id: address,
+    direction: TransferDirection,
+}
+
+/// Create and transfer a soul-bound deposit receipt to the sender.
+public(package) fun send_deposit_receipt(request_id: address, ctx: &mut TxContext) {
+    transfer::transfer(
+        HashiReceipt { id: object::new(ctx), request_id, direction: TransferDirection::Deposit },
+        ctx.sender(),
+    );
+}
+
+/// Create and transfer a soul-bound withdrawal receipt to the sender.
+public(package) fun send_withdrawal_receipt(request_id: address, ctx: &mut TxContext) {
+    transfer::transfer(
+        HashiReceipt {
+            id: object::new(ctx),
+            request_id,
+            direction: TransferDirection::Withdrawal,
+        },
+        ctx.sender(),
+    );
+}
+
+// ======== Guards ========
+
 public(package) fun assert_unpaused(self: &Hashi) {
     // Check if state is PAUSED
     assert!(!self.config().paused());

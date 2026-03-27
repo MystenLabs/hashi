@@ -41,6 +41,9 @@ public fun deposit(
         sui_tx_digest: pending.pending_sui_tx_digest(),
     });
 
+    // Send a soul-bound receipt to the sender's wallet.
+    hashi::hashi::send_deposit_receipt(request_id, ctx);
+
     // Insert both the persistent request and operational pending.
     hashi
         .borrow_bitcoin_state_mut()
