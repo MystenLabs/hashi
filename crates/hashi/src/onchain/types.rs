@@ -677,21 +677,41 @@ impl From<hashi_types::move_types::UtxoId> for UtxoId {
     }
 }
 
+/// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
+#[derive(Debug)]
+pub struct UtxoRecord {
+    pub utxo: Utxo,
+    /// The withdrawal_id that produced this UTXO as a change output; None if
+    /// confirmed (deposit or previously promoted change).
+    pub produced_by: Option<Address>,
+    /// The withdrawal_id currently spending this UTXO; None if available.
+    pub locked_by: Option<Address>,
+}
+
 #[derive(Debug)]
 pub struct UtxoPool {
-    pub(super) active_utxos_id: Address,
-    pub(super) active_utxos: BTreeMap<UtxoId, Utxo>,
+    pub(super) utxo_records_id: Address,
+    pub(super) utxo_records: BTreeMap<UtxoId, UtxoRecord>,
     pub(super) spent_utxos_id: Address,
     pub(super) spent_utxos: BTreeMap<UtxoId, u64>,
 }
 
 impl UtxoPool {
-    pub fn active_utxos_id(&self) -> &Address {
-        &self.active_utxos_id
+    pub fn utxo_records_id(&self) -> &Address {
+        &self.utxo_records_id
     }
 
-    pub fn active_utxos(&self) -> &BTreeMap<UtxoId, Utxo> {
-        &self.active_utxos
+    pub fn utxo_records(&self) -> &BTreeMap<UtxoId, UtxoRecord> {
+        &self.utxo_records
+    }
+
+    /// Returns all UTXOs that are available (not locked) for coin selection,
+    /// regardless of whether they are confirmed.
+    pub fn active_utxos(&self) -> impl Iterator<Item = (&UtxoId, &Utxo)> {
+        self.utxo_records
+            .iter()
+            .filter(|(_, r)| r.locked_by.is_none())
+            .map(|(id, r)| (id, &r.utxo))
     }
 
     pub fn spent_utxos_id(&self) -> &Address {

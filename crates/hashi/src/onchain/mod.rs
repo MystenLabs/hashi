@@ -345,8 +345,7 @@ impl OnchainState {
             .hashi()
             .utxo_pool
             .active_utxos()
-            .values()
-            .cloned()
+            .map(|(_, utxo)| utxo.clone())
             .collect()
     }
 
@@ -364,8 +363,8 @@ impl OnchainState {
             .hashi()
             .utxo_pool
             .active_utxos()
-            .get(id)
-            .cloned()
+            .find(|(utxo_id, _)| *utxo_id == id)
+            .map(|(_, utxo)| utxo.clone())
     }
 
     pub fn withdrawal_fee_btc(&self) -> u64 {
@@ -1244,27 +1243,27 @@ async fn scrape_utxo_pool(
     client: Client,
     utxo_pool: move_types::UtxoPool,
 ) -> Result<types::UtxoPool> {
-    let (active_utxos, spent_utxos) = tokio::try_join!(
-        scrape_active_utxos(client.clone(), utxo_pool.active_utxos.id),
+    let (utxo_records, spent_utxos) = tokio::try_join!(
+        scrape_utxo_records(client.clone(), utxo_pool.utxo_records.id),
         scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id),
     )?;
 
     Ok(types::UtxoPool {
-        active_utxos_id: utxo_pool.active_utxos.id,
-        active_utxos,
+        utxo_records_id: utxo_pool.utxo_records.id,
+        utxo_records,
         spent_utxos_id: utxo_pool.spent_utxos.id,
         spent_utxos,
     })
 }
 
-async fn scrape_active_utxos(
+async fn scrape_utxo_records(
     client: Client,
-    active_utxos_id: Address,
-) -> Result<BTreeMap<types::UtxoId, types::Utxo>> {
-    let active_utxos: BTreeMap<types::UtxoId, types::Utxo> = client
+    utxo_records_id: Address,
+) -> Result<BTreeMap<types::UtxoId, types::UtxoRecord>> {
+    let utxo_records: BTreeMap<types::UtxoId, types::UtxoRecord> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
-                .with_parent(active_utxos_id)
+                .with_parent(utxo_records_id)
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
@@ -1272,20 +1271,28 @@ async fn scrape_active_utxos(
                 ])),
         )
         .and_then(|field| async move {
-            let utxo: move_types::Utxo = field
+            let record: move_types::UtxoRecord = field
                 .value()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok(utxo)
+            Ok(record)
         })
-        .map_ok(|utxo| {
-            let utxo = convert_move_utxo(utxo);
-            (utxo.id, utxo)
+        .map_ok(|record| {
+            let record = convert_move_utxo_record(record);
+            (record.utxo.id, record)
         })
         .try_collect()
         .await?;
 
-    Ok(active_utxos)
+    Ok(utxo_records)
+}
+
+fn convert_move_utxo_record(record: move_types::UtxoRecord) -> types::UtxoRecord {
+    types::UtxoRecord {
+        utxo: convert_move_utxo(record.utxo),
+        produced_by: record.produced_by,
+        locked_by: record.locked_by,
+    }
 }
 
 async fn scrape_spent_utxos(

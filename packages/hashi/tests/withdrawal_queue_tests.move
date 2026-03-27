@@ -78,8 +78,7 @@ fun setup_pending_withdrawal(
     ctx: &mut TxContext,
 ): address {
     let info = approve_and_extract_info(queue, clock, btc_amount, ctx);
-    let utxo_id = utxo::utxo_id(txid, 0);
-    let test_utxo = utxo::utxo(utxo_id, btc_amount * 2, option::none());
+    let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount * 2, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
         vector[info],
@@ -186,8 +185,8 @@ fun test_pending_withdrawal_insert_and_remove() {
 
     // Remove and destroy — no change output expected
     let pending = queue.remove_pending_withdrawal(pending_id);
-    let change_utxo = pending.destroy_pending_withdrawal();
-    change_utxo.destroy_none();
+    let (_input_ids, change_id) = pending.destroy_pending_withdrawal();
+    change_id.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -207,8 +206,8 @@ fun test_sign_pending_withdrawal() {
 
     // Remove and destroy
     let pending = queue.remove_pending_withdrawal(pending_id);
-    let change_utxo = pending.destroy_pending_withdrawal();
-    change_utxo.destroy_none();
+    let (_input_ids, change_id) = pending.destroy_pending_withdrawal();
+    change_id.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -232,8 +231,7 @@ fun test_full_withdrawal_queue_lifecycle() {
     assert!(btc.value() == 30_000);
     btc.destroy_for_testing();
 
-    let utxo_id = utxo::utxo_id(@0xAAAA, 1);
-    let test_utxo = utxo::utxo(utxo_id, 50_000, option::none());
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xAAAA, 1), 50_000, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
         vector[info],
@@ -252,8 +250,8 @@ fun test_full_withdrawal_queue_lifecycle() {
 
     // Step 5: Confirm — remove and destroy
     let pending = queue.remove_pending_withdrawal(pending_id);
-    let change_utxo = pending.destroy_pending_withdrawal();
-    change_utxo.destroy_none();
+    let (_input_ids, change_id) = pending.destroy_pending_withdrawal();
+    change_id.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -272,9 +270,8 @@ fun test_pending_withdrawal_with_change_output() {
     let txid = @0xCAFE;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let utxo_id = utxo::utxo_id(txid, 0);
     // Input UTXO is larger than withdrawal amount (100k > 50k, leaving 49k change + 1k fee)
-    let test_utxo = utxo::utxo(utxo_id, 100_000, option::none());
+    let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), 100_000, option::none());
 
     let change_output = make_test_output(change_amount);
 
@@ -290,18 +287,14 @@ fun test_pending_withdrawal_with_change_output() {
     let pending_id = pending.pending_withdrawal_id();
     queue.insert_pending_withdrawal(pending);
 
-    // Remove and destroy — should return a change UTXO
+    // Remove and destroy — should return a change UTXO ID.
     let pending = queue.remove_pending_withdrawal(pending_id);
-    let change_utxo = pending.destroy_pending_withdrawal();
-    assert!(change_utxo.is_some());
+    let (_, change_id) = pending.destroy_pending_withdrawal();
+    assert!(change_id.is_some());
 
-    let utxo = change_utxo.destroy_some();
-    // Change vout = number of user outputs = 1
+    // Change vout = number of user outputs = 1.
     let expected_utxo_id = utxo::utxo_id(txid, 1);
-    assert!(utxo.id() == expected_utxo_id);
-    assert!(utxo.amount() == change_amount);
-    assert!(utxo.derivation_path().is_none());
-    utxo.delete();
+    assert!(change_id.destroy_some() == expected_utxo_id);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -317,9 +310,8 @@ fun test_pending_withdrawal_without_change_output() {
     let txid = @0xDEAD;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let utxo_id = utxo::utxo_id(txid, 0);
     // Input UTXO exactly matches withdrawal amount (no change)
-    let test_utxo = utxo::utxo(utxo_id, btc_amount, option::none());
+    let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
         vector[info],
@@ -333,11 +325,11 @@ fun test_pending_withdrawal_without_change_output() {
     let pending_id = pending.pending_withdrawal_id();
     queue.insert_pending_withdrawal(pending);
 
-    // Remove and destroy — should return None
+    // Remove and destroy — should return None for the change UTXO ID.
     let pending = queue.remove_pending_withdrawal(pending_id);
-    let change_utxo = pending.destroy_pending_withdrawal();
-    assert!(change_utxo.is_none());
-    change_utxo.destroy_none();
+    let (_, change_id) = pending.destroy_pending_withdrawal();
+    assert!(change_id.is_none());
+    change_id.destroy_none();
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -399,11 +391,10 @@ fun test_miner_fee_single_request() {
     let change = input_amount - user_output - miner_fee;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xAA01, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xAA01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA01,
         0,
@@ -434,11 +425,10 @@ fun test_miner_fee_single_request_large_fee() {
     let change = input_amount - user_output - miner_fee;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xAA02, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xAA02, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA02,
         0,
@@ -471,11 +461,10 @@ fun test_miner_fee_batched_even_split() {
 
     let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
     let info2 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBB01, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info1, info2],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xBB01, 0), input_amount, option::none())],
         vector[
             make_test_output(user_output),
             make_test_output(user_output),
@@ -515,11 +504,10 @@ fun test_miner_fee_batched_with_remainder() {
     let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
     let info2 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
     let info3 = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBB02, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info1, info2, info3],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xBB02, 0), input_amount, option::none())],
         vector[
             make_test_output(user_output),
             make_test_output(user_output),
@@ -559,11 +547,10 @@ fun test_miner_fee_batched_unequal_amounts() {
 
     let info1 = approve_and_extract_info(&mut queue, &clock, btc_amount_1, ctx);
     let info2 = approve_and_extract_info(&mut queue, &clock, btc_amount_2, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBB03, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info1, info2],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xBB03, 0), input_amount, option::none())],
         vector[
             make_test_output(user_output_1),
             make_test_output(user_output_2),
@@ -597,11 +584,10 @@ fun test_miner_fee_zero() {
     let change = 5_000u64;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xCC01, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xCC01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC01,
         0,
@@ -633,11 +619,10 @@ fun test_miner_fee_output_at_dust_floor() {
     let change = 1_000u64;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xCC02, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xCC02, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC02,
         0,
@@ -670,11 +655,10 @@ fun test_miner_fee_output_below_dust_aborts() {
     let change = 1_000u64;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD01, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xDD01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xDD01,
         0,
@@ -709,11 +693,10 @@ fun test_miner_fee_wrong_output_amount_aborts() {
     // wrong_output = 30000 - 500 = 29500, which != 29000
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none())],
         vector[make_test_output(wrong_output), make_test_output(change)],
         @0xDD02,
         0,
@@ -745,13 +728,12 @@ fun test_miner_fee_wrong_address_aborts() {
     let change = 5_000u64;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xDD03, 0), input_amount, option::none());
 
     // Output uses a different address than the request (which uses all-zeros)
     let wrong_addr = x"1111111111111111111111111111111111111111";
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xDD03, 0), input_amount, option::none())],
         vector[make_test_output_with_address(user_output, wrong_addr), make_test_output(change)],
         @0xDD03,
         0,
@@ -787,11 +769,10 @@ fun test_miner_fee_exceeds_max_aborts() {
     let change = 5_000u64;
 
     let info = approve_and_extract_info(&mut queue, &clock, btc_amount, ctx);
-    let test_utxo = utxo::utxo(utxo::utxo_id(@0xEE01, 0), input_amount, option::none());
 
     let pending = withdrawal_queue::new_pending_withdrawal(
         vector[info],
-        vector[test_utxo],
+        vector[utxo::utxo(utxo::utxo_id(@0xEE01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xEE01,
         0,

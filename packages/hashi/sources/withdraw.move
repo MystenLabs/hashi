@@ -137,9 +137,11 @@ entry fun commit_withdrawal_tx(
     // Do not allow scheduling of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
-    // Selected UTXOs
     let epoch = hashi.committee_set().epoch();
-    let inputs = selected_utxos.map!(|utxo_id| hashi.utxo_pool_mut().spend(utxo_id, epoch));
+
+    // Copy the full UTXO data from the pool before locking — used for fee
+    // accounting and event emission inside new_pending_withdrawal.
+    let inputs = selected_utxos.map!(|utxo_id| hashi.utxo_pool().get_utxo(utxo_id));
 
     let presig_start_index = hashi.withdrawal_queue().num_consumed_presigs();
     hashi.withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
@@ -184,6 +186,21 @@ entry fun commit_withdrawal_tx(
         randomness,
         ctx,
     );
+
+    // Lock inputs and insert the pending change UTXO using the withdrawal's
+    // freshly-assigned ID. UTXOs remain in the pool until confirm_withdrawal()
+    // finalizes them as spent.
+    let withdrawal_id = pending_withdrawal.pending_withdrawal_id();
+    inputs.do_ref!(|utxo| hashi.utxo_pool_mut().lock(utxo.id(), withdrawal_id));
+
+    // Insert the pending change UTXO into the pool immediately so it can be
+    // selected by subsequent transactions before this one confirms on Bitcoin.
+    let change_utxo_opt = hashi::withdrawal_queue::build_change_utxo(&pending_withdrawal);
+    if (change_utxo_opt.is_some()) {
+        hashi.utxo_pool_mut().insert_pending(change_utxo_opt.destroy_some(), withdrawal_id);
+    } else {
+        change_utxo_opt.destroy_none();
+    };
 
     pending_withdrawal.emit_withdrawal_picked_for_processing();
     hashi.withdrawal_queue_mut().insert_pending_withdrawal(pending_withdrawal);
@@ -230,15 +247,23 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
     hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
 
     let withdrawal = hashi.withdrawal_queue_mut().remove_pending_withdrawal(withdrawal_id);
-
     withdrawal.emit_withdrawal_confirmed();
-    let change_utxo = withdrawal.destroy_pending_withdrawal();
 
-    // Insert the change UTXO back into the active pool
-    if (change_utxo.is_some()) {
-        hashi.utxo_pool_mut().insert_active(change_utxo.destroy_some());
+    let (input_utxos, change_id) = withdrawal.destroy_pending_withdrawal();
+    let epoch = hashi.committee_set().epoch();
+
+    // Move each locked input to the spent set now that the Bitcoin transaction
+    // has been confirmed on-chain.
+    input_utxos.do!(|utxo| {
+        hashi.utxo_pool_mut().confirm_spent(utxo.id(), epoch);
+    });
+
+    // Promote the change UTXO from unconfirmed to confirmed. If the change was
+    // already locked by a subsequent withdrawal, only `produced_by` is cleared.
+    if (change_id.is_some()) {
+        hashi.utxo_pool_mut().confirm_pending(change_id.destroy_some());
     } else {
-        change_utxo.destroy_none();
+        change_id.destroy_none();
     };
 }
 

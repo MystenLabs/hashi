@@ -3,7 +3,7 @@
 
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, config::Config, utxo::{Utxo, UtxoId, UtxoInfo}};
+use hashi::{btc::BTC, config::Config, utxo::{Utxo, UtxoId}};
 use sui::{bag::Bag, balance::Balance, clock::Clock};
 
 #[error]
@@ -50,6 +50,9 @@ public struct PendingWithdrawal has store {
     id: address,
     txid: address,
     requests: vector<WithdrawalRequestInfo>,
+    /// UTXOs consumed by this withdrawal. The UTXOs remain locked in the pool
+    /// until `confirm_withdrawal()` moves them to spent; these copies are kept
+    /// for event emission and fee accounting.
     inputs: vector<Utxo>,
     withdrawal_outputs: vector<OutputUtxo>,
     change_output: Option<OutputUtxo>,
@@ -270,8 +273,29 @@ public(package) fun request_into_parts(
     (info, btc)
 }
 
-/// Destroy a pending withdrawal, returning the change UTXO if one exists.
-public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<Utxo> {
+/// Build the change UTXO from a pending withdrawal's data.
+///
+/// Returns the Utxo that corresponds to the change output, or None if there
+/// is no change output. Used by `commit_withdrawal_tx()` to insert the change
+/// UTXO into the pool immediately after the pending withdrawal is created.
+public(package) fun build_change_utxo(self: &PendingWithdrawal): Option<hashi::utxo::Utxo> {
+    if (self.change_output.is_some()) {
+        let change = self.change_output.borrow();
+        // Change output is always the last output in the BTC transaction.
+        let change_vout = (self.withdrawal_outputs.length() as u32);
+        let change_utxo_id = hashi::utxo::utxo_id(self.txid, change_vout);
+        option::some(hashi::utxo::utxo(change_utxo_id, change.amount, option::none()))
+    } else {
+        option::none()
+    }
+}
+
+/// Destroy a pending withdrawal, returning the input UTXOs and the change
+/// UTXO ID (if any). The caller is responsible for calling `confirm_spent()`
+/// on each input's ID and `confirm_pending()` on the change ID in the pool.
+public(package) fun destroy_pending_withdrawal(
+    self: PendingWithdrawal,
+): (vector<Utxo>, Option<UtxoId>) {
     let PendingWithdrawal {
         id: _,
         txid,
@@ -286,21 +310,17 @@ public(package) fun destroy_pending_withdrawal(self: PendingWithdrawal): Option<
         epoch: _,
     } = self;
 
-    inputs.destroy!(|utxo| {
-        utxo.delete();
-    });
-
-    // In case of a change output, insert the change UTXO back into the active UTXO pool.
-    if (change_output.is_some()) {
-        let change = change_output.destroy_some();
-        // Change output is always the last output in the BTC transaction,
+    let change_id = if (change_output.is_some()) {
+        let _change = change_output.destroy_some();
+        // Change output is always the last output in the BTC transaction.
         let change_vout = (withdrawal_outputs.length() as u32);
-        let change_utxo_id = hashi::utxo::utxo_id(txid, change_vout);
-        option::some(hashi::utxo::utxo(change_utxo_id, change.amount, option::none()))
+        option::some(hashi::utxo::utxo_id(txid, change_vout))
     } else {
         change_output.destroy_none();
         option::none()
-    }
+    };
+
+    (inputs, change_id)
 }
 
 public(package) fun emit_withdrawal_requested(self: &WithdrawalRequest) {
@@ -325,7 +345,7 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdraw
         pending_id: self.id,
         txid: self.txid,
         request_ids: self.requests.map_ref!(|info| info.id),
-        inputs: self.inputs.map_ref!(|u| u.to_info()),
+        inputs: self.inputs,
         withdrawal_outputs: self.withdrawal_outputs,
         change_output: self.change_output,
         timestamp_ms: self.timestamp_ms,
@@ -433,7 +453,7 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
     pending_id: address,
     txid: address,
     request_ids: vector<address>,
-    inputs: vector<UtxoInfo>,
+    inputs: vector<Utxo>,
     withdrawal_outputs: vector<OutputUtxo>,
     change_output: Option<OutputUtxo>,
     timestamp_ms: u64,

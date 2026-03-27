@@ -11,38 +11,116 @@ const MAX_SPENT_UTXO_AGE_EPOCHS: u64 = 7;
 
 #[error]
 const ESpentUtxoNotExpired: vector<u8> = b"Spent UTXO has not expired yet";
+#[error]
+const EUtxoAlreadyLocked: vector<u8> = b"UTXO is already locked in a pending withdrawal";
+
+/// Tracks a UTXO through its full lifecycle in the pool.
+///
+/// A UTXO lives in `utxo_records` from the moment it is inserted (either
+/// as a confirmed deposit or as a change output from a pending withdrawal)
+/// until the withdrawal that spends it is confirmed on Bitcoin.
+///
+/// `produced_by`: None = confirmed deposit or promoted change output;
+///                Some(id) = unconfirmed change output of that withdrawal.
+/// `locked_by`:   None = available for coin selection;
+///                Some(id) = currently locked in that pending withdrawal.
+///
+/// A UTXO is selectable when `locked_by` is None, regardless of
+/// `produced_by`. This allows chaining withdrawals through mempool change
+/// outputs before the parent transaction confirms.
+public struct UtxoRecord has store {
+    utxo: Utxo,
+    produced_by: Option<address>,
+    locked_by: Option<address>,
+}
 
 public struct UtxoPool has store {
-    active_utxos: Bag, // UtxoId -> Utxo
+    utxo_records: Bag, // UtxoId -> UtxoRecord
     spent_utxos: Bag, // UtxoId -> u64 (spent_epoch)
 }
 
 public(package) fun create(ctx: &mut TxContext): UtxoPool {
     UtxoPool {
-        active_utxos: sui::bag::new(ctx),
+        utxo_records: sui::bag::new(ctx),
         spent_utxos: sui::bag::new(ctx),
     }
 }
 
-/// Returns true if the UTXO is either active or has been spent
+/// Returns true if the UTXO is either in the active records or has been spent.
 public(package) fun is_spent_or_active(self: &UtxoPool, utxo_id: UtxoId): bool {
-    self.active_utxos.contains(utxo_id) || self.spent_utxos.contains(utxo_id)
+    self.utxo_records.contains(utxo_id) || self.spent_utxos.contains(utxo_id)
 }
 
+/// Insert a confirmed UTXO (from a deposit) into the pool.
 public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
-    self.active_utxos.add(utxo.id(), utxo)
+    let utxo_id = utxo.id();
+    self
+        .utxo_records
+        .add(
+            utxo_id,
+            UtxoRecord {
+                utxo,
+                produced_by: option::none(),
+                locked_by: option::none(),
+            },
+        )
 }
 
-/// Remove a UTXO from active and mark it as spent
-public(package) fun spend(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64): Utxo {
-    let utxo: Utxo = self.active_utxos.remove(utxo_id);
+/// Insert an unconfirmed change UTXO produced by a pending withdrawal.
+///
+/// The UTXO is immediately selectable (`locked_by = None`) but flagged as
+/// unconfirmed until `confirm_pending()` is called after the producing
+/// transaction confirms on Bitcoin.
+public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
+    let utxo_id = utxo.id();
+    self
+        .utxo_records
+        .add(
+            utxo_id,
+            UtxoRecord {
+                utxo,
+                produced_by: option::some(withdrawal_id),
+                locked_by: option::none(),
+            },
+        )
+}
+
+/// Lock a UTXO for use in a pending withdrawal. Aborts if already locked.
+public(package) fun lock(self: &mut UtxoPool, utxo_id: UtxoId, withdrawal_id: address) {
+    let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
+    assert!(record.locked_by.is_none(), EUtxoAlreadyLocked);
+    record.locked_by = option::some(withdrawal_id);
+}
+
+/// Return a copy of a UTXO from the pool.
+public(package) fun get_utxo(self: &UtxoPool, utxo_id: UtxoId): hashi::utxo::Utxo {
+    let record: &UtxoRecord = self.utxo_records.borrow(utxo_id);
+    record.utxo
+}
+
+/// Mark a UTXO as confirmed-spent once its spending withdrawal is confirmed
+/// on Bitcoin. Removes the record from the pool and records the spent epoch.
+public(package) fun confirm_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64) {
+    let UtxoRecord { utxo, produced_by: _, locked_by: _ } = self.utxo_records.remove(utxo_id);
+    utxo.delete();
     self.spent_utxos.add(utxo_id, epoch);
     sui::event::emit(UtxoSpentEvent { utxo_id, spent_epoch: epoch });
-    utxo
+}
+
+/// Promote a pending change UTXO to confirmed once its producing withdrawal
+/// confirms on Bitcoin. If the UTXO was already locked by a subsequent
+/// withdrawal, only `produced_by` is cleared; `locked_by` is left intact.
+/// No-ops if the UTXO is no longer present (it was already spent).
+public(package) fun confirm_pending(self: &mut UtxoPool, utxo_id: UtxoId) {
+    if (self.utxo_records.contains(utxo_id)) {
+        let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
+        record.produced_by = option::none();
+    }
 }
 
 /// Delete an expired spent UTXO from the pool.
-/// Aborts if the spent UTXO has not expired yet (less than MAX_SPENT_UTXO_AGE_EPOCHS old).
+/// Aborts if the spent UTXO has not expired yet (less than
+/// MAX_SPENT_UTXO_AGE_EPOCHS old).
 public(package) fun delete_expired_spent_utxo(
     self: &mut UtxoPool,
     utxo_id: UtxoId,

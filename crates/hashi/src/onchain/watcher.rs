@@ -266,7 +266,14 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .deposit_queue
                     .requests
                     .remove(&deposit_confirmed_event.request_id);
-                state.hashi.utxo_pool.active_utxos.insert(utxo.id, utxo);
+                state.hashi.utxo_pool.utxo_records.insert(
+                    utxo.id,
+                    super::types::UtxoRecord {
+                        utxo,
+                        produced_by: None,
+                        locked_by: None,
+                    },
+                );
                 // TODO notify
             }
             HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
@@ -347,6 +354,38 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         );
                     }
                 }
+
+                // Lock each input UTXO in the pool and insert the pending
+                // change UTXO (if any) so it is immediately selectable.
+                {
+                    let mut state = state.state_mut();
+                    for input in &event.inputs {
+                        let utxo_id: super::types::UtxoId = input.id.into();
+                        if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&utxo_id) {
+                            record.locked_by = Some(event.pending_id);
+                        }
+                    }
+                    if let Some(ref change_output) = event.change_output {
+                        let change_vout = event.withdrawal_outputs.len() as u32;
+                        let change_utxo_id = super::types::UtxoId {
+                            txid: event.txid,
+                            vout: change_vout,
+                        };
+                        let change_utxo = super::types::Utxo {
+                            id: change_utxo_id,
+                            amount: change_output.amount,
+                            derivation_path: None,
+                        };
+                        state.hashi.utxo_pool.utxo_records.insert(
+                            change_utxo_id,
+                            super::types::UtxoRecord {
+                                utxo: change_utxo,
+                                produced_by: Some(event.pending_id),
+                                locked_by: None,
+                            },
+                        );
+                    }
+                }
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 tracing::info!(pending_withdrawal_id = %event.withdrawal_id, "Withdrawal signatures stored on-chain");
@@ -364,17 +403,16 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 tracing::info!(pending_withdrawal_id = %event.pending_id, "Withdrawal confirmed on-chain");
                 let mut state = state.state_mut();
 
-                // If a change UTXO was created, add it to the active pool.
-                if let (Some(change_utxo_id), Some(change_amount)) =
-                    (event.change_utxo_id, event.change_utxo_amount)
-                {
-                    let utxo_id = change_utxo_id.into();
-                    let utxo = super::types::Utxo {
-                        id: utxo_id,
-                        amount: change_amount,
-                        derivation_path: None,
-                    };
-                    state.hashi.utxo_pool.active_utxos.insert(utxo_id, utxo);
+                // Promote the change UTXO from pending to confirmed by
+                // clearing `produced_by`. The UTXO was already inserted at
+                // commit time; input UTXOs are removed via UtxoSpentEvent.
+                if let Some(change_utxo_id) = event.change_utxo_id {
+                    let change_utxo_id: super::types::UtxoId = change_utxo_id.into();
+                    if let Some(record) =
+                        state.hashi.utxo_pool.utxo_records.get_mut(&change_utxo_id)
+                    {
+                        record.produced_by = None;
+                    }
                 }
 
                 state
@@ -386,7 +424,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
                 let mut state = state.state_mut();
                 let utxo_id = utxo_spent_event.utxo_id.into();
-                state.hashi.utxo_pool.active_utxos.remove(&utxo_id);
+                state.hashi.utxo_pool.utxo_records.remove(&utxo_id);
                 state
                     .hashi
                     .utxo_pool

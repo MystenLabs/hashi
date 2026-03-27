@@ -127,7 +127,7 @@ impl Hashi {
 
         let utxo_pool = &state.hashi().utxo_pool;
         if utxo_pool
-            .active_utxos()
+            .utxo_records()
             .contains_key(&deposit_request.utxo.id)
             || utxo_pool
                 .spent_utxos()

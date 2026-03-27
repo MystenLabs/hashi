@@ -13,6 +13,7 @@ mod tests {
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::move_types::DepositConfirmedEvent;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
+    use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
@@ -725,6 +726,253 @@ mod tests {
             withdrawal_amount_sats,
         )
         .await?;
+        Ok(())
+    }
+
+    /// Wait for the committee to commit a withdrawal (i.e., select UTXOs and
+    /// broadcast the Bitcoin tx), without requiring Bitcoin confirmations.
+    async fn wait_for_withdrawal_picked(
+        sui_client: &mut sui_rpc::Client,
+        timeout: Duration,
+    ) -> Result<WithdrawalPickedForProcessingEvent> {
+        let start = std::time::Instant::now();
+        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
+            .transactions()
+            .events()
+            .events()
+            .contents()
+            .finish()]);
+        let mut subscription = sui_client
+            .subscription_client()
+            .subscribe_checkpoints(
+                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+            )
+            .await?
+            .into_inner();
+
+        while let Some(item) = subscription.next().await {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for WithdrawalPickedForProcessingEvent after {:?}",
+                    timeout
+                ));
+            }
+            let checkpoint = match item {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {}", e);
+                    continue;
+                }
+            };
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    if event
+                        .contents()
+                        .name()
+                        .contains("WithdrawalPickedForProcessingEvent")
+                    {
+                        match WithdrawalPickedForProcessingEvent::from_bcs(event.contents().value())
+                        {
+                            Ok(data) => {
+                                info!(
+                                    "Withdrawal picked for processing: pending_id={}",
+                                    data.pending_id
+                                );
+                                return Ok(data);
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse WithdrawalPickedForProcessingEvent: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
+    }
+
+    /// Wait for `n` withdrawal confirmations using a single checkpoint
+    /// subscription, so no events are missed when two confirmations fall in
+    /// the same checkpoint.
+    async fn wait_for_n_withdrawal_confirmations(
+        sui_client: &mut sui_rpc::Client,
+        n: usize,
+        timeout: Duration,
+    ) -> Result<Vec<WithdrawalConfirmedEvent>> {
+        let start = std::time::Instant::now();
+        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
+            .transactions()
+            .events()
+            .events()
+            .contents()
+            .finish()]);
+        let mut subscription = sui_client
+            .subscription_client()
+            .subscribe_checkpoints(
+                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+            )
+            .await?
+            .into_inner();
+
+        let mut events = Vec::with_capacity(n);
+        while events.len() < n {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for {} withdrawal confirmations (got {}) after {:?}",
+                    n,
+                    events.len(),
+                    timeout
+                ));
+            }
+            let Some(item) = subscription.next().await else {
+                return Err(anyhow!("Checkpoint subscription ended unexpectedly"));
+            };
+            let checkpoint = match item {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {}", e);
+                    continue;
+                }
+            };
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    if event.contents().name().contains("WithdrawalConfirmedEvent") {
+                        match WithdrawalConfirmedEvent::from_bcs(event.contents().value()) {
+                            Ok(data) => {
+                                info!(
+                                    "Withdrawal confirmed ({}/{}): pending_id={}",
+                                    events.len() + 1,
+                                    n,
+                                    data.pending_id
+                                );
+                                events.push(data);
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse WithdrawalConfirmedEvent: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(events)
+    }
+
+    /// Verifies that the committee can commit a second withdrawal whose sole
+    /// available input is the unconfirmed change UTXO from a prior pending
+    /// withdrawal (i.e., before that first Bitcoin tx has 6 confirmations).
+    ///
+    /// Test outline:
+    /// 1. Deposit 200 000 sats → one confirmed UTXO in the pool.
+    /// 2. Submit withdrawal 1 (30 000 sats). Wait for the committee to commit
+    ///    it (`WithdrawalPickedForProcessingEvent`). No Bitcoin blocks mined
+    ///    yet, so the change UTXO is pending/unconfirmed.
+    /// 3. Submit withdrawal 2 (30 000 sats) immediately. Wait for the
+    ///    committee to commit it. Assert that it spent the pending change UTXO
+    ///    from withdrawal 1.
+    /// 4. Mine blocks and wait for both `WithdrawalConfirmedEvent`s.
+    #[tokio::test]
+    async fn test_withdrawal_chains_through_unconfirmed_change_utxo() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Unconfirmed Change UTXO Chaining Test ===");
+
+        let mut networks = setup_test_networks().await?;
+
+        // Deposit enough that after withdrawal 1 there is substantial change.
+        let deposit_amount_sats = 200_000u64;
+        let withdrawal_amount_sats = 30_000u64;
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+
+        // Submit withdrawal 1. Do NOT mine any Bitcoin blocks yet.
+        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes1 = extract_witness_program(&btc_destination1)?;
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
+            .await?;
+        info!("Withdrawal 1 request submitted");
+
+        // Wait for the committee to commit withdrawal 1. At this point the
+        // deposit UTXO is locked and the change UTXO is inserted as pending
+        // (produced_by = Some, locked_by = None). No Bitcoin blocks have been
+        // mined, so neither the deposit spend nor the change output is
+        // confirmed on-chain.
+        let picked1 =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(30))
+                .await?;
+        info!(
+            "Withdrawal 1 committed: pending_id={}, txid={}",
+            picked1.pending_id, picked1.txid
+        );
+
+        assert!(
+            picked1.change_output.is_some(),
+            "Withdrawal 1 must produce a change UTXO for this test to be meaningful \
+             (deposit={deposit_amount_sats}, withdrawal={withdrawal_amount_sats})"
+        );
+
+        // The change UTXO id: same txid as withdrawal 1, vout after all
+        // withdrawal outputs.
+        let change_txid = picked1.txid;
+        let change_vout = picked1.withdrawal_outputs.len() as u32;
+
+        // Submit withdrawal 2 immediately — the deposit UTXO is now locked, so
+        // the only available UTXO is the unconfirmed change from withdrawal 1.
+        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes2 = extract_witness_program(&btc_destination2)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
+            .await?;
+        info!("Withdrawal 2 request submitted (no Bitcoin blocks mined yet)");
+
+        // Wait for the committee to commit withdrawal 2. It must use the
+        // pending change UTXO as its input.
+        let picked2 =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(30))
+                .await?;
+        info!(
+            "Withdrawal 2 committed: pending_id={}, txid={}",
+            picked2.pending_id, picked2.txid
+        );
+
+        // Assert that withdrawal 2 spent the pending change UTXO from
+        // withdrawal 1 (the only available UTXO at commit time).
+        let spent_pending_change = picked2
+            .inputs
+            .iter()
+            .any(|utxo| utxo.id.txid == change_txid && utxo.id.vout == change_vout);
+        assert!(
+            spent_pending_change,
+            "Withdrawal 2 should have spent the unconfirmed change UTXO \
+             (txid={change_txid}, vout={change_vout}) from withdrawal 1, \
+             but its inputs were: {:?}",
+            picked2
+                .inputs
+                .iter()
+                .map(|u| (u.id.txid, u.id.vout))
+                .collect::<Vec<_>>()
+        );
+
+        info!("Confirmed: withdrawal 2 spent the unconfirmed change UTXO from withdrawal 1");
+
+        // Mine blocks and wait for both withdrawals to be confirmed on Sui.
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_n_withdrawal_confirmations(
+            &mut networks.sui_network.client,
+            2,
+            Duration::from_secs(90),
+        )
+        .await?;
+        drop(miner);
+
+        info!("Both withdrawals confirmed on Sui");
+        info!("=== Unconfirmed Change UTXO Chaining Test Passed ===");
         Ok(())
     }
 

@@ -403,10 +403,10 @@ impl Metrics {
                     .map(|r| r.btc_amount)
                     .sum::<u64>() as i64,
             );
-        let active_utxos = hashi.utxo_pool.active_utxos();
-        self.utxo_pool_size.set(active_utxos.len() as i64);
+        let utxo_records = hashi.utxo_pool.utxo_records();
+        self.utxo_pool_size.set(utxo_records.len() as i64);
         self.utxo_pool_value
-            .set(active_utxos.values().map(|u| u.amount).sum::<u64>() as i64);
+            .set(utxo_records.values().map(|r| r.utxo.amount).sum::<u64>() as i64);
         {
             use crate::onchain::types::ProposalType;
             let mut counts = std::collections::HashMap::<&str, i64>::new();

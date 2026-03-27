@@ -277,14 +277,12 @@ pub struct Utxo {
     pub derivation_path: Option<Address>,
 }
 
-/// Rust version of the Move hashi::utxo::UtxoInfo type.
-/// A copyable, droppable view of a Utxo for use in events.
+/// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct UtxoInfo {
-    pub id: UtxoId,
-    // In satoshis
-    pub amount: u64,
-    pub derivation_path: Option<Address>,
+pub struct UtxoRecord {
+    pub utxo: Utxo,
+    pub produced_by: Option<Address>,
+    pub locked_by: Option<Address>,
 }
 
 /// txid:vout
@@ -298,7 +296,7 @@ pub struct UtxoId {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct UtxoPool {
-    pub active_utxos: Bag,
+    pub utxo_records: Bag,
     pub spent_utxos: Bag,
 }
 
@@ -905,7 +903,7 @@ pub struct WithdrawalPickedForProcessingEvent {
     pub pending_id: Address,
     pub txid: Address,
     pub request_ids: Vec<Address>,
-    pub inputs: Vec<UtxoInfo>,
+    pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
     pub change_output: Option<OutputUtxo>,
     pub timestamp_ms: u64,
