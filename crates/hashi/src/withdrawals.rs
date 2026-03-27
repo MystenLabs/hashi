@@ -678,10 +678,12 @@ impl Hashi {
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
 
         // Build coin selection parameters from on-chain config. Override
-        // max_fee_per_request and input_budget to match the Move contract.
+        // max_fee_per_request and input_budget to match the Move contract, and
+        // max_withdrawal_requests to honour the leader's configured batch cap.
         let params = CoinSelectionParams {
             max_fee_per_request: self.onchain_state().worst_case_network_fee(),
             input_budget: self.onchain_state().input_budget() as usize,
+            max_withdrawal_requests: self.config.withdrawal_max_batch_size(),
             ..CoinSelectionParams::new(change_address.clone())
         };
 

@@ -13,6 +13,7 @@ use fastcrypto::groups::secp256k1::ProjectivePoint;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
+use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
@@ -213,8 +214,13 @@ impl Hashi {
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> anyhow::Result<XOnlyPublicKey> {
         if let Some(path) = derivation_path {
+            // Prefer the local signing manager (available after DKG preparation).
+            // Fall back to the on-chain key, which is guaranteed present once the
+            // initial committee has formed and `end_reconfig` has been processed.
             let verifying_key = self
                 .signing_verifying_key()
+                .map(Ok)
+                .unwrap_or_else(|| self.onchain_verifying_key_g())
                 .context("MPC public key not available yet")?;
             let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
                 &verifying_key,
@@ -242,6 +248,32 @@ impl Hashi {
         let schnorr_pk = SchnorrPublicKey::try_from(&g)
             .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
         Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
+    }
+
+    /// Read the MPC public key from on-chain state.
+    ///
+    /// Unlike `get_hashi_pubkey`, this does not depend on the node's local DKG
+    /// completion channel. The on-chain key is set during `end_reconfig` event
+    /// processing, so it is guaranteed to be present once the initial committee
+    /// has formed (i.e., after `HashiNetworkBuilder::build()` returns).
+    pub fn get_onchain_mpc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
+        let g = self.onchain_verifying_key_g()?;
+        let schnorr_pk = SchnorrPublicKey::try_from(&g)
+            .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
+        Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
+    }
+
+    /// Deserialize the BCS-encoded MPC group element from on-chain state.
+    ///
+    /// The on-chain key is stored as `bcs::to_bytes(&G)` in the `CommitteeSet`
+    /// and is populated atomically with the `end_reconfig` event.
+    fn onchain_verifying_key_g(&self) -> anyhow::Result<G> {
+        let bytes = self.onchain_state().mpc_public_key();
+        anyhow::ensure!(
+            !bytes.is_empty(),
+            "MPC public key not yet available on-chain"
+        );
+        bcs::from_bytes(&bytes).context("failed to deserialize on-chain MPC public key")
     }
 
     fn sign_deposit_confirmation(

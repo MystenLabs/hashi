@@ -223,6 +223,12 @@ pub struct HashiNetworkBuilder {
     pub test_batch_size_per_weight: Option<u16>,
     /// `None` means full Sui voting power weights (no reduction).
     pub test_weight_divisor: Option<u16>,
+    /// Overrides `withdrawal_batching_delay_ms` in each node's config.
+    /// Defaults to `Some(0)` (no delay) for tests.
+    pub withdrawal_batching_delay_ms: Option<u64>,
+    /// Overrides `withdrawal_max_batch_size` in each node's config.
+    /// `None` uses the production default (50).
+    pub withdrawal_max_batch_size: Option<usize>,
 }
 
 impl HashiNetworkBuilder {
@@ -232,6 +238,8 @@ impl HashiNetworkBuilder {
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
+            withdrawal_batching_delay_ms: Some(0),
+            withdrawal_max_batch_size: None,
         }
     }
 
@@ -252,6 +260,16 @@ impl HashiNetworkBuilder {
 
     pub fn with_full_voting_power(mut self) -> Self {
         self.test_weight_divisor = None;
+        self
+    }
+
+    pub fn with_withdrawal_batching_delay_ms(mut self, ms: u64) -> Self {
+        self.withdrawal_batching_delay_ms = Some(ms);
+        self
+    }
+
+    pub fn with_withdrawal_max_batch_size(mut self, size: usize) -> Self {
+        self.withdrawal_max_batch_size = Some(size);
         self
     }
 
@@ -282,6 +300,8 @@ impl HashiNetworkBuilder {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = self.test_weight_divisor;
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
+            config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
+            config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

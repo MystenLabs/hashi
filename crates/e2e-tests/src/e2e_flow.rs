@@ -268,8 +268,11 @@ mod tests {
         let user_key = networks.sui_network.user_keys.first().unwrap();
         let hbtc_recipient = user_key.public_key().derive_address();
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        // Use the on-chain MPC key rather than the local key-ready channel.
+        // The on-chain key is set during end_reconfig and is guaranteed
+        // available once HashiNetworkBuilder::build() returns.
         let deposit_address =
-            hashi.get_deposit_address(&hashi.get_hashi_pubkey()?, Some(&hbtc_recipient))?;
+            hashi.get_deposit_address(&hashi.get_onchain_mpc_pubkey()?, Some(&hbtc_recipient))?;
 
         info!("Sending Bitcoin to deposit address...");
         let txid = networks
@@ -1069,11 +1072,20 @@ mod tests {
         init_test_logging();
         info!("=== Starting Batch Withdrawal Test ===");
 
-        let mut networks = setup_test_networks().await?;
+        // Use a 5 s batching delay and cap of 2 so both requests accumulate
+        // before the leader commits, exercising the delay-trigger path.
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_batching_delay_ms(5_000)
+            .with_withdrawal_max_batch_size(2)
+            .build()
+            .await?;
 
         // Deposit enough to cover two withdrawals plus fees.
+        // Each withdrawal must be at least withdrawal_minimum (~28 517 sats
+        // at default config), so use 30 000 sats per request.
         let deposit_amount_sats = 200_000u64;
-        let withdrawal_amount_sats = 20_000u64;
+        let withdrawal_amount_sats = 30_000u64;
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
@@ -1144,6 +1156,90 @@ mod tests {
 
         info!("Batch withdrawal confirmed on Sui");
         info!("=== Batch Withdrawal Test Passed ===");
+        Ok(())
+    }
+
+    /// Verify the batch fires immediately when `withdrawal_max_batch_size` is
+    /// reached, even if `withdrawal_batching_delay_ms` has not elapsed yet.
+    ///
+    /// Steps:
+    /// 1. Start a network with a 24-hour delay (would never expire in a test)
+    ///    and a max batch size of 2.
+    /// 2. Deposit and submit 2 withdrawal requests.
+    /// 3. The batch should fire at capacity (2 requests) well before the delay
+    ///    expires, producing a single `WithdrawalPickedForProcessingEvent` with
+    ///    exactly 2 request IDs.
+    #[tokio::test]
+    async fn test_batch_withdrawal_fires_at_capacity() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Batch Withdrawal Fires At Capacity Test ===");
+
+        // 24-hour delay ensures the delay path cannot trigger; only the
+        // capacity path (batch.len() >= max_batch_size) should fire the batch.
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_batching_delay_ms(86_400_000)
+            .with_withdrawal_max_batch_size(2)
+            .build()
+            .await?;
+
+        // Each withdrawal must be at least withdrawal_minimum (~28 517 sats
+        // at default config), so use 30 000 sats per request.
+        let deposit_amount_sats = 200_000u64;
+        let withdrawal_amount_sats = 30_000u64;
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+
+        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes1 = extract_witness_program(&btc_destination1)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
+            .await?;
+        info!("Withdrawal request 1 submitted");
+
+        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes2 = extract_witness_program(&btc_destination2)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
+            .await?;
+        info!("Withdrawal request 2 submitted");
+
+        // Both requests should be batched at capacity (before the 24 h delay).
+        let picked = wait_for_batched_withdrawal_picked(
+            &mut networks.sui_network.client,
+            2,
+            Duration::from_secs(90),
+        )
+        .await?;
+
+        info!(
+            "Capacity-triggered batch committed: pending_id={}, request_count={}",
+            picked.pending_id,
+            picked.request_ids.len(),
+        );
+
+        assert_eq!(
+            picked.request_ids.len(),
+            2,
+            "Expected both withdrawal requests to be batched at capacity, \
+             but got {} request(s)",
+            picked.request_ids.len(),
+        );
+
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_n_withdrawal_confirmations(
+            &mut networks.sui_network.client,
+            1,
+            Duration::from_secs(90),
+        )
+        .await?;
+        drop(miner);
+
+        info!("=== Batch Withdrawal Fires At Capacity Test Passed ===");
         Ok(())
     }
 

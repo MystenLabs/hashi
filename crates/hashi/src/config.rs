@@ -145,6 +145,22 @@ pub struct Config {
     /// Maximum number of tasks to process concurrently for a leader job such as processing deposit requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_leader_job_tasks: Option<usize>,
+
+    /// Minimum time (ms) the leader waits after the oldest approved withdrawal
+    /// request was submitted before committing a batch. The batch fires earlier
+    /// if it reaches `withdrawal_max_batch_size`.
+    ///
+    /// Defaults to 300,000 ms (5 minutes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_batching_delay_ms: Option<u64>,
+
+    /// Maximum number of withdrawal requests to include in a single Bitcoin
+    /// transaction. The batch commits immediately once this many requests are
+    /// ready, without waiting for `withdrawal_batching_delay_ms` to elapse.
+    ///
+    /// Defaults to 50 (the algorithm's hard upper bound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_max_batch_size: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -321,6 +337,15 @@ impl Config {
 
     pub fn max_concurrent_leader_job_tasks(&self) -> usize {
         self.max_concurrent_leader_job_tasks.unwrap_or(32)
+    }
+
+    pub fn withdrawal_batching_delay_ms(&self) -> u64 {
+        self.withdrawal_batching_delay_ms.unwrap_or(300_000)
+    }
+
+    pub fn withdrawal_max_batch_size(&self) -> usize {
+        self.withdrawal_max_batch_size
+            .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MAX_WITHDRAWAL_REQUESTS)
     }
 
     // Creates a new config suitable for testing. In particular this config will:

@@ -738,8 +738,27 @@ impl LeaderService {
             .collect();
 
         if !batch.is_empty() {
-            self.process_approved_withdrawal_request_batch(&batch, checkpoint_timestamp_ms)
-                .await;
+            let max_batch = self.inner.config.withdrawal_max_batch_size();
+            let delay_ms = self.inner.config.withdrawal_batching_delay_ms();
+
+            let batch_is_full = batch.len() >= max_batch;
+            let oldest_has_waited = batch
+                .first()
+                .is_some_and(|r| checkpoint_timestamp_ms >= r.timestamp_ms + delay_ms);
+
+            if batch_is_full || oldest_has_waited {
+                self.process_approved_withdrawal_request_batch(&batch, checkpoint_timestamp_ms)
+                    .await;
+            } else {
+                debug!(
+                    "Holding {} approved request(s): oldest is {}ms old, \
+                     waiting for {}ms delay or {} requests",
+                    batch.len(),
+                    checkpoint_timestamp_ms.saturating_sub(batch[0].timestamp_ms),
+                    delay_ms,
+                    max_batch,
+                );
+            }
         }
 
         self.inner
