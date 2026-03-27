@@ -51,7 +51,7 @@ const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 const WITHDRAWAL_FEE_CONF_TARGET: u16 = 3;
 
 /// Fee rate tolerance multiplier for validation.
-const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
+const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 
 /// Long-term fee rate (10 sat/vB). Used for the waste metric when evaluating
 /// whether to create a change output vs. paying a slightly higher fee.
