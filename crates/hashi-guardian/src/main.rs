@@ -364,20 +364,23 @@ impl EnclaveState {
         }
     }
 
-    pub fn consume_from_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+    fn with_rate_limiter_mut<R>(
+        &self,
+        f: impl FnOnce(&mut RateLimiter) -> GuardianResult<R>,
+    ) -> GuardianResult<R> {
         let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
         let limiter = guard
             .as_mut()
             .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
-        limiter.consume(epoch, amount)
+        f(limiter)
+    }
+
+    pub fn consume_from_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
+        self.with_rate_limiter_mut(|limiter| limiter.consume(epoch, amount))
     }
 
     pub fn revert_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
-        let limiter = guard
-            .as_mut()
-            .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
-        limiter.revert(epoch, amount)
+        self.with_rate_limiter_mut(|limiter| limiter.revert(epoch, amount))
     }
 }
 
