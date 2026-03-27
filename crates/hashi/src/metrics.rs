@@ -52,8 +52,8 @@ pub struct Metrics {
     deposit_queue_size: IntGauge,
     withdrawal_queue_size: IntGaugeVec,
     withdrawal_queue_value: IntGaugeVec,
-    utxo_pool_size: IntGauge,
-    utxo_pool_value: IntGauge,
+    utxo_pool_size: IntGaugeVec,
+    utxo_pool_value: IntGaugeVec,
     proposals: IntGaugeVec,
     num_consumed_presigs: IntGauge,
     treasury_supply: IntGaugeVec,
@@ -229,15 +229,17 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            utxo_pool_size: register_int_gauge_with_registry!(
+            utxo_pool_size: register_int_gauge_vec_with_registry!(
                 "hashi_utxo_pool_size",
-                "number of active utxos",
+                "number of UTXOs in the pool by status",
+                &["status"],
                 registry,
             )
             .unwrap(),
-            utxo_pool_value: register_int_gauge_with_registry!(
+            utxo_pool_value: register_int_gauge_vec_with_registry!(
                 "hashi_utxo_pool_value",
-                "total value of active utxos in satoshis",
+                "value of UTXOs in the pool in satoshis by status",
+                &["status"],
                 registry,
             )
             .unwrap(),
@@ -403,10 +405,51 @@ impl Metrics {
                     .map(|r| r.btc_amount)
                     .sum::<u64>() as i64,
             );
-        let utxo_records = hashi.utxo_pool.utxo_records();
-        self.utxo_pool_size.set(utxo_records.len() as i64);
+        // Track three views of utxo_records:
+        // - available:         all selectable UTXOs (locked_by = None), whether
+        //                      confirmed or not; this is the coin-selection pool
+        // - unconfirmed_change: subset of available whose producing withdrawal
+        //                      has not yet confirmed on Bitcoin (produced_by =
+        //                      Some); useful for gauging mempool chain depth
+        // - locked:            committed to a pending withdrawal, awaiting
+        //                      Bitcoin confirmation (locked_by = Some)
+        let mut available_count = 0i64;
+        let mut unconfirmed_change_count = 0i64;
+        let mut locked_count = 0i64;
+        let mut available_value = 0u64;
+        let mut unconfirmed_change_value = 0u64;
+        let mut locked_value = 0u64;
+        for record in hashi.utxo_pool.utxo_records().values() {
+            if record.locked_by.is_some() {
+                locked_count += 1;
+                locked_value += record.utxo.amount;
+            } else {
+                available_count += 1;
+                available_value += record.utxo.amount;
+                if record.produced_by.is_some() {
+                    unconfirmed_change_count += 1;
+                    unconfirmed_change_value += record.utxo.amount;
+                }
+            }
+        }
+        self.utxo_pool_size
+            .with_label_values(&["available"])
+            .set(available_count);
+        self.utxo_pool_size
+            .with_label_values(&["unconfirmed_change"])
+            .set(unconfirmed_change_count);
+        self.utxo_pool_size
+            .with_label_values(&["locked"])
+            .set(locked_count);
         self.utxo_pool_value
-            .set(utxo_records.values().map(|r| r.utxo.amount).sum::<u64>() as i64);
+            .with_label_values(&["available"])
+            .set(available_value as i64);
+        self.utxo_pool_value
+            .with_label_values(&["unconfirmed_change"])
+            .set(unconfirmed_change_value as i64);
+        self.utxo_pool_value
+            .with_label_values(&["locked"])
+            .set(locked_value as i64);
         {
             use crate::onchain::types::ProposalType;
             let mut counts = std::collections::HashMap::<&str, i64>::new();
