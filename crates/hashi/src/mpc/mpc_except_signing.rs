@@ -108,6 +108,8 @@ pub struct MpcManager {
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_nonce_outputs: BTreeMap<Address, batch_avss::ReceiverOutput>,
+    /// Test-only: corrupt shares for this target address during dealing.
+    test_corrupt_shares_for: Option<Address>,
 }
 
 impl MpcManager {
@@ -123,6 +125,7 @@ impl MpcManager {
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
+        test_corrupt_shares_for: Option<Address>,
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
             assert!(
@@ -224,6 +227,7 @@ impl MpcManager {
             previous_output: None,
             batch_size_per_weight,
             dealer_nonce_outputs: BTreeMap::new(),
+            test_corrupt_shares_for,
         };
         manager.load_stored_messages()?;
         Ok(manager)
@@ -789,6 +793,10 @@ impl MpcManager {
                 .await?
             };
             if has_complaint {
+                tracing::info!(
+                    "DKG complaint detected for dealer {:?}, recovering via Complain RPC",
+                    dealer
+                );
                 let signers = {
                     let mgr = mpc_manager.read().unwrap();
                     dkg_cert
@@ -1229,9 +1237,10 @@ impl MpcManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> avss::Message {
         let dealer_session_id = self.session_id.dealer_session_id(&self.address);
+        let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
         let dealer = avss::Dealer::new(
             None,
-            self.dkg_config.nodes.clone(),
+            nodes,
             self.dkg_config.threshold,
             self.dkg_config.max_faulty,
             dealer_session_id.to_vec(),
@@ -2975,6 +2984,25 @@ impl MpcManager {
 
     fn required_nonce_weight(&self) -> u32 {
         2 * self.dkg_config.max_faulty as u32 + 1
+    }
+
+    fn maybe_corrupt_nodes_for_testing(
+        &self,
+        nodes: &Nodes<EncryptionGroupElement>,
+    ) -> Nodes<EncryptionGroupElement> {
+        if let Some(target) = self.test_corrupt_shares_for
+            && let Some(party_id) = self.committee.index_of(&target)
+        {
+            let mut node_list: Vec<Node<EncryptionGroupElement>> = nodes.iter().cloned().collect();
+            let random_key = PrivateKey::new(&mut rand::thread_rng());
+            node_list[party_id].pk = PublicKey::from_private_key(&random_key);
+            tracing::info!(
+                "Test: corrupted encryption key for party {party_id} ({})",
+                target
+            );
+            return Nodes::new(node_list).unwrap();
+        }
+        nodes.clone()
     }
 }
 
