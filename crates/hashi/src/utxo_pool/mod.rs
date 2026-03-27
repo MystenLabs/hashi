@@ -52,7 +52,7 @@ const DUST_RELAY_MIN_VALUE: u64 = 546;
 /// Minimum value (sat) for a P2TR (or P2WSH) output to be above the dust
 /// relay threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
 /// Outputs below this value will not be relayed by default Bitcoin nodes.
-const TR_DUST_RELAY_MIN_VALUE: u64 = 330;
+pub const TR_DUST_RELAY_MIN_VALUE: u64 = 330;
 
 /// Minimum value (sat) for a P2WPKH output to be above the dust relay
 /// threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
