@@ -170,6 +170,11 @@ pub struct Config {
     /// Defaults to 5.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_mempool_chain_depth: Option<usize>,
+
+    /// Test-only: corrupt AVSS shares sent to this address, triggering the
+    /// complaint recovery flow. Must not be set on mainnet or testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_corrupt_shares_for: Option<Address>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
