@@ -169,6 +169,16 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_withdrawal_batching_delay_ms(mut self, ms: u64) -> Self {
+        self.hashi_builder = self.hashi_builder.with_withdrawal_batching_delay_ms(ms);
+        self
+    }
+
+    pub fn with_withdrawal_max_batch_size(mut self, size: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_withdrawal_max_batch_size(size);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")
