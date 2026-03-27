@@ -267,6 +267,7 @@ impl TestSetup {
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
+            None, // test_corrupt_shares_for
         )
         .unwrap()
     }
@@ -879,6 +880,7 @@ fn test_mpc_manager_new_from_committee_set() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .expect("Should create manager from CommitteeSet");
 
@@ -941,6 +943,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     );
 
     let err = match result {
@@ -5756,6 +5759,7 @@ async fn test_prepare_previous_output_for_new_member() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
@@ -6875,6 +6879,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
@@ -7034,6 +7039,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
@@ -7111,6 +7117,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
+            None, // test_corrupt_shares_for
         )
         .unwrap();
         dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
@@ -7141,6 +7148,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
+            None, // test_corrupt_shares_for
         )
         .unwrap();
         other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
@@ -7227,6 +7235,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
