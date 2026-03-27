@@ -283,8 +283,7 @@ impl EnclaveState {
     // Initialization Status
     // ========================================================================
 
-    /// Check if state init is complete
-    pub fn is_provisioner_init_complete(&self) -> bool {
+    fn status_check_inner(&self) -> (bool, bool) {
         let committee_init = self
             .committee
             .read()
@@ -297,23 +296,18 @@ impl EnclaveState {
             .expect("mutex lock should not fail")
             .is_some();
 
+        (committee_init, limiter_init)
+    }
+
+    /// Check if state init is complete
+    pub fn is_provisioner_init_complete(&self) -> bool {
+        let (committee_init, limiter_init) = self.status_check_inner();
         committee_init && limiter_init
     }
 
     /// Check if any state has been set
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        let committee_init = self
-            .committee
-            .read()
-            .expect("rwlock read should not fail")
-            .is_some();
-
-        let limiter_init = self
-            .rate_limiter
-            .lock()
-            .expect("mutex lock should not fail")
-            .is_some();
-
+        let (committee_init, limiter_init) = self.status_check_inner();
         committee_init || limiter_init
     }
 
