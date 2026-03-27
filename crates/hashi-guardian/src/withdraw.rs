@@ -206,7 +206,6 @@ mod tests {
     use hashi_types::guardian::WithdrawalState;
     use std::num::NonZeroU16;
 
-
     /// Sets up an enclave with a one-epoch window and provided committee, rate limits.
     async fn setup_fully_initialized_enclave(
         network: Network,
