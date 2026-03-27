@@ -23,7 +23,6 @@ use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::TapLeafHash;
-use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::hash::Blake2b256;
@@ -512,7 +511,7 @@ impl Hashi {
         }
         let p2p_channel = RpcP2PChannel::new(onchain_state, epoch);
         let signing_manager = self.signing_manager();
-        let beacon = S::zero();
+        let beacon = S::from_bytes_mod_order(&pending.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &pending.inputs)?;
         let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
         for (input_index, message) in signing_messages.iter().enumerate() {
