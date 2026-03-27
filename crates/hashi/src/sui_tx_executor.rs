@@ -337,30 +337,20 @@ impl SuiTxExecutor {
             vec![utxo_id_arg, amount_arg, derivation_path_arg],
         );
 
-        // 3. Create DepositRequest: deposit_queue::deposit_request(utxo, clock)
-        let deposit_request_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("deposit_queue"),
-                Identifier::from_static("deposit_request"),
-            ),
-            vec![utxo_arg, clock_arg],
-        );
-
-        // 4. Split zero SUI for fee coin
+        // 3. Split zero SUI for fee coin
         let zero_arg = builder.pure(&0u64);
         let gas_arg = builder.gas();
         let fee_coins = builder.split_coins(gas_arg, vec![zero_arg]);
         let fee_coin_arg = fee_coins.into_iter().next().unwrap();
 
-        // 5. Call deposit(hashi, request, fee)
+        // 4. Call deposit(hashi, utxo, fee, clock)
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("deposit"),
             ),
-            vec![hashi_arg, deposit_request_arg, fee_coin_arg],
+            vec![hashi_arg, utxo_arg, fee_coin_arg, clock_arg],
         );
 
         let response = self.execute(builder).await?;

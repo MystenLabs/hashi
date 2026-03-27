@@ -24,7 +24,9 @@ use crate::onchain::scrape_member_info;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
+use crate::onchain::types::WithdrawalBalance;
 use crate::onchain::types::WithdrawalRequest;
+use crate::onchain::types::WithdrawalStatus;
 use hashi_types::move_types::HashiEvent;
 
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
@@ -266,41 +268,72 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::WithdrawalRequestedEvent(withdrawal_requested_event) => {
                 tracing::info!(withdrawal_request_id = %withdrawal_requested_event.request_id, "Withdrawal request detected");
+                let id = withdrawal_requested_event.request_id;
                 let withdrawal_request = WithdrawalRequest {
-                    id: withdrawal_requested_event.request_id,
+                    id,
+                    sender: withdrawal_requested_event.requester_address,
                     btc_amount: withdrawal_requested_event.btc_amount,
                     bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
                     timestamp_ms: withdrawal_requested_event.timestamp_ms,
-                    requester_address: withdrawal_requested_event.requester_address,
-                    sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
+                    status: WithdrawalStatus::Requested,
+                    pending_withdrawal_id: None,
+                    sui_tx_digest: withdrawal_requested_event
+                        .sui_tx_digest
+                        .into_inner()
+                        .to_vec(),
+                };
+                let withdrawal_balance = WithdrawalBalance {
+                    id,
+                    btc: withdrawal_requested_event.btc_amount,
                     approved: false,
                 };
+                let mut state = state.state_mut();
                 state
-                    .state_mut()
                     .hashi
                     .withdrawal_queue
                     .requests
-                    .insert(withdrawal_request.id, withdrawal_request);
+                    .insert(id, withdrawal_request);
+                state
+                    .hashi
+                    .withdrawal_queue
+                    .balances
+                    .insert(id, withdrawal_balance);
             }
             HashiEvent::WithdrawalApprovedEvent(event) => {
                 tracing::info!(withdrawal_request_id = %event.request_id, "Withdrawal approved");
+                let mut state = state.state_mut();
                 if let Some(request) = state
-                    .state_mut()
                     .hashi
                     .withdrawal_queue
                     .requests
                     .get_mut(&event.request_id)
                 {
-                    request.approved = true;
+                    request.status = WithdrawalStatus::Approved;
+                }
+                if let Some(balance) = state
+                    .hashi
+                    .withdrawal_queue
+                    .balances
+                    .get_mut(&event.request_id)
+                {
+                    balance.approved = true;
                 }
             }
             HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
                 tracing::info!(pending_withdrawal_id = %event.pending_id, "Withdrawal picked for processing");
-                // Remove requests from the queue
+                // Remove balances and update request statuses
                 {
                     let mut state = state.state_mut();
                     for request_id in &event.request_ids {
-                        state.hashi.withdrawal_queue.requests.remove(request_id);
+                        state.hashi.withdrawal_queue.balances.remove(request_id);
+                        if let Some(request) =
+                            state.hashi.withdrawal_queue.requests.get_mut(request_id)
+                        {
+                            request.status = WithdrawalStatus::Processing {
+                                pending_withdrawal_id: event.pending_id,
+                            };
+                            request.pending_withdrawal_id = Some(event.pending_id);
+                        }
                     }
                 }
 
@@ -344,6 +377,16 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .get_mut(&event.withdrawal_id)
                 {
                     pending.signatures = Some(event.signatures.clone());
+                    // Update request statuses to Signed
+                    for request_id in &pending.request_ids.clone() {
+                        if let Some(request) =
+                            state.hashi.withdrawal_queue.requests.get_mut(request_id)
+                        {
+                            request.status = WithdrawalStatus::Signed {
+                                pending_withdrawal_id: event.withdrawal_id,
+                            };
+                        }
+                    }
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
@@ -361,6 +404,25 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         derivation_path: None,
                     };
                     state.hashi.utxo_pool.active_utxos.insert(utxo_id, utxo);
+                }
+
+                // Update request statuses to Confirmed before removing the pending withdrawal
+                if let Some(pending) = state
+                    .hashi
+                    .withdrawal_queue
+                    .pending_withdrawals
+                    .get(&event.pending_id)
+                {
+                    let request_ids = pending.request_ids.clone();
+                    for request_id in &request_ids {
+                        if let Some(request) =
+                            state.hashi.withdrawal_queue.requests.get_mut(request_id)
+                        {
+                            request.status = WithdrawalStatus::Confirmed {
+                                txid: event.pending_id,
+                            };
+                        }
+                    }
                 }
 
                 state

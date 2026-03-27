@@ -128,10 +128,11 @@ impl Hashi {
                     approval.request_id
                 ))
             })?;
-        if request.approved {
+        if request.status != crate::onchain::types::WithdrawalStatus::Requested {
             return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
-                "Withdrawal request {} is already approved",
-                approval.request_id
+                "Withdrawal request {} is not in Requested status (current: {:?})",
+                approval.request_id,
+                request.status
             )));
         }
 
@@ -185,8 +186,9 @@ impl Hashi {
                     .withdrawal_request(id)
                     .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
                 anyhow::ensure!(
-                    request.approved,
-                    "Withdrawal request {id} has not been approved"
+                    request.status == crate::onchain::types::WithdrawalStatus::Approved,
+                    "Withdrawal request {id} is not in Approved status (current: {:?})",
+                    request.status
                 );
                 Ok(request)
             })
@@ -376,7 +378,7 @@ impl Hashi {
         );
 
         anyhow::ensure!(
-            message.request_ids == pending.request_ids(),
+            message.request_ids == *pending.request_ids(),
             "Request IDs mismatch for PendingWithdrawal {}",
             message.withdrawal_id
         );
@@ -847,7 +849,10 @@ impl Hashi {
         };
 
         // Source: Sui tx digest (base58 string)
-        let source_tx_hash = request.sui_tx_digest.to_string();
+        let digest_bytes: [u8; 32] = request.sui_tx_digest.as_slice().try_into().map_err(|_| {
+            WithdrawalApprovalError::NeverRetry(anyhow!("sui_tx_digest must be 32 bytes"))
+        })?;
+        let source_tx_hash = sui_sdk_types::Digest::new(digest_bytes).to_string();
 
         // Destination: Bitcoin address (raw witness bytes -> bech32 string)
         let destination_address = self

@@ -357,11 +357,12 @@ impl Metrics {
         self.paused.set(if hashi.config.paused() { 1 } else { 0 });
         self.deposit_queue_size
             .set(hashi.deposit_queue.requests().len() as i64);
-        let (requested, approved) = hashi
+        use crate::onchain::types::WithdrawalStatus;
+        let (requested, approved): (Vec<_>, Vec<_>) = hashi
             .withdrawal_queue
             .requests()
             .values()
-            .partition::<Vec<_>, _>(|r| !r.approved);
+            .partition(|r| r.status == WithdrawalStatus::Requested);
         let (signed, pending): (Vec<_>, Vec<_>) = hashi
             .withdrawal_queue
             .pending_withdrawals()
@@ -387,7 +388,8 @@ impl Metrics {
             .set(
                 pending
                     .iter()
-                    .flat_map(|w| &w.requests)
+                    .flat_map(|w| &w.request_ids)
+                    .filter_map(|id| hashi.withdrawal_queue.requests().get(id))
                     .map(|r| r.btc_amount)
                     .sum::<u64>() as i64,
             );
@@ -399,7 +401,8 @@ impl Metrics {
             .set(
                 signed
                     .iter()
-                    .flat_map(|w| &w.requests)
+                    .flat_map(|w| &w.request_ids)
+                    .filter_map(|id| hashi.withdrawal_queue.requests().get(id))
                     .map(|r| r.btc_amount)
                     .sum::<u64>() as i64,
             );

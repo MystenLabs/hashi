@@ -224,33 +224,51 @@ pub struct Coin {
 /// Rust version of the Move hashi::deposit_queue::DepositRequestQueue type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequestQueue {
+    /// Persistent status records (never deleted)
     pub requests: Bag,
+    /// Operational deposit data awaiting confirmation
+    pub pending: Bag,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestQueue type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalRequestQueue {
     pub requests: Bag,
+    pub balances: Bag,
     pub pending_withdrawals: Bag,
 }
 
-/// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalRequest {
-    pub info: WithdrawalRequestInfo,
-    pub btc: u64,
-    pub approved: bool,
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalStatus enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub enum WithdrawalStatus {
+    Requested,
+    Approved,
+    Processing { pending_withdrawal_id: Address },
+    Signed { pending_withdrawal_id: Address },
+    Confirmed { txid: Address },
+    Cancelled,
 }
 
-/// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestInfo type.
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
+/// Persistent status record, keyed by request_id in the `requests` bag.
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalRequestInfo {
-    pub id: Address,
+pub struct WithdrawalRequest {
+    pub sender: Address,
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
-    pub requester_address: Address,
-    pub sui_tx_digest: Digest,
+    pub status: WithdrawalStatus,
+    pub pending_withdrawal_id: Option<Address>,
+    pub sui_tx_digest: Vec<u8>,
+}
+
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalBalance type.
+/// Operational BTC balance held during the withdrawal lifecycle.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalBalance {
+    pub id: Address,
+    pub btc: u64, // Balance<BTC> deserializes as just the u64 value
+    pub approved: bool,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
@@ -258,7 +276,7 @@ pub struct WithdrawalRequestInfo {
 pub struct PendingWithdrawal {
     pub id: Address,
     pub txid: Address,
-    pub requests: Vec<WithdrawalRequestInfo>,
+    pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
     pub change_output: Option<OutputUtxo>,

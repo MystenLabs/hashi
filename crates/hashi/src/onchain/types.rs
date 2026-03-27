@@ -559,6 +559,8 @@ impl DepositRequestQueue {
 pub struct WithdrawalRequestQueue {
     pub(super) requests_id: Address,
     pub(super) requests: BTreeMap<Address, WithdrawalRequest>,
+    pub(super) balances_id: Address,
+    pub(super) balances: BTreeMap<Address, WithdrawalBalance>,
     pub(super) pending_withdrawals_id: Address,
     pub(super) pending_withdrawals: BTreeMap<Address, PendingWithdrawal>,
 }
@@ -572,6 +574,14 @@ impl WithdrawalRequestQueue {
         &self.requests
     }
 
+    pub fn balances_id(&self) -> &Address {
+        &self.balances_id
+    }
+
+    pub fn balances(&self) -> &BTreeMap<Address, WithdrawalBalance> {
+        &self.balances
+    }
+
     pub fn pending_withdrawals_id(&self) -> &Address {
         &self.pending_withdrawals_id
     }
@@ -582,31 +592,39 @@ impl WithdrawalRequestQueue {
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct WithdrawalRequest {
-    pub id: Address,
-    pub btc_amount: u64,
-    pub bitcoin_address: Vec<u8>,
-    pub timestamp_ms: u64,
-    pub requester_address: Address,
-    pub sui_tx_digest: Digest,
-    pub approved: bool,
+pub enum WithdrawalStatus {
+    Requested,
+    Approved,
+    Processing { pending_withdrawal_id: Address },
+    Signed { pending_withdrawal_id: Address },
+    Confirmed { txid: Address },
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct WithdrawalRequestInfo {
+pub struct WithdrawalRequest {
     pub id: Address,
+    pub sender: Address,
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
-    pub requester_address: Address,
-    pub sui_tx_digest: Digest,
+    pub status: WithdrawalStatus,
+    pub pending_withdrawal_id: Option<Address>,
+    pub sui_tx_digest: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+pub struct WithdrawalBalance {
+    pub id: Address,
+    pub btc: u64,
+    pub approved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
 pub struct PendingWithdrawal {
     pub id: Address,
     pub txid: Address,
-    pub requests: Vec<WithdrawalRequestInfo>,
+    pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
     pub change_output: Option<OutputUtxo>,
@@ -618,8 +636,8 @@ pub struct PendingWithdrawal {
 }
 
 impl PendingWithdrawal {
-    pub fn request_ids(&self) -> Vec<Address> {
-        self.requests.iter().map(|r| r.id).collect()
+    pub fn request_ids(&self) -> &Vec<Address> {
+        &self.request_ids
     }
 
     pub fn all_outputs(&self) -> Vec<OutputUtxo> {

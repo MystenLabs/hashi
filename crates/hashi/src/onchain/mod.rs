@@ -637,7 +637,7 @@ async fn scrape_hashi(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
-        scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue.requests.id),
+        scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue.pending.id),
         scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
         scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
         scrape_proposals(client.clone(), proposals),
@@ -1025,14 +1025,17 @@ async fn scrape_withdrawal_queue(
     client: Client,
     withdrawal_queue: move_types::WithdrawalRequestQueue,
 ) -> Result<types::WithdrawalRequestQueue> {
-    let (requests, pending_withdrawals) = tokio::try_join!(
+    let (requests, balances, pending_withdrawals) = tokio::try_join!(
         scrape_withdrawal_requests(client.clone(), withdrawal_queue.requests.id),
+        scrape_withdrawal_balances(client.clone(), withdrawal_queue.balances.id),
         scrape_pending_withdrawals(client.clone(), withdrawal_queue.pending_withdrawals.id),
     )?;
 
     Ok(types::WithdrawalRequestQueue {
         requests_id: withdrawal_queue.requests.id,
         requests,
+        balances_id: withdrawal_queue.balances.id,
+        balances,
         pending_withdrawals_id: withdrawal_queue.pending_withdrawals.id,
         pending_withdrawals,
     })
@@ -1053,23 +1056,28 @@ async fn scrape_withdrawal_requests(
                 ])),
         )
         .and_then(|field| async move {
+            let id: Address = field
+                .name()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
             let withdrawal_request: move_types::WithdrawalRequest = field
                 .value()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok(withdrawal_request)
+            Ok((id, withdrawal_request))
         })
-        .map_ok(|move_types::WithdrawalRequest { info, approved, .. }| {
+        .map_ok(|(id, req)| {
             (
-                info.id,
+                id,
                 types::WithdrawalRequest {
-                    id: info.id,
-                    btc_amount: info.btc_amount,
-                    bitcoin_address: info.bitcoin_address,
-                    timestamp_ms: info.timestamp_ms,
-                    requester_address: info.requester_address,
-                    sui_tx_digest: info.sui_tx_digest,
-                    approved,
+                    id,
+                    sender: req.sender,
+                    btc_amount: req.btc_amount,
+                    bitcoin_address: req.bitcoin_address,
+                    timestamp_ms: req.timestamp_ms,
+                    status: convert_move_withdrawal_status(req.status),
+                    pending_withdrawal_id: req.pending_withdrawal_id,
+                    sui_tx_digest: req.sui_tx_digest,
                 },
             )
         })
@@ -1077,6 +1085,43 @@ async fn scrape_withdrawal_requests(
         .await?;
 
     Ok(requests)
+}
+
+async fn scrape_withdrawal_balances(
+    client: Client,
+    balances_id: Address,
+) -> Result<BTreeMap<Address, types::WithdrawalBalance>> {
+    let balances: BTreeMap<Address, types::WithdrawalBalance> = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(balances_id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ])),
+        )
+        .and_then(|field| async move {
+            let balance: move_types::WithdrawalBalance = field
+                .value()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok(balance)
+        })
+        .map_ok(|balance| {
+            (
+                balance.id,
+                types::WithdrawalBalance {
+                    id: balance.id,
+                    btc: balance.btc,
+                    approved: balance.approved,
+                },
+            )
+        })
+        .try_collect()
+        .await?;
+
+    Ok(balances)
 }
 
 async fn scrape_pending_withdrawals(
@@ -1104,7 +1149,7 @@ async fn scrape_pending_withdrawals(
             |move_types::PendingWithdrawal {
                  txid,
                  id,
-                 requests,
+                 request_ids,
                  inputs,
                  withdrawal_outputs,
                  change_output,
@@ -1114,10 +1159,6 @@ async fn scrape_pending_withdrawals(
                  presig_start_index,
                  epoch,
              }| {
-                let requests = requests
-                    .into_iter()
-                    .map(convert_move_withdrawal_request_info)
-                    .collect();
                 let inputs = inputs.into_iter().map(convert_move_utxo).collect();
                 let withdrawal_outputs = withdrawal_outputs
                     .into_iter()
@@ -1135,7 +1176,7 @@ async fn scrape_pending_withdrawals(
                     types::PendingWithdrawal {
                         id,
                         txid,
-                        requests,
+                        request_ids,
                         inputs,
                         withdrawal_outputs,
                         change_output,
@@ -1168,16 +1209,24 @@ fn convert_move_utxo(
     }
 }
 
-fn convert_move_withdrawal_request_info(
-    info: move_types::WithdrawalRequestInfo,
-) -> types::WithdrawalRequestInfo {
-    types::WithdrawalRequestInfo {
-        id: info.id,
-        btc_amount: info.btc_amount,
-        bitcoin_address: info.bitcoin_address,
-        timestamp_ms: info.timestamp_ms,
-        requester_address: info.requester_address,
-        sui_tx_digest: info.sui_tx_digest,
+fn convert_move_withdrawal_status(status: move_types::WithdrawalStatus) -> types::WithdrawalStatus {
+    match status {
+        move_types::WithdrawalStatus::Requested => types::WithdrawalStatus::Requested,
+        move_types::WithdrawalStatus::Approved => types::WithdrawalStatus::Approved,
+        move_types::WithdrawalStatus::Processing {
+            pending_withdrawal_id,
+        } => types::WithdrawalStatus::Processing {
+            pending_withdrawal_id,
+        },
+        move_types::WithdrawalStatus::Signed {
+            pending_withdrawal_id,
+        } => types::WithdrawalStatus::Signed {
+            pending_withdrawal_id,
+        },
+        move_types::WithdrawalStatus::Confirmed { txid } => {
+            types::WithdrawalStatus::Confirmed { txid }
+        }
+        move_types::WithdrawalStatus::Cancelled => types::WithdrawalStatus::Cancelled,
     }
 }
 
@@ -1185,7 +1234,7 @@ fn convert_move_pending_withdrawal(
     move_types::PendingWithdrawal {
         id,
         txid,
-        requests,
+        request_ids,
         inputs,
         withdrawal_outputs,
         change_output,
@@ -1203,10 +1252,7 @@ fn convert_move_pending_withdrawal(
     types::PendingWithdrawal {
         id,
         txid,
-        requests: requests
-            .into_iter()
-            .map(convert_move_withdrawal_request_info)
-            .collect(),
+        request_ids,
         inputs: inputs.into_iter().map(convert_move_utxo).collect(),
         withdrawal_outputs: withdrawal_outputs.into_iter().map(convert_output).collect(),
         change_output: change_output.map(convert_output),

@@ -140,7 +140,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         println!(
             "  {} {}",
             "Requester:".bold(),
-            display::format_address(&wr.requester_address)
+            display::format_address(&wr.sender)
         );
         println!(
             "  {} {}",
@@ -149,13 +149,14 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         );
         println!();
 
-        let status_label = if wr.approved {
+        let is_approved = wr.status == crate::onchain::types::WithdrawalStatus::Approved;
+        let status_label = if is_approved {
             "Approved".green()
         } else {
             "Requested".yellow()
         };
 
-        let step = if wr.approved { 2 } else { 1 };
+        let step = if is_approved { 2 } else { 1 };
         println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
         println!(
             "    {} Requested",
@@ -260,8 +261,8 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     serde_json::json!({
                         "request_id": wr.id.to_string(),
                         "amount_sats": wr.btc_amount,
-                        "status": if wr.approved { "approved" } else { "requested" },
-                        "caller": wr.requester_address.to_string(),
+                        "status": format!("{:?}", wr.status),
+                        "caller": wr.sender.to_string(),
                         "requested_ms": wr.timestamp_ms,
                     })
                 })
@@ -308,13 +309,13 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         "Requested".bold()
                     );
                     for wr in &requests {
-                        let status = if wr.approved { "Approved" } else { "Requested" };
+                        let status = format!("{:?}", wr.status);
                         println!(
                             "  {:<20} {:<14} {:<10} {:<20} {}",
                             display::format_address_full(&wr.id),
                             wr.btc_amount,
                             status,
-                            display::format_address_full(&wr.requester_address),
+                            display::format_address_full(&wr.sender),
                             display::format_timestamp(wr.timestamp_ms)
                         );
                     }

@@ -21,19 +21,21 @@ fun test_delete_deposit_request() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let mut clock = clock::create_for_testing(ctx);
 
-    // Create a UTXO and deposit request, insert into queue
+    // Create a deposit and insert into queue
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
-    let request = deposit_queue::deposit_request(utxo, &clock, ctx);
-    let request_id = request.id();
-    hashi.borrow_bitcoin_state_mut().deposit_queue_mut().insert(request);
+    let (pending, request, request_id) = deposit_queue::create_deposit(utxo, &clock, ctx);
+    hashi
+        .borrow_bitcoin_state_mut()
+        .deposit_queue_mut()
+        .insert_deposit(request_id, pending, request);
     assert!(hashi.borrow_bitcoin_state().deposit_queue().contains(request_id));
 
     // Advance clock past the expiration time (3 days + 1 ms)
     let three_days_ms = 1000 * 60 * 60 * 24 * 3;
     clock.set_for_testing(three_days_ms + 1);
 
-    // Delete the expired deposit request and verify it is no longer in the queue
+    // Delete the expired deposit request and verify it is no longer in the pending bag
     hashi.borrow_bitcoin_state_mut().deposit_queue_mut().delete_expired(request_id, &clock);
     assert!(!hashi.borrow_bitcoin_state().deposit_queue().contains(request_id));
 
@@ -50,12 +52,14 @@ fun test_delete_unexpired_deposit_request() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let mut clock = clock::create_for_testing(ctx);
 
-    // Create a UTXO and deposit request, insert into queue
+    // Create a deposit and insert into queue
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
-    let request = deposit_queue::deposit_request(utxo, &clock, ctx);
-    let request_id = request.id();
-    hashi.borrow_bitcoin_state_mut().deposit_queue_mut().insert(request);
+    let (pending, request, request_id) = deposit_queue::create_deposit(utxo, &clock, ctx);
+    hashi
+        .borrow_bitcoin_state_mut()
+        .deposit_queue_mut()
+        .insert_deposit(request_id, pending, request);
     assert!(hashi.borrow_bitcoin_state().deposit_queue().contains(request_id));
 
     // Advance clock by only 1 day (not enough to expire)
