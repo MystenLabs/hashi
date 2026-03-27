@@ -613,7 +613,6 @@ fn fee_for_weight(fee_rate: FeeRate, weight: Weight) -> u64 {
         .expect("fee computation overflow: fee rate or weight is unreasonably large")
 }
 
-
 /// Select UTXOs and plan a batched withdrawal transaction.
 ///
 /// Uses a `TransactionBuilder` to construct the transaction
@@ -811,11 +810,7 @@ pub fn select_coins(
             .collect(),
         change: builder.final_change,
         fee: miner_fee,
-        selected_requests: builder
-            .outputs
-            .iter()
-            .map(|o| o.request.clone())
-            .collect(),
+        selected_requests: builder.outputs.iter().map(|o| o.request.clone()).collect(),
     })
 }
 

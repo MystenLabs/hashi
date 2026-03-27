@@ -60,12 +60,7 @@ fn pending_utxo(n: u8, amount: u64) -> UtxoCandidate {
 
 /// Creates a pending UTXO with `depth` 0-confirmation ancestors.
 /// Each ancestor has weight 1000 WU and fee `fee_per_ancestor` sat.
-fn pending_utxo_deep(
-    n: u8,
-    amount: u64,
-    depth: usize,
-    fee_per_ancestor: u64,
-) -> UtxoCandidate {
+fn pending_utxo_deep(n: u8, amount: u64, depth: usize, fee_per_ancestor: u64) -> UtxoCandidate {
     let chain = (0..depth)
         .map(|_| AncestorTx {
             confirmations: 0,
@@ -83,11 +78,7 @@ fn pending_utxo_deep(
 
 /// Creates a pending UTXO whose ancestors have mixed confirmations.
 /// `ancestors` is a slice of (confirmations, weight_wu, fee) tuples.
-fn pending_utxo_mixed(
-    n: u8,
-    amount: u64,
-    ancestors: &[(u32, u64, u64)],
-) -> UtxoCandidate {
+fn pending_utxo_mixed(n: u8, amount: u64, ancestors: &[(u32, u64, u64)]) -> UtxoCandidate {
     let chain = ancestors
         .iter()
         .map(|&(confirmations, weight_wu, fee)| AncestorTx {
@@ -157,8 +148,7 @@ fn test_empty_pool() {
 #[test]
 fn test_no_requests() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
-    let result =
-        select_coins(&utxos, &[], &default_params(), default_fee_rate());
+    let result = select_coins(&utxos, &[], &default_params(), default_fee_rate());
     assert!(matches!(result, Err(CoinSelectionError::NoRequests)));
 }
 
@@ -170,8 +160,7 @@ fn test_zero_max_withdrawal_requests_returns_no_requests() {
         max_withdrawal_requests: 0,
         ..default_params()
     };
-    let result =
-        select_coins(&utxos, &requests, &params, default_fee_rate());
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
     assert!(matches!(result, Err(CoinSelectionError::NoRequests)));
 }
 
@@ -179,12 +168,7 @@ fn test_zero_max_withdrawal_requests_returns_no_requests() {
 fn test_insufficient_funds() {
     let utxos = vec![confirmed_utxo(1, 50_000)];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    );
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate());
     assert!(matches!(
         result,
         Err(CoinSelectionError::InsufficientFunds {
@@ -203,15 +187,11 @@ fn test_request_amount_too_small() {
         amount: 100, // far below any realistic fee + dust.
         timestamp_ms: 0,
     };
-    let result =
-        select_coins(&utxos, &[req], &default_params(), default_fee_rate());
+    let result = select_coins(&utxos, &[req], &default_params(), default_fee_rate());
     assert!(
         matches!(
             result,
-            Err(CoinSelectionError::RequestAmountTooSmall {
-                amount: 100,
-                ..
-            })
+            Err(CoinSelectionError::RequestAmountTooSmall { amount: 100, .. })
         ),
         "expected RequestAmountTooSmall, got {result:?}",
     );
@@ -227,8 +207,7 @@ fn test_fee_exceeds_cap() {
         max_fee_per_request: 1,
         ..default_params()
     };
-    let result =
-        select_coins(&utxos, &requests, &params, default_fee_rate());
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
     assert!(
         matches!(result, Err(CoinSelectionError::FeeExceedsCap { .. })),
         "expected FeeExceedsCap, got {result:?}",
@@ -241,13 +220,8 @@ fn test_fee_exceeds_cap() {
 fn test_single_request_basic() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert_eq!(result.inputs.len(), 1);
     assert_eq!(result.selected_requests.len(), 1);
@@ -265,13 +239,8 @@ fn test_multiple_requests_equal_fee_shares() {
         make_request(2, 200_000, 2000),
         make_request(3, 300_000, 3000),
     ];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert_eq!(result.selected_requests.len(), 3);
     assert_eq!(result.withdrawal_outputs.len(), 3);
@@ -294,13 +263,8 @@ fn test_multiple_requests_equal_fee_shares() {
 fn test_change_output_emitted_when_above_dust() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert!(result.change.is_some());
     assert!(result.change.unwrap() >= TR_DUST_RELAY_MIN_VALUE);
@@ -314,13 +278,8 @@ fn test_exact_match_no_change() {
     // Use a high fee rate to suppress consolidation so the exact
     // match is preserved.
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), high_fee).expect("should succeed");
 
     assert!(
         result.change.is_none(),
@@ -338,13 +297,8 @@ fn test_p2wpkh_recipient() {
         amount: 100_000,
         timestamp_ms: 0,
     };
-    let result = select_coins(
-        &utxos,
-        &[req],
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &[req], &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert_conservation(&result);
     assert_eq!(result.withdrawal_outputs[0].recipient.len(), 20);
@@ -352,13 +306,8 @@ fn test_p2wpkh_recipient() {
     // P2WPKH output is lighter (22-byte scriptPubKey vs 34-byte P2TR),
     // so the fee should be lower than an equivalent P2TR request.
     let p2tr_req = make_request(1, 100_000, 0);
-    let p2tr_result = select_coins(
-        &utxos,
-        &[p2tr_req],
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("P2TR should succeed");
+    let p2tr_result = select_coins(&utxos, &[p2tr_req], &default_params(), default_fee_rate())
+        .expect("P2TR should succeed");
     assert!(
         result.fee <= p2tr_result.fee,
         "P2WPKH fee {} should be <= P2TR fee {}",
@@ -389,13 +338,8 @@ fn test_cpfp_pending_utxo_increases_fee() {
     let requests = vec![make_request(1, 100_000, 0)];
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
 
-    let pending_result = select_coins(
-        &[low_fee_ancestor],
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("pending should succeed");
+    let pending_result = select_coins(&[low_fee_ancestor], &requests, &default_params(), high_fee)
+        .expect("pending should succeed");
 
     let confirmed_result = select_coins(
         &[confirmed_utxo(1, 5_000_000)],
@@ -422,13 +366,8 @@ fn test_cpfp_confirmed_utxo_zero_deficit() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let requests = vec![make_request(1, 100_000, 0)];
 
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert!(result.fee > 0);
     assert_conservation(&result);
@@ -465,28 +404,15 @@ fn test_cpfp_multiple_pending_utxos_summed() {
     let requests = vec![make_request(1, 300_000, 0)];
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
 
-    let result = select_coins(
-        &[utxo1, utxo2],
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("should succeed with multiple pending inputs");
+    let result = select_coins(&[utxo1, utxo2], &requests, &default_params(), high_fee)
+        .expect("should succeed with multiple pending inputs");
 
     assert_eq!(result.inputs.len(), 2);
 
     // Fee should be higher than a comparable confirmed-only tx.
-    let confirmed_utxos = vec![
-        confirmed_utxo(1, 200_000),
-        confirmed_utxo(2, 200_000),
-    ];
-    let confirmed_result = select_coins(
-        &confirmed_utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("confirmed should succeed");
+    let confirmed_utxos = vec![confirmed_utxo(1, 200_000), confirmed_utxo(2, 200_000)];
+    let confirmed_result = select_coins(&confirmed_utxos, &requests, &default_params(), high_fee)
+        .expect("confirmed should succeed");
     assert!(
         result.fee >= confirmed_result.fee,
         "CPFP fee {} should be >= confirmed-only fee {}",
@@ -501,10 +427,7 @@ fn test_cpfp_multiple_pending_utxos_summed() {
 fn test_all_utxos_pending_no_consolidation() {
     // Every UTXO is pending. Consolidation should not add any extras
     // (only confirmed UTXOs are eligible for consolidation).
-    let utxos = vec![
-        pending_utxo(1, 500_000),
-        pending_utxo(2, 300_000),
-    ];
+    let utxos = vec![pending_utxo(1, 500_000), pending_utxo(2, 300_000)];
     let requests = vec![make_request(1, 100_000, 0)];
     // Low fee rate would normally trigger consolidation.
     let result = select_coins(
@@ -537,13 +460,8 @@ fn test_low_fee_consolidation_active_smallest_first() {
     let requests = vec![make_request(1, 200_000, 0)];
 
     let low_fee = FeeRate::from_sat_per_vb_unchecked(1);
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        low_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), low_fee).expect("should succeed");
 
     // Should consolidate extra confirmed UTXOs.
     assert!(
@@ -576,19 +494,12 @@ fn test_moderate_fee_limited_consolidation() {
     // Between long-term (10 sat/vb) and high (30 sat/vb):
     // max consolidation = input_budget * N / 2.
     // With default input_budget=10 and 1 request: 10 * 1 / 2 = 5.
-    let utxos: Vec<UtxoCandidate> = (0u8..30)
-        .map(|i| confirmed_utxo(i, 100_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..30).map(|i| confirmed_utxo(i, 100_000)).collect();
     let requests = vec![make_request(1, 50_000, 0)];
 
     let moderate_fee = FeeRate::from_sat_per_vb_unchecked(15);
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        moderate_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), moderate_fee).expect("should succeed");
 
     let min_inputs = 1usize;
     let extras = result.inputs.len() - min_inputs;
@@ -604,19 +515,12 @@ fn test_moderate_fee_limited_consolidation() {
 #[test]
 fn test_high_fee_no_consolidation() {
     // At or above high_fee_rate_threshold, no consolidation.
-    let utxos: Vec<UtxoCandidate> = (0u8..20)
-        .map(|i| confirmed_utxo(i, 100_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..20).map(|i| confirmed_utxo(i, 100_000)).collect();
     let requests = vec![make_request(1, 50_000, 0)];
 
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), high_fee).expect("should succeed");
 
     assert_eq!(
         result.inputs.len(),
@@ -639,13 +543,8 @@ fn test_no_consolidation_when_raw_change_zero() {
     let requests = vec![make_request(1, 100_000, 0)];
 
     let low_fee = FeeRate::from_sat_per_vb_unchecked(1);
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        low_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), low_fee).expect("should succeed");
 
     // select_coins only consolidates when raw_change > 0.
     assert_eq!(
@@ -668,13 +567,8 @@ fn test_consolidation_only_confirmed_utxos() {
     let requests = vec![make_request(1, 200_000, 0)];
 
     let low_fee = FeeRate::from_sat_per_vb_unchecked(1);
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        low_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), low_fee).expect("should succeed");
 
     // All extra inputs (beyond the first) must be confirmed.
     for input in &result.inputs {
@@ -697,13 +591,8 @@ fn test_utxo_at_max_mempool_chain_depth_eligible() {
     // A UTXO at exactly max_mempool_chain_depth should be eligible.
     let utxos = vec![pending_utxo_deep(1, 1_000_000, 5, 500)];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("UTXO at exactly max depth should be eligible");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("UTXO at exactly max depth should be eligible");
     assert_conservation(&result);
 }
 
@@ -712,12 +601,7 @@ fn test_utxo_exceeding_max_mempool_chain_depth_excluded() {
     // A UTXO one over the limit should be excluded.
     let utxos = vec![pending_utxo_deep(1, 1_000_000, 6, 500)];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    );
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate());
     assert!(matches!(
         result,
         Err(CoinSelectionError::InsufficientFunds { .. })
@@ -753,13 +637,8 @@ fn test_max_mempool_chain_depth_zero_excludes_all_pending() {
 fn test_sub_dust_change_padded_to_dust_threshold() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let requests = vec![make_request(1, 999_700, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert_eq!(
         result.change,
@@ -775,13 +654,8 @@ fn test_one_sat_change_padded_to_dust() {
     let requests = vec![make_request(1, 100_000, 0)];
     // Use high fee rate to suppress consolidation.
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), high_fee).expect("should succeed");
 
     assert_eq!(
         result.change,
@@ -799,23 +673,13 @@ fn test_dust_padding_cost_deducted_from_requests() {
     let requests = vec![make_request(1, 100_000, 0)];
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
 
-    let padded_result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("padded should succeed");
+    let padded_result = select_coins(&utxos, &requests, &default_params(), high_fee)
+        .expect("padded should succeed");
 
     // Compare with an exact match that has no dust padding.
     let exact_utxos = vec![confirmed_utxo(1, 100_000)];
-    let exact_result = select_coins(
-        &exact_utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("exact should succeed");
+    let exact_result = select_coins(&exact_utxos, &requests, &default_params(), high_fee)
+        .expect("exact should succeed");
 
     // The padded result's fee should be higher because it includes
     // dust padding cost (plus the additional weight for the change
@@ -844,13 +708,8 @@ fn test_oldest_requests_selected_first() {
         max_withdrawal_requests: 2,
         ..default_params()
     };
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &params,
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &params, default_fee_rate()).expect("should succeed");
 
     let timestamps: std::collections::BTreeSet<u64> = result
         .selected_requests
@@ -872,13 +731,8 @@ fn test_max_withdrawal_requests_respected() {
         max_withdrawal_requests: 3,
         ..default_params()
     };
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &params,
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &params, default_fee_rate()).expect("should succeed");
 
     assert_eq!(result.selected_requests.len(), 3);
     assert_conservation(&result);
@@ -890,13 +744,8 @@ fn test_max_withdrawal_requests_respected() {
 fn test_fee_rate_below_min_clamped_up() {
     let utxos = vec![confirmed_utxo(1, 2_000_000)];
     let requests = vec![make_request(1, 500_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        FeeRate::ZERO,
-    )
-    .expect("should succeed at zero fee rate (clamped to min)");
+    let result = select_coins(&utxos, &requests, &default_params(), FeeRate::ZERO)
+        .expect("should succeed at zero fee rate (clamped to min)");
 
     // Fee is nonzero because the rate is clamped to 1 sat/vb.
     assert!(result.fee > 0, "fee should be nonzero after clamping");
@@ -906,8 +755,7 @@ fn test_fee_rate_below_min_clamped_up() {
 // ── Property-based tests (test_strategy) ────────────────────────────────
 
 fn arb_confirmed_utxo() -> impl Strategy<Value = UtxoCandidate> {
-    (1u8..=200u8, 1_000u64..10_000_000u64)
-        .prop_map(|(id, amount)| confirmed_utxo(id, amount))
+    (1u8..=200u8, 1_000u64..10_000_000u64).prop_map(|(id, amount)| confirmed_utxo(id, amount))
 }
 
 fn arb_pending_utxo() -> impl Strategy<Value = UtxoCandidate> {
@@ -939,13 +787,14 @@ fn arb_utxo() -> impl Strategy<Value = UtxoCandidate> {
 }
 
 fn arb_withdrawal_request() -> impl Strategy<Value = WithdrawalRequest> {
-    (1u8..=200u8, 100_000u64..500_000u64, 0u64..1_000_000u64)
-        .prop_map(|(id, amount, ts)| WithdrawalRequest {
+    (1u8..=200u8, 100_000u64..500_000u64, 0u64..1_000_000u64).prop_map(|(id, amount, ts)| {
+        WithdrawalRequest {
             id: Address::new([id; 32]),
             recipient: p2tr_recipient(),
             amount,
             timestamp_ms: ts,
-        })
+        }
+    })
 }
 
 /// Fee rate strategy covering all three consolidation tiers:
@@ -960,18 +809,15 @@ use test_strategy::proptest;
 /// Conservation: sum(inputs) == sum(outputs) + change + fee.
 #[proptest]
 fn prop_conservation(
-    #[strategy(prop::collection::vec(arb_utxo(), 1..=15))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_utxo(), 1..=15))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
-    if let Ok(r) =
-        select_coins(&utxos, &requests, &default_params(), fee_rate)
-    {
+    if let Ok(r) = select_coins(&utxos, &requests, &default_params(), fee_rate) {
         let input_sum: u64 = r.inputs.iter().map(|u| u.amount).sum();
-        let recipient_sum: u64 =
-            r.withdrawal_outputs.iter().map(|o| o.amount).sum();
+        let recipient_sum: u64 = r.withdrawal_outputs.iter().map(|o| o.amount).sum();
         let change = r.change.unwrap_or(0);
         assert_eq!(
             input_sum,
@@ -984,15 +830,13 @@ fn prop_conservation(
 /// Fee shares are equal across all requests.
 #[proptest]
 fn prop_equal_fee_shares(
-    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 2..=10))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 2..=4))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 2..=10))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 2..=4))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
-    if let Ok(r) =
-        select_coins(&utxos, &requests, &default_params(), fee_rate)
-    {
+    if let Ok(r) = select_coins(&utxos, &requests, &default_params(), fee_rate) {
         let shares: Vec<u64> = r
             .selected_requests
             .iter()
@@ -1011,14 +855,13 @@ fn prop_equal_fee_shares(
 /// Change output, when present, is at or above the dust threshold.
 #[proptest]
 fn prop_change_above_dust(
-    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=10))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=10))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
-    if let Ok(r) =
-        select_coins(&utxos, &requests, &default_params(), fee_rate)
+    if let Ok(r) = select_coins(&utxos, &requests, &default_params(), fee_rate)
         && let Some(change) = r.change
     {
         assert!(
@@ -1032,18 +875,16 @@ fn prop_change_above_dust(
 /// Low fee rate consolidates at least as many inputs as high fee rate.
 #[proptest]
 fn prop_low_fee_consolidates_more_or_equal(
-    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 5..=15))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=2))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 5..=15))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=2))] requests: Vec<
+        WithdrawalRequest,
+    >,
 ) {
     let low = FeeRate::from_sat_per_vb_unchecked(1);
     let high = FeeRate::from_sat_per_vb_unchecked(30);
 
-    let low_r =
-        select_coins(&utxos, &requests, &default_params(), low);
-    let high_r =
-        select_coins(&utxos, &requests, &default_params(), high);
+    let low_r = select_coins(&utxos, &requests, &default_params(), low);
+    let high_r = select_coins(&utxos, &requests, &default_params(), high);
 
     if let (Ok(l), Ok(h)) = (low_r, high_r) {
         assert!(
@@ -1058,10 +899,10 @@ fn prop_low_fee_consolidates_more_or_equal(
 /// Fee per request never exceeds the configured cap.
 #[proptest]
 fn prop_fee_per_request_never_exceeds_cap(
-    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=15))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=15))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
     let params = default_params();
@@ -1085,18 +926,17 @@ fn prop_fee_per_request_never_exceeds_cap(
 /// All selected inputs pass the chain depth filter.
 #[proptest]
 fn prop_inputs_pass_chain_depth_filter(
-    #[strategy(prop::collection::vec(arb_utxo(), 1..=15))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=3))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_utxo(), 1..=15))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=3))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
     let params = default_params();
     if let Ok(r) = select_coins(&utxos, &requests, &params, fee_rate) {
         for input in &r.inputs {
             assert!(
-                input.status.mempool_chain_depth()
-                    <= params.max_mempool_chain_depth,
+                input.status.mempool_chain_depth() <= params.max_mempool_chain_depth,
                 "input exceeds max_mempool_chain_depth"
             );
         }
@@ -1107,19 +947,15 @@ fn prop_inputs_pass_chain_depth_filter(
 /// outputs cover their request amount after fee deduction.
 #[proptest]
 fn prop_outputs_cover_request_minus_fee(
-    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=10))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=10))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
-    if let Ok(r) =
-        select_coins(&utxos, &requests, &default_params(), fee_rate)
-    {
+    if let Ok(r) = select_coins(&utxos, &requests, &default_params(), fee_rate) {
         assert_eq!(r.selected_requests.len(), r.withdrawal_outputs.len());
-        for (req, out) in
-            r.selected_requests.iter().zip(&r.withdrawal_outputs)
-        {
+        for (req, out) in r.selected_requests.iter().zip(&r.withdrawal_outputs) {
             assert_eq!(req.id, out.request_id);
             assert!(out.amount <= req.amount, "output exceeds request amount");
             assert!(
@@ -1134,18 +970,15 @@ fn prop_outputs_cover_request_minus_fee(
 /// sum(inputs) >= sum(selected request amounts).
 #[proptest]
 fn prop_inputs_cover_request_amounts(
-    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=10))]
-    utxos: Vec<UtxoCandidate>,
-    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))]
-    requests: Vec<WithdrawalRequest>,
+    #[strategy(prop::collection::vec(arb_confirmed_utxo(), 1..=10))] utxos: Vec<UtxoCandidate>,
+    #[strategy(prop::collection::vec(arb_withdrawal_request(), 1..=5))] requests: Vec<
+        WithdrawalRequest,
+    >,
     #[strategy(arb_fee_rate())] fee_rate: FeeRate,
 ) {
-    if let Ok(r) =
-        select_coins(&utxos, &requests, &default_params(), fee_rate)
-    {
+    if let Ok(r) = select_coins(&utxos, &requests, &default_params(), fee_rate) {
         let input_sum: u64 = r.inputs.iter().map(|u| u.amount).sum();
-        let request_sum: u64 =
-            r.selected_requests.iter().map(|req| req.amount).sum();
+        let request_sum: u64 = r.selected_requests.iter().map(|req| req.amount).sum();
         assert!(
             input_sum >= request_sum,
             "inputs {input_sum} < requested {request_sum}"
@@ -1165,12 +998,7 @@ fn test_insufficient_funds_available_reflects_eligible_pool() {
         pending_utxo_deep(2, 200_000, 10, 500), // depth 10 > default 5
     ];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    );
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate());
     assert!(matches!(
         result,
         Err(CoinSelectionError::InsufficientFunds {
@@ -1197,20 +1025,10 @@ fn test_p2wpkh_change_address_dust_threshold() {
     };
     let p2tr_params = default_params();
 
-    let p2wpkh_result = select_coins(
-        &utxos,
-        &requests,
-        &p2wpkh_params,
-        default_fee_rate(),
-    )
-    .expect("P2WPKH should succeed");
-    let p2tr_result = select_coins(
-        &utxos,
-        &requests,
-        &p2tr_params,
-        default_fee_rate(),
-    )
-    .expect("P2TR should succeed");
+    let p2wpkh_result = select_coins(&utxos, &requests, &p2wpkh_params, default_fee_rate())
+        .expect("P2WPKH should succeed");
+    let p2tr_result = select_coins(&utxos, &requests, &p2tr_params, default_fee_rate())
+        .expect("P2TR should succeed");
 
     assert_eq!(
         p2wpkh_result.change,
@@ -1237,16 +1055,10 @@ fn test_fund_balance_decreases_by_exactly_request_amounts() {
         make_request(1, 300_000, 1000),
         make_request(2, 400_000, 2000),
     ];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
-    let total_selected: u64 =
-        result.selected_requests.iter().map(|r| r.amount).sum();
+    let total_selected: u64 = result.selected_requests.iter().map(|r| r.amount).sum();
     let input_sum: u64 = result.inputs.iter().map(|u| u.amount).sum();
     let change = result.change.unwrap_or(0);
 
@@ -1267,13 +1079,8 @@ fn test_largest_first_input_selection() {
         confirmed_utxo(3, 200_000),
     ];
     let requests = vec![make_request(1, 150_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     // The 500k UTXO (largest) should be selected first.
     assert_eq!(result.inputs[0].amount, 500_000);
@@ -1282,17 +1089,10 @@ fn test_largest_first_input_selection() {
 
 #[test]
 fn test_multiple_inputs_needed_largest_first() {
-    let utxos: Vec<UtxoCandidate> = (0u8..10)
-        .map(|i| confirmed_utxo(i, 50_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..10).map(|i| confirmed_utxo(i, 50_000)).collect();
     let requests = vec![make_request(1, 300_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     assert!(
         result.inputs.len() >= 6,
@@ -1306,19 +1106,11 @@ fn test_deterministic_tiebreak_by_id() {
     // Two UTXOs of equal value: the one with the smaller ID should
     // appear first (deterministic tiebreak). High fee suppresses
     // consolidation so only one input is selected.
-    let utxos = vec![
-        confirmed_utxo(5, 1_000_000),
-        confirmed_utxo(2, 1_000_000),
-    ];
+    let utxos = vec![confirmed_utxo(5, 1_000_000), confirmed_utxo(2, 1_000_000)];
     let requests = vec![make_request(1, 500_000, 0)];
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), high_fee).expect("should succeed");
 
     assert_eq!(result.inputs.len(), 1);
     assert_eq!(
@@ -1335,19 +1127,11 @@ fn test_deterministic_tiebreak_by_id() {
 fn test_pending_utxos_eligible_as_inputs() {
     // Pending UTXOs are eligible; largest-first picks the pending one
     // when it is the biggest. High fee suppresses consolidation.
-    let utxos = vec![
-        pending_utxo(1, 5_000_000),
-        confirmed_utxo(2, 200_000),
-    ];
+    let utxos = vec![pending_utxo(1, 5_000_000), confirmed_utxo(2, 200_000)];
     let requests = vec![make_request(1, 1_000_000, 0)];
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        high_fee,
-    )
-    .expect("should succeed");
+    let result =
+        select_coins(&utxos, &requests, &default_params(), high_fee).expect("should succeed");
 
     assert_eq!(result.inputs.len(), 1);
     assert_eq!(result.inputs[0].amount, 5_000_000);
@@ -1375,9 +1159,8 @@ fn test_pending_utxo_with_confirmed_ancestors_eligible() {
         max_mempool_chain_depth: 0,
         ..default_params()
     };
-    let result =
-        select_coins(&[utxo], &requests, &params, default_fee_rate())
-            .expect("should succeed even with max_mempool_chain_depth = 0");
+    let result = select_coins(&[utxo], &requests, &params, default_fee_rate())
+        .expect("should succeed even with max_mempool_chain_depth = 0");
     assert_conservation(&result);
 }
 
@@ -1392,12 +1175,7 @@ fn test_chain_depth_filter_excludes_deep_utxos_from_available() {
         pending_utxo_deep(2, 5_000_000, 6, 500), // depth 6 > default 5
     ];
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    );
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate());
     assert!(matches!(
         result,
         Err(CoinSelectionError::InsufficientFunds {
@@ -1440,12 +1218,7 @@ fn test_mixed_confirmation_ancestors_only_mempool_counted() {
         max_mempool_chain_depth: 1,
         ..default_params()
     };
-    let result = select_coins(
-        &[utxo],
-        &requests,
-        &strict_params,
-        default_fee_rate(),
-    );
+    let result = select_coins(&[utxo], &requests, &strict_params, default_fee_rate());
     assert!(matches!(
         result,
         Err(CoinSelectionError::InsufficientFunds { .. })
@@ -1524,8 +1297,7 @@ fn test_cpfp_deficit_exhausts_fee_cap() {
         max_fee_per_request: 5_000, // tight budget
         ..default_params()
     };
-    let result =
-        select_coins(&[heavy_low_fee], &requests, &params, default_fee_rate());
+    let result = select_coins(&[heavy_low_fee], &requests, &params, default_fee_rate());
 
     assert!(
         matches!(result, Err(CoinSelectionError::FeeExceedsCap { .. })),
@@ -1583,14 +1355,12 @@ fn test_fund_balance_with_cpfp() {
         },
     };
     let requests = vec![make_request(1, 500_000, 0)];
-    let result =
-        select_coins(&[utxo], &requests, &default_params(), default_fee_rate())
-            .expect("should succeed");
+    let result = select_coins(&[utxo], &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
 
     let input_sum: u64 = result.inputs.iter().map(|u| u.amount).sum();
     let change = result.change.unwrap_or(0);
-    let total_selected: u64 =
-        result.selected_requests.iter().map(|r| r.amount).sum();
+    let total_selected: u64 = result.selected_requests.iter().map(|r| r.amount).sum();
 
     let fund_decrease = input_sum - change;
     assert!(
@@ -1606,21 +1376,19 @@ fn test_fund_balance_with_cpfp() {
 #[test]
 fn test_consolidation_three_tiers_ordering() {
     // Low fee should consolidate >= moderate >= high.
-    let utxos: Vec<UtxoCandidate> = (0u8..30)
-        .map(|i| confirmed_utxo(i, 100_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..30).map(|i| confirmed_utxo(i, 100_000)).collect();
     let requests = vec![make_request(1, 50_000, 0)];
 
     let low = FeeRate::from_sat_per_vb_unchecked(1);
     let moderate = FeeRate::from_sat_per_vb_unchecked(15);
     let high = FeeRate::from_sat_per_vb_unchecked(30);
 
-    let low_r = select_coins(&utxos, &requests, &default_params(), low)
-        .expect("low should succeed");
+    let low_r =
+        select_coins(&utxos, &requests, &default_params(), low).expect("low should succeed");
     let mod_r = select_coins(&utxos, &requests, &default_params(), moderate)
         .expect("moderate should succeed");
-    let high_r = select_coins(&utxos, &requests, &default_params(), high)
-        .expect("high should succeed");
+    let high_r =
+        select_coins(&utxos, &requests, &default_params(), high).expect("high should succeed");
 
     assert!(
         low_r.inputs.len() >= mod_r.inputs.len(),
@@ -1641,9 +1409,7 @@ fn test_consolidation_three_tiers_ordering() {
 
 #[test]
 fn test_max_inputs_caps_consolidation() {
-    let utxos: Vec<UtxoCandidate> = (0u8..20)
-        .map(|i| confirmed_utxo(i, 100_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..20).map(|i| confirmed_utxo(i, 100_000)).collect();
     let requests = vec![make_request(1, 50_000, 0)];
     let params = CoinSelectionParams {
         max_inputs: 5,
@@ -1651,8 +1417,7 @@ fn test_max_inputs_caps_consolidation() {
     };
 
     let low_fee = FeeRate::from_sat_per_vb_unchecked(1);
-    let result = select_coins(&utxos, &requests, &params, low_fee)
-        .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &params, low_fee).expect("should succeed");
 
     assert!(
         result.inputs.len() <= 5,
@@ -1667,15 +1432,11 @@ fn test_fee_rate_at_long_term_boundary() {
     // fee_rate exactly at long_term_fee_rate (10 sat/vB) is NOT below
     // the long-term rate, so it falls into the moderate consolidation
     // tier: cap = input_budget * N / 2 = 10 * 1 / 2 = 5 extras.
-    let utxos: Vec<UtxoCandidate> = (0u8..10)
-        .map(|i| confirmed_utxo(i, 100_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..10).map(|i| confirmed_utxo(i, 100_000)).collect();
     let requests = vec![make_request(1, 50_000, 0)];
     let at_lt = FeeRate::from_sat_per_vb_unchecked(10);
 
-    let result =
-        select_coins(&utxos, &requests, &default_params(), at_lt)
-            .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), at_lt).expect("should succeed");
 
     // 1 min input + at most 5 extras = 6 max.
     assert!(
@@ -1753,13 +1514,8 @@ fn test_unknown_recipient_length_uses_p2tr_weight() {
         amount: 100_000,
         timestamp_ms: 0,
     };
-    let result = select_coins(
-        &utxos,
-        &[req],
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("unknown recipient length should succeed with P2TR weight");
+    let result = select_coins(&utxos, &[req], &default_params(), default_fee_rate())
+        .expect("unknown recipient length should succeed with P2TR weight");
     assert_conservation(&result);
 }
 
@@ -1776,13 +1532,8 @@ fn test_custom_spend_path_weight() {
         status: UtxoStatus::Confirmed,
     };
     let requests = vec![make_request(1, 100_000, 0)];
-    let result = select_coins(
-        &[utxo],
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let result = select_coins(&[utxo], &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
     assert_conservation(&result);
 }
 
@@ -1804,13 +1555,8 @@ fn test_taproot_key_path_spend() {
         status: UtxoStatus::Confirmed,
     };
     let requests = vec![make_request(1, 100_000, 0)];
-    let key_path_result = select_coins(
-        &[utxo],
-        &requests,
-        &default_params(),
-        default_fee_rate(),
-    )
-    .expect("should succeed");
+    let key_path_result = select_coins(&[utxo], &requests, &default_params(), default_fee_rate())
+        .expect("should succeed");
     assert_conservation(&key_path_result);
 
     // Key-path witness is lighter than script-path, so fee should be lower.
@@ -1837,9 +1583,8 @@ fn test_withdrawal_output_at_dust_boundary_p2tr() {
     // should succeed.
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let req = make_request(1, 1_310, 0);
-    let result =
-        select_coins(&utxos, &[req], &default_params(), default_fee_rate())
-            .expect("output at dust boundary should succeed");
+    let result = select_coins(&utxos, &[req], &default_params(), default_fee_rate())
+        .expect("output at dust boundary should succeed");
     assert!(
         result.withdrawal_outputs[0].amount >= TR_DUST_RELAY_MIN_VALUE,
         "output {} should be >= dust {}",
@@ -1853,10 +1598,12 @@ fn test_withdrawal_output_at_dust_boundary_p2tr() {
 fn test_withdrawal_output_below_dust_rejected() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let req = make_request(1, 500, 0); // way below fee + dust
-    let result =
-        select_coins(&utxos, &[req], &default_params(), default_fee_rate());
+    let result = select_coins(&utxos, &[req], &default_params(), default_fee_rate());
     assert!(
-        matches!(result, Err(CoinSelectionError::RequestAmountTooSmall { .. })),
+        matches!(
+            result,
+            Err(CoinSelectionError::RequestAmountTooSmall { .. })
+        ),
         "sub-dust output should be rejected, got {result:?}"
     );
 }
@@ -1873,8 +1620,7 @@ fn test_exceeds_max_weight_error() {
         max_tx_weight: Weight::from_wu(1),
         ..default_params()
     };
-    let result =
-        select_coins(&utxos, &requests, &params, default_fee_rate());
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
     assert!(
         matches!(result, Err(CoinSelectionError::ExceedsMaxWeight { .. })),
         "expected ExceedsMaxWeight, got {result:?}"
@@ -1888,16 +1634,13 @@ fn test_max_inputs_prevents_covering_request_returns_insufficient_funds() {
     // Pool has many small UTXOs; max_inputs = 2 prevents selecting
     // enough to cover the request. Step 2 is gated by max_inputs
     // before consolidation, so InsufficientFunds is returned.
-    let utxos: Vec<UtxoCandidate> = (0u8..10)
-        .map(|i| confirmed_utxo(i, 10_000))
-        .collect();
+    let utxos: Vec<UtxoCandidate> = (0u8..10).map(|i| confirmed_utxo(i, 10_000)).collect();
     let requests = vec![make_request(1, 50_000, 0)];
     let params = CoinSelectionParams {
         max_inputs: 2,
         ..default_params()
     };
-    let result =
-        select_coins(&utxos, &requests, &params, default_fee_rate());
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
     // 2 inputs × 10k = 20k < 50k required.
     assert!(
         matches!(result, Err(CoinSelectionError::InsufficientFunds { .. })),
