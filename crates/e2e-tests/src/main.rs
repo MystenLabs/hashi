@@ -57,9 +57,37 @@ struct LocalnetOpts {
     data_dir: std::path::PathBuf,
 }
 
+/// Options for connecting to an external Bitcoin node (signet, testnet4, etc).
+/// These are only used when `--bitcoin-network` is not `regtest`.
+#[derive(Args)]
+struct ExternalBitcoinOpts {
+    /// Bitcoin RPC URL
+    #[clap(long, default_value = "http://127.0.0.1:38332")]
+    btc_rpc_url: String,
+
+    /// Bitcoin RPC username
+    #[clap(long, default_value = "")]
+    btc_rpc_user: String,
+
+    /// Bitcoin RPC password
+    #[clap(long, default_value = "")]
+    btc_rpc_pass: String,
+
+    /// Bitcoin wallet name (used for send_to_address)
+    #[clap(long)]
+    btc_wallet: Option<String>,
+
+    /// Bitcoin P2P address for Kyoto light client
+    #[clap(long, default_value = "127.0.0.1:38333")]
+    btc_p2p_address: String,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Start a local development environment (bitcoind + Sui + Hashi validators)
+    /// Start a local development environment (Sui localnet + Hashi validators + Bitcoin)
+    ///
+    /// With --bitcoin-network regtest (default), a local bitcoind is spawned.
+    /// With --bitcoin-network signet, connects to an external node (see --btc-rpc-url).
     Start {
         /// Number of Hashi validators to run
         #[clap(long, default_value = "4")]
@@ -69,9 +97,16 @@ enum Commands {
         #[clap(long, default_value = "9000")]
         sui_rpc_port: u16,
 
-        /// Bitcoin regtest RPC port
+        /// Bitcoin regtest RPC port (only used in regtest mode)
         #[clap(long, default_value = "18443")]
         btc_rpc_port: u16,
+
+        /// Bitcoin network: "regtest" spawns a local node, others connect externally
+        #[clap(long, default_value = "regtest")]
+        bitcoin_network: String,
+
+        #[command(flatten)]
+        btc_opts: ExternalBitcoinOpts,
 
         /// Enable verbose tracing output
         #[clap(long, short)]
@@ -171,6 +206,13 @@ struct LocalnetState {
     /// Path to a PEM-encoded funded Sui keypair (from genesis)
     #[serde(skip_serializing_if = "Option::is_none")]
     funded_sui_keypair_path: Option<String>,
+    /// Bitcoin network: "regtest", "signet", "testnet4", or "mainnet"
+    #[serde(default = "default_bitcoin_network")]
+    bitcoin_network: String,
+}
+
+fn default_bitcoin_network() -> String {
+    "regtest".to_string()
 }
 
 impl LocalnetState {
@@ -220,16 +262,20 @@ async fn main() -> Result<()> {
             num_validators,
             sui_rpc_port,
             btc_rpc_port,
+            bitcoin_network,
+            btc_opts,
             verbose,
             opts,
         } => {
-            cmd_start(
+            cmd_start(StartConfig {
                 num_validators,
                 sui_rpc_port,
                 btc_rpc_port,
+                bitcoin_network,
+                btc_opts,
                 verbose,
-                &opts.data_dir,
-            )
+                data_dir: opts.data_dir,
+            })
             .await
         }
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
@@ -255,15 +301,40 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_start(
+struct StartConfig {
     num_validators: usize,
     sui_rpc_port: u16,
     btc_rpc_port: u16,
+    bitcoin_network: String,
+    btc_opts: ExternalBitcoinOpts,
     verbose: bool,
-    data_dir: &Path,
-) -> Result<()> {
+    data_dir: std::path::PathBuf,
+}
+
+impl StartConfig {
+    fn chain_id(&self) -> Result<&'static str> {
+        match self.bitcoin_network.as_str() {
+            "regtest" => Ok(hashi::constants::BITCOIN_REGTEST_CHAIN_ID),
+            "signet" => Ok(hashi::constants::BITCOIN_SIGNET_CHAIN_ID),
+            "testnet4" => Ok(hashi::constants::BITCOIN_TESTNET4_CHAIN_ID),
+            "mainnet" => Ok(hashi::constants::BITCOIN_MAINNET_CHAIN_ID),
+            other => anyhow::bail!(
+                "Unknown bitcoin network '{}'. Use regtest, signet, testnet4, or mainnet",
+                other
+            ),
+        }
+    }
+
+    fn is_regtest(&self) -> bool {
+        self.bitcoin_network == "regtest"
+    }
+}
+
+async fn cmd_start(cfg: StartConfig) -> Result<()> {
+    cfg.chain_id()?; // Validate early
+
     // Check for existing running instance
-    if let Ok(state) = LocalnetState::load(data_dir) {
+    if let Ok(state) = LocalnetState::load(&cfg.data_dir) {
         if state.is_alive() {
             anyhow::bail!(
                 "Localnet is already running (PID {}). Stop it first with `hashi-localnet stop`.",
@@ -273,12 +344,173 @@ async fn cmd_start(
         print_warning("Found stale state file, cleaning up...");
     }
 
+    init_tracing(cfg.verbose);
+
+    use std::io::Write;
+    print!(
+        "{} Starting localnet with {} validators (btc: {})...",
+        "ℹ".blue().bold(),
+        cfg.num_validators,
+        cfg.bitcoin_network,
+    );
+    std::io::stdout().flush().ok();
+
+    if cfg.is_regtest() {
+        start_regtest(&cfg).await
+    } else {
+        start_external(&cfg).await
+    }
+}
+
+/// Regtest mode: spawn bitcoind, Sui localnet, and Hashi validators.
+async fn start_regtest(cfg: &StartConfig) -> Result<()> {
+    let test_networks = TestNetworksBuilder::new()
+        .with_nodes(cfg.num_validators)
+        .with_sui_rpc_port(cfg.sui_rpc_port)
+        .with_btc_rpc_port(cfg.btc_rpc_port)
+        .build()
+        .await?;
+
+    let state = persist_localnet_state(
+        &cfg.data_dir,
+        &test_networks.sui_network,
+        test_networks.bitcoin_node().rpc_url(),
+        e2e_tests::bitcoin_node::RPC_USER,
+        e2e_tests::bitcoin_node::RPC_PASSWORD,
+        test_networks.hashi_network().ids(),
+        cfg,
+    )?;
+    print_ready(&state);
+
+    tokio::signal::ctrl_c().await?;
+    cleanup_state_files(&cfg.data_dir);
+    drop(test_networks);
+    Ok(())
+}
+
+/// External node mode: connect to an existing Bitcoin node (signet, testnet4, etc).
+async fn start_external(cfg: &StartConfig) -> Result<()> {
+    let btc = &cfg.btc_opts;
+    let external_node = e2e_tests::external_bitcoin_node::ExternalBitcoinNode::new(
+        &btc.btc_rpc_url,
+        &btc.btc_rpc_user,
+        &btc.btc_rpc_pass,
+        btc.btc_wallet.as_deref(),
+        &btc.btc_p2p_address,
+    )?;
+
+    let dir = tempfile::Builder::new()
+        .prefix("hashi-test-env-")
+        .tempdir()?;
+    tracing::info!("test env: {}", dir.path().display());
+
+    let mut sui_network = e2e_tests::SuiNetworkBuilder::default()
+        .with_num_validators(cfg.num_validators)
+        .with_rpc_port(cfg.sui_rpc_port)
+        .dir(&dir.path().join("sui"))
+        .build()
+        .await?;
+
+    TestNetworksBuilder::cp_packages(dir.as_ref())?;
+    let chain_id = cfg.chain_id()?;
+    let hashi_ids = e2e_tests::publish::publish(
+        dir.as_ref(),
+        &mut sui_network.client,
+        sui_network.user_keys.first().unwrap(),
+        chain_id,
+    )
+    .await?;
+
+    let hashi_network = e2e_tests::HashiNetworkBuilder::new()
+        .with_num_nodes(cfg.num_validators)
+        .with_bitcoin_chain_id(chain_id)
+        .with_bitcoin_rpc_auth(btc.btc_rpc_user.clone(), btc.btc_rpc_pass.clone())
+        .build(
+            &dir.path().join("hashi"),
+            &sui_network,
+            &external_node,
+            hashi_ids,
+        )
+        .await?;
+
+    let state = persist_localnet_state(
+        &cfg.data_dir,
+        &sui_network,
+        &btc.btc_rpc_url,
+        &btc.btc_rpc_user,
+        &btc.btc_rpc_pass,
+        hashi_ids,
+        cfg,
+    )?;
+    print_ready(&state);
+
+    tokio::signal::ctrl_c().await?;
+    cleanup_state_files(&cfg.data_dir);
+    drop(hashi_network);
+    drop(external_node);
+    drop(sui_network);
+    drop(dir);
+    Ok(())
+}
+
+/// Write the funded genesis key and localnet state to disk.
+fn persist_localnet_state(
+    data_dir: &Path,
+    sui_network: &e2e_tests::SuiNetworkHandle,
+    btc_rpc_url: &str,
+    btc_rpc_user: &str,
+    btc_rpc_pass: &str,
+    ids: hashi::config::HashiIds,
+    cfg: &StartConfig,
+) -> Result<LocalnetState> {
+    std::fs::create_dir_all(data_dir)?;
+
+    // Write the funded genesis key to disk so deposit/faucet commands can use it
+    let funded_key_path = data_dir.join("funded_keypair.pem");
+    let funded_key = sui_network
+        .user_keys
+        .first()
+        .context("No funded user keys in localnet genesis")?;
+    write_pem_key(&funded_key_path, &funded_key.to_pem()?)?;
+
+    let state = LocalnetState {
+        pid: std::process::id(),
+        sui_rpc_url: sui_network.rpc_url.clone(),
+        btc_rpc_url: btc_rpc_url.to_string(),
+        btc_rpc_user: btc_rpc_user.to_string(),
+        btc_rpc_password: btc_rpc_pass.to_string(),
+        package_id: ids.package_id.to_string(),
+        hashi_object_id: ids.hashi_object_id.to_string(),
+        num_validators: cfg.num_validators,
+        data_dir: data_dir.to_path_buf(),
+        funded_sui_keypair_path: Some(funded_key_path.to_string_lossy().into_owned()),
+        bitcoin_network: cfg.bitcoin_network.clone(),
+    };
+    state.save(data_dir)?;
+    write_cli_config(data_dir, &state)?;
+    Ok(state)
+}
+
+fn write_pem_key(path: &Path, pem: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("Failed to write key to {}", path.display()))?;
+    file.write_all(pem.as_bytes())?;
+    Ok(())
+}
+
+fn init_tracing(verbose: bool) {
     let default_level = if verbose {
         tracing::level_filters::LevelFilter::INFO
     } else {
         tracing::level_filters::LevelFilter::OFF
     };
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()
@@ -287,94 +519,26 @@ async fn cmd_start(
         )
         .with_target(false)
         .init();
+}
 
-    use std::io::Write;
-    print!(
-        "{} Starting localnet with {} validators...",
-        "ℹ".blue().bold(),
-        num_validators
-    );
-    std::io::stdout().flush().ok();
-
-    let test_networks = TestNetworksBuilder::new()
-        .with_nodes(num_validators)
-        .with_sui_rpc_port(sui_rpc_port)
-        .with_btc_rpc_port(btc_rpc_port)
-        .build()
-        .await?;
-
-    let sui_rpc_url = &test_networks.sui_network().rpc_url;
-    let btc_rpc_url = test_networks.bitcoin_node().rpc_url();
-    let ids = test_networks.hashi_network().ids();
-
-    // Write the funded genesis key to disk so faucet/CLI commands can use it
-    let funded_key_path = data_dir.join("funded_keypair.pem");
-    let funded_key = test_networks
-        .sui_network()
-        .user_keys
-        .first()
-        .context("No funded user keys in localnet genesis")?;
-    let pem = funded_key
-        .to_pem()
-        .context("Failed to serialize funded key as PEM")?;
-    std::fs::create_dir_all(data_dir)?;
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&funded_key_path)
-            .with_context(|| {
-                format!(
-                    "Failed to write funded key to {}",
-                    funded_key_path.display()
-                )
-            })?;
-        file.write_all(pem.as_bytes())?;
-    }
-
-    let state = LocalnetState {
-        pid: std::process::id(),
-        sui_rpc_url: sui_rpc_url.clone(),
-        btc_rpc_url: btc_rpc_url.to_string(),
-        btc_rpc_user: e2e_tests::bitcoin_node::RPC_USER.to_string(),
-        btc_rpc_password: e2e_tests::bitcoin_node::RPC_PASSWORD.to_string(),
-        package_id: ids.package_id.to_string(),
-        hashi_object_id: ids.hashi_object_id.to_string(),
-        num_validators,
-        data_dir: data_dir.to_path_buf(),
-        funded_sui_keypair_path: Some(funded_key_path.to_string_lossy().into_owned()),
-    };
-    state.save(data_dir)?;
-
-    // Write a CLI config file so `hashi` CLI can auto-discover the localnet
-    write_cli_config(data_dir, &state)?;
-
-    // Overwrite the "ℹ Starting..." line with a checkmark
-    print!("\r{}", " ".repeat(60));
+fn print_ready(state: &LocalnetState) {
+    print!("\r{}", " ".repeat(80));
     println!(
-        "\r{} Localnet started with {} validators",
+        "\r{} Localnet started with {} validators (btc: {})",
         "✓".green().bold(),
-        num_validators
+        state.num_validators,
+        state.bitcoin_network,
     );
     println!();
-    print_connection_details(&state);
-
+    print_connection_details(state);
     print_info("Press Ctrl+C to stop the localnet.");
+}
 
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
-
+fn cleanup_state_files(data_dir: &Path) {
     print_info("Shutting down...");
-    // Cleanup happens via Drop on test_networks
     let _ = std::fs::remove_file(LocalnetState::state_file_path(data_dir));
     let _ = std::fs::remove_file(cli_config_path(data_dir));
     print_success("Localnet stopped.");
-
-    Ok(())
 }
 
 async fn cmd_stop(data_dir: &Path) -> Result<()> {
@@ -450,6 +614,13 @@ fn cmd_mine(blocks: u64, data_dir: &Path) -> Result<()> {
         anyhow::bail!("Localnet process is not running.");
     }
 
+    if state.bitcoin_network != "regtest" {
+        anyhow::bail!(
+            "Mining is only supported on regtest. Current network: {}",
+            state.bitcoin_network
+        );
+    }
+
     let client = corepc_client::client_sync::v29::Client::new_with_auth(
         &state.btc_rpc_url,
         corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
@@ -511,9 +682,10 @@ fn cmd_keygen(action: KeygenCommands) -> Result<()> {
             let btc_network = match network.as_str() {
                 "mainnet" => bitcoin::Network::Bitcoin,
                 "testnet4" => bitcoin::Network::Testnet4,
+                "signet" => bitcoin::Network::Signet,
                 "regtest" => bitcoin::Network::Regtest,
                 other => anyhow::bail!(
-                    "Unknown Bitcoin network: {}. Use mainnet, testnet4, or regtest",
+                    "Unknown Bitcoin network: {}. Use mainnet, testnet4, signet, or regtest",
                     other
                 ),
             };
@@ -668,6 +840,14 @@ fn cmd_faucet_btc(address: &str, blocks: u64, data_dir: &Path) -> Result<()> {
         anyhow::bail!("Localnet process is not running.");
     }
 
+    if state.bitcoin_network != "regtest" {
+        anyhow::bail!(
+            "BTC faucet (mining) is only supported on regtest. Current network: {}. \
+             Use a signet faucet instead.",
+            state.bitcoin_network
+        );
+    }
+
     let btc_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
         address.parse().context("Invalid Bitcoin address")?;
     let btc_addr = btc_addr
@@ -750,7 +930,7 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
     }
 
     // Derive deposit address
-    let btc_network = bitcoin::Network::Regtest;
+    let btc_network = hashi::btc_monitor::config::parse_btc_network(Some(&state.bitcoin_network))?;
     let deposit_address = hashi::cli::commands::deposit::cli_derive_deposit_address(
         &mpc_pubkey,
         Some(&recipient_addr),
@@ -792,11 +972,43 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
 
     print_success(&format!("BTC sent! txid: {} vout: {}", txid, vout));
 
-    // Step 2: Mine blocks
-    print_info("Mining 10 blocks...");
-    let mine_addr = btc_rpc.new_address()?;
-    btc_rpc.generate_to_address(10, &mine_addr)?;
-    print_success("Mined 10 blocks");
+    // Step 2: Confirm the transaction
+    if state.bitcoin_network == "regtest" {
+        print_info("Mining 10 blocks...");
+        let mine_addr = btc_rpc.new_address()?;
+        btc_rpc.generate_to_address(10, &mine_addr)?;
+        print_success("Mined 10 blocks");
+    } else {
+        print_info(&format!(
+            "Waiting for block confirmation on {} (this may take ~10 minutes)...",
+            state.bitcoin_network
+        ));
+        // Poll for at least 1 confirmation
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(900);
+        loop {
+            if start.elapsed() > timeout {
+                anyhow::bail!("Timeout waiting for transaction confirmation");
+            }
+            match btc_rpc.get_transaction(txid) {
+                Ok(info) => {
+                    let confirmations = info.confirmations;
+                    if confirmations >= 1 {
+                        print_success(&format!(
+                            "Transaction confirmed ({} confirmations)",
+                            confirmations
+                        ));
+                        break;
+                    }
+                    print_info(&format!("  {} confirmations, waiting...", confirmations));
+                }
+                Err(_) => {
+                    print_info("  Transaction not yet visible, waiting...");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    }
 
     // Step 3: Submit deposit request on Sui
     print_info("Submitting deposit request on Sui...");
@@ -835,7 +1047,7 @@ fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
             rpc_url: Some(state.btc_rpc_url.clone()),
             rpc_user: Some(state.btc_rpc_user.clone()),
             rpc_password: Some(state.btc_rpc_password.clone()),
-            network: Some("regtest".to_string()),
+            network: Some(state.bitcoin_network.clone()),
             private_key_path: None,
         }),
     };

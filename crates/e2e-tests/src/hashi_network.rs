@@ -17,11 +17,25 @@ use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::debug;
 
-use crate::BitcoinNodeHandle;
 use crate::SuiNetworkHandle;
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const TEST_WEIGHT_DIVISOR: u16 = 100;
+
+/// Trait for Bitcoin node connectivity used by the hashi network builder.
+pub trait BitcoinNodeInfo {
+    fn rpc_url(&self) -> &str;
+    fn p2p_address(&self) -> String;
+}
+
+impl BitcoinNodeInfo for crate::BitcoinNodeHandle {
+    fn rpc_url(&self) -> &str {
+        self.rpc_url()
+    }
+    fn p2p_address(&self) -> String {
+        self.p2p_address()
+    }
+}
 
 pub struct HashiNodeHandle {
     config: HashiConfig,
@@ -235,6 +249,10 @@ pub struct HashiNetworkBuilder {
     /// Node index whose shares should be corrupted by all other nodes,
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
+    /// Bitcoin chain ID (genesis block hash). Defaults to regtest.
+    pub bitcoin_chain_id: String,
+    /// Optional override for bitcoin RPC auth credentials.
+    pub bitcoin_rpc_auth: Option<(String, String)>,
 }
 
 impl HashiNetworkBuilder {
@@ -248,7 +266,19 @@ impl HashiNetworkBuilder {
             withdrawal_max_batch_size: None,
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
+            bitcoin_chain_id: hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string(),
+            bitcoin_rpc_auth: None,
         }
+    }
+
+    pub fn with_bitcoin_chain_id(mut self, id: &str) -> Self {
+        self.bitcoin_chain_id = id.to_string();
+        self
+    }
+
+    pub fn with_bitcoin_rpc_auth(mut self, user: String, pass: String) -> Self {
+        self.bitcoin_rpc_auth = Some((user, pass));
+        self
     }
 
     pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
@@ -295,7 +325,7 @@ impl HashiNetworkBuilder {
         self,
         dir: &Path,
         sui: &SuiNetworkHandle,
-        bitcoin: &BitcoinNodeHandle,
+        bitcoin: &impl BitcoinNodeInfo,
         hashi_ids: HashiIds,
     ) -> Result<HashiNetwork> {
         // Start a mock screener server for integration tests
@@ -342,12 +372,17 @@ impl HashiNetworkBuilder {
             config.operator_private_key = Some(private_key.to_pem()?);
             config.sui_rpc = Some(sui_rpc.clone());
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
+            let (rpc_user, rpc_pass) = self.bitcoin_rpc_auth.clone().unwrap_or_else(|| {
+                (
+                    crate::bitcoin_node::RPC_USER.into(),
+                    crate::bitcoin_node::RPC_PASSWORD.into(),
+                )
+            });
             config.bitcoin_rpc_auth = Some(hashi::btc_monitor::config::BtcRpcAuth::UserPass(
-                crate::bitcoin_node::RPC_USER.into(),
-                crate::bitcoin_node::RPC_PASSWORD.into(),
+                rpc_user, rpc_pass,
             ));
             config.bitcoin_trusted_peers = Some(vec![bitcoin.p2p_address()]);
-            config.bitcoin_chain_id = Some(hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string());
+            config.bitcoin_chain_id = Some(self.bitcoin_chain_id.clone());
             config.sui_chain_id = service_info.chain_id.clone();
             config.screener_endpoint = Some(screener_endpoint.clone());
             config.db = Some(dir.join(validator_address.to_string()));
