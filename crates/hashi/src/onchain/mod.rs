@@ -640,6 +640,29 @@ async fn scrape_hashi(
     ))
 }
 
+/// Re-fetch only the `config` field from the Hashi Move object.
+///
+/// This is a lightweight alternative to the full `scrape_hashi` that avoids
+/// re-reading all nested dynamic fields (members, committees, treasury, etc.).
+/// Used by the watcher to refresh in-memory config when an `UpdateConfig`
+/// proposal is executed.
+pub(crate) async fn scrape_hashi_config(
+    mut client: Client,
+    hashi_object_id: Address,
+) -> Result<types::Config> {
+    let response =
+        client
+            .ledger_client()
+            .get_object(GetObjectRequest::new(&hashi_object_id).with_read_mask(
+                FieldMask::from_paths([Object::path_builder().contents().finish()]),
+            ))
+            .await?;
+
+    let move_types::Hashi { config, .. } = response.get_ref().object().contents().deserialize()?;
+
+    Ok(convert_move_config(config))
+}
+
 fn convert_move_config(config: move_types::Config) -> types::Config {
     types::Config {
         config: config
