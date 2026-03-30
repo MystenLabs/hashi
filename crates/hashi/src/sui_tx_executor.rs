@@ -386,6 +386,121 @@ impl SuiTxExecutor {
         anyhow::bail!("DepositRequestedEvent not found in transaction events")
     }
 
+    /// Execute a batch deposit request transaction.
+    ///
+    /// Creates multiple deposit requests on-chain in a single PTB by repeating
+    /// the deposit sequence for each UTXO output:
+    /// 1. Creating a UTXO object (txid, vout, amount, derivation_path)
+    /// 2. Creating a DepositRequest using the Clock
+    /// 3. Splitting SUI for the deposit fee
+    /// 4. Calling the deposit() function on Hashi
+    ///
+    /// Returns the deposit request IDs on success.
+    pub async fn execute_create_deposit_requests_batch(
+        &mut self,
+        txid: Address,
+        utxos: &[(u32, u64)],
+        derivation_path: Option<Address>,
+    ) -> anyhow::Result<Vec<Address>> {
+        anyhow::ensure!(!utxos.is_empty(), "No UTXOs to deposit");
+
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        let gas_arg = builder.gas();
+
+        for &(vout, amount_sats) in utxos {
+            let txid_arg = builder.pure(&txid);
+            let vout_arg = builder.pure(&vout);
+            let amount_arg = builder.pure(&amount_sats);
+            let derivation_path_arg = builder.pure(&derivation_path);
+
+            // 1. Create UtxoId
+            let utxo_id_arg = builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("utxo"),
+                    Identifier::from_static("utxo_id"),
+                ),
+                vec![txid_arg, vout_arg],
+            );
+
+            // 2. Create Utxo
+            let utxo_arg = builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("utxo"),
+                    Identifier::from_static("utxo"),
+                ),
+                vec![utxo_id_arg, amount_arg, derivation_path_arg],
+            );
+
+            // 3. Create DepositRequest
+            let deposit_request_arg = builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("deposit_queue"),
+                    Identifier::from_static("deposit_request"),
+                ),
+                vec![utxo_arg, clock_arg],
+            );
+
+            // 4. Split SUI for fee coin
+            let zero_arg = builder.pure(&0u64);
+            let fee_coins = builder.split_coins(gas_arg, vec![zero_arg]);
+            let fee_coin_arg = fee_coins.into_iter().next().unwrap();
+
+            // 5. Call deposit(hashi, request, fee)
+            builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("deposit"),
+                    Identifier::from_static("deposit"),
+                ),
+                vec![hashi_arg, deposit_request_arg, fee_coin_arg],
+            );
+        }
+
+        let response = self.execute(builder).await?;
+
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "Batch deposit request transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+
+        // Parse events to extract all deposit request IDs
+        let events = response.transaction().events();
+        let mut request_ids = Vec::new();
+        for event in events.events() {
+            let event_type = event.contents().name();
+            if event_type.contains("DepositRequestedEvent") {
+                let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
+                request_ids.push(event_data.request_id);
+            }
+        }
+
+        anyhow::ensure!(
+            request_ids.len() == utxos.len(),
+            "Expected {} DepositRequestedEvents but found {}",
+            utxos.len(),
+            request_ids.len(),
+        );
+
+        Ok(request_ids)
+    }
+
     /// Execute a withdrawal request transaction.
     ///
     /// Creates a withdrawal request on-chain by:
