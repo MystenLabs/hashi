@@ -773,4 +773,35 @@ mod tests {
         info!("=== UpdateConfig Proposal E2E Test Passed ===");
         Ok(())
     }
+
+    /// Verify that `TestNetworksBuilder::with_onchain_config` applies the
+    /// override automatically during `build()`: the full propose/vote/execute
+    /// cycle runs and the new value is visible on-chain before the builder
+    /// returns.
+    #[tokio::test]
+    async fn test_onchain_config_override_via_builder() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting OnchainConfig Builder Override Test ===");
+
+        // Use 4 nodes so quorum (66.67%) requires multiple votes. The builder
+        // should handle collecting votes from all nodes automatically.
+        let networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_onchain_config(
+                "bitcoin_confirmation_threshold",
+                hashi_types::move_types::ConfigValue::U64(3),
+            )
+            .build()
+            .await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi();
+        let threshold = hashi.onchain_state().bitcoin_confirmation_threshold();
+        assert_eq!(
+            threshold, 3,
+            "expected bitcoin_confirmation_threshold=3 after builder override, got {threshold}"
+        );
+
+        info!("=== OnchainConfig Builder Override Test Passed ===");
+        Ok(())
+    }
 }

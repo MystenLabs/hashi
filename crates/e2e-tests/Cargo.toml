@@ -10,6 +10,7 @@ hashi-types = { path = "../hashi-types" }
 
 sui-futures.workspace = true
 anyhow.workspace = true
+bcs.workspace = true
 fastcrypto.workspace = true
 tokio.workspace = true
 tracing.workspace = true

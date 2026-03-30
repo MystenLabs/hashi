@@ -197,6 +197,26 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .proposals
                     .proposals
                     .remove(&proposal_executed_event.proposal_id);
+
+                // When an UpdateConfig proposal executes, the Hashi object's
+                // config field changes on-chain. The event carries no key/value
+                // payload, so re-fetch the config from the Hashi object to
+                // keep the in-memory state current.
+                if parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type)
+                    == ProposalType::UpdateConfig
+                {
+                    match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
+                        Ok(config) => {
+                            state.state_mut().hashi.config = config;
+                            tracing::info!("on-chain config refreshed after UpdateConfig proposal");
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to refresh config after UpdateConfig proposal: {e}"
+                            );
+                        }
+                    }
+                }
             }
             HashiEvent::QuorumReachedEvent(_) => {}
             HashiEvent::PackageUpgradedEvent(package_upgraded_event) => {

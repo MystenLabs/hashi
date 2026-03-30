@@ -85,6 +85,9 @@ pub struct TestNetworksBuilder {
     sui_builder: SuiNetworkBuilder,
     hashi_builder: HashiNetworkBuilder,
     bitcoin_builder: BitcoinNodeBuilder,
+    /// On-chain config overrides applied after DKG completes, before `build()`
+    /// returns. Each entry is run through the full propose/vote/execute flow.
+    onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
 }
 
 impl TestNetworksBuilder {
@@ -93,6 +96,7 @@ impl TestNetworksBuilder {
             sui_builder: SuiNetworkBuilder::default(),
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
+            onchain_config_overrides: Vec::new(),
         }
     }
 
@@ -144,6 +148,27 @@ impl TestNetworksBuilder {
         self
     }
 
+    /// Queue an on-chain config override to be applied after the network
+    /// initializes. Each call adds one key/value pair; multiple overrides
+    /// are applied in order, one proposal per entry.
+    ///
+    /// Example:
+    /// ```ignore
+    /// TestNetworksBuilder::new()
+    ///     .with_nodes(4)
+    ///     .with_onchain_config("bitcoin_confirmation_threshold", ConfigValue::U64(6))
+    ///     .build()
+    ///     .await?
+    /// ```
+    pub fn with_onchain_config(
+        mut self,
+        key: impl Into<String>,
+        value: hashi_types::move_types::ConfigValue,
+    ) -> Self {
+        self.onchain_config_overrides.push((key.into(), value));
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")
@@ -177,7 +202,7 @@ impl TestNetworksBuilder {
             )
             .await?;
 
-        let test_networks = TestNetworks {
+        let mut test_networks = TestNetworks {
             dir,
             sui_network,
             hashi_network,
@@ -185,6 +210,11 @@ impl TestNetworksBuilder {
         };
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
+
+        if !self.onchain_config_overrides.is_empty() {
+            apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
+                .await?;
+        }
 
         Ok(test_networks)
     }
@@ -204,6 +234,135 @@ impl TestNetworksBuilder {
 
         Ok(())
     }
+}
+
+/// Apply on-chain config overrides by running the full propose/vote/execute
+/// cycle for each `(key, value)` pair. Called from `TestNetworksBuilder::build`
+/// when overrides are present.
+///
+/// Waits for DKG to complete first so the committee is ready to vote.
+/// All nodes vote on every proposal, ensuring quorum is always reached
+/// regardless of the number of nodes or their weight distribution.
+async fn apply_onchain_config_overrides(
+    networks: &mut TestNetworks,
+    overrides: &[(String, hashi_types::move_types::ConfigValue)],
+) -> Result<()> {
+    use hashi::cli::client::CreateProposalParams;
+    use hashi::cli::client::build_create_proposal_transaction;
+    use hashi::cli::client::build_execute_update_config_transaction;
+    use hashi::cli::client::build_vote_update_config_transaction;
+    use hashi::sui_tx_executor::SuiTxExecutor;
+
+    let nodes = networks.hashi_network.nodes();
+
+    // The committee is only available after DKG. Wait on the first node; the
+    // others are guaranteed to be ready too once DKG completes.
+    nodes[0]
+        .wait_for_mpc_key(std::time::Duration::from_secs(120))
+        .await?;
+
+    let hashi_ids = networks.hashi_network.ids();
+
+    // Build one executor per node, reused across all overrides.
+    let mut executors: Vec<SuiTxExecutor> = nodes
+        .iter()
+        .map(|node| {
+            let hashi = node.hashi();
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    // Updated to the checkpoint of each execute response; used after the loop
+    // to wait for all nodes to catch up to the last applied override.
+    let mut exec_checkpoint: u64 = 0;
+
+    //TODO could we build the proposals and vote/execute on them all at the same time vs doing them
+    //one at a time?
+    for (key, value) in overrides {
+        tracing::info!("applying on-chain config override: {key} = {value:?}");
+
+        // 1. Node 0 creates the proposal (and automatically casts its own vote).
+        let create_tx = build_create_proposal_transaction(
+            hashi_ids,
+            CreateProposalParams::UpdateConfig {
+                key: key.clone(),
+                value: value.clone(),
+                metadata: vec![],
+            },
+        );
+        let response = executors[0].execute(create_tx).await?;
+        anyhow::ensure!(
+            response.transaction().effects().status().success(),
+            "create UpdateConfig proposal for '{key}' failed"
+        );
+
+        // Extract the proposal ID from the ProposalCreatedEvent. The event BCS
+        // layout is (Address, u64) — proposal_id followed by timestamp_ms.
+        let proposal_id = response
+            .transaction()
+            .events()
+            .events()
+            .iter()
+            .find(|e| e.contents().name().contains("ProposalCreatedEvent"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ProposalCreatedEvent not found after creating proposal for '{key}'"
+                )
+            })
+            .and_then(|e| {
+                let (id, _ts): (sui_sdk_types::Address, u64) =
+                    bcs::from_bytes(e.contents().value())?;
+                Ok(id)
+            })?;
+
+        tracing::info!("proposal {proposal_id} created for '{key}'; collecting votes");
+
+        // 2. All remaining nodes vote. This gives 100% of total weight,
+        //    guaranteeing the 66.67% quorum threshold is met.
+        for executor in &mut executors[1..] {
+            let vote_tx = build_vote_update_config_transaction(hashi_ids, proposal_id);
+            let vote_resp = executor.execute(vote_tx).await?;
+            anyhow::ensure!(
+                vote_resp.transaction().effects().status().success(),
+                "vote on UpdateConfig proposal {proposal_id} for '{key}' failed"
+            );
+        }
+
+        // 3. Node 0 executes the proposal now that quorum is reached.
+        let execute_tx = build_execute_update_config_transaction(hashi_ids, proposal_id);
+        let exec_resp = executors[0].execute(execute_tx).await?;
+        anyhow::ensure!(
+            exec_resp.transaction().effects().status().success(),
+            "execute UpdateConfig proposal {proposal_id} for '{key}' failed"
+        );
+
+        exec_checkpoint = exec_resp
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("execute transaction response missing checkpoint"))?;
+
+        tracing::info!("on-chain config override applied: {key} (checkpoint {exec_checkpoint})");
+    }
+
+    // Wait for all nodes' watchers to process the checkpoint that contains the
+    // last execute transaction. The watcher re-fetches config on each
+    // ProposalExecutedEvent<UpdateConfig>, so once a node reaches this
+    // checkpoint its in-memory config will reflect the override.
+    let futs = networks.hashi_network().nodes().iter().map(|node| {
+        let mut subscription = node.hashi().onchain_state().subscribe_checkpoint();
+        async move {
+            while subscription.borrow().height < exec_checkpoint {
+                subscription.changed().await.unwrap();
+            }
+        }
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        futures::future::join_all(futs),
+    )
+    .await?;
+
+    Ok(())
 }
 
 impl Default for TestNetworksBuilder {
