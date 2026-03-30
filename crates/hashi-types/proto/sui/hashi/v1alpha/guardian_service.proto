@@ -174,24 +174,30 @@ message ProvisionerInitState {
   // X-only public key bytes (32 bytes).
   optional bytes hashi_btc_master_pubkey = 4;
 
-  // Current rate limiter state.
-  RateLimiter rate_limiter = 6;
+  // Rate limiter state.
+  LimiterState limiter_state = 6;
 }
 
 message WithdrawalConfig {
   // Committee threshold expressed in terms of weight.
   optional uint64 committee_threshold = 1;
 
-  // Maximum amount withdrawable per epoch, in sats.
-  optional uint64 max_withdrawable_per_epoch_sats = 2;
+  // Token refill rate in sats per second.
+  optional uint64 refill_rate_sats_per_sec = 2;
+
+  // Maximum bucket capacity in sats.
+  optional uint64 max_bucket_capacity_sats = 3;
 }
 
-message RateLimiter {
-  // Amount withdrawn in the current epoch, in sats.
-  optional uint64 withdrawn_sats = 1;
+message LimiterState {
+  // Available tokens in sats.
+  optional uint64 num_tokens_available_sats = 1;
 
-  // Current epoch.
-  optional uint64 epoch = 2;
+  // Last updated timestamp in unix seconds.
+  optional uint64 last_updated_at_secs = 2;
+
+  // Next expected withdrawal sequence number.
+  optional uint64 next_seq = 3;
 }
 
 message ProvisionerInitResponse {}
@@ -215,6 +221,12 @@ message StandardWithdrawalRequestData {
 
   // Transaction UTXOs (inputs and outputs).
   TxUtxos utxos = 2;
+
+  // Timestamp in unix seconds (signed by committee, used for rate limiting).
+  optional uint64 timestamp_secs = 3;
+
+  // Monotonic sequence number for ordering withdrawals.
+  optional uint64 seq = 4;
 }
 
 // Guardian-signed response.

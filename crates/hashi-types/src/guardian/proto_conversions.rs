@@ -21,10 +21,10 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::LimiterState;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
-use super::RateLimiter;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -159,12 +159,10 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
             .ok_or_else(|| missing("withdrawal_config"))?;
         let withdrawal_config = pb_to_withdrawal_config(withdrawal_config_pb)?;
 
-        let max_per_epoch = Amount::from_sat(withdrawal_config.max_withdrawable_per_epoch_sats);
-        let rate_limiter = pb_to_rate_limiter(
+        let limiter_state = pb_to_limiter_state(
             state_pb
-                .rate_limiter
-                .ok_or_else(|| missing("rate_limiter"))?,
-            max_per_epoch,
+                .limiter_state
+                .ok_or_else(|| missing("limiter_state"))?,
         )?;
 
         let master_pk_bytes = state_pb
@@ -177,7 +175,7 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         ProvisionerInitState::new(
             committee,
             withdrawal_config,
-            rate_limiter,
+            limiter_state,
             hashi_btc_master_pubkey,
         )
     }
@@ -219,11 +217,17 @@ pub fn pb_to_signed_standard_withdrawal_request_wire(
     let wid = data.wid.ok_or_else(|| missing("wid"))?;
     let utxos_pb = data.utxos.ok_or_else(|| missing("utxos"))?;
     let utxos_wire = pb_to_tx_utxos_wire(utxos_pb)?;
+    let timestamp_secs = data
+        .timestamp_secs
+        .ok_or_else(|| missing("timestamp_secs"))?;
+    let seq = data.seq.ok_or_else(|| missing("seq"))?;
 
     Ok(SignedStandardWithdrawalRequestWire {
         data: StandardWithdrawalRequestWire {
             wid,
             utxos: utxos_wire,
+            timestamp_secs,
+            seq,
         },
         signature: CommitteeSignatureWire {
             epoch,
@@ -312,13 +316,13 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
-    let (committee, withdrawal_config, rate_limiter, hashi_btc_master_pubkey) = s.into_parts();
+    let (committee, withdrawal_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
 
     pb::ProvisionerInitState {
         committee: Some(hashi_committee_to_pb(committee)),
         withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
-        rate_limiter: Some(rate_limiter_to_pb(rate_limiter)),
+        limiter_state: Some(limiter_state_to_pb(limiter_state)),
     }
 }
 
@@ -605,43 +609,49 @@ fn pb_to_withdrawal_config(cfg: pb::WithdrawalConfig) -> GuardianResult<Withdraw
     let committee_threshold = cfg
         .committee_threshold
         .ok_or_else(|| missing("committee_threshold"))?;
-    let max_withdrawable_per_epoch_sats = cfg
-        .max_withdrawable_per_epoch_sats
-        .ok_or_else(|| missing("max_withdrawable_per_epoch_sats"))?;
+    let refill_rate_sats_per_sec = cfg
+        .refill_rate_sats_per_sec
+        .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
+    let max_bucket_capacity_sats = cfg
+        .max_bucket_capacity_sats
+        .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
 
     Ok(WithdrawalConfig {
         committee_threshold,
-        max_withdrawable_per_epoch_sats,
+        refill_rate_sats_per_sec,
+        max_bucket_capacity_sats,
     })
 }
 
 fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
     pb::WithdrawalConfig {
         committee_threshold: Some(cfg.committee_threshold),
-        max_withdrawable_per_epoch_sats: Some(cfg.max_withdrawable_per_epoch_sats),
+        refill_rate_sats_per_sec: Some(cfg.refill_rate_sats_per_sec),
+        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity_sats),
     }
 }
 
-fn pb_to_rate_limiter(
-    rl: pb::RateLimiter,
-    max_withdrawable_per_epoch: Amount,
-) -> GuardianResult<RateLimiter> {
-    let withdrawn_sats = rl
-        .withdrawn_sats
-        .ok_or_else(|| missing("rate_limiter.withdrawn_sats"))?;
-    let epoch = rl.epoch.ok_or_else(|| missing("rate_limiter.epoch"))?;
+fn pb_to_limiter_state(limiter: pb::LimiterState) -> GuardianResult<LimiterState> {
+    let num_tokens_available = limiter
+        .num_tokens_available_sats
+        .ok_or_else(|| missing("num_tokens_available_sats"))?;
+    let last_updated_at = limiter
+        .last_updated_at_secs
+        .ok_or_else(|| missing("last_updated_at_secs"))?;
+    let next_seq = limiter.next_seq.ok_or_else(|| missing("next_seq"))?;
 
-    RateLimiter::new(
-        epoch,
-        Amount::from_sat(withdrawn_sats),
-        max_withdrawable_per_epoch,
-    )
+    Ok(LimiterState {
+        num_tokens_available,
+        last_updated_at,
+        next_seq,
+    })
 }
 
-fn rate_limiter_to_pb(rl: RateLimiter) -> pb::RateLimiter {
-    pb::RateLimiter {
-        withdrawn_sats: Some(rl.withdrawn().to_sat()),
-        epoch: Some(rl.epoch()),
+fn limiter_state_to_pb(state: LimiterState) -> pb::LimiterState {
+    pb::LimiterState {
+        num_tokens_available_sats: Some(state.num_tokens_available),
+        last_updated_at_secs: Some(state.last_updated_at),
+        next_seq: Some(state.next_seq),
     }
 }
 
@@ -798,6 +808,8 @@ pub fn standard_withdrawal_request_wire_to_pb(
     pb::StandardWithdrawalRequestData {
         wid: Some(req.wid),
         utxos: Some(tx_utxos_wire_to_pb(req.utxos)),
+        timestamp_secs: Some(req.timestamp_secs),
+        seq: Some(req.seq),
     }
 }
 

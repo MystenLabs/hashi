@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
-use bitcoin::Amount;
 use bitcoin::Txid;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
@@ -12,6 +11,7 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
@@ -31,7 +31,7 @@ pub async fn standard_withdrawal(
     let request_signature = signed_request.committee_signature().clone(); // for logging
     let wid = unsigned_request.wid;
 
-    match normal_withdrawal_inner(enclave.clone(), signed_request) {
+    match normal_withdrawal_inner(enclave.clone(), signed_request).await {
         Ok((txid, response, limiter_guard)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
             let msg = WithdrawalLogMessage::Success {
@@ -56,15 +56,37 @@ pub async fn standard_withdrawal(
     }
 }
 
-/// RAII guard to ensure limiter consumption is reverted on any error path.
-struct LimiterGuard {
-    enclave: Arc<Enclave>,
-    epoch: u64,
-    amount: Amount,
+/// RAII guard that holds the limiter mutex via an owned guard.
+/// Reverts on drop unless committed.
+pub struct LimiterGuard {
+    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
     committed: bool,
 }
 
-fn normal_withdrawal_inner(
+impl LimiterGuard {
+    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
+        Self {
+            guard,
+            committed: false,
+        }
+    }
+
+    /// Mark this withdrawal as successful. Prevents revert on drop.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for LimiterGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard.revert();
+        }
+    }
+}
+
+// TODO: Support batched withdrawals (multiple wids per transaction).
+async fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
 ) -> GuardianResult<(Txid, StandardWithdrawalResponse, LimiterGuard)> {
@@ -73,7 +95,7 @@ fn normal_withdrawal_inner(
         return Err(EnclaveUninitialized);
     }
 
-    let epoch = signed_request.epoch();
+    // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
     let threshold = enclave
         .config
@@ -86,13 +108,23 @@ fn normal_withdrawal_inner(
 
     let (_, request) = signed_request.into_parts();
 
-    // 1) Rate limits: reserve from the available limit (automatically reverted on failure)
+    // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
+    //    The returned guard holds the mutex — no other withdrawal can proceed
+    //    until this one is committed or reverted.
+    // TODO: Check that timestamp_secs is somewhat recent?
     info!("Checking rate limits.");
-    let consumed_amount = request.utxos().external_out_amount();
-    let limiter_guard = LimiterGuard::new(enclave.clone(), epoch, consumed_amount)?;
+    let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
+    let limiter_guard = enclave
+        .state
+        .consume_from_limiter(
+            request.seq(),
+            request.timestamp_secs(),
+            consumed_amount_sats,
+        )
+        .await?;
     info!("Rate limit check passed.");
 
-    // 2) Sign tx
+    // 3) Sign tx (while holding limiter lock)
     info!("Generating BTC signatures.");
     let (txid, signatures) = enclave
         .config
@@ -104,41 +136,6 @@ fn normal_withdrawal_inner(
     info!("BTC signatures generated.");
 
     Ok((txid, response, limiter_guard))
-}
-
-impl LimiterGuard {
-    fn new(enclave: Arc<Enclave>, epoch: u64, amount: Amount) -> GuardianResult<Self> {
-        enclave.state.consume_from_limiter(epoch, amount)?;
-        Ok(Self {
-            enclave,
-            epoch,
-            amount,
-            committed: false,
-        })
-    }
-
-    fn commit(mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for LimiterGuard {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-
-        // Note: The only downside with the current RAII approach is that we are unable to propagate
-        // errors in revert_limiter. But that function should not fail normally, so this should be rare.
-        if let Err(e) = self.enclave.state.revert_limiter(self.epoch, self.amount) {
-            // Never panic in Drop; best-effort revert and local error log.
-            error!(
-                epoch = self.epoch,
-                ?e,
-                "failed to revert limiter during drop"
-            );
-        }
-    }
 }
 
 pub fn verify_hashi_cert<T: Serialize>(
@@ -194,20 +191,18 @@ async fn log_withdrawal_failure(
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
-    use bitcoin::Amount;
     use bitcoin::Network;
     use hashi_types::guardian::test_utils::create_btc_keypair;
+    use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::ProvisionerInitState;
-    use hashi_types::guardian::RateLimiter;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::WithdrawalConfig;
 
-    /// Sets up an enclave with a single committee and rate limiter.
+    /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
         network: Network,
-        epoch: u64,
         committee: HashiCommittee,
-        max_withdrawable_per_epoch: Amount,
+        max_bucket_capacity_sats: u64,
     ) -> Arc<Enclave> {
         let enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default().with_network(network),
@@ -224,21 +219,26 @@ mod tests {
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
             .unwrap();
 
+        let refill_rate = 0; // no refill in tests unless specified
         let withdrawal_config = WithdrawalConfig {
             committee_threshold: 1,
-            max_withdrawable_per_epoch_sats: max_withdrawable_per_epoch.to_sat(),
+            refill_rate_sats_per_sec: refill_rate,
+            max_bucket_capacity_sats,
         };
         enclave
             .config
-            .set_withdrawal_config(withdrawal_config.clone())
+            .set_withdrawal_config(withdrawal_config)
             .unwrap();
 
-        let limiter =
-            RateLimiter::new(epoch, Amount::from_sat(0), max_withdrawable_per_epoch).unwrap();
+        let limiter_state = LimiterState {
+            num_tokens_available: max_bucket_capacity_sats,
+            last_updated_at: 0,
+            next_seq: 0,
+        };
         let init_state = ProvisionerInitState::new(
             committee,
             withdrawal_config,
-            limiter,
+            limiter_state,
             hashi_btc_master_pubkey,
         )
         .unwrap();
@@ -254,11 +254,11 @@ mod tests {
         enclave
     }
 
-    #[test]
-    fn test_normal_withdrawal_inner_requires_full_init() {
+    #[tokio::test]
+    async fn test_normal_withdrawal_inner_requires_full_init() {
         let enclave = Enclave::create_with_random_keys();
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let result = normal_withdrawal_inner(enclave, signed_request);
+        let result = normal_withdrawal_inner(enclave, signed_request).await;
         assert!(matches!(result, Err(EnclaveUninitialized)));
     }
 
@@ -266,30 +266,43 @@ mod tests {
     async fn test_normal_withdrawal() {
         let (signed_request, committee) =
             StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
-        let epoch = signed_request.epoch();
-        let amount = signed_request.message().utxos().external_out_amount();
-        // Set request amount as the max withdrawable
+        let amount_sats = signed_request
+            .message()
+            .utxos()
+            .external_out_amount()
+            .to_sat();
+        // Set request amount as the max bucket capacity
         let enclave =
-            setup_fully_initialized_enclave(Network::Regtest, epoch, committee, amount).await;
+            setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
-        let result = normal_withdrawal_inner(enclave, signed_request);
+        let result = normal_withdrawal_inner(enclave, signed_request).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_standard_withdrawal_rate_limit_exceeded() {
-        let (signed_request, committee) =
-            StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
-        let epoch = signed_request.epoch();
-        let amount = signed_request.message().utxos().external_out_amount();
-        // Set request amount as the max withdrawable
+        let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            1,
+            100,
+            0,
+        );
+        let amount_sats = req1.message().utxos().external_out_amount().to_sat();
+        // Bucket capacity == one withdrawal, so second will be rejected.
         let enclave =
-            setup_fully_initialized_enclave(Network::Regtest, epoch, committee, amount).await;
+            setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
-        let first = standard_withdrawal(enclave.clone(), signed_request.clone()).await;
+        let first = standard_withdrawal(enclave.clone(), req1).await;
         assert!(first.is_ok());
 
-        let second = standard_withdrawal(enclave, signed_request).await;
+        // Second withdrawal with seq=1 and later timestamp — bucket is empty, no refill (rate=0).
+        let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            2,
+            200,
+            1,
+        );
+        let second = standard_withdrawal(enclave, req2).await;
         assert!(matches!(
             second.unwrap_err(),
             GuardianError::RateLimitExceeded

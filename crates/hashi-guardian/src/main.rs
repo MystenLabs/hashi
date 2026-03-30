@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use bitcoin::secp256k1::Keypair;
-use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::Txid;
 use hashi_guardian::HEARTBEAT_INTERVAL;
@@ -17,7 +16,6 @@ use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
@@ -35,6 +33,7 @@ mod withdraw;
 use crate::heartbeat::HeartbeatWriter;
 use crate::rpc::GuardianGrpc;
 use crate::s3_logger::S3Logger;
+use crate::withdraw::LimiterGuard;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 
@@ -69,8 +68,9 @@ pub struct EnclaveConfig {
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
-    /// Rate limiter state.
-    rate_limiter: Mutex<Option<RateLimiter>>,
+    /// Rate limiter. Set once during provisioner_init.
+    /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
+    rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
 /// Scratchpad used only during initialization.
@@ -272,7 +272,8 @@ impl EnclaveConfig {
 
 impl EnclaveState {
     pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
-        let (committee, _, rate_limiter, _) = incoming_state.into_parts();
+        let rate_limiter = incoming_state.build_rate_limiter()?;
+        let (committee, _, _, _) = incoming_state.into_parts();
 
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;
@@ -290,11 +291,7 @@ impl EnclaveState {
             .expect("rwlock read should not fail")
             .is_some();
 
-        let limiter_init = self
-            .rate_limiter
-            .lock()
-            .expect("mutex lock should not fail")
-            .is_some();
+        let limiter_init = self.rate_limiter.get().is_some();
 
         (committee_init, limiter_init)
     }
@@ -349,32 +346,27 @@ impl EnclaveState {
     fn set_rate_limiter(&self, limiter: RateLimiter) -> GuardianResult<()> {
         info!("Setting rate limiter.");
 
-        let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
-        if guard.is_some() {
-            Err(InvalidInputs("rate_limiter already initialized".into()))
-        } else {
-            *guard = Some(limiter);
-            Ok(())
-        }
+        self.rate_limiter
+            .set(Arc::new(tokio::sync::Mutex::new(limiter)))
+            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))
     }
 
-    fn with_rate_limiter_mut<R>(
+    /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
+    /// The guard holds the mutex lock — no other withdrawal can start until it is
+    /// committed or dropped (which reverts).
+    pub async fn consume_from_limiter(
         &self,
-        f: impl FnOnce(&mut RateLimiter) -> GuardianResult<R>,
-    ) -> GuardianResult<R> {
-        let mut guard = self.rate_limiter.lock().expect("should not be poisoned");
-        let limiter = guard
-            .as_mut()
+        seq: u64,
+        timestamp: u64,
+        amount_sats: u64,
+    ) -> GuardianResult<LimiterGuard> {
+        let rate_limiter = self
+            .rate_limiter
+            .get()
             .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
-        f(limiter)
-    }
-
-    pub fn consume_from_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        self.with_rate_limiter_mut(|limiter| limiter.consume(epoch, amount))
-    }
-
-    pub fn revert_limiter(&self, epoch: u64, amount: Amount) -> GuardianResult<()> {
-        self.with_rate_limiter_mut(|limiter| limiter.revert(epoch, amount))
+        let mut guard = rate_limiter.clone().lock_owned().await;
+        guard.consume(seq, timestamp, amount_sats)?;
+        Ok(LimiterGuard::new(guard))
     }
 }
 
@@ -388,7 +380,7 @@ impl Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
                 committee: RwLock::new(None),
-                rate_limiter: Mutex::new(None),
+                rate_limiter: OnceLock::new(),
             },
             scratchpad: Scratchpad::default(),
         }

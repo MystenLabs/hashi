@@ -8,10 +8,12 @@ pub mod proto_conversions;
 pub mod test_utils;
 pub mod time_utils;
 
-pub mod enclave_state;
+pub mod limiter;
 pub mod s3_utils;
 
-pub use enclave_state::RateLimiter;
+pub use limiter::LimiterConfig;
+pub use limiter::LimiterState;
+pub use limiter::RateLimiter;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
 pub use time_utils::unix_millis_to_seconds;
@@ -159,10 +161,10 @@ pub struct ProvisionerInitRequest {
 pub struct ProvisionerInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
-    /// Withdrawal config
+    /// Withdrawal config (includes limiter config)
     withdrawal_config: WithdrawalConfig,
-    /// Current rate limiter state
-    rate_limiter: RateLimiter,
+    /// Limiter state (tokens available, timestamp, seq)
+    limiter_state: LimiterState,
     /// Hashi BTC master key used to derive child keys for diff inputs
     hashi_btc_master_pubkey: BitcoinPubkey,
 }
@@ -200,6 +202,10 @@ pub struct StandardWithdrawalRequest {
     wid: WithdrawalID,
     /// BTC transaction input and output utxos
     utxos: TxUTXOs,
+    /// Timestamp in unix seconds (used for rate limiting)
+    timestamp_secs: u64,
+    /// Monotonic sequence number for ordering
+    seq: u64,
 }
 
 /// `EnclaveSigned<T>`
@@ -288,12 +294,14 @@ pub struct S3BucketInfo {
     pub region: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight
     pub committee_threshold: u64,
-    /// Maximum amount withdrawable per epoch, in sats
-    pub max_withdrawable_per_epoch_sats: u64,
+    /// Token refill rate in sats per second
+    pub refill_rate_sats_per_sec: u64,
+    /// Maximum bucket capacity in sats
+    pub max_bucket_capacity_sats: u64,
 }
 
 // ---------------------------------
@@ -375,36 +383,47 @@ impl ProvisionerInitState {
     pub fn new(
         committee: HashiCommittee,
         withdrawal_config: WithdrawalConfig,
-        rate_limiter: RateLimiter,
+        limiter_state: LimiterState,
         hashi_btc_master_pubkey: BitcoinPubkey,
     ) -> GuardianResult<Self> {
-        if committee.epoch() != rate_limiter.epoch() {
-            return Err(InvalidInputs(format!(
-                "committee epoch {} != rate limiter epoch {}",
-                committee.epoch(),
-                rate_limiter.epoch()
-            )));
-        }
-        if rate_limiter.max_withdrawable_per_epoch()
-            != Amount::from_sat(withdrawal_config.max_withdrawable_per_epoch_sats)
-        {
+        // Validate that limiter state is consistent with config.
+        if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
             return Err(InvalidInputs(
-                "rate limiter max does not match withdrawal config".into(),
+                "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
         Ok(Self {
             committee,
             withdrawal_config,
-            rate_limiter,
+            limiter_state,
             hashi_btc_master_pubkey,
         })
     }
 
-    pub fn into_parts(self) -> (HashiCommittee, WithdrawalConfig, RateLimiter, BitcoinPubkey) {
+    /// Build a `RateLimiter` from the config and state in this init state.
+    pub fn build_rate_limiter(&self) -> GuardianResult<RateLimiter> {
+        RateLimiter::new(self.limiter_config(), self.limiter_state)
+    }
+
+    pub fn limiter_config(&self) -> LimiterConfig {
+        LimiterConfig {
+            refill_rate: self.withdrawal_config.refill_rate_sats_per_sec,
+            max_bucket_capacity: self.withdrawal_config.max_bucket_capacity_sats,
+        }
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        HashiCommittee,
+        WithdrawalConfig,
+        LimiterState,
+        BitcoinPubkey,
+    ) {
         (
             self.committee,
             self.withdrawal_config,
-            self.rate_limiter,
+            self.limiter_state,
             self.hashi_btc_master_pubkey,
         )
     }
@@ -460,8 +479,13 @@ impl ProvisionerInitRequest {
 }
 
 impl StandardWithdrawalRequest {
-    pub fn new(wid: WithdrawalID, utxos: TxUTXOs) -> Self {
-        Self { wid, utxos }
+    pub fn new(wid: WithdrawalID, utxos: TxUTXOs, timestamp_secs: u64, seq: u64) -> Self {
+        Self {
+            wid,
+            utxos,
+            timestamp_secs,
+            seq,
+        }
     }
 
     pub fn wid(&self) -> &WithdrawalID {
@@ -470,6 +494,14 @@ impl StandardWithdrawalRequest {
 
     pub fn utxos(&self) -> &TxUTXOs {
         &self.utxos
+    }
+
+    pub fn timestamp_secs(&self) -> u64 {
+        self.timestamp_secs
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.seq
     }
 }
 
@@ -693,6 +725,8 @@ pub fn verify_enclave_attestation(_attestation: Attestation) -> GuardianResult<(
 pub struct StandardWithdrawalRequestWire {
     pub wid: WithdrawalID,
     pub utxos: TxUTXOsWire,
+    pub timestamp_secs: u64,
+    pub seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -713,7 +747,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 struct ProvisionerInitStateRepr {
     pub committee: crate::move_types::Committee,
     pub withdrawal_config: WithdrawalConfig,
-    pub rate_limiter: RateLimiter,
+    pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: BitcoinPubkey,
 }
 
@@ -760,6 +794,8 @@ impl AddressValidation<StandardWithdrawalRequestWire> for StandardWithdrawalRequ
         Ok(Self {
             wid: value.wid,
             utxos: TxUTXOs::new(inputs, outputs)?,
+            timestamp_secs: value.timestamp_secs,
+            seq: value.seq,
         })
     }
 }
@@ -769,17 +805,19 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
         Self {
             wid: m.wid,
             utxos: m.utxos.into(),
+            timestamp_secs: m.timestamp_secs,
+            seq: m.seq,
         }
     }
 }
 
 impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
     fn from(state: &ProvisionerInitState) -> Self {
-        let (committee, config, limiter, pubkey) = state.clone().into_parts();
+        let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),
             withdrawal_config: config,
-            rate_limiter: limiter,
+            limiter_state,
             hashi_btc_master_pubkey: pubkey,
         }
     }

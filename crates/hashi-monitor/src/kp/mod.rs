@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use bitcoin::Amount;
 use hpke::Deserializable;
 mod config;
 mod heartbeat_checks;
@@ -12,9 +11,9 @@ use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
-use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -39,18 +38,17 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     expected_guardian_config.ensure_matches_info(&guardian_info)?;
     info!(session_id, "init checks passed for selected session");
 
-    // TODO: replace mock rate limiter with actual state from S3 logs.
+    // TODO: replace mock limiter state with actual state from S3 logs.
     let committee = cfg.hashi_committee.try_into()?;
-    let mock_rate_limiter = RateLimiter::new(
-        0,
-        Amount::from_sat(0),
-        Amount::from_sat(cfg.withdrawal_config.max_withdrawable_per_epoch_sats),
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    let mock_limiter_state = LimiterState {
+        num_tokens_available: cfg.withdrawal_config.max_bucket_capacity_sats,
+        last_updated_at: 0,
+        next_seq: 0,
+    };
     let state = ProvisionerInitState::new(
         committee,
         cfg.withdrawal_config,
-        mock_rate_limiter,
+        mock_limiter_state,
         cfg.hashi_btc_master_pubkey,
     )
     .map_err(|e| anyhow::anyhow!(e))?;

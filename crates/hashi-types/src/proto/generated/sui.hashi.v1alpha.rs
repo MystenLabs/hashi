@@ -1152,27 +1152,33 @@ pub struct ProvisionerInitState {
     /// X-only public key bytes (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Current rate limiter state.
+    /// Rate limiter state.
     #[prost(message, optional, tag = "6")]
-    pub rate_limiter: ::core::option::Option<RateLimiter>,
+    pub limiter_state: ::core::option::Option<LimiterState>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawalConfig {
     /// Committee threshold expressed in terms of weight.
     #[prost(uint64, optional, tag = "1")]
     pub committee_threshold: ::core::option::Option<u64>,
-    /// Maximum amount withdrawable per epoch, in sats.
+    /// Token refill rate in sats per second.
     #[prost(uint64, optional, tag = "2")]
-    pub max_withdrawable_per_epoch_sats: ::core::option::Option<u64>,
+    pub refill_rate_sats_per_sec: ::core::option::Option<u64>,
+    /// Maximum bucket capacity in sats.
+    #[prost(uint64, optional, tag = "3")]
+    pub max_bucket_capacity_sats: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RateLimiter {
-    /// Amount withdrawn in the current epoch, in sats.
+pub struct LimiterState {
+    /// Available tokens in sats.
     #[prost(uint64, optional, tag = "1")]
-    pub withdrawn_sats: ::core::option::Option<u64>,
-    /// Current epoch.
+    pub num_tokens_available_sats: ::core::option::Option<u64>,
+    /// Last updated timestamp in unix seconds.
     #[prost(uint64, optional, tag = "2")]
-    pub epoch: ::core::option::Option<u64>,
+    pub last_updated_at_secs: ::core::option::Option<u64>,
+    /// Next expected withdrawal sequence number.
+    #[prost(uint64, optional, tag = "3")]
+    pub next_seq: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}
@@ -1194,6 +1200,12 @@ pub struct StandardWithdrawalRequestData {
     /// Transaction UTXOs (inputs and outputs).
     #[prost(message, optional, tag = "2")]
     pub utxos: ::core::option::Option<TxUtxos>,
+    /// Timestamp in unix seconds (signed by committee, used for rate limiting).
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_secs: ::core::option::Option<u64>,
+    /// Monotonic sequence number for ordering withdrawals.
+    #[prost(uint64, optional, tag = "4")]
+    pub seq: ::core::option::Option<u64>,
 }
 /// Guardian-signed response.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

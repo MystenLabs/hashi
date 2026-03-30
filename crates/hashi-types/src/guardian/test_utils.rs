@@ -10,11 +10,11 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::LimiterState;
 use super::NUM_OF_SHARES;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
-use super::RateLimiter;
 use super::S3BucketInfo;
 use super::S3Config;
 use super::SetupNewKeyRequest;
@@ -191,14 +191,14 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
 impl ProvisionerInitState {
     pub fn from_parts_for_testing(
         withdrawal_config: WithdrawalConfig,
-        rate_limiter: RateLimiter,
+        limiter_state: LimiterState,
         committee: HashiCommittee,
         hashi_btc_master_pubkey: super::BitcoinPubkey,
     ) -> Self {
         ProvisionerInitState::new(
             committee,
             withdrawal_config,
-            rate_limiter,
+            limiter_state,
             hashi_btc_master_pubkey,
         )
         .expect("valid ProvisionerInitState")
@@ -206,20 +206,20 @@ impl ProvisionerInitState {
 
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
-        let max_withdrawable_per_epoch_sats = 1000;
+        let max_capacity = 1000;
 
         ProvisionerInitState::new(
             mock_committee_with_one_member(0),
             WithdrawalConfig {
                 committee_threshold: 0,
-                max_withdrawable_per_epoch_sats,
+                refill_rate_sats_per_sec: 10,
+                max_bucket_capacity_sats: max_capacity,
             },
-            RateLimiter::new(
-                0,
-                Amount::from_sat(0),
-                Amount::from_sat(max_withdrawable_per_epoch_sats),
-            )
-            .unwrap(),
+            LimiterState {
+                num_tokens_available: max_capacity,
+                last_updated_at: 0,
+                next_seq: 0,
+            },
             kp.x_only_public_key().0,
         )
         .expect("valid ProvisionerInitState")
@@ -255,7 +255,19 @@ impl StandardWithdrawalRequest {
         let utxos = TxUTXOs::new(vec![input], vec![output_external, output_internal])
             .expect("valid TxUTXOs");
 
-        StandardWithdrawalRequest::new(wid, utxos)
+        StandardWithdrawalRequest::new(wid, utxos, 1_000_000, 0)
+    }
+
+    fn mock_for_testing_with_seq(
+        network: Network,
+        wid: u64,
+        timestamp_secs: u64,
+        seq: u64,
+    ) -> Self {
+        let mut req = Self::mock_for_testing(network, wid);
+        req.timestamp_secs = timestamp_secs;
+        req.seq = seq;
+        req
     }
 
     fn sign_for_request(
@@ -296,6 +308,20 @@ impl StandardWithdrawalRequest {
         wid: u64,
     ) -> HashiSigned<StandardWithdrawalRequest> {
         Self::sign_for_wid(network, wid).0
+    }
+
+    pub fn mock_signed_and_committee_with_seq(
+        network: Network,
+        wid: u64,
+        timestamp_secs: u64,
+        seq: u64,
+    ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
+        Self::sign_for_request(Self::mock_for_testing_with_seq(
+            network,
+            wid,
+            timestamp_secs,
+            seq,
+        ))
     }
 }
 
