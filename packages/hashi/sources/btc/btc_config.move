@@ -30,6 +30,33 @@ const OUTPUT_BUDGET: u64 = 2;
 /// ceil((32 + 4 + 6) WU / 4) = 11 vB.
 const TX_FIXED_VB: u64 = 11;
 
+// ======== Config Validation ========
+
+/// Returns true when `key` is a recognised BTC config key and `value`
+/// carries the type that key expects.
+#[allow(implicit_const_copy)]
+public(package) fun is_valid_config_entry(
+    key: &std::string::String,
+    value: &config_value::Value,
+): bool {
+    let k = key.as_bytes();
+    if (k == &b"deposit_fee") {
+        value.is_u64()
+    } else if (k == &b"withdrawal_fee_btc") {
+        value.is_u64()
+    } else if (k == &b"max_fee_rate") {
+        value.is_u64()
+    } else if (k == &b"input_budget") {
+        value.is_u64()
+    } else if (k == &b"bitcoin_confirmation_threshold") {
+        value.is_u64()
+    } else if (k == &b"withdrawal_cancellation_cooldown_ms") {
+        value.is_u64()
+    } else {
+        false
+    }
+}
+
 // ======== Accessors ========
 
 public(package) fun bitcoin_chain_id(self: &Config): address {

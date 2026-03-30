@@ -13,7 +13,7 @@ use hashi::{
     disable_version,
     enable_version,
     hashi::Hashi,
-    update_config,
+    update_config
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
 

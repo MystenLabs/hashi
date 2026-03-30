@@ -3,8 +3,10 @@
 
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, config::Config, utxo::{Utxo, UtxoId}};
+use hashi::{btc::BTC, btc_config, config::Config, utxo::{Utxo, UtxoId}};
 use sui::{bag::Bag, balance::Balance, clock::Clock};
+
+use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
 
 #[error]
 const ERequestNotApproved: vector<u8> = b"Withdrawal request has not been approved";
@@ -110,7 +112,7 @@ public(package) fun new_pending_withdrawal(
     randomness: vector<u8>,
     ctx: &mut TxContext,
 ): PendingWithdrawal {
-    let max_network_fee = hashi::btc_config::worst_case_network_fee(config);
+    let max_network_fee = config.worst_case_network_fee();
 
     let mut input_amount = 0;
     inputs.do_ref!(|utxo| {

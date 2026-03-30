@@ -10,10 +10,9 @@ use hashi::{
     committee_set::CommitteeSet,
     config::Config,
     threshold,
-    treasury::Treasury,
+    treasury::Treasury
 };
-use sui::bag::{Self, Bag};
-use sui::dynamic_field as df;
+use sui::{bag::{Self, Bag}, dynamic_field as df};
 
 public struct Hashi has key {
     id: UID,

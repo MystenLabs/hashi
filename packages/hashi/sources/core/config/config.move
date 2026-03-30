@@ -20,26 +20,8 @@ const PACKAGE_VERSION: u64 = 1;
 const EVersionDisabled: vector<u8> = b"Version disabled";
 #[error(code = 1)]
 const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
-#[error(code = 2)]
-const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type";
-
-//
-// Config keys (core)
-//
 
 const PAUSED_KEY: vector<u8> = b"paused";
-
-//
-// Config keys (BTC) — kept here for is_valid_config_entry validation.
-// Accessors and calculation functions live in btc_config.move.
-//
-
-const DEPOSIT_FEE_KEY: vector<u8> = b"deposit_fee";
-const WITHDRAWAL_FEE_BTC_KEY: vector<u8> = b"withdrawal_fee_btc";
-const MAX_FEE_RATE_KEY: vector<u8> = b"max_fee_rate";
-const INPUT_BUDGET_KEY: vector<u8> = b"input_budget";
-const BITCOIN_CONFIRMATION_THRESHOLD_KEY: vector<u8> = b"bitcoin_confirmation_threshold";
-const WITHDRAWAL_CANCELLATION_COOLDOWN_KEY: vector<u8> = b"withdrawal_cancellation_cooldown_ms";
 
 public struct Config has store {
     config: VecMap<String, Value>,
@@ -65,36 +47,13 @@ public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     self.config.insert(key, value);
 }
 
-/// Validated upsert: accepts a key string and a Value, validates that
-/// known keys receive the expected value type, and rejects unknown keys.
-/// This is the entry point used by the generic `UpdateConfig` proposal.
-public(package) fun upsert_checked(self: &mut Config, key: String, value: Value) {
-    assert!(is_valid_config_entry(&key, &value), EInvalidConfigEntry);
-    let bytes = *key.as_bytes();
-    self.upsert(bytes, value);
-}
-
-/// Returns true when `key` is a recognised config key and `value`
+/// Returns true when `key` is a recognised core config key and `value`
 /// carries the type that key expects.
 #[allow(implicit_const_copy)]
-fun is_valid_config_entry(key: &String, value: &Value): bool {
+public(package) fun is_valid_core_config_entry(key: &String, value: &Value): bool {
     let k = key.as_bytes();
-    // Core keys
     if (k == &PAUSED_KEY) {
         value.is_bool()
-    } else if (k == &DEPOSIT_FEE_KEY) {
-        // BTC bridge keys (accessors live in btc_config.move)
-        value.is_u64()
-    } else if (k == &WITHDRAWAL_FEE_BTC_KEY) {
-        value.is_u64()
-    } else if (k == &MAX_FEE_RATE_KEY) {
-        value.is_u64()
-    } else if (k == &INPUT_BUDGET_KEY) {
-        value.is_u64()
-    } else if (k == &BITCOIN_CONFIRMATION_THRESHOLD_KEY) {
-        value.is_u64()
-    } else if (k == &WITHDRAWAL_CANCELLATION_COOLDOWN_KEY) {
-        value.is_u64()
     } else {
         false
     }

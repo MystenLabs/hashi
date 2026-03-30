@@ -613,8 +613,10 @@ async fn scrape_hashi(
         Identifier::from_static("BitcoinStateKey"),
         vec![],
     )));
-    let bitcoin_state_field_id =
-        id.derive_dynamic_child_id(&bitcoin_state_key_type, &bitcoin_state_key.to_bcs().unwrap());
+    let bitcoin_state_field_id = id.derive_dynamic_child_id(
+        &bitcoin_state_key_type,
+        &bitcoin_state_key.to_bcs().unwrap(),
+    );
     let bitcoin_state_response = client
         .ledger_client()
         .get_object(
@@ -623,13 +625,15 @@ async fn scrape_hashi(
             ])),
         )
         .await?;
-    let bitcoin_state_field: move_types::Field<move_types::BitcoinStateKey, move_types::BitcoinState> =
-        bitcoin_state_response
-            .into_inner()
-            .object()
-            .contents()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
+    let bitcoin_state_field: move_types::Field<
+        move_types::BitcoinStateKey,
+        move_types::BitcoinState,
+    > = bitcoin_state_response
+        .into_inner()
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
     let bitcoin_state = bitcoin_state_field.value;
 
     let (

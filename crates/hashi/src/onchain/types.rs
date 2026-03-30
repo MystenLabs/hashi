@@ -452,7 +452,7 @@ pub struct Config {
     pub upgrade_cap: Option<UpgradeCap>,
 }
 
-// These constants mirror the values in config.move and must be kept in sync.
+// These constants mirror the values in btc_config.move and must be kept in sync.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 const MIN_RELAY_FEE_RATE: u64 = 1;
 const INPUT_VB: u64 = 100;

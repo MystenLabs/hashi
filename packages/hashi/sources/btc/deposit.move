@@ -3,8 +3,18 @@
 
 module hashi::deposit;
 
-use hashi::{btc::BTC, committee::CommitteeSignature, hashi::Hashi, utxo::UtxoId};
+use hashi::{
+    btc::BTC,
+    btc_config,
+    committee::CommitteeSignature,
+    config::Config,
+    hashi::Hashi,
+    utxo::UtxoId
+};
 use sui::{coin::{Self, Coin}, sui::SUI};
+
+use fun btc_config::deposit_fee as Config.deposit_fee;
+use fun btc_config::deposit_minimum as Config.deposit_minimum;
 
 public fun deposit(
     hashi: &mut Hashi,
@@ -17,11 +27,11 @@ public fun deposit(
     hashi.assert_unpaused();
 
     // Check that the fee is sufficient
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == fee.value());
+    assert!(hashi.config().deposit_fee() == fee.value());
     sui::coin::send_funds(fee, hashi.id().to_address());
 
     // Check that the deposit amount meets the dust minimum
-    assert!(request.utxo().amount() >= hashi::btc_config::deposit_minimum(hashi.config()));
+    assert!(request.utxo().amount() >= hashi.config().deposit_minimum());
 
     // Check that the UTXO isn't already active or previously spent (replay protection)
     assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(request.utxo().id()));

@@ -3,9 +3,12 @@
 
 module hashi::update_config;
 
-use hashi::{config_value::Value, hashi::Hashi, proposal};
+use hashi::{config, config_value::Value, hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
+
+#[error]
+const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type";
 
 const THRESHOLD_BPS: u64 = 6667;
 
@@ -28,5 +31,11 @@ public fun propose(
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let UpdateConfig { key, value } = proposal::execute(hashi, proposal_id, clock);
-    hashi.config_mut().upsert_checked(key, value);
+    assert!(
+        config::is_valid_core_config_entry(&key, &value)
+            || hashi::btc_config::is_valid_config_entry(&key, &value),
+        EInvalidConfigEntry,
+    );
+    let bytes = *key.as_bytes();
+    hashi.config_mut().upsert(bytes, value);
 }
