@@ -235,8 +235,20 @@ pub enum DepositCommands {
         recipient: String,
     },
 
-    /// Submit a deposit request on Sui with existing UTXO info
+    /// Submit deposit requests for all outputs in a Bitcoin transaction that match the deposit address.
+    /// Requires Bitcoin RPC to look up the transaction outputs.
     Request {
+        /// Bitcoin transaction ID containing the deposit(s)
+        #[clap(long)]
+        txid: String,
+
+        /// Sui address that will receive hBTC
+        #[clap(long)]
+        recipient: Option<String>,
+    },
+
+    /// Submit a deposit request for a single specific UTXO (manual vout + amount)
+    RequestSingle {
         /// Bitcoin transaction ID containing the deposit
         #[clap(long)]
         txid: String,

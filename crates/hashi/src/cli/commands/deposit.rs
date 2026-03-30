@@ -23,7 +23,10 @@ pub async fn run(action: DepositCommands, config: &CliConfig, tx_opts: &TxOption
         DepositCommands::GenerateAddress { recipient } => {
             generate_address(config, &recipient).await
         }
-        DepositCommands::Request {
+        DepositCommands::Request { txid, recipient } => {
+            request_all(config, tx_opts, &txid, recipient.as_deref()).await
+        }
+        DepositCommands::RequestSingle {
             txid,
             vout,
             amount,
@@ -172,6 +175,122 @@ async fn request(
         .await?;
 
     print_success(&format!("Deposit request created: {}", request_id));
+
+    Ok(())
+}
+
+async fn request_all(
+    config: &CliConfig,
+    _tx_opts: &TxOptions,
+    txid: &str,
+    recipient: Option<&str>,
+) -> Result<()> {
+    config.validate()?;
+
+    let btc_rpc = config.require_btc_rpc_client()?;
+
+    let hashi_ids = crate::config::HashiIds {
+        package_id: config.package_id(),
+        hashi_object_id: config.hashi_object_id(),
+    };
+
+    let signer = config
+        .load_keypair()?
+        .context("Keypair required for deposit request. Set keypair_path in config.")?;
+
+    let derivation_path = match recipient {
+        Some(r) => Some(
+            r.parse::<sui_sdk_types::Address>()
+                .context("Invalid recipient Sui address")?,
+        ),
+        None => {
+            let addr = signer.public_key().derive_address();
+            print_info(&format!(
+                "No --recipient specified, defaulting to signer address {}",
+                addr
+            ));
+            Some(addr)
+        }
+    };
+
+    // Fetch the MPC public key and derive the deposit address
+    let client = HashiClient::new(config).await?;
+    let mpc_pubkey = client.fetch_mpc_public_key();
+    if mpc_pubkey.is_empty() {
+        anyhow::bail!("MPC public key not available on-chain. Has the committee completed DKG?");
+    }
+
+    let btc_network = crate::btc_monitor::config::parse_btc_network(
+        config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
+    )?;
+
+    let deposit_address =
+        cli_derive_deposit_address(&mpc_pubkey, derivation_path.as_ref(), btc_network)?;
+
+    // Look up the transaction and find all matching outputs
+    let parsed_txid: bitcoin::Txid = txid.parse().context("Invalid txid")?;
+
+    use bitcoincore_rpc::RpcApi;
+    let raw_tx = btc_rpc
+        .get_raw_transaction(&parsed_txid, None)
+        .context("Failed to fetch transaction from Bitcoin RPC")?;
+
+    let matching_utxos: Vec<(u32, u64)> = raw_tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.script_pubkey == deposit_address.script_pubkey())
+        .map(|(i, output)| (i as u32, output.value.to_sat()))
+        .collect();
+
+    if matching_utxos.is_empty() {
+        anyhow::bail!(
+            "No outputs in transaction {} match the deposit address {}",
+            txid,
+            deposit_address
+        );
+    }
+
+    let total_sats: u64 = matching_utxos.iter().map(|(_, amount)| amount).sum();
+    println!("\n{}", "Found matching outputs".bold());
+    println!("{}", "━".repeat(50).dimmed());
+    for (vout, amount) in &matching_utxos {
+        println!(
+            "  vout {}: {} sats ({:.8} BTC)",
+            vout,
+            amount,
+            *amount as f64 / 1e8
+        );
+    }
+    println!(
+        "  {} {} outputs, {} total sats ({:.8} BTC)",
+        "Summary:".bold(),
+        matching_utxos.len(),
+        total_sats,
+        total_sats as f64 / 1e8
+    );
+    println!("{}", "━".repeat(50).dimmed());
+
+    // Submit batch deposit request
+    let sui_client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(sui_client, signer, hashi_ids);
+
+    let txid_address =
+        sui_sdk_types::Address::new(bitcoin::hashes::Hash::to_byte_array(parsed_txid));
+
+    print_info("Submitting batch deposit request on Sui...");
+
+    let request_ids = executor
+        .execute_create_deposit_requests_batch(txid_address, &matching_utxos, derivation_path)
+        .await?;
+
+    println!("\n{}", "Deposit requests created".bold().green());
+    println!("{}", "━".repeat(50).dimmed());
+    for (i, request_id) in request_ids.iter().enumerate() {
+        let (vout, amount) = matching_utxos[i];
+        println!("  vout {}: {} sats -> request {}", vout, amount, request_id);
+    }
+    println!("{}", "━".repeat(50).dimmed());
 
     Ok(())
 }
