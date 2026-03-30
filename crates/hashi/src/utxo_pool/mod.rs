@@ -501,7 +501,7 @@ pub enum CoinSelectionError {
          {n_requests} requests)"
     )]
     FeeExceedsCap {
-        /// `floor(total_deduction / N)` — the equal share charged to each
+        /// `ceil(total_deduction / N)` — the equal share charged to each
         /// request.
         fee_per_request: u64,
         /// The configured per-request fee cap (`params.max_fee_per_request`).
@@ -513,25 +513,24 @@ pub enum CoinSelectionError {
         n_requests: usize,
     },
 
-    /// The total confirmed UTXO value is insufficient to cover the total
+    /// The total available UTXO value is insufficient to cover the total
     /// requested withdrawal amounts. All fees come from request amounts, so
     /// inputs only need to cover `sum(request.amount)`; no extra for fees.
     #[error(
-        "insufficient funds: {available} sat available across confirmed UTXOs, \
-         {required} sat required to cover selected withdrawal amounts"
+        "insufficient funds: {available} sat available across confirmed and \
+         pending UTXOs, {required} sat required to cover selected withdrawal \
+         amounts"
     )]
     InsufficientFunds {
-        /// Total satoshis available across confirmed UTXOs only.
+        /// Total satoshis available across confirmed and pending UTXOs.
         available: u64,
         /// Sum of the selected withdrawal request amounts.
         required: u64,
     },
 
-    /// Even a single-request transaction with the minimum required inputs
-    /// exceeds `params.max_tx_weight`. This is the gating check for request
-    /// selection (step 1): requests are dropped newest-first until the batch
-    /// fits; this error fires only when a one-request batch still exceeds the
-    /// limit.
+    /// The transaction weight exceeds `params.max_tx_weight`. Step 1 takes
+    /// `min(requests.len(), max_withdrawal_requests)` oldest requests; Step 2
+    /// checks the resulting weight and returns this error if it is too high.
     #[error(
         "single-request transaction weight {weight:#} exceeds the configured \
          maximum {max_weight:#}"
@@ -547,7 +546,7 @@ pub enum CoinSelectionError {
     /// which would produce a zero-value or negative output.
     ///
     /// This can occur when a request amount is less than
-    /// `floor(total_fee / N)`. Callers should ensure request amounts exceed
+    /// `ceil(total_fee / N)`. Callers should ensure request amounts exceed
     /// `params.max_fee_per_request` before submitting them.
     #[error(
         "withdrawal request {request_id} amount {amount} sat is less than the \
@@ -683,7 +682,7 @@ pub fn select_coins(
     requests.sort_by_key(|r| r.timestamp_ms);
 
     for r in requests.iter().take(params.max_withdrawal_requests) {
-        builder.outputs.push(WithdrawalOutput2 {
+        builder.outputs.push(PendingOutput {
             request: r,
             net_amount: 0,
         });
@@ -821,7 +820,7 @@ struct TransactionBuilder<'a> {
 
     // Values that are built up
     inputs: Vec<&'a UtxoCandidate>,
-    outputs: Vec<WithdrawalOutput2<'a>>,
+    outputs: Vec<PendingOutput<'a>>,
     /// The raw excess of input value over requested value, before any
     /// dust padding. `None` means not yet computed; `Some(0)` means
     /// exact match (no change output); `Some(n)` means `n` sats of
@@ -830,12 +829,12 @@ struct TransactionBuilder<'a> {
     final_change: Option<u64>,
 }
 
-struct WithdrawalOutput2<'a> {
+struct PendingOutput<'a> {
     request: &'a WithdrawalRequest,
     net_amount: u64,
 }
 
-impl<'a> WithdrawalOutput2<'a> {
+impl<'a> PendingOutput<'a> {
     /// The dust relay threshold for this output's recipient address type.
     fn dust_threshold(&self) -> u64 {
         match self.request.recipient.len() {
