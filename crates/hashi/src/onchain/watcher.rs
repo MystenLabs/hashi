@@ -211,7 +211,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                             tracing::info!("on-chain config refreshed after UpdateConfig proposal");
                         }
                         Err(e) => {
-                            tracing::warn!(
+                            tracing::error!(
                                 "failed to refresh config after UpdateConfig proposal: {e}"
                             );
                         }
