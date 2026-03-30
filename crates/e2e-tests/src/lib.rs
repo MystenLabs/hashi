@@ -20,8 +20,9 @@ use anyhow::Result;
 
 pub mod bitcoin_node;
 pub mod e2e_flow;
+pub mod external_bitcoin_node;
 pub mod hashi_network;
-mod publish;
+pub mod publish;
 pub mod sui_network;
 
 pub use bitcoin_node::BitcoinNodeBuilder;
@@ -164,6 +165,7 @@ impl TestNetworksBuilder {
             dir.as_ref(),
             &mut sui_network.client,
             sui_network.user_keys.first().unwrap(),
+            hashi::constants::BITCOIN_REGTEST_CHAIN_ID,
         )
         .await?;
 
