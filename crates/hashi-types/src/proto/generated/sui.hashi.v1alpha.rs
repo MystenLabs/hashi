@@ -1220,6 +1220,7 @@ pub enum Network {
     Mainnet = 0,
     Testnet = 1,
     Regtest = 2,
+    Signet = 3,
 }
 impl Network {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1231,6 +1232,7 @@ impl Network {
             Self::Mainnet => "MAINNET",
             Self::Testnet => "TESTNET",
             Self::Regtest => "REGTEST",
+            Self::Signet => "SIGNET",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1239,6 +1241,7 @@ impl Network {
             "MAINNET" => Some(Self::Mainnet),
             "TESTNET" => Some(Self::Testnet),
             "REGTEST" => Some(Self::Regtest),
+            "SIGNET" => Some(Self::Signet),
             _ => None,
         }
     }

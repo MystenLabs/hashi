@@ -149,6 +149,7 @@ enum Network {
   MAINNET = 0;
   TESTNET = 1;
   REGTEST = 2;
+  SIGNET = 3;
 }
 
 // ==========================
