@@ -229,6 +229,9 @@ pub struct HashiNetworkBuilder {
     /// Overrides `withdrawal_max_batch_size` in each node's config.
     /// `None` uses the production default (50).
     pub withdrawal_max_batch_size: Option<usize>,
+    /// Overrides `max_mempool_chain_depth` in each node's config.
+    /// `None` uses the production default (5).
+    pub max_mempool_chain_depth: Option<usize>,
 }
 
 impl HashiNetworkBuilder {
@@ -240,6 +243,7 @@ impl HashiNetworkBuilder {
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
             withdrawal_batching_delay_ms: Some(0),
             withdrawal_max_batch_size: None,
+            max_mempool_chain_depth: None,
         }
     }
 
@@ -273,6 +277,11 @@ impl HashiNetworkBuilder {
         self
     }
 
+    pub fn with_max_mempool_chain_depth(mut self, depth: usize) -> Self {
+        self.max_mempool_chain_depth = Some(depth);
+        self
+    }
+
     pub async fn build(
         self,
         dir: &Path,
@@ -302,6 +311,7 @@ impl HashiNetworkBuilder {
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
             config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
             config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
+            config.max_mempool_chain_depth = self.max_mempool_chain_depth;
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

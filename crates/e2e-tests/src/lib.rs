@@ -179,6 +179,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_max_mempool_chain_depth(mut self, depth: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_max_mempool_chain_depth(depth);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")

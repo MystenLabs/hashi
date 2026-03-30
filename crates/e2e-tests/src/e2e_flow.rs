@@ -1319,4 +1319,226 @@ mod tests {
         info!("=== OnchainConfig Builder Override Test Passed ===");
         Ok(())
     }
+
+    /// Verify that a withdrawal can spend a change output whose producing
+    /// transaction is mined on Bitcoin but not yet confirmed on Sui. The
+    /// actual Bitcoin confirmation count must be queried from the node
+    /// instead of hardcoded to 0. A UTXO whose ancestor has
+    /// `confirmations >= 1` has `mempool_chain_depth() == 0` and is eligible
+    /// for coin selection, even though the producing withdrawal is still a
+    /// `PendingWithdrawal` on Sui.
+    ///
+    /// We set `bitcoin_confirmation_threshold = 6` so that mining 2 blocks
+    /// leaves withdrawal 1 in the `[1, threshold)` window: mined on Bitcoin
+    /// but not yet confirmed on Sui. If confirmations were still hardcoded to
+    /// 0, the change UTXO would appear to have `mempool_chain_depth == 1` and
+    /// could be incorrectly filtered by the coin selector.
+    ///
+    /// Steps:
+    /// 1. Deposit enough to produce change after two withdrawals.
+    /// 2. Submit withdrawal 1 and wait for it to be picked for processing.
+    /// 3. Mine 2 blocks (below threshold of 6). Withdrawal 1 is mined on
+    ///    Bitcoin but the leader has not yet confirmed it on Sui.
+    /// 4. Submit withdrawal 2. The only available UTXO is the change from
+    ///    withdrawal 1. Its ancestor has 2 confirmations, so
+    ///    `mempool_chain_depth() == 0` and it is eligible.
+    /// 5. Mine to finality and verify both withdrawals are confirmed on Sui.
+    #[tokio::test]
+    async fn test_chained_withdrawal_spends_mined_change() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Chained Withdrawal Spends Mined Change Test ===");
+
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_onchain_config(
+                "bitcoin_confirmation_threshold",
+                hashi_types::move_types::ConfigValue::U64(6),
+            )
+            .build()
+            .await?;
+
+        // A deposit large enough to produce a meaningful change output.
+        let deposit_amount_sats = 500_000u64;
+        let withdrawal_amount_sats = 30_000u64;
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+
+        // --- Withdrawal 1 ---
+        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes1 = extract_witness_program(&btc_destination1)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
+            .await?;
+        info!("Withdrawal 1 submitted");
+
+        let picked1 =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
+                .await?;
+        info!(
+            "Withdrawal 1 picked: pending_id={}, has_change={}",
+            picked1.pending_id,
+            picked1.change_output.is_some(),
+        );
+        assert!(
+            picked1.change_output.is_some(),
+            "Withdrawal 1 should have produced a change output (deposit was large enough)"
+        );
+
+        // Mine 2 blocks so withdrawal 1 has 2 Bitcoin confirmations, which is
+        // below the on-chain threshold of 6. The leader will NOT call
+        // confirm_withdrawal_on_sui yet, so withdrawal 1 remains a
+        // PendingWithdrawal and its change UTXO remains Pending { chain }.
+        // The AncestorTx for withdrawal 1 will have confirmations=2, so
+        // mempool_chain_depth() returns 0 — the change UTXO is eligible.
+        networks.bitcoin_node.generate_blocks(2)?;
+        info!("Mined 2 blocks; withdrawal 1 now has 2 Bitcoin confirmations (below threshold 6)");
+
+        // --- Withdrawal 2 ---
+        // The only available UTXO is the change from withdrawal 1. Its ancestor
+        // is mined (confirmations=2 ≥ 1) so mempool_chain_depth()=0, making it
+        // eligible even though withdrawal 1 is not yet confirmed on Sui.
+        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes2 = extract_witness_program(&btc_destination2)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
+            .await?;
+        info!("Withdrawal 2 submitted (withdrawal 1 still pending on Sui)");
+
+        let picked2 =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
+                .await?;
+        info!("Withdrawal 2 picked: pending_id={}", picked2.pending_id);
+
+        // Mine to finality and wait for both withdrawals to be confirmed on Sui.
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_n_withdrawal_confirmations(
+            &mut networks.sui_network.client,
+            2,
+            Duration::from_secs(120),
+        )
+        .await?;
+        drop(miner);
+
+        info!("=== Chained Withdrawal Spends Mined Change Test Passed ===");
+        Ok(())
+    }
+
+    /// Verify that three consecutive withdrawals can chain through each other's
+    /// change outputs while all three transactions remain unconfirmed in the
+    /// mempool. The ancestor chain is now traversed recursively so that a UTXO
+    /// at depth 3 in the mempool is correctly identified as such.
+    ///
+    /// `max_mempool_chain_depth` is set to 3 so that all three unconfirmed
+    /// change outputs remain eligible for coin selection.
+    ///
+    /// Steps:
+    /// 1. Deposit enough to produce change across three withdrawals.
+    /// 2. Submit withdrawal A and wait for it to be picked (change UTXO_A at
+    ///    mempool depth 1).
+    /// 3. Submit withdrawal B; the leader should pick UTXO_A (depth 1 ≤ 3).
+    ///    UTXO_B's full ancestor chain is now [B, A] at depth 2.
+    /// 4. Submit withdrawal C; the leader should pick UTXO_B (depth 2 ≤ 3).
+    /// 5. Mine to finality and verify all three withdrawals are confirmed.
+    #[tokio::test]
+    async fn test_chained_withdrawal_full_depth() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Chained Withdrawal Full Depth Test ===");
+
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_max_mempool_chain_depth(3)
+            .build()
+            .await?;
+
+        // Large deposit so all three withdrawals can produce meaningful change.
+        let deposit_amount_sats = 500_000u64;
+        let withdrawal_amount_sats = 30_000u64;
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+
+        // --- Withdrawal A ---
+        let btc_destination_a = networks.bitcoin_node.get_new_address()?;
+        executor
+            .execute_create_withdrawal_request(
+                withdrawal_amount_sats,
+                extract_witness_program(&btc_destination_a)?,
+            )
+            .await?;
+        info!("Withdrawal A submitted");
+
+        let picked_a =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
+                .await?;
+        info!(
+            "Withdrawal A picked: pending_id={}, has_change={}",
+            picked_a.pending_id,
+            picked_a.change_output.is_some(),
+        );
+        assert!(
+            picked_a.change_output.is_some(),
+            "Withdrawal A must produce change to chain into B"
+        );
+
+        // --- Withdrawal B ---
+        // UTXO_A has mempool depth 1 ≤ 3 → eligible.
+        let btc_destination_b = networks.bitcoin_node.get_new_address()?;
+        executor
+            .execute_create_withdrawal_request(
+                withdrawal_amount_sats,
+                extract_witness_program(&btc_destination_b)?,
+            )
+            .await?;
+        info!("Withdrawal B submitted");
+
+        let picked_b =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
+                .await?;
+        info!(
+            "Withdrawal B picked: pending_id={}, has_change={}",
+            picked_b.pending_id,
+            picked_b.change_output.is_some(),
+        );
+        assert!(
+            picked_b.change_output.is_some(),
+            "Withdrawal B must produce change to chain into C"
+        );
+
+        // --- Withdrawal C ---
+        // UTXO_B has full ancestor chain [B, A] at mempool depth 2 ≤ 3 → eligible.
+        let btc_destination_c = networks.bitcoin_node.get_new_address()?;
+        executor
+            .execute_create_withdrawal_request(
+                withdrawal_amount_sats,
+                extract_witness_program(&btc_destination_c)?,
+            )
+            .await?;
+        info!("Withdrawal C submitted");
+
+        let picked_c =
+            wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
+                .await?;
+        info!("Withdrawal C picked: pending_id={}", picked_c.pending_id);
+
+        // Mine to finality and wait for all three confirmation events.
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_n_withdrawal_confirmations(
+            &mut networks.sui_network.client,
+            3,
+            Duration::from_secs(120),
+        )
+        .await?;
+        drop(miner);
+
+        info!("All three chained withdrawals confirmed on Sui");
+        info!("=== Chained Withdrawal Full Depth Test Passed ===");
+        Ok(())
+    }
 }

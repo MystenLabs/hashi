@@ -22,14 +22,18 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::guardian::bitcoin_utils;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
 use crate::Hashi;
+use crate::btc_monitor::monitor::TxStatus;
 use crate::leader::RetryPolicy;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
+use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
@@ -684,17 +688,38 @@ impl Hashi {
             max_fee_per_request: self.onchain_state().worst_case_network_fee(),
             input_budget: self.onchain_state().input_budget() as usize,
             max_withdrawal_requests: self.config.withdrawal_max_batch_size(),
+            max_mempool_chain_depth: self.config.max_mempool_chain_depth(),
             ..CoinSelectionParams::new(change_address.clone())
         };
 
+        // Snapshot both maps under a single read-lock so they are always
+        // mutually consistent (e.g., a WithdrawalConfirmedEvent cannot update
+        // one map but not the other between the two reads).
+        let (pending_withdrawals, utxo_records) = {
+            let state = self.onchain_state().state();
+            (
+                state.hashi().withdrawal_queue.pending_withdrawals().clone(),
+                state.hashi().utxo_pool.utxo_records().clone(),
+            )
+        };
+
+        // Query Bitcoin in parallel for the confirmation count of every
+        // pending withdrawal so we can accurately fill AncestorTx::confirmations
+        // instead of always hardcoding 0.
+        let tx_confirmations = fetch_withdrawal_tx_confirmations(self, &pending_withdrawals).await;
+
         // Map available (unlocked) UTXOs to UtxoCandidates.
-        let candidates: Vec<UtxoCandidate> = self
-            .onchain_state()
-            .utxo_records()
+        let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
             .filter(|r| r.locked_by.is_none())
             .map(|r| {
-                let status = build_utxo_status(self, r);
+                let status = build_utxo_status(
+                    self,
+                    r,
+                    &pending_withdrawals,
+                    &tx_confirmations,
+                    &utxo_records,
+                );
                 UtxoCandidate {
                     id: r.utxo.id,
                     amount: r.utxo.amount,
@@ -935,40 +960,132 @@ fn withdrawal_input_signing_request_id(
     Address::new(Blake2b256::digest(&bytes).digest)
 }
 
-/// Build the [`UtxoStatus`] for a UTXO record.
+/// Query Bitcoin in parallel for the confirmation count of every pending
+/// withdrawal transaction. Returns a map from withdrawal ID to confirmation
+/// count. Withdrawals that are in the mempool, not found, or whose RPC call
+/// fails are mapped to 0 (treated as unconfirmed).
+async fn fetch_withdrawal_tx_confirmations(
+    hashi: &Hashi,
+    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+) -> HashMap<Address, u32> {
+    let futures: Vec<_> = pending_withdrawals
+        .iter()
+        .map(|(id, pending)| async {
+            let btc_txid = bitcoin::Txid::from_byte_array(pending.txid.into());
+            let confs = match hashi.btc_monitor().get_transaction_status(btc_txid).await {
+                Ok(TxStatus::Confirmed { confirmations }) => confirmations,
+                // Mempool, not found, or RPC error — treat as unconfirmed.
+                _ => 0,
+            };
+            (*id, confs)
+        })
+        .collect();
+    futures::future::join_all(futures)
+        .await
+        .into_iter()
+        .collect()
+}
+
+/// Build the [`UtxoStatus`] for a UTXO record using a pre-fetched snapshot.
 ///
 /// For confirmed UTXOs (`produced_by = None`) this is simply
 /// [`UtxoStatus::Confirmed`]. For unconfirmed change outputs
-/// (`produced_by = Some(withdrawal_id)`) we look up the producing
-/// pending withdrawal to obtain the ancestor tx weight and fee needed for
-/// CPFP calculations. If the pending withdrawal cannot be found (should not
-/// happen in normal operation), we fall back to `Confirmed` — the UTXO
-/// remains selectable but CPFP boosting will be missing.
-fn build_utxo_status(hashi: &Hashi, record: &UtxoRecord) -> UtxoStatus {
+/// (`produced_by = Some(withdrawal_id)`) we walk the full ancestor chain
+/// recursively so that CPFP weight and mempool depth are accurately computed
+/// even for multi-level chains. If the producing withdrawal has already been
+/// removed from `pending_withdrawals` (confirmed and cleared), we promote the
+/// UTXO to `Confirmed` — it is safe to spend immediately.
+fn build_utxo_status(
+    hashi: &Hashi,
+    record: &UtxoRecord,
+    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    tx_confirmations: &HashMap<Address, u32>,
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+) -> UtxoStatus {
     let Some(producing_id) = record.produced_by else {
         return UtxoStatus::Confirmed;
     };
 
-    let chain = hashi
-        .onchain_state()
-        .pending_withdrawal(&producing_id)
-        .and_then(|pending| {
-            let tx = hashi
-                .build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())
-                .ok()?;
-            let tx_weight = tx.weight();
-            let input_total: u64 = pending.inputs.iter().map(|u| u.amount).sum();
-            let output_total: u64 = pending.all_outputs().iter().map(|o| o.amount).sum();
-            let tx_fee = input_total.saturating_sub(output_total);
-            Some(vec![AncestorTx {
-                confirmations: 0,
-                tx_weight,
-                tx_fee,
-            }])
-        })
-        .unwrap_or_default();
+    let chain = build_ancestor_chain(
+        hashi,
+        producing_id,
+        pending_withdrawals,
+        tx_confirmations,
+        utxo_records,
+        0,
+    );
 
-    UtxoStatus::Pending { chain }
+    if chain.is_empty() {
+        // The producing withdrawal was confirmed and removed from
+        // pending_withdrawals. The UTXO is safe to spend.
+        UtxoStatus::Confirmed
+    } else {
+        UtxoStatus::Pending { chain }
+    }
+}
+
+/// Maximum number of ancestor levels to traverse. Bitcoin's relay policy
+/// limits the ancestor chain to 25 transactions.
+const MAX_ANCESTOR_DEPTH: usize = 25;
+
+/// Recursively build the ancestor chain for a UTXO produced by
+/// `producing_id`. Each level appends one [`AncestorTx`] entry with the
+/// actual confirmation count (from `tx_confirmations`) and the weight and fee
+/// of the producing transaction. The recursion bottoms out when a producing
+/// withdrawal is no longer in `pending_withdrawals` (confirmed) or when
+/// `MAX_ANCESTOR_DEPTH` is reached.
+fn build_ancestor_chain(
+    hashi: &Hashi,
+    producing_id: Address,
+    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    tx_confirmations: &HashMap<Address, u32>,
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+    depth: usize,
+) -> Vec<AncestorTx> {
+    if depth >= MAX_ANCESTOR_DEPTH {
+        return Vec::new();
+    }
+
+    let Some(pending) = pending_withdrawals.get(&producing_id) else {
+        // The producing withdrawal has been confirmed; no ancestors to add.
+        return Vec::new();
+    };
+
+    let confirmations = tx_confirmations.get(&producing_id).copied().unwrap_or(0);
+
+    let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs()) else {
+        return Vec::new();
+    };
+
+    let tx_weight = tx.weight();
+    let input_total: u64 = pending.inputs.iter().map(|u| u.amount).sum();
+    let output_total: u64 = pending.all_outputs().iter().map(|o| o.amount).sum();
+    let tx_fee = input_total.saturating_sub(output_total);
+
+    let mut chain = vec![AncestorTx {
+        confirmations,
+        tx_weight,
+        tx_fee,
+    }];
+
+    // Recurse into any inputs that are themselves unconfirmed change outputs
+    // of an earlier withdrawal.
+    for input_utxo in &pending.inputs {
+        if let Some(input_record) = utxo_records.get(&input_utxo.id)
+            && let Some(parent_id) = input_record.produced_by
+        {
+            chain.extend(build_ancestor_chain(
+                hashi,
+                parent_id,
+                pending_withdrawals,
+                tx_confirmations,
+                utxo_records,
+                depth + 1,
+            ));
+        }
+    }
+
+    chain
 }
 
 /// Convert raw bitcoin address bytes (witness program) to a `ScriptBuf`.

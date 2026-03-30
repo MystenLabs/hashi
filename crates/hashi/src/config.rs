@@ -161,6 +161,15 @@ pub struct Config {
     /// Defaults to 50 (the algorithm's hard upper bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
+
+    /// Maximum number of mempool-only (0-confirmation) ancestors a UTXO may
+    /// have and still be eligible as a coin-selection input. Constrains how
+    /// deep the chain of unconfirmed transactions can grow, staying within
+    /// Bitcoin's relay policy limits.
+    ///
+    /// Defaults to 5.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_mempool_chain_depth: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -346,6 +355,11 @@ impl Config {
     pub fn withdrawal_max_batch_size(&self) -> usize {
         self.withdrawal_max_batch_size
             .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MAX_WITHDRAWAL_REQUESTS)
+    }
+
+    pub fn max_mempool_chain_depth(&self) -> usize {
+        self.max_mempool_chain_depth
+            .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MAX_MEMPOOL_CHAIN_DEPTH)
     }
 
     // Creates a new config suitable for testing. In particular this config will:
