@@ -585,9 +585,7 @@ impl MpcManager {
             mgr.dkg_config.epoch,
             dealers.len(),
         );
-        Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
-            .into_values()
-            .collect())
+        Ok(mgr.dealer_nonce_outputs.values().cloned().collect())
     }
 
     pub fn reconstruct_presignatures(
@@ -1395,8 +1393,9 @@ impl MpcManager {
             batch_index,
             &self.address,
         );
+        let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
         let dealer = batch_avss::Dealer::new(
-            self.dkg_config.nodes.clone(),
+            nodes,
             self.party_id,
             self.dkg_config.threshold,
             self.dkg_config.max_faulty,
@@ -2297,9 +2296,10 @@ impl MpcManager {
                 let sid = self
                     .session_id
                     .rotation_session_id(&self.address, share.index);
+                let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
                 let dealer = avss::Dealer::new(
                     Some(share.value),
-                    self.dkg_config.nodes.clone(),
+                    nodes,
                     self.dkg_config.threshold,
                     self.dkg_config.max_faulty,
                     sid.to_vec(),
