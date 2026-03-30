@@ -56,35 +56,6 @@ pub async fn standard_withdrawal(
     }
 }
 
-/// RAII guard that holds the limiter mutex via an owned guard.
-/// Reverts on drop unless committed.
-pub struct LimiterGuard {
-    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
-    committed: bool,
-}
-
-impl LimiterGuard {
-    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
-        Self {
-            guard,
-            committed: false,
-        }
-    }
-
-    /// Mark this withdrawal as successful. Prevents revert on drop.
-    pub fn commit(mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for LimiterGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.guard.revert();
-        }
-    }
-}
-
 // TODO: Support batched withdrawals (multiple wids per transaction).
 async fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
@@ -136,6 +107,35 @@ async fn normal_withdrawal_inner(
     info!("BTC signatures generated.");
 
     Ok((txid, response, limiter_guard))
+}
+
+/// RAII guard that holds the limiter mutex via an owned guard.
+/// Reverts on drop unless committed.
+pub struct LimiterGuard {
+    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
+    committed: bool,
+}
+
+impl LimiterGuard {
+    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
+        Self {
+            guard,
+            committed: false,
+        }
+    }
+
+    /// Mark this withdrawal as successful. Prevents revert on drop.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for LimiterGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard.revert();
+        }
+    }
 }
 
 pub fn verify_hashi_cert<T: Serialize>(
