@@ -953,6 +953,8 @@ pub enum WithdrawalCommitmentErrorKind {
     FailedQuorum,
     FeeEstimateFailed,
     UtxoSelectionFailed,
+    TimedOut,
+    TaskFailed,
 }
 
 impl RetryPolicy for WithdrawalCommitmentErrorKind {
