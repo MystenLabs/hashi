@@ -609,9 +609,10 @@ impl MpcManager {
                     outputs.insert(dealer, output);
                 }
                 batch_avss::ProcessedMessage::Complaint(_) => {
-                    return Err(MpcError::ProtocolFailed(format!(
-                        "Unexpected complaint during reconstruction for dealer {dealer:?}"
-                    )));
+                    tracing::info!(
+                        "Skipping dealer {dealer:?} during presignature reconstruction: complaint"
+                    );
+                    continue;
                 }
             }
         }
@@ -1195,6 +1196,10 @@ impl MpcManager {
                 .await?
             };
             if has_complaint {
+                tracing::info!(
+                    "Nonce gen complaint detected for dealer {:?}, recovering via Complain RPC",
+                    dealer
+                );
                 let signers = {
                     let mgr = mpc_manager.read().unwrap();
                     nonce_cert
@@ -2110,6 +2115,10 @@ impl MpcManager {
             else {
                 return Ok(());
             };
+            tracing::info!(
+                "Rotation complaint detected for dealer {:?}, recovering via Complain RPC",
+                dealer
+            );
             (request, recovery_contexts)
         };
         // Wrap receivers in Arc for use in `spawn_blocking` across loop iterations.
@@ -2549,10 +2558,11 @@ impl MpcManager {
                     outputs.insert(dealer_party_id, output);
                 }
                 avss::ProcessedMessage::Complaint(_) => {
-                    return Err(MpcError::ProtocolFailed(format!(
-                        "Complaint during DKG reconstruction for dealer {:?}",
+                    tracing::info!(
+                        "Skipping dealer {:?} during DKG reconstruction: complaint (shares invalid for this node)",
                         dealer_address
-                    )));
+                    );
+                    continue;
                 }
             }
             let dealer_weight = previous_nodes
@@ -2660,10 +2670,12 @@ impl MpcManager {
                         local_outputs.insert(share_index, output);
                     }
                     avss::ProcessedMessage::Complaint(_) => {
-                        return Err(MpcError::ProtocolFailed(format!(
-                            "Complaint during rotation reconstruction for dealer {:?} share {}",
-                            dealer_address, share_index
-                        )));
+                        tracing::info!(
+                            "Skipping dealer {:?} share {} during rotation reconstruction: complaint",
+                            dealer_address,
+                            share_index
+                        );
+                        continue;
                     }
                 }
                 certified_share_indices.push(share_index);

@@ -38,6 +38,10 @@ impl HashiNodeHandle {
         })
     }
 
+    pub fn set_corrupt_shares_for(&mut self, target: Option<sui_sdk_types::Address>) {
+        self.config.test_corrupt_shares_for = target;
+    }
+
     pub async fn start(&mut self) -> Result<()> {
         if self.service.is_some() {
             anyhow::bail!("Hashi node already started");

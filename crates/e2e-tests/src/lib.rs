@@ -1436,7 +1436,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_complaint_recovery() -> Result<()> {
+    async fn test_dkg_and_nonce_generation_complaint_recovery() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         tracing_subscriber::fmt()
@@ -1448,7 +1448,7 @@ mod tests {
             .try_init()
             .ok();
 
-        let mut test_networks = TestNetworksBuilder::new()
+        let test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .with_corrupt_shares_target(0) // all others corrupt shares for node 0
             .build()
@@ -1465,19 +1465,71 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
         assert_nodes_agree_on_mpc_key(nodes);
-        tracing::info!("=== DKG complaint recovery passed ===");
 
         // 2. Sign to verify nonce gen presigs (built via complaint recovery) work
         let epoch = nodes[0].hashi().onchain_state().epoch();
         let request_id = sui_sdk_types::Address::ZERO;
         let results = sign_on_all_nodes(nodes, b"complaint test", epoch, request_id, 0).await;
         assert_all_signatures_match(results);
-        tracing::info!("=== Nonce gen complaint recovery verified via signing ===");
 
-        // 3. Key rotation with complaint recovery
-        let initial_epoch = nodes[0].current_epoch().unwrap();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rotation_complaint_recovery() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        // 1. Start without corruption, let DKG complete
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        assert_nodes_agree_on_mpc_key(nodes);
+
+        // 2. Restart all non-target nodes with corruption enabled
+        let target_address = test_networks.hashi_network().nodes()[0].validator_address();
+        let nodes = test_networks.hashi_network_mut().nodes_mut();
+        for node in nodes[1..].iter_mut() {
+            node.set_corrupt_shares_for(Some(target_address));
+        }
+        test_networks.hashi_network_mut().restart().await?;
+
+        // Wait for all nodes to recover MPC state after restart
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} MPC recovery after restart failed: {e}"));
+        }
+
+        // 3. Force rotation — reconstruct_previous_output uses clean DKG messages,
+        //    rotation dealer messages are corrupted → complaints → recovery
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
         force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
-        tracing::info!("=== Rotation complaint recovery passed ===");
 
         Ok(())
     }
