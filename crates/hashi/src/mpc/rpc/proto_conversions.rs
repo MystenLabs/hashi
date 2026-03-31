@@ -289,13 +289,14 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
 
     fn try_from(value: &proto::ComplainRequest) -> Result<Self, Self::Error> {
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
-        let share_index = value
-            .share_index
-            .map(|idx| {
+        let share_index = if let Some(idx) = value.share_index {
+            Some(
                 std::num::NonZeroU16::new(idx as u16)
-                    .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))
-            })
-            .transpose()?;
+                    .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))?,
+            )
+        } else {
+            None
+        };
         let complaint: complaint::Complaint = deserialize_bcs(
             required(value.complaint.as_ref(), "complaint")?,
             "complaint",
