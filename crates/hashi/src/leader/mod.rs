@@ -157,17 +157,22 @@ impl LeaderService {
                     }
                 }
                 Some(result) = OptionFuture::from(self.withdrawal_approval_task.as_mut()) => {
-                    self.handle_completed_withdrawal_approval_task(result);
+                    self.withdrawal_approval_task = None;
+                    Self::log_task_result("withdrawal_approval", result);
                 }
                 Some(result) = OptionFuture::from(self.withdrawal_commitment_task.as_mut()) => {
-                    self.handle_completed_withdrawal_commitment_task(result);
+                    self.withdrawal_commitment_task = None;
+                    Self::log_task_result("withdrawal_commitment", result);
                 }
                 Some(result) = OptionFuture::from(self.deposit_gc_task.as_mut()) => {
-                    self.handle_completed_deposit_gc_task(result);
+                    self.deposit_gc_task = None;
+                    Self::log_task_result("deposit_gc", result);
                 }
                 Some(result) = OptionFuture::from(self.proposal_gc_task.as_mut()) => {
-                    self.handle_completed_proposal_gc_task(result);
+                    self.proposal_gc_task = None;
+                    Self::log_task_result("proposal_gc", result);
                 }
+
             }
         }
     }
@@ -176,96 +181,22 @@ impl LeaderService {
         &mut self,
         result: Result<(Address, anyhow::Result<()>), tokio::task::JoinError>,
     ) {
-        match result {
-            Ok((deposit_id, Ok(()))) => {
+        let mapped = match result {
+            Ok((deposit_id, inner)) => {
                 self.inflight_deposits.remove(&deposit_id);
+                Ok(inner)
             }
-            Ok((deposit_id, Err(err))) => {
-                self.inflight_deposits.remove(&deposit_id);
-                error!(deposit_request_id = %deposit_id, "Deposit task failed: {err:#}");
-            }
-            Err(err) if err.is_panic() => {
-                error!("Deposit task panicked: {err}");
-            }
-            Err(err) => {
-                error!("Deposit task failed to join: {err}");
-            }
-        }
+            Err(e) => Err(e),
+        };
+        Self::log_task_result("deposit", mapped);
     }
 
-    fn handle_completed_deposit_gc_task(
-        &mut self,
-        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
-    ) {
-        self.deposit_gc_task = None;
+    fn log_task_result(label: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) {
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                error!("Deposit request GC task failed: {err:#}");
-            }
-            Err(err) if err.is_panic() => {
-                error!("Deposit request GC task panicked: {err}");
-            }
-            Err(err) => {
-                error!("Deposit request GC task failed to join: {err}");
-            }
-        }
-    }
-
-    fn handle_completed_withdrawal_approval_task(
-        &mut self,
-        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
-    ) {
-        self.withdrawal_approval_task = None;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                error!("Withdrawal approval task failed: {err:#}");
-            }
-            Err(err) if err.is_panic() => {
-                error!("Withdrawal approval task panicked: {err}");
-            }
-            Err(err) => {
-                error!("Withdrawal approval task failed to join: {err}");
-            }
-        }
-    }
-
-    fn handle_completed_withdrawal_commitment_task(
-        &mut self,
-        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
-    ) {
-        self.withdrawal_commitment_task = None;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                error!("Withdrawal commitment task failed: {err:#}");
-            }
-            Err(err) if err.is_panic() => {
-                error!("Withdrawal commitment task panicked: {err}");
-            }
-            Err(err) => {
-                error!("Withdrawal commitment task failed to join: {err}");
-            }
-        }
-    }
-
-    fn handle_completed_proposal_gc_task(
-        &mut self,
-        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
-    ) {
-        self.proposal_gc_task = None;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                error!("Proposal GC task failed: {err:#}");
-            }
-            Err(err) if err.is_panic() => {
-                error!("Proposal GC task panicked: {err}");
-            }
-            Err(err) => {
-                error!("Proposal GC task failed to join: {err}");
-            }
+            Ok(Err(err)) => error!("{label} task failed: {err:#}"),
+            Err(err) if err.is_panic() => error!("{label} task panicked: {err}"),
+            Err(err) => error!("{label} task failed to join: {err}"),
         }
     }
 
