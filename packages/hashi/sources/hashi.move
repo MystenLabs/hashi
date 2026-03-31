@@ -5,25 +5,21 @@
 module hashi::hashi;
 
 use hashi::{
+    bitcoin_state::{Self, BitcoinState},
     committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
-    deposit_queue::DepositRequestQueue,
     threshold,
     treasury::Treasury,
-    utxo_pool::UtxoPool,
-    withdrawal_queue::WithdrawalRequestQueue
 };
 use sui::bag::{Self, Bag};
+use sui::dynamic_field as df;
 
 public struct Hashi has key {
     id: UID,
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    deposit_queue: DepositRequestQueue,
-    withdrawal_queue: WithdrawalRequestQueue,
-    utxo_pool: UtxoPool,
     proposals: Bag,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     tob: Bag,
@@ -31,7 +27,7 @@ public struct Hashi has key {
 
 #[allow(unused_function)]
 fun init(ctx: &mut TxContext) {
-    let hashi = Hashi {
+    let mut hashi = Hashi {
         id: object::new(ctx),
         committee_set: hashi::committee_set::create(ctx),
         config: {
@@ -40,12 +36,11 @@ fun init(ctx: &mut TxContext) {
             config
         },
         treasury: hashi::treasury::create(ctx),
-        deposit_queue: hashi::deposit_queue::create(ctx),
-        withdrawal_queue: hashi::withdrawal_queue::create(ctx),
-        utxo_pool: hashi::utxo_pool::create(ctx),
         proposals: bag::new(ctx),
         tob: bag::new(ctx),
     };
+
+    df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
 
     sui::transfer::share_object(hashi);
 }
@@ -149,34 +144,12 @@ public(package) fun proposals_mut(self: &mut Hashi): &mut Bag {
     &mut self.proposals
 }
 
-public(package) fun deposit_queue(self: &Hashi): &hashi::deposit_queue::DepositRequestQueue {
-    &self.deposit_queue
+public(package) fun bitcoin(self: &Hashi): &BitcoinState {
+    df::borrow(&self.id, bitcoin_state::key())
 }
 
-public(package) fun deposit_queue_mut(
-    self: &mut Hashi,
-): &mut hashi::deposit_queue::DepositRequestQueue {
-    &mut self.deposit_queue
-}
-
-public(package) fun withdrawal_queue(
-    self: &Hashi,
-): &hashi::withdrawal_queue::WithdrawalRequestQueue {
-    &self.withdrawal_queue
-}
-
-public(package) fun withdrawal_queue_mut(
-    self: &mut Hashi,
-): &mut hashi::withdrawal_queue::WithdrawalRequestQueue {
-    &mut self.withdrawal_queue
-}
-
-public(package) fun utxo_pool(self: &Hashi): &hashi::utxo_pool::UtxoPool {
-    &self.utxo_pool
-}
-
-public(package) fun utxo_pool_mut(self: &mut Hashi): &mut hashi::utxo_pool::UtxoPool {
-    &mut self.utxo_pool
+public(package) fun bitcoin_mut(self: &mut Hashi): &mut BitcoinState {
+    df::borrow_mut(&mut self.id, bitcoin_state::key())
 }
 
 public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
@@ -204,22 +177,19 @@ public fun create_for_testing(
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    deposit_queue: hashi::deposit_queue::DepositRequestQueue,
-    withdrawal_queue: WithdrawalRequestQueue,
-    utxo_pool: hashi::utxo_pool::UtxoPool,
+    btc_state: BitcoinState,
     proposals: Bag,
     tob: Bag,
     ctx: &mut TxContext,
 ): Hashi {
-    Hashi {
+    let mut hashi = Hashi {
         id: object::new(ctx),
         committee_set,
         config,
         treasury,
-        deposit_queue,
-        withdrawal_queue,
-        utxo_pool,
         proposals,
         tob,
-    }
+    };
+    df::add(&mut hashi.id, bitcoin_state::key(), btc_state);
+    hashi
 }

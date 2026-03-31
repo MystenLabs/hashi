@@ -40,12 +40,23 @@ pub struct Hashi {
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub deposit_queue: DepositRequestQueue,
-    pub withdrawal_queue: WithdrawalRequestQueue,
-    pub utxo_pool: UtxoPool,
     pub proposals: Bag,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
+}
+
+/// Rust version of the Move hashi::bitcoin_state::BitcoinStateKey type.
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct BitcoinStateKey {
+    pub dummy_field: bool,
+}
+
+/// Rust version of the Move hashi::bitcoin_state::BitcoinState type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct BitcoinState {
+    pub deposit_queue: DepositRequestQueue,
+    pub withdrawal_queue: WithdrawalRequestQueue,
+    pub utxo_pool: UtxoPool,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.

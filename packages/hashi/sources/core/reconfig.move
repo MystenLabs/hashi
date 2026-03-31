@@ -48,7 +48,7 @@ entry fun end_reconfig(
     let next_committee = self.committee_set().get_committee(next_epoch);
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     self.verify_with_committee(next_committee, message, cert);
-    self.withdrawal_queue_mut().reset_num_consumed_presigs();
+    self.bitcoin_mut().withdrawal_queue_mut().reset_num_consumed_presigs();
     let epoch = self.committee_set_mut().end_reconfig(mpc_public_key, ctx);
     sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
 }

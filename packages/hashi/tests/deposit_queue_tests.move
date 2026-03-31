@@ -26,16 +26,16 @@ fun test_delete_deposit_request() {
     let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
     let request = deposit_queue::deposit_request(utxo, &clock, ctx);
     let request_id = request.id();
-    hashi.deposit_queue_mut().insert(request);
-    assert!(hashi.deposit_queue().contains(request_id));
+    hashi.bitcoin_mut().deposit_queue_mut().insert(request);
+    assert!(hashi.bitcoin().deposit_queue().contains(request_id));
 
     // Advance clock past the expiration time (3 days + 1 ms)
     let three_days_ms = 1000 * 60 * 60 * 24 * 3;
     clock.set_for_testing(three_days_ms + 1);
 
     // Delete the expired deposit request and verify it is no longer in the queue
-    hashi.deposit_queue_mut().delete_expired(request_id, &clock);
-    assert!(!hashi.deposit_queue().contains(request_id));
+    hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, &clock);
+    assert!(!hashi.bitcoin().deposit_queue().contains(request_id));
 
     // Clean up
     clock.destroy_for_testing();
@@ -55,15 +55,15 @@ fun test_delete_unexpired_deposit_request() {
     let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
     let request = deposit_queue::deposit_request(utxo, &clock, ctx);
     let request_id = request.id();
-    hashi.deposit_queue_mut().insert(request);
-    assert!(hashi.deposit_queue().contains(request_id));
+    hashi.bitcoin_mut().deposit_queue_mut().insert(request);
+    assert!(hashi.bitcoin().deposit_queue().contains(request_id));
 
     // Advance clock by only 1 day (not enough to expire)
     let one_day_ms = 1000 * 60 * 60 * 24;
     clock.set_for_testing(one_day_ms);
 
     // Attempt to delete the unexpired deposit request - should fail
-    hashi.deposit_queue_mut().delete_expired(request_id, &clock);
+    hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, &clock);
 
     // Clean up (shouldn't be reached due to expected failure)
     clock.destroy_for_testing();

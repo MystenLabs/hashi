@@ -24,7 +24,7 @@ public fun deposit(
     assert!(request.utxo().amount() >= hashi::btc_config::deposit_minimum(hashi.config()));
 
     // Check that the UTXO isn't already active or previously spent (replay protection)
-    assert!(!hashi.utxo_pool().is_spent_or_active(request.utxo().id()));
+    assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(request.utxo().id()));
 
     let deposit_requested_event = DepositRequestedEvent {
         request_id: request.id(),
@@ -36,7 +36,7 @@ public fun deposit(
         sui_tx_digest: request.sui_tx_digest(),
     };
 
-    hashi.deposit_queue_mut().insert(request);
+    hashi.bitcoin_mut().deposit_queue_mut().insert(request);
     sui::event::emit(deposit_requested_event);
 }
 
@@ -52,7 +52,7 @@ public fun confirm_deposit(
     // delays the confirmation to be done by the next epoch's committee.
     hashi.assert_not_reconfiguring();
 
-    let request = hashi.deposit_queue_mut().remove(request_id);
+    let request = hashi.bitcoin_mut().deposit_queue_mut().remove(request_id);
 
     let deposit_confirmed_event = DepositConfirmedEvent {
         request_id: request.id(),
@@ -75,7 +75,7 @@ public fun confirm_deposit(
         transfer::public_transfer(coin::from_balance(btc, ctx), recipient);
     };
 
-    hashi.utxo_pool_mut().insert_active(utxo);
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
     sui::event::emit(deposit_confirmed_event);
 }
 
@@ -85,7 +85,7 @@ public fun delete_expired_deposit(
     clock: &sui::clock::Clock,
 ) {
     hashi.config().assert_version_enabled();
-    hashi.deposit_queue_mut().delete_expired(request_id, clock);
+    hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, clock);
 
     let expired_deposit_deleted_event = ExpiredDepositDeletedEvent {
         request_id,
