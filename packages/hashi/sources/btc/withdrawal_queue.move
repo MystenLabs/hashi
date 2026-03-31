@@ -28,9 +28,6 @@ const EOutputCountMismatch: vector<u8> =
 public struct WithdrawalRequestQueue has store {
     requests: Bag,
     pending_withdrawals: Bag,
-    /// Number of presignatures consumed in the current epoch.
-    /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
-    num_consumed_presigs: u64,
 }
 
 public struct WithdrawalRequest has store {
@@ -237,35 +234,27 @@ public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
     WithdrawalRequestQueue {
         requests: sui::bag::new(ctx),
         pending_withdrawals: sui::bag::new(ctx),
-        num_consumed_presigs: 0,
     }
 }
 
-public(package) fun num_consumed_presigs(self: &WithdrawalRequestQueue): u64 {
-    self.num_consumed_presigs
+public(package) fun pending_withdrawal_num_inputs(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): u64 {
+    let pending: &PendingWithdrawal = self.pending_withdrawals.borrow(withdrawal_id);
+    pending.inputs.length()
 }
 
-public(package) fun increment_num_consumed_presigs(self: &mut WithdrawalRequestQueue, count: u64) {
-    self.num_consumed_presigs = self.num_consumed_presigs + count;
-}
-
-public(package) fun reset_num_consumed_presigs(self: &mut WithdrawalRequestQueue) {
-    self.num_consumed_presigs = 0;
-}
-
-public(package) fun allocate_presigs_for_pending_withdrawal(
+public(package) fun reassign_presigs_for_pending_withdrawal(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
+    presig_start_index: u64,
     current_epoch: u64,
 ) {
     let pending: &mut PendingWithdrawal = self.pending_withdrawals.borrow_mut(withdrawal_id);
-    // Reassignment only — initial allocation is done in commit_withdrawal_tx.
-    // Also prevents double-allocation within the same epoch.
     assert!(pending.epoch != current_epoch);
-    let num_inputs = pending.inputs.length();
-    pending.presig_start_index = self.num_consumed_presigs;
+    pending.presig_start_index = presig_start_index;
     pending.epoch = current_epoch;
-    self.num_consumed_presigs = self.num_consumed_presigs + num_inputs;
 }
 
 public(package) fun request_into_parts(
