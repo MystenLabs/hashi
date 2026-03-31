@@ -180,16 +180,51 @@ impl Hashi {
             })
             .collect::<anyhow::Result<_>>()?;
 
-        // 2. Verify each selected UTXO exists and collect full UTXO data
-        let selected_utxos: Vec<Utxo> = approval
+        // 2. Verify each selected UTXO exists, is not locked, and collect
+        //    full UTXO data. We look up via utxo_records so we can
+        //    distinguish "missing" from "locked by another withdrawal" and
+        //    also inspect the `produced_by` chain for ancestor depth.
+        let (utxo_records, pending_withdrawals) = {
+            let state = self.onchain_state().state();
+            (
+                state.hashi().utxo_pool.utxo_records().clone(),
+                state.hashi().withdrawal_queue.pending_withdrawals().clone(),
+            )
+        };
+
+        let selected_records: Vec<&UtxoRecord> = approval
             .selected_utxos
             .iter()
             .map(|id| {
-                self.onchain_state()
-                    .active_utxo(id)
-                    .ok_or_else(|| anyhow!("UTXO {id:?} not found in active pool"))
+                let record = utxo_records
+                    .get(id)
+                    .ok_or_else(|| anyhow!("UTXO {id:?} not found in the pool"))?;
+                anyhow::ensure!(
+                    record.locked_by.is_none(),
+                    "UTXO {id:?} is locked by pending withdrawal {:?}",
+                    record.locked_by.unwrap()
+                );
+                Ok(record)
             })
             .collect::<anyhow::Result<_>>()?;
+
+        // 2b. Verify that no selected UTXO has an unconfirmed ancestor
+        //     chain deeper than Bitcoin Core's relay limit (25). We
+        //     conservatively treat every `produced_by` ancestor that still
+        //     appears in `pending_withdrawals` as unconfirmed.
+        for record in &selected_records {
+            let depth = unconfirmed_ancestor_depth(record, &pending_withdrawals, &utxo_records);
+            anyhow::ensure!(
+                depth <= MAX_ANCESTOR_DEPTH,
+                "UTXO {:?} has an unconfirmed ancestor chain of depth {}, \
+                 exceeding the maximum of {}",
+                record.utxo.id,
+                depth,
+                MAX_ANCESTOR_DEPTH,
+            );
+        }
+
+        let selected_utxos: Vec<Utxo> = selected_records.iter().map(|r| r.utxo.clone()).collect();
 
         // 3. Verify output count: one per request, plus at most one change output
         let request_count = requests.len();
@@ -265,9 +300,17 @@ impl Hashi {
             );
         }
 
-        // 6. Validate fee is reasonable
+        // 6. Validate fee is reasonable.
+        //
+        // TODO: When spending unconfirmed change UTXOs the effective fee
+        // rate that matters for mining is the *package* fee rate across
+        // the entire ancestor chain (CPFP). This check currently
+        // evaluates the transaction in isolation, which may over- or
+        // under-estimate the true cost to get the package mined. A
+        // future revision should compute the aggregate ancestor weight
+        // and fees and validate the package fee rate instead.
         {
-            // Estimate transaction weight
+            // Estimate transaction weight.
             let num_inputs = selected_utxos.len() as u64;
             let input_weight = SCRIPT_PATH_2OF2_TXIN_WEIGHT * num_inputs;
             let output_weight: u64 = approval
@@ -279,8 +322,9 @@ impl Hashi {
                 .sum();
             let tx_weight = Weight::from_wu(TX_FIXED_WEIGHT_WU + input_weight + output_weight);
 
-            // Fee must be at least the minimum relay fee (1 sat/vB).
             let min_fee_rate = FeeRate::from_sat_per_vb_unchecked(1);
+
+            // Fee must be at least the minimum relay fee (1 sat/vB).
             let min_fee = min_fee_rate
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
@@ -290,24 +334,27 @@ impl Hashi {
                 "Fee {fee} sats is below minimum relay fee {min_fee} sats"
             );
 
-            // Fee must not exceed FEE_RATE_TOLERANCE_MULTIPLIER x our own estimate.
+            // Fee ceiling: clamp the fee rate from our Bitcoin node to
+            // a floor of 1 sat/vB, then cap at the tolerance multiplier.
             let kyoto_fee_rate = self
                 .btc_monitor()
                 .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
                 .await?;
-            let our_estimated_fee = kyoto_fee_rate
+            let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, min_fee_rate);
+            let estimated_fee = clamped_fee_rate
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
                 .unwrap_or(0);
-            let max_fee = our_estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
+            let max_fee = estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
             anyhow::ensure!(
                 fee <= max_fee,
                 "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
-                 ({FEE_RATE_TOLERANCE_MULTIPLIER}x our estimate of {our_estimated_fee} sats)"
+                 ({FEE_RATE_TOLERANCE_MULTIPLIER}x the clamped estimate of \
+                 {estimated_fee} sats at {clamped_fee_rate})"
             );
         }
 
-        // 6. Rebuild unsigned tx and verify txid matches
+        // 7. Rebuild unsigned tx and verify txid matches.
         let tx = self.build_unsigned_withdrawal_tx(&selected_utxos, &approval.outputs)?;
         let expected_txid = Address::new(tx.compute_txid().to_byte_array());
         anyhow::ensure!(
@@ -991,10 +1038,10 @@ async fn fetch_withdrawal_tx_confirmations(
 /// For confirmed UTXOs (`produced_by = None`) this is simply
 /// [`UtxoStatus::Confirmed`]. For unconfirmed change outputs
 /// (`produced_by = Some(withdrawal_id)`) we walk the full ancestor chain
-/// recursively so that CPFP weight and mempool depth are accurately computed
-/// even for multi-level chains. If the producing withdrawal has already been
-/// removed from `pending_withdrawals` (confirmed and cleared), we promote the
-/// UTXO to `Confirmed` — it is safe to spend immediately.
+/// so that CPFP weight and mempool depth are accurately computed even for
+/// multi-level chains. If the producing withdrawal has already been removed
+/// from `pending_withdrawals` (confirmed and cleared), we promote the UTXO
+/// to `Confirmed` — it is safe to spend immediately.
 fn build_utxo_status(
     hashi: &Hashi,
     record: &UtxoRecord,
@@ -1012,7 +1059,6 @@ fn build_utxo_status(
         pending_withdrawals,
         tx_confirmations,
         utxo_records,
-        0,
     );
 
     if chain.is_empty() {
@@ -1028,60 +1074,102 @@ fn build_utxo_status(
 /// limits the ancestor chain to 25 transactions.
 const MAX_ANCESTOR_DEPTH: usize = 25;
 
-/// Recursively build the ancestor chain for a UTXO produced by
-/// `producing_id`. Each level appends one [`AncestorTx`] entry with the
-/// actual confirmation count (from `tx_confirmations`) and the weight and fee
-/// of the producing transaction. The recursion bottoms out when a producing
-/// withdrawal is no longer in `pending_withdrawals` (confirmed) or when
-/// `MAX_ANCESTOR_DEPTH` is reached.
+/// Count the number of unconfirmed ancestors for a UTXO record by walking
+/// the `produced_by` chain. Every ancestor that still appears in
+/// `pending_withdrawals` is conservatively treated as unconfirmed (we skip
+/// querying Bitcoin for actual confirmation counts). This is used during
+/// commitment validation to reject UTXOs whose ancestor chain would exceed
+/// Bitcoin Core's relay limit.
+///
+/// The walk is a BFS over the ancestor DAG. Each item on the queue is a
+/// `(producing_withdrawal_id, depth)` pair. We track the maximum depth
+/// seen across all branches.
+fn unconfirmed_ancestor_depth(
+    record: &UtxoRecord,
+    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+) -> usize {
+    let Some(producing_id) = record.produced_by else {
+        return 0;
+    };
+
+    let mut max_depth: usize = 0;
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((producing_id, 1usize));
+
+    while let Some((wid, depth)) = queue.pop_front() {
+        if depth > MAX_ANCESTOR_DEPTH {
+            return depth;
+        }
+
+        let Some(pending) = pending_withdrawals.get(&wid) else {
+            // The producing withdrawal has been confirmed and removed;
+            // it does not contribute to the unconfirmed chain.
+            continue;
+        };
+
+        max_depth = std::cmp::max(max_depth, depth);
+
+        // Enqueue any inputs that are themselves unconfirmed change
+        // outputs of an earlier withdrawal.
+        for input_utxo in &pending.inputs {
+            if let Some(input_record) = utxo_records.get(&input_utxo.id)
+                && let Some(parent_id) = input_record.produced_by
+            {
+                queue.push_back((parent_id, depth + 1));
+            }
+        }
+    }
+
+    max_depth
+}
+
+/// Build the ancestor chain for a UTXO produced by `producing_id`. Each
+/// unconfirmed ancestor that still appears in `pending_withdrawals` gets
+/// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
+/// The walk is a BFS over the ancestor DAG, capped at
+/// [`MAX_ANCESTOR_DEPTH`] levels.
 fn build_ancestor_chain(
     hashi: &Hashi,
     producing_id: Address,
     pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
     tx_confirmations: &HashMap<Address, u32>,
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
-    depth: usize,
 ) -> Vec<AncestorTx> {
-    if depth >= MAX_ANCESTOR_DEPTH {
-        return Vec::new();
-    }
+    let mut chain = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((producing_id, 0usize));
 
-    let Some(pending) = pending_withdrawals.get(&producing_id) else {
-        // The producing withdrawal has been confirmed; no ancestors to add.
-        return Vec::new();
-    };
+    while let Some((wid, depth)) = queue.pop_front() {
+        if depth >= MAX_ANCESTOR_DEPTH {
+            continue;
+        }
 
-    let confirmations = tx_confirmations.get(&producing_id).copied().unwrap_or(0);
+        let Some(pending) = pending_withdrawals.get(&wid) else {
+            continue;
+        };
 
-    let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs()) else {
-        return Vec::new();
-    };
+        let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())
+        else {
+            continue;
+        };
 
-    let tx_weight = tx.weight();
-    let input_total: u64 = pending.inputs.iter().map(|u| u.amount).sum();
-    let output_total: u64 = pending.all_outputs().iter().map(|o| o.amount).sum();
-    let tx_fee = input_total.saturating_sub(output_total);
+        let confirmations = tx_confirmations.get(&wid).copied().unwrap_or(0);
+        let input_total: u64 = pending.inputs.iter().map(|u| u.amount).sum();
+        let output_total: u64 = pending.all_outputs().iter().map(|o| o.amount).sum();
 
-    let mut chain = vec![AncestorTx {
-        confirmations,
-        tx_weight,
-        tx_fee,
-    }];
+        chain.push(AncestorTx {
+            confirmations,
+            tx_weight: tx.weight(),
+            tx_fee: input_total.saturating_sub(output_total),
+        });
 
-    // Recurse into any inputs that are themselves unconfirmed change outputs
-    // of an earlier withdrawal.
-    for input_utxo in &pending.inputs {
-        if let Some(input_record) = utxo_records.get(&input_utxo.id)
-            && let Some(parent_id) = input_record.produced_by
-        {
-            chain.extend(build_ancestor_chain(
-                hashi,
-                parent_id,
-                pending_withdrawals,
-                tx_confirmations,
-                utxo_records,
-                depth + 1,
-            ));
+        for input_utxo in &pending.inputs {
+            if let Some(input_record) = utxo_records.get(&input_utxo.id)
+                && let Some(parent_id) = input_record.produced_by
+            {
+                queue.push_back((parent_id, depth + 1));
+            }
         }
     }
 
