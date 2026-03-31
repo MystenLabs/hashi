@@ -851,12 +851,19 @@ impl Hashi {
 pub enum WithdrawalApprovalErrorKind {
     AmlServiceError,
     FailedQuorum,
+    TimedOut,
+    TaskFailed,
     NeverRetry,
 }
 
 impl RetryPolicy for WithdrawalApprovalErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
-        5 * 1000
+        match self {
+            Self::AmlServiceError | Self::FailedQuorum | Self::TaskFailed | Self::TimedOut => {
+                5 * 1000
+            }
+            Self::NeverRetry => u64::MAX,
+        }
     }
 
     fn max_delay_ms(self) -> u64 {
@@ -865,7 +872,9 @@ impl RetryPolicy for WithdrawalApprovalErrorKind {
 
     fn max_retries(self) -> u32 {
         match self {
-            Self::AmlServiceError | Self::FailedQuorum => u32::MAX,
+            Self::AmlServiceError | Self::FailedQuorum | Self::TaskFailed | Self::TimedOut => {
+                u32::MAX
+            }
             Self::NeverRetry => 0,
         }
     }
