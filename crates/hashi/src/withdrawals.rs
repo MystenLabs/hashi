@@ -762,7 +762,7 @@ impl Hashi {
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
         let onchain_max_fee_rate =
             FeeRate::from_sat_per_vb(self.onchain_state().max_fee_rate() as f32);
-        let min_fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as f32 / 1000.0);
+        let min_fee_rate = FeeRate::from_sat_per_vb((2 * DEFAULT_MIN_RELAY_TX_FEE) as f32 / 1000.0);
         // Convert kyoto FeeRate (sat/kwu) to bdk_coin_select FeeRate (sat/wu)
         let node_fee_rate =
             FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
