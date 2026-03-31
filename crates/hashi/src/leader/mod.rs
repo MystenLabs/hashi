@@ -62,11 +62,11 @@ pub struct LeaderService {
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
-    deposit_gc_tasks: JoinSet<(Vec<Address>, anyhow::Result<usize>)>,
     inflight_deposits: HashSet<Address>,
-    inflight_deposit_gc_requests: HashSet<Address>,
     withdrawal_approval_task: Option<JoinHandle<anyhow::Result<()>>>,
     withdrawal_commitment_task: Option<JoinHandle<anyhow::Result<()>>>,
+    deposit_gc_task: Option<JoinHandle<anyhow::Result<()>>>,
+    proposal_gc_task: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl LeaderService {
@@ -77,11 +77,11 @@ impl LeaderService {
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
-            deposit_gc_tasks: JoinSet::new(),
             inflight_deposits: HashSet::new(),
-            inflight_deposit_gc_requests: HashSet::new(),
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
+            deposit_gc_task: None,
+            proposal_gc_task: None,
         }
     }
 
@@ -147,11 +147,7 @@ impl LeaderService {
                         self.process_signed_pending_withdrawals(),
                     )
                     .await;
-                    let _ = tokio::time::timeout(
-                        LEADER_PHASE_TIMEOUT,
-                        self.check_delete_proposals(checkpoint_timestamp_ms),
-                    )
-                    .await;
+                    self.check_delete_proposals(checkpoint_timestamp_ms);
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
@@ -160,14 +156,17 @@ impl LeaderService {
                         self.handle_completed_deposit_task(result);
                     }
                 }
-                Some(result) = self.deposit_gc_tasks.join_next() => {
-                    self.handle_completed_deposit_gc_task(result);
-                }
                 Some(result) = OptionFuture::from(self.withdrawal_approval_task.as_mut()) => {
                     self.handle_completed_withdrawal_approval_task(result);
                 }
                 Some(result) = OptionFuture::from(self.withdrawal_commitment_task.as_mut()) => {
                     self.handle_completed_withdrawal_commitment_task(result);
+                }
+                Some(result) = OptionFuture::from(self.deposit_gc_task.as_mut()) => {
+                    self.handle_completed_deposit_gc_task(result);
+                }
+                Some(result) = OptionFuture::from(self.proposal_gc_task.as_mut()) => {
+                    self.handle_completed_proposal_gc_task(result);
                 }
             }
         }
@@ -196,23 +195,13 @@ impl LeaderService {
 
     fn handle_completed_deposit_gc_task(
         &mut self,
-        result: Result<(Vec<Address>, anyhow::Result<usize>), tokio::task::JoinError>,
+        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
     ) {
+        self.deposit_gc_task = None;
         match result {
-            Ok((deposit_ids, Ok(deleted_count))) => {
-                for deposit_id in deposit_ids {
-                    self.inflight_deposit_gc_requests.remove(&deposit_id);
-                }
-                info!(
-                    "Successfully deleted {} expired deposit requests",
-                    deleted_count
-                );
-            }
-            Ok((deposit_ids, Err(err))) => {
-                for deposit_id in deposit_ids {
-                    self.inflight_deposit_gc_requests.remove(&deposit_id);
-                }
-                error!("Failed to delete expired deposit requests: {err}");
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                error!("Deposit request GC task failed: {err:#}");
             }
             Err(err) if err.is_panic() => {
                 error!("Deposit request GC task panicked: {err}");
@@ -257,6 +246,25 @@ impl LeaderService {
             }
             Err(err) => {
                 error!("Withdrawal commitment task failed to join: {err}");
+            }
+        }
+    }
+
+    fn handle_completed_proposal_gc_task(
+        &mut self,
+        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+    ) {
+        self.proposal_gc_task = None;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                error!("Proposal GC task failed: {err:#}");
+            }
+            Err(err) if err.is_panic() => {
+                error!("Proposal GC task panicked: {err}");
+            }
+            Err(err) => {
+                error!("Proposal GC task failed to join: {err}");
             }
         }
     }
@@ -1007,8 +1015,7 @@ impl LeaderService {
                     .leader_retries_total
                     .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
                     .inc();
-                retry_tracker
-                    .record_failure(kind, checkpoint_timestamp_ms);
+                retry_tracker.record_failure(kind, checkpoint_timestamp_ms);
                 return Ok(());
             }
         };

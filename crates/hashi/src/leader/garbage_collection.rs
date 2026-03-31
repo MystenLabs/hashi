@@ -30,6 +30,11 @@ impl LeaderService {
         deposit_requests: &[DepositRequest],
         checkpoint_timestamp_ms: u64,
     ) {
+        if self.deposit_gc_task.is_some() {
+            debug!("Deposit GC task already in-flight, skipping");
+            return;
+        }
+
         let Some(oldest_request) = deposit_requests.first() else {
             return;
         };
@@ -42,20 +47,13 @@ impl LeaderService {
             return;
         }
 
-        let expired_requests = deposit_requests
+        let expired_requests: Vec<_> = deposit_requests
             .iter()
-            .filter(|r| {
-                checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
-                    && !self.inflight_deposit_gc_requests.contains(&r.id)
-            })
+            .filter(|r| checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
             .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
             .cloned()
-            .collect::<Vec<_>>();
+            .collect();
         if expired_requests.is_empty() {
-            return;
-        }
-
-        if self.deposit_gc_tasks.len() >= self.inner.config.max_concurrent_leader_job_tasks() {
             return;
         }
 
@@ -64,36 +62,35 @@ impl LeaderService {
             expired_requests.len()
         );
 
-        let deposit_ids = expired_requests
-            .iter()
-            .map(|request| request.id)
-            .collect::<Vec<_>>();
-        self.inflight_deposit_gc_requests
-            .extend(deposit_ids.iter().copied());
-
         let inner = self.inner.clone();
-        self.deposit_gc_tasks.spawn(async move {
-            let result = Self::delete_expired_deposit_requests(inner, expired_requests).await;
-            (deposit_ids, result)
-        });
+        self.deposit_gc_task = Some(tokio::task::spawn(async move {
+            Self::delete_expired_deposit_requests(inner, expired_requests).await
+        }));
     }
 
     async fn delete_expired_deposit_requests(
         inner: Arc<crate::Hashi>,
         expired_requests: Vec<DepositRequest>,
-    ) -> anyhow::Result<usize> {
-        let deleted_count = expired_requests.len();
+    ) -> anyhow::Result<()> {
+        let count = expired_requests.len();
         let mut executor = SuiTxExecutor::from_hashi(inner)?;
         executor
             .execute_delete_expired_deposit_requests(&expired_requests)
             .await?;
-        Ok(deleted_count)
+        info!("Successfully deleted {count} expired deposit requests");
+        Ok(())
     }
 
     /// Check for and delete expired proposals.
     /// Proposals are sorted by timestamp and deleted if they are older than MAX_PROPOSAL_AGE_MS.
-    pub(crate) async fn check_delete_proposals(&self, checkpoint_timestamp_ms: u64) {
+    pub(crate) fn check_delete_proposals(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering check_delete_proposals");
+
+        if self.proposal_gc_task.is_some() {
+            debug!("Proposal GC task already in-flight, skipping");
+            return;
+        }
+
         let mut proposals = self.inner.onchain_state().proposals();
         // Sort proposals by timestamp, from earliest to latest
         proposals.sort_by_key(|p| p.timestamp_ms);
@@ -121,24 +118,20 @@ impl LeaderService {
             return;
         }
 
-        info!("Deleting {} expired proposals", expired_proposals.len());
+        info!(
+            "Scheduling deletion of {} expired proposals",
+            expired_proposals.len()
+        );
 
-        let result = self
-            .delete_expired_proposals_batch(&expired_proposals)
-            .await;
-        if let Err(e) = result {
-            error!("Failed to delete expired proposals: {e}");
-        } else {
-            info!(
-                "Successfully deleted {} expired proposals",
-                expired_proposals.len()
-            );
-        }
+        let inner = self.inner.clone();
+        self.proposal_gc_task = Some(tokio::task::spawn(async move {
+            Self::delete_expired_proposals(inner, expired_proposals).await
+        }));
     }
 
-    async fn delete_expired_proposals_batch(
-        &self,
-        expired_proposals: &[Proposal],
+    async fn delete_expired_proposals(
+        inner: Arc<crate::Hashi>,
+        expired_proposals: Vec<Proposal>,
     ) -> anyhow::Result<()> {
         use sui_sdk_types::Identifier;
         use sui_sdk_types::StructTag;
@@ -147,8 +140,8 @@ impl LeaderService {
         use sui_transaction_builder::ObjectInput;
         use sui_transaction_builder::TransactionBuilder;
 
-        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-        let hashi_ids = self.inner.config.hashi_ids();
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let hashi_ids = inner.config.hashi_ids();
 
         let mut builder = TransactionBuilder::new();
 
@@ -166,7 +159,7 @@ impl LeaderService {
         );
 
         // Add a move call for each expired proposal
-        for proposal in expired_proposals {
+        for proposal in &expired_proposals {
             let proposal_id_arg = builder.pure(&proposal.id);
 
             // Get the type argument for the proposal
@@ -219,6 +212,10 @@ impl LeaderService {
         if !response.transaction().effects().status().success() {
             anyhow::bail!("Transaction failed to delete expired proposals");
         }
+        info!(
+            "Successfully deleted {} expired proposals",
+            expired_proposals.len()
+        );
         Ok(())
     }
 }
