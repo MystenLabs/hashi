@@ -305,8 +305,12 @@ impl Hashi {
                 .btc_monitor()
                 .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
                 .await?;
+            let clamped_fee_rate = std::cmp::max(
+                kyoto_fee_rate,
+                bitcoin::FeeRate::from_sat_per_vb_unchecked(1),
+            );
             let our_fee_rate =
-                FeeRate::from_sat_per_wu(kyoto_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
+                FeeRate::from_sat_per_wu(clamped_fee_rate.to_sat_per_kwu() as f32 / 1000.0);
             let our_estimated_fee = our_fee_rate.implied_fee(tx_weight);
             let max_fee = our_estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
             anyhow::ensure!(
