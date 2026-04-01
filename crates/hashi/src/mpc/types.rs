@@ -126,7 +126,7 @@ impl SessionId {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgOutput {
+pub struct MpcOutput {
     pub public_key: G,
     pub key_shares: avss::SharesForNode,
     pub commitments: BTreeMap<ShareIndex, G>,
@@ -140,7 +140,7 @@ pub struct PublicDkgOutput {
 }
 
 impl PublicDkgOutput {
-    pub fn from_dkg_output(output: &DkgOutput) -> Self {
+    pub fn from_dkg_output(output: &MpcOutput) -> Self {
         Self {
             public_key: output.public_key,
             commitments: output.commitments.clone(),

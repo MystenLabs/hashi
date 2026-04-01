@@ -20,8 +20,8 @@ use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
-use crate::mpc::DkgOutput;
 use crate::mpc::MpcManager;
+use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
@@ -244,7 +244,7 @@ impl MpcService {
         }
     }
 
-    async fn recover_mpc_state(&self) -> anyhow::Result<DkgOutput> {
+    async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
         let protocol_type = onchain_state
@@ -274,7 +274,7 @@ impl MpcService {
         Ok(output)
     }
 
-    async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
+    async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
             .inner
@@ -342,7 +342,7 @@ impl MpcService {
         Ok((committee, presignatures))
     }
 
-    async fn prepare_signing(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {
+    async fn prepare_signing(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
         let (committee, presignatures) = self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
         let signing_manager = SigningManager::new(
@@ -361,7 +361,7 @@ impl MpcService {
         Ok(())
     }
 
-    async fn recover_presigning_state(&self, output: &DkgOutput) -> anyhow::Result<()> {
+    async fn recover_presigning_state(&self, output: &MpcOutput) -> anyhow::Result<()> {
         let (num_consumed, epoch, committee) = {
             let state = self.inner.onchain_state().state();
             let hashi = state.hashi();
@@ -624,7 +624,7 @@ impl MpcService {
         Ok(())
     }
 
-    async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<DkgOutput> {
+    async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
             .inner
@@ -656,7 +656,7 @@ impl MpcService {
         Ok(output)
     }
 
-    async fn submit_end_reconfig(&self, epoch: u64, output: &DkgOutput) -> anyhow::Result<()> {
+    async fn submit_end_reconfig(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
         let mpc_public_key =
             bcs::to_bytes(&output.public_key).expect("public key serialization should succeed");
         let target_committee = self
