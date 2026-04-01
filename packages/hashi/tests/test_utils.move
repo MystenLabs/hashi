@@ -7,7 +7,6 @@
 module hashi::test_utils;
 
 use hashi::{
-    bitcoin_state,
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
     disable_version,
@@ -130,9 +129,6 @@ public fun create_hashi_with_weighted_committee(
     // Create treasury
     let treasury = hashi::treasury::create(ctx);
 
-    // Create bitcoin state (deposit queue, withdrawal queue, utxo pool)
-    let btc_state = bitcoin_state::new(ctx);
-
     // Create proposals bag
     let proposals = bag::new(ctx);
 
@@ -143,7 +139,6 @@ public fun create_hashi_with_weighted_committee(
         committee_set,
         config,
         treasury,
-        btc_state,
         proposals,
         tob,
         ctx,

@@ -370,7 +370,7 @@ impl Metrics {
             .withdrawal_queue
             .requests()
             .values()
-            .partition::<Vec<_>, _>(|r| !r.approved);
+            .partition::<Vec<_>, _>(|r| r.status.is_requested());
         let (signed, pending): (Vec<_>, Vec<_>) = hashi
             .withdrawal_queue
             .pending_withdrawals()
@@ -396,8 +396,8 @@ impl Metrics {
             .set(
                 pending
                     .iter()
-                    .flat_map(|w| &w.requests)
-                    .map(|r| r.btc_amount)
+                    .flat_map(|w| &w.withdrawal_outputs)
+                    .map(|o| o.amount)
                     .sum::<u64>() as i64,
             );
         self.withdrawal_queue_size
@@ -408,8 +408,8 @@ impl Metrics {
             .set(
                 signed
                     .iter()
-                    .flat_map(|w| &w.requests)
-                    .map(|r| r.btc_amount)
+                    .flat_map(|w| &w.withdrawal_outputs)
+                    .map(|o| o.amount)
                     .sum::<u64>() as i64,
             );
         // Track three views of utxo_records:

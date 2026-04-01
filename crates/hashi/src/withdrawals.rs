@@ -116,7 +116,7 @@ impl Hashi {
                     approval.request_id
                 ))
             })?;
-        if request.approved {
+        if request.status.is_approved() {
             return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
                 "Withdrawal request {} is already approved",
                 approval.request_id
@@ -173,7 +173,7 @@ impl Hashi {
                     .withdrawal_request(id)
                     .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
                 anyhow::ensure!(
-                    request.approved,
+                    request.status.is_approved(),
                     "Withdrawal request {id} has not been approved"
                 );
                 Ok(request)
@@ -416,7 +416,7 @@ impl Hashi {
         );
 
         anyhow::ensure!(
-            message.request_ids == pending.request_ids(),
+            message.request_ids == pending.request_ids,
             "Request IDs mismatch for PendingWithdrawal {}",
             message.withdrawal_id
         );

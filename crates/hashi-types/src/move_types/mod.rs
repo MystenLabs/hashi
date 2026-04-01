@@ -218,36 +218,64 @@ pub struct Coin {
 /// Rust version of the Move hashi::deposit_queue::DepositRequestQueue type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequestQueue {
+    /// Active deposits awaiting confirmation
     pub requests: Bag,
+    /// Completed deposits (confirmed or expired)
     pub processed: Bag,
-    /// Table<address, Bag> has the same BCS layout as Bag (id + size).
-    pub user_requests: Bag,
+    /// Per-sender index: sender address -> Bag of request IDs
+    pub user_requests: Table,
+}
+
+/// Rust version of the Move sui::table::Table type (header only).
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Table {
+    pub id: Address,
+    pub size: u64,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestQueue type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalRequestQueue {
+    /// Active requests awaiting action (Requested, Approved)
     pub requests: Bag,
+    /// Processed requests (Processing, Signed, Confirmed)
+    pub processed: Bag,
+    /// In-flight withdrawal transactions (PendingWithdrawal)
     pub pending_withdrawals: Bag,
+    /// Per-sender index: sender address -> Bag of request IDs
+    pub user_requests: Table,
+}
+
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalStatus enum.
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub enum WithdrawalStatus {
+    Requested,
+    Approved,
+    Processing { pending_withdrawal_id: Address },
+    Signed { pending_withdrawal_id: Address },
+    Confirmed { txid: Address },
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalRequest {
-    pub info: WithdrawalRequestInfo,
-    pub btc: u64,
-    pub approved: bool,
-}
-
-/// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestInfo type.
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalRequestInfo {
     pub id: Address,
+    pub sender: Address,
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
-    pub requester_address: Address,
+    pub status: WithdrawalStatus,
+    pub pending_withdrawal_id: Option<Address>,
     pub sui_tx_digest: Digest,
+    /// BTC balance in satoshis.
+    pub btc: u64,
+}
+
+/// Lightweight info extracted from a request at commit time for validation.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct CommittedRequestInfo {
+    pub btc_amount: u64,
+    pub bitcoin_address: Vec<u8>,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
@@ -255,7 +283,7 @@ pub struct WithdrawalRequestInfo {
 pub struct PendingWithdrawal {
     pub id: Address,
     pub txid: Address,
-    pub requests: Vec<WithdrawalRequestInfo>,
+    pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
     pub change_output: Option<OutputUtxo>,

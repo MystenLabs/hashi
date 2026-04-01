@@ -649,7 +649,7 @@ async fn scrape_hashi(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
-        scrape_deposit_requests(client.clone(), &bitcoin_state.deposit_queue),
+        scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue),
         scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
         scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
         scrape_proposals(client.clone(), proposals),
@@ -1005,7 +1005,7 @@ fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381Public
 
 async fn scrape_deposit_requests(
     client: Client,
-    deposit_queue: &move_types::DepositRequestQueue,
+    deposit_queue: move_types::DepositRequestQueue,
 ) -> Result<types::DepositRequestQueue> {
     let deposit_queue_id = deposit_queue.requests.id;
     let requests: BTreeMap<Address, types::DepositRequest> = client
@@ -1069,6 +1069,7 @@ async fn scrape_withdrawal_queue(
     Ok(types::WithdrawalRequestQueue {
         requests_id: withdrawal_queue.requests.id,
         requests,
+        processed_id: withdrawal_queue.processed.id,
         pending_withdrawals_id: withdrawal_queue.pending_withdrawals.id,
         pending_withdrawals,
     })
@@ -1095,17 +1096,19 @@ async fn scrape_withdrawal_requests(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(withdrawal_request)
         })
-        .map_ok(|move_types::WithdrawalRequest { info, approved, .. }| {
+        .map_ok(|req| {
             (
-                info.id,
+                req.id,
                 types::WithdrawalRequest {
-                    id: info.id,
-                    btc_amount: info.btc_amount,
-                    bitcoin_address: info.bitcoin_address,
-                    timestamp_ms: info.timestamp_ms,
-                    requester_address: info.requester_address,
-                    sui_tx_digest: info.sui_tx_digest,
-                    approved,
+                    id: req.id,
+                    sender: req.sender,
+                    btc_amount: req.btc_amount,
+                    bitcoin_address: req.bitcoin_address,
+                    timestamp_ms: req.timestamp_ms,
+                    status: convert_move_withdrawal_status(req.status),
+                    pending_withdrawal_id: req.pending_withdrawal_id,
+                    sui_tx_digest: req.sui_tx_digest,
+                    btc: req.btc,
                 },
             )
         })
@@ -1136,54 +1139,37 @@ async fn scrape_pending_withdrawals(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(pending)
         })
-        .map_ok(
-            |move_types::PendingWithdrawal {
-                 txid,
-                 id,
-                 requests,
-                 inputs,
-                 withdrawal_outputs,
-                 change_output,
-                 timestamp_ms,
-                 randomness,
-                 signatures,
-                 presig_start_index,
-                 epoch,
-             }| {
-                let requests = requests
-                    .into_iter()
-                    .map(convert_move_withdrawal_request_info)
-                    .collect();
-                let inputs = inputs.into_iter().map(convert_move_utxo).collect();
-                let withdrawal_outputs = withdrawal_outputs
-                    .into_iter()
-                    .map(|o| types::OutputUtxo {
-                        amount: o.amount,
-                        bitcoin_address: o.bitcoin_address,
-                    })
-                    .collect();
-                let change_output = change_output.map(|o| types::OutputUtxo {
+        .map_ok(|pending| {
+            let inputs = pending.inputs.into_iter().map(convert_move_utxo).collect();
+            let withdrawal_outputs = pending
+                .withdrawal_outputs
+                .into_iter()
+                .map(|o| types::OutputUtxo {
                     amount: o.amount,
                     bitcoin_address: o.bitcoin_address,
-                });
-                (
-                    id,
-                    types::PendingWithdrawal {
-                        id,
-                        txid,
-                        requests,
-                        inputs,
-                        withdrawal_outputs,
-                        change_output,
-                        timestamp_ms,
-                        randomness,
-                        signatures,
-                        presig_start_index,
-                        epoch,
-                    },
-                )
-            },
-        )
+                })
+                .collect();
+            let change_output = pending.change_output.map(|o| types::OutputUtxo {
+                amount: o.amount,
+                bitcoin_address: o.bitcoin_address,
+            });
+            (
+                pending.id,
+                types::PendingWithdrawal {
+                    id: pending.id,
+                    txid: pending.txid,
+                    request_ids: pending.request_ids,
+                    inputs,
+                    withdrawal_outputs,
+                    change_output,
+                    timestamp_ms: pending.timestamp_ms,
+                    randomness: pending.randomness,
+                    signatures: pending.signatures,
+                    presig_start_index: pending.presig_start_index,
+                    epoch: pending.epoch,
+                },
+            )
+        })
         .try_collect()
         .await?;
 
@@ -1204,53 +1190,49 @@ fn convert_move_utxo(
     }
 }
 
-fn convert_move_withdrawal_request_info(
-    info: move_types::WithdrawalRequestInfo,
-) -> types::WithdrawalRequestInfo {
-    types::WithdrawalRequestInfo {
-        id: info.id,
-        btc_amount: info.btc_amount,
-        bitcoin_address: info.bitcoin_address,
-        timestamp_ms: info.timestamp_ms,
-        requester_address: info.requester_address,
-        sui_tx_digest: info.sui_tx_digest,
+fn convert_move_withdrawal_status(status: move_types::WithdrawalStatus) -> types::WithdrawalStatus {
+    match status {
+        move_types::WithdrawalStatus::Requested => types::WithdrawalStatus::Requested,
+        move_types::WithdrawalStatus::Approved => types::WithdrawalStatus::Approved,
+        move_types::WithdrawalStatus::Processing {
+            pending_withdrawal_id,
+        } => types::WithdrawalStatus::Processing {
+            pending_withdrawal_id,
+        },
+        move_types::WithdrawalStatus::Signed {
+            pending_withdrawal_id,
+        } => types::WithdrawalStatus::Signed {
+            pending_withdrawal_id,
+        },
+        move_types::WithdrawalStatus::Confirmed { txid } => {
+            types::WithdrawalStatus::Confirmed { txid }
+        }
     }
 }
 
 fn convert_move_pending_withdrawal(
-    move_types::PendingWithdrawal {
-        id,
-        txid,
-        requests,
-        inputs,
-        withdrawal_outputs,
-        change_output,
-        timestamp_ms,
-        randomness,
-        signatures,
-        presig_start_index,
-        epoch,
-    }: move_types::PendingWithdrawal,
+    pending: move_types::PendingWithdrawal,
 ) -> types::PendingWithdrawal {
     let convert_output = |o: move_types::OutputUtxo| types::OutputUtxo {
         amount: o.amount,
         bitcoin_address: o.bitcoin_address,
     };
     types::PendingWithdrawal {
-        id,
-        txid,
-        requests: requests
+        id: pending.id,
+        txid: pending.txid,
+        request_ids: pending.request_ids,
+        inputs: pending.inputs.into_iter().map(convert_move_utxo).collect(),
+        withdrawal_outputs: pending
+            .withdrawal_outputs
             .into_iter()
-            .map(convert_move_withdrawal_request_info)
+            .map(convert_output)
             .collect(),
-        inputs: inputs.into_iter().map(convert_move_utxo).collect(),
-        withdrawal_outputs: withdrawal_outputs.into_iter().map(convert_output).collect(),
-        change_output: change_output.map(convert_output),
-        timestamp_ms,
-        randomness,
-        signatures,
-        presig_start_index,
-        epoch,
+        change_output: pending.change_output.map(convert_output),
+        timestamp_ms: pending.timestamp_ms,
+        randomness: pending.randomness,
+        signatures: pending.signatures,
+        presig_start_index: pending.presig_start_index,
+        epoch: pending.epoch,
     }
 }
 

@@ -562,6 +562,7 @@ impl DepositRequestQueue {
 pub struct WithdrawalRequestQueue {
     pub(super) requests_id: Address,
     pub(super) requests: BTreeMap<Address, WithdrawalRequest>,
+    pub(super) processed_id: Address,
     pub(super) pending_withdrawals_id: Address,
     pub(super) pending_withdrawals: BTreeMap<Address, PendingWithdrawal>,
 }
@@ -575,6 +576,10 @@ impl WithdrawalRequestQueue {
         &self.requests
     }
 
+    pub fn processed_id(&self) -> &Address {
+        &self.processed_id
+    }
+
     pub fn pending_withdrawals_id(&self) -> &Address {
         &self.pending_withdrawals_id
     }
@@ -584,32 +589,47 @@ impl WithdrawalRequestQueue {
     }
 }
 
+/// Withdrawal lifecycle status, mirroring the Move `WithdrawalStatus` enum.
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct WithdrawalRequest {
-    pub id: Address,
-    pub btc_amount: u64,
-    pub bitcoin_address: Vec<u8>,
-    pub timestamp_ms: u64,
-    pub requester_address: Address,
-    pub sui_tx_digest: Digest,
-    pub approved: bool,
+pub enum WithdrawalStatus {
+    Requested,
+    Approved,
+    Processing { pending_withdrawal_id: Address },
+    Signed { pending_withdrawal_id: Address },
+    Confirmed { txid: Address },
+}
+
+impl WithdrawalStatus {
+    /// Returns true if the status is `Approved`.
+    pub fn is_approved(&self) -> bool {
+        matches!(self, Self::Approved)
+    }
+
+    /// Returns true if the status is `Requested`.
+    pub fn is_requested(&self) -> bool {
+        matches!(self, Self::Requested)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct WithdrawalRequestInfo {
+pub struct WithdrawalRequest {
     pub id: Address,
+    pub sender: Address,
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
-    pub requester_address: Address,
+    pub status: WithdrawalStatus,
+    pub pending_withdrawal_id: Option<Address>,
     pub sui_tx_digest: Digest,
+    /// BTC balance in satoshis
+    pub btc: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
 pub struct PendingWithdrawal {
     pub id: Address,
     pub txid: Address,
-    pub requests: Vec<WithdrawalRequestInfo>,
+    pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
     pub change_output: Option<OutputUtxo>,
@@ -621,10 +641,6 @@ pub struct PendingWithdrawal {
 }
 
 impl PendingWithdrawal {
-    pub fn request_ids(&self) -> Vec<Address> {
-        self.requests.iter().map(|r| r.id).collect()
-    }
-
     pub fn all_outputs(&self) -> Vec<OutputUtxo> {
         let mut outputs = self.withdrawal_outputs.clone();
         if let Some(ref change) = self.change_output {
