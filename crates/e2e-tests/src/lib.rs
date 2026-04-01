@@ -1307,7 +1307,7 @@ mod tests {
         }
         assert_nodes_agree_on_mpc_key(nodes);
 
-        // 2. Sign to verify nonce gen presigs (built via complaint recovery) work
+        // 2. Sign to verify nonce generation presigs (built via in-memory complaint recovery) work
         let epoch = nodes[0].hashi().onchain_state().epoch();
         let request_id = sui_sdk_types::Address::ZERO;
         let results = sign_on_all_nodes(nodes, b"complaint test", epoch, request_id, 0).await;
@@ -1323,6 +1323,59 @@ mod tests {
         // 4. Second rotation — reconstruct_previous_output hits corrupted
         //    rotation messages → rotation reconstruction complaint recovery
         force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_nonce_generation_complaint_recovery_after_restart() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .with_corrupt_shares_target(0)
+            .build()
+            .await?;
+
+        // 1. DKG + nonce gen with complaint recovery
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        // 2. Restart — recover_presigning_state hits corrupted nonce messages
+        //    in DB → nonce gen complaint recovery via RPC
+        test_networks.hashi_network_mut().restart().await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} MPC recovery after restart failed: {e}"));
+        }
+
+        // 3. Sign to verify presigs recovered via nonce gen complaint recovery work
+        let nodes = test_networks.hashi_network().nodes();
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(nodes, b"post-restart", epoch, request_id, 0).await;
+        assert_all_signatures_match(results);
 
         Ok(())
     }

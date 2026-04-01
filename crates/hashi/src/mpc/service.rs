@@ -392,7 +392,7 @@ impl MpcService {
         let mut batch_index = 0u32;
         let presignatures = loop {
             let presigs = self
-                .reconstruct_presignatures_from_tob(
+                .recover_presignatures_from_certs(
                     &mpc_manager,
                     epoch,
                     batch_index,
@@ -444,7 +444,7 @@ impl MpcService {
         Ok(())
     }
 
-    async fn reconstruct_presignatures_from_tob(
+    async fn recover_presignatures_from_certs(
         &self,
         mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
         epoch: u64,
@@ -461,10 +461,15 @@ impl MpcService {
                     "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
                 )
             })?;
-        let outputs = mpc_manager
-            .read()
-            .unwrap()
-            .reconstruct_presignatures(batch_index, &certs)?;
+        let p2p_channel = RpcP2PChannel::new(self.inner.onchain_state().clone(), epoch);
+        let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
+            mpc_manager,
+            epoch,
+            batch_index,
+            &certs,
+            &p2p_channel,
+        )
+        .await?;
         if outputs.is_empty() {
             return Err(anyhow::anyhow!(
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
