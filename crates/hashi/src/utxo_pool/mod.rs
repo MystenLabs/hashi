@@ -25,6 +25,7 @@ use sui_sdk_types::Address;
 use thiserror::Error;
 
 use crate::onchain::types::UtxoId;
+use crate::withdrawals::MAX_ANCESTOR_DEPTH;
 
 #[cfg(test)]
 mod tests;
@@ -697,7 +698,12 @@ pub fn select_coins(
     // stay within Bitcoin's relay policy limits.
     let mut pool: Vec<&UtxoCandidate> = utxos
         .iter()
-        .filter(|u| u.status.mempool_chain_depth() <= params.max_mempool_chain_depth)
+        .filter(|u| {
+            u.status.mempool_chain_depth() <= params.max_mempool_chain_depth
+                // Also ensure that if this UTXO were to be selected, the resulting unconfirmed
+                // chain depth would be less than the max relay limit
+                && u.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
+        })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
 

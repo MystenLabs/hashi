@@ -209,15 +209,17 @@ impl Hashi {
             .collect::<anyhow::Result<_>>()?;
 
         // 2b. Verify that no selected UTXO has an unconfirmed ancestor
-        //     chain deeper than Bitcoin Core's relay limit (25). We
-        //     conservatively treat every `produced_by` ancestor that still
-        //     appears in `pending_withdrawals` as unconfirmed.
+        //     chain deeper than Bitcoin Core's relay limit. The limit
+        //     (DEFAULT_ANCESTOR_LIMIT = 25) counts the candidate tx
+        //     itself, so the existing chain must leave room for the
+        //     transaction we are about to construct.
         for record in &selected_records {
             let depth = unconfirmed_ancestor_depth(record, &pending_withdrawals, &utxo_records);
             anyhow::ensure!(
-                depth <= MAX_ANCESTOR_DEPTH,
-                "UTXO {:?} has an unconfirmed ancestor chain of depth {}, \
-                 exceeding the maximum of {}",
+                depth < MAX_ANCESTOR_DEPTH,
+                "UTXO {:?} has an unconfirmed ancestor chain of depth {} \
+                 which, together with the new transaction, would exceed \
+                 Bitcoin Core's ancestor limit of {}",
                 record.utxo.id,
                 depth,
                 MAX_ANCESTOR_DEPTH,
@@ -1070,9 +1072,12 @@ fn build_utxo_status(
     }
 }
 
-/// Maximum number of ancestor levels to traverse. Bitcoin's relay policy
-/// limits the ancestor chain to 25 transactions.
-const MAX_ANCESTOR_DEPTH: usize = 25;
+/// Maximum ancestor depth permitted by Bitcoin Core's relay policy
+/// (`DEFAULT_ANCESTOR_LIMIT = 25`). Bitcoin Core counts the candidate
+/// transaction itself in the ancestor set, so a UTXO whose existing
+/// unconfirmed ancestor depth is already `MAX_ANCESTOR_DEPTH - 1` is
+/// the deepest we can safely spend.
+pub const MAX_ANCESTOR_DEPTH: usize = 25;
 
 /// Count the number of unconfirmed ancestors for a UTXO record by walking
 /// the `produced_by` chain. Every ancestor that still appears in
