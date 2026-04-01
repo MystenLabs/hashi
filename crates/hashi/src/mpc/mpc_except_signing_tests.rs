@@ -453,11 +453,11 @@ impl P2PChannel for MockP2PChannel {
         Ok(response)
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         party: &Address,
-        request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
         let managers = self.managers.lock().unwrap();
         let manager = managers.get(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -466,7 +466,7 @@ impl P2PChannel for MockP2PChannel {
             ))
         })?;
         let response = manager
-            .handle_get_public_dkg_output_request(request)
+            .handle_get_public_mpc_output_request(request)
             .map_err(|e| {
                 crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
@@ -605,11 +605,11 @@ impl P2PChannel for FailingP2PChannel {
         ))
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -676,12 +676,12 @@ impl P2PChannel for SucceedingP2PChannel {
         unimplemented!("SucceedingP2PChannel does not implement complain")
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        unimplemented!("SucceedingP2PChannel does not implement get_public_dkg_output")
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("SucceedingP2PChannel does not implement get_public_mpc_output")
     }
 
     async fn get_partial_signatures(
@@ -769,12 +769,12 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         unimplemented!("PartiallyFailingP2PChannel does not implement complain")
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        unimplemented!("PartiallyFailingP2PChannel does not implement get_public_dkg_output")
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("PartiallyFailingP2PChannel does not implement get_public_mpc_output")
     }
 
     async fn get_partial_signatures(
@@ -831,12 +831,12 @@ impl P2PChannel for PreCollectedP2PChannel {
             .ok_or_else(|| crate::communication::ChannelError::RequestFailed("No response".into()))
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        unimplemented!("PreCollectedP2PChannel does not implement get_public_dkg_output")
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("PreCollectedP2PChannel does not implement get_public_mpc_output")
     }
 
     async fn get_partial_signatures(
@@ -4552,12 +4552,12 @@ impl P2PChannel for TrackingP2PChannel {
         self.inner.complain(party, request).await
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         party: &Address,
-        request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        self.inner.get_public_dkg_output(party, request).await
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        self.inner.get_public_mpc_output(party, request).await
     }
 
     async fn get_partial_signatures(

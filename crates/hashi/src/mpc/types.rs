@@ -134,13 +134,13 @@ pub struct MpcOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicDkgOutput {
+pub struct PublicMpcOutput {
     pub public_key: G,
     pub commitments: BTreeMap<ShareIndex, G>,
 }
 
-impl PublicDkgOutput {
-    pub fn from_dkg_output(output: &MpcOutput) -> Self {
+impl PublicMpcOutput {
+    pub fn from_mpc_output(output: &MpcOutput) -> Self {
         Self {
             public_key: output.public_key,
             commitments: output.commitments.clone(),
@@ -149,13 +149,13 @@ impl PublicDkgOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GetPublicDkgOutputRequest {
+pub struct GetPublicMpcOutputRequest {
     pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GetPublicDkgOutputResponse {
-    pub output: PublicDkgOutput,
+pub struct GetPublicMpcOutputResponse {
+    pub output: PublicMpcOutput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

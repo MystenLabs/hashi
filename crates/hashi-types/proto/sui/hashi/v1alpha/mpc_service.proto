@@ -14,8 +14,8 @@ service MpcService {
   // Send complaints about invalid shares and receive correct shares.
   rpc Complain(ComplainRequest) returns (ComplainResponse);
 
-  // Get public DKG output.
-  rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
+  // Get public MPC output.
+  rpc GetPublicMpcOutput(GetPublicMpcOutputRequest) returns (GetPublicMpcOutputResponse);
 
   // Get a validator's signature on the reconfig completion message.
   rpc GetReconfigCompletionSignature(GetReconfigCompletionSignatureRequest) returns (GetReconfigCompletionSignatureResponse);
@@ -130,12 +130,12 @@ message ComplainResponse {
   }
 }
 
-message GetPublicDkgOutputRequest {
-  // The epoch for which to retrieve the public DKG output.
+message GetPublicMpcOutputRequest {
+  // The epoch for which to retrieve the public MPC output.
   optional uint64 epoch = 1;
 }
 
-message GetPublicDkgOutputResponse {
+message GetPublicMpcOutputResponse {
   // The aggregated public key.
   optional sui.rpc.v2.Bcs public_key = 1;
 

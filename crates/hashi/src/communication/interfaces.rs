@@ -5,8 +5,8 @@
 
 use crate::mpc::ComplainRequest;
 use crate::mpc::ComplaintResponses;
-use crate::mpc::GetPublicDkgOutputRequest;
-use crate::mpc::GetPublicDkgOutputResponse;
+use crate::mpc::GetPublicMpcOutputRequest;
+use crate::mpc::GetPublicMpcOutputResponse;
 use crate::mpc::RetrieveMessagesRequest;
 use crate::mpc::RetrieveMessagesResponse;
 use crate::mpc::SendMessagesRequest;
@@ -60,11 +60,11 @@ pub trait P2PChannel: Send + Sync {
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses>;
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         party: &Address,
-        request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse>;
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse>;
 
     async fn get_partial_signatures(
         &self,
