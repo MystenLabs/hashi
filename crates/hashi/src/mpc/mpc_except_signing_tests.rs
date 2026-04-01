@@ -2319,7 +2319,7 @@ fn create_weight_based_test_certificate(
 async fn setup_party_and_run(
     test_setup: &WeightBasedTestSetup,
     party_index: usize,
-) -> (MpcResult<DkgOutput>, MockOrderedBroadcastChannel) {
+) -> (MpcResult<MpcOutput>, MockOrderedBroadcastChannel) {
     let party_addr = test_setup.setup.address(party_index);
 
     let mut party_manager = test_setup.setup.create_manager(party_index);
@@ -4768,7 +4768,7 @@ impl RotationTestSetup {
     }
 
     /// Creates a manager that has completed DKG and is ready for rotation.
-    fn create_receiver_with_completed_dkg(&self, receiver_index: usize) -> (MpcManager, DkgOutput) {
+    fn create_receiver_with_completed_dkg(&self, receiver_index: usize) -> (MpcManager, MpcOutput) {
         let mut receiver_manager = self.setup.create_manager(receiver_index);
 
         // Process all dealer messages
@@ -4795,7 +4795,7 @@ impl RotationTestSetup {
     /// Creates a manager with InMemoryPublicMessagesStore and completed DKG.
     /// The store contains all dealer messages for later reconstruction.
     /// The manager is ready for rotation (outputs cleared after DKG completion).
-    fn create_receiver_with_memory_store(&self, receiver_index: usize) -> (MpcManager, DkgOutput) {
+    fn create_receiver_with_memory_store(&self, receiver_index: usize) -> (MpcManager, MpcOutput) {
         let mut receiver_manager = self.setup.create_manager_with_store(
             receiver_index,
             Box::new(InMemoryPublicMessagesStore::new()),
@@ -4824,7 +4824,7 @@ impl RotationTestSetup {
 
     /// Creates a rotation dealer that has completed DKG and generates rotation messages.
     /// The manager is ready for rotation (outputs cleared after DKG completion).
-    fn create_rotation_dealer(&self, dealer_index: usize) -> (MpcManager, DkgOutput, Messages) {
+    fn create_rotation_dealer(&self, dealer_index: usize) -> (MpcManager, MpcOutput, Messages) {
         let mut rng = rand::thread_rng();
         let mut dealer_manager = self.setup.create_manager(dealer_index);
 
@@ -4862,7 +4862,7 @@ impl RotationTestSetup {
     fn create_rotation_dealer_with_memory_store(
         &self,
         dealer_index: usize,
-    ) -> (MpcManager, DkgOutput, Messages) {
+    ) -> (MpcManager, MpcOutput, Messages) {
         let mut rng = rand::thread_rng();
         let mut dealer_manager = self
             .setup
@@ -5883,7 +5883,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
 
     // Create rotation dealers with KeyRotation session ID.
     let dealer_indices = [0usize, 1, 4];
-    let mut dealers: Vec<(usize, MpcManager, DkgOutput)> = dealer_indices
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
