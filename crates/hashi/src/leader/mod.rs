@@ -120,7 +120,8 @@ impl LeaderService {
                         continue;
                     }
 
-                    // Drain all completed deposit tasks before spawning new ones.
+                    // TODO: Remove this drain once the leader loop is restructured
+                    // to avoid the checkpoint branch blocking task draining.
                     while let Some(result) = self.deposit_tasks.try_join_next() {
                         self.handle_completed_deposit_task(result);
                     }
@@ -160,6 +161,10 @@ impl LeaderService {
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
+                    // Drain any other completed tasks while we're here.
+                    while let Some(result) = self.deposit_tasks.try_join_next() {
+                        self.handle_completed_deposit_task(result);
+                    }
                 }
                 Some(result) = self.deposit_gc_tasks.join_next() => {
                     self.handle_completed_deposit_gc_task(result);
