@@ -31,6 +31,11 @@ pub(super) struct RetryTracker<K> {
     state: Arc<Mutex<HashMap<Address, RetryState<K>>>>,
 }
 
+#[derive(Clone)]
+pub(super) struct GlobalRetryTracker<K> {
+    state: Arc<Mutex<Option<RetryState<K>>>>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RetryState<K> {
     attempt: u32,
@@ -91,21 +96,7 @@ where
         let mut states = self.state.lock().unwrap();
         let previous = states.get(&request_id).copied();
 
-        let attempt = match previous {
-            Some(state) if state.last_error_kind == error_kind => state.attempt.saturating_add(1),
-            _ => 1,
-        };
-        let next_retry_at_ms = if attempt >= error_kind.max_retries() {
-            checkpoint_timestamp_ms
-        } else {
-            let delay_ms = error_kind.retry_delay_ms(attempt);
-            checkpoint_timestamp_ms.saturating_add(delay_ms)
-        };
-        let state = RetryState {
-            attempt,
-            next_retry_at_ms,
-            last_error_kind: error_kind,
-        };
+        let state = next_retry_state(previous, error_kind, checkpoint_timestamp_ms);
         states.insert(request_id, state);
 
         if state.attempt >= error_kind.max_retries() {
@@ -122,5 +113,91 @@ where
                 request_id, retry_delay_ms, state.attempt,
             );
         }
+    }
+}
+
+impl<K> GlobalRetryTracker<K>
+where
+    K: RetryPolicy + Copy + Eq + Debug,
+{
+    pub(super) fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub(super) fn should_skip(&self, checkpoint_timestamp_ms: u64) -> bool {
+        let state = *self.state.lock().unwrap();
+        match state {
+            Some(state) => {
+                state.attempt >= state.last_error_kind.max_retries()
+                    || state.next_retry_at_ms > checkpoint_timestamp_ms
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn clear(&self) {
+        *self.state.lock().unwrap() = None;
+    }
+
+    pub(super) fn in_backoff_count(&self, checkpoint_timestamp_ms: u64) -> usize {
+        let state = *self.state.lock().unwrap();
+        match state {
+            Some(state)
+                if state.attempt < state.last_error_kind.max_retries()
+                    && state.next_retry_at_ms > checkpoint_timestamp_ms =>
+            {
+                1
+            }
+            _ => 0,
+        }
+    }
+
+    pub(super) fn record_failure(&self, error_kind: K, checkpoint_timestamp_ms: u64) {
+        let mut state = self.state.lock().unwrap();
+        let previous = *state;
+        let next = next_retry_state(previous, error_kind, checkpoint_timestamp_ms);
+        *state = Some(next);
+
+        if next.attempt >= error_kind.max_retries() {
+            warn!(
+                "Global retry state failed ({error_kind:?}). Reached max retries ({}), no further retries",
+                next.attempt,
+            );
+        } else {
+            let retry_delay_ms = next
+                .next_retry_at_ms
+                .saturating_sub(checkpoint_timestamp_ms);
+            warn!(
+                "Global retry state failed ({error_kind:?}). Next retry in {} ms (attempt {})",
+                retry_delay_ms, next.attempt,
+            );
+        }
+    }
+}
+
+fn next_retry_state<K>(
+    previous: Option<RetryState<K>>,
+    error_kind: K,
+    checkpoint_timestamp_ms: u64,
+) -> RetryState<K>
+where
+    K: RetryPolicy + Copy + Eq + Debug,
+{
+    let attempt = match previous {
+        Some(state) if state.last_error_kind == error_kind => state.attempt.saturating_add(1),
+        _ => 1,
+    };
+    let next_retry_at_ms = if attempt >= error_kind.max_retries() {
+        checkpoint_timestamp_ms
+    } else {
+        let delay_ms = error_kind.retry_delay_ms(attempt);
+        checkpoint_timestamp_ms.saturating_add(delay_ms)
+    };
+    RetryState {
+        attempt,
+        next_retry_at_ms,
+        last_error_kind: error_kind,
     }
 }

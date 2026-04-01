@@ -9,6 +9,7 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
 use crate::deposits::DepositRequestErrorKind;
+use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
@@ -58,7 +59,7 @@ pub struct LeaderService {
     inner: Arc<Hashi>,
     deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
-    withdrawal_commitment_retry_tracker: RetryTracker<WithdrawalCommitmentErrorKind>,
+    withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     deposit_gc_tasks: JoinSet<(Vec<Address>, anyhow::Result<usize>)>,
     inflight_deposits: HashSet<Address>,
@@ -72,7 +73,7 @@ impl LeaderService {
             inner: hashi,
             deposit_retry_tracker: RetryTracker::new(),
             withdrawal_approval_retry_tracker: RetryTracker::new(),
-            withdrawal_commitment_retry_tracker: RetryTracker::new(),
+            withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
             deposit_gc_tasks: JoinSet::new(),
             inflight_deposits: HashSet::new(),
@@ -865,21 +866,25 @@ impl LeaderService {
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
-        let approved_ids: Vec<Address> = approved.iter().map(|r| r.id).collect();
-        self.withdrawal_commitment_retry_tracker
-            .prune(&approved_ids);
+        if self
+            .withdrawal_commitment_retry_tracker
+            .should_skip(checkpoint_timestamp_ms)
+        {
+            self.inner
+                .metrics
+                .leader_items_in_backoff
+                .with_label_values(&["withdrawal_commitment"])
+                .set(
+                    self.withdrawal_commitment_retry_tracker
+                        .in_backoff_count(checkpoint_timestamp_ms) as i64,
+                );
+            return;
+        }
 
-        // Collect all non-backoff approved requests and process them as a
-        // single batch. The coin selection algorithm picks up to
+        // Collect all approved requests and process them as a single batch.
+        // The coin selection algorithm picks up to
         // max_withdrawal_requests oldest requests from the slice.
-        let batch: Vec<&WithdrawalRequest> = approved
-            .iter()
-            .filter(|r| {
-                !self
-                    .withdrawal_commitment_retry_tracker
-                    .should_skip(&r.id, checkpoint_timestamp_ms)
-            })
-            .collect();
+        let batch: Vec<&WithdrawalRequest> = approved.iter().collect();
 
         if !batch.is_empty() {
             let max_batch = self.inner.config.withdrawal_max_batch_size();
@@ -920,7 +925,6 @@ impl LeaderService {
         requests: &[&WithdrawalRequest],
         checkpoint_timestamp_ms: u64,
     ) {
-        let oldest_id = requests[0].id;
         info!(
             withdrawal_request_ids = ?requests.iter().map(|r| r.id).collect::<Vec<_>>(),
             "Processing batch of {} approved withdrawal request(s)",
@@ -937,27 +941,18 @@ impl LeaderService {
             .await
         {
             Ok(approval) => {
-                // Clear backoff for all requests included in this commitment.
-                for id in &approval.request_ids {
-                    self.withdrawal_commitment_retry_tracker.clear(id);
-                }
+                self.withdrawal_commitment_retry_tracker.clear();
                 approval
             }
             Err(e) => {
-                // Record the failure against the oldest request in the batch so
-                // it enters backoff. The next iteration will exclude it and retry
-                // with a smaller batch.
                 let kind = e.kind();
                 self.inner
                     .metrics
                     .leader_retries_total
                     .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
                     .inc();
-                self.withdrawal_commitment_retry_tracker.record_failure(
-                    kind,
-                    oldest_id,
-                    checkpoint_timestamp_ms,
-                );
+                self.withdrawal_commitment_retry_tracker
+                    .record_failure(kind, checkpoint_timestamp_ms);
                 return;
             }
         };
@@ -989,7 +984,7 @@ impl LeaderService {
         let mut signature_aggregator = BlsSignatureAggregator::new(&committee, approval.clone());
         for signature in signatures {
             if let Err(e) = signature_aggregator.add_signature(signature) {
-                error!(oldest_request_id = %oldest_id, "Failed to add withdrawal commitment signature: {e}");
+                error!("Failed to add withdrawal commitment signature: {e}");
             }
         }
 
@@ -1003,17 +998,18 @@ impl LeaderService {
                 .inc();
             self.withdrawal_commitment_retry_tracker.record_failure(
                 WithdrawalCommitmentErrorKind::FailedQuorum,
-                oldest_id,
                 checkpoint_timestamp_ms,
             );
-            error!(oldest_request_id = %oldest_id, "Insufficient withdrawal commitment signatures: weight {weight} < {required_weight}");
+            error!(
+                "Insufficient withdrawal commitment signatures: weight {weight} < {required_weight}"
+            );
             return;
         }
 
         let signed_approval = match signature_aggregator.finish() {
             Ok(signed_approval) => signed_approval,
             Err(e) => {
-                error!(oldest_request_id = %oldest_id, "Failed to build withdrawal commitment certificate: {e}");
+                error!("Failed to build withdrawal commitment certificate: {e}");
                 return;
             }
         };
@@ -1035,7 +1031,7 @@ impl LeaderService {
                     .sui_tx_submissions_total
                     .with_label_values(&["commit_withdrawal", "failure"])
                     .inc();
-                error!(oldest_request_id = %oldest_id, "Failed to submit commit_withdrawal_tx: {e}");
+                error!("Failed to submit commit_withdrawal_tx: {e}");
             });
     }
 
