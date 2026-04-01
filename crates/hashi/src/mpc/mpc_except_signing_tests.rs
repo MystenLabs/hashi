@@ -3146,7 +3146,7 @@ fn test_handle_complain_request_caches_response() {
     assert!(
         party2_manager
             .complaint_responses
-            .contains_key(&dealer_addr)
+            .contains_key(&(dealer_addr, ProtocolTypeIndicator::Dkg))
     );
 
     // Second call - should return cached response
@@ -6516,7 +6516,7 @@ fn test_handle_complain_request_success() {
     assert!(
         responder_manager
             .complaint_responses
-            .contains_key(&dealer_addr),
+            .contains_key(&(dealer_addr, ProtocolTypeIndicator::KeyRotation)),
         "Response should be cached"
     );
 }
@@ -8045,7 +8045,7 @@ fn test_handle_complain_request_nonce_no_message_from_dealer() {
 }
 
 #[test]
-fn test_handle_complain_request_nonce_no_output() {
+fn test_handle_complain_request_nonce_rederives_output_rejects_invalid_proof() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
 
@@ -8069,16 +8069,12 @@ fn test_handle_complain_request_nonce_no_output() {
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: receiver.dkg_config.epoch,
     };
+    // Handler re-derives the output from the message (fallback).
+    // The complaint proof was generated with a wrong key and doesn't match
+    // the re-derived output, so handle_complaint correctly rejects it.
     let result = receiver.handle_complain_request(&request);
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, MpcError::ProtocolFailed(_)));
-    assert!(
-        err.to_string()
-            .contains("No nonce output for complained dealer"),
-        "Expected nonce output error, got: {}",
-        err
-    );
+    assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
 
 #[test]
@@ -8137,7 +8133,11 @@ fn test_handle_complain_request_nonce_caches_response() {
     // First call → computes and caches
     let response1 = party2.handle_complain_request(&request).unwrap();
     assert_eq!(party2.complaint_responses.len(), 1);
-    assert!(party2.complaint_responses.contains_key(&dealer_addr));
+    assert!(
+        party2
+            .complaint_responses
+            .contains_key(&(dealer_addr, ProtocolTypeIndicator::NonceGeneration))
+    );
 
     // Second call → returns cached
     let response2 = party2.handle_complain_request(&request).unwrap();
@@ -8606,6 +8606,7 @@ async fn test_recover_nonce_shares_via_complaint() {
         &dealer_addr,
         signers,
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 

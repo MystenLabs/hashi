@@ -109,7 +109,7 @@ message ComplainRequest {
   // The protocol phase this complaint is for.
   optional MpcProtocolType protocol_type = 5;
 
-  // For nonce generation: the batch index. Not set for DKG/rotation.
+  // For nonce generation: the batch index.
   optional uint32 batch_index = 6;
 }
 
