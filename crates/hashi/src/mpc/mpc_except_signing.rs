@@ -16,13 +16,13 @@ pub use crate::mpc::types::DealerFlowData;
 use crate::mpc::types::DealerMessagesHash;
 pub use crate::mpc::types::DealerOutputsKey;
 use crate::mpc::types::DkgConfig;
-pub use crate::mpc::types::DkgOutput;
 pub use crate::mpc::types::EncryptionGroupElement;
 pub use crate::mpc::types::GetPublicDkgOutputRequest;
 pub use crate::mpc::types::GetPublicDkgOutputResponse;
 pub use crate::mpc::types::MessageHash;
 pub use crate::mpc::types::Messages;
 pub use crate::mpc::types::MpcError;
+pub use crate::mpc::types::MpcOutput;
 pub use crate::mpc::types::MpcResult;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::ProtocolType;
@@ -93,7 +93,7 @@ pub struct MpcManager {
     chain_id: String,
     /// The epoch from which to read previous messages during reconstruction.
     pub source_epoch: u64,
-    previous_output: Option<DkgOutput>,
+    previous_output: Option<MpcOutput>,
     pub batch_size_per_weight: u16,
 
     // Mutable during the epoch
@@ -443,7 +443,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, threshold) = {
             let mgr = mpc_manager.read().unwrap();
@@ -469,7 +469,7 @@ impl MpcManager {
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let (previous, is_member_of_previous_committee) =
             Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel).await?;
         {
@@ -699,7 +699,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let threshold = {
             let mgr = mpc_manager.read().unwrap();
             mgr.dkg_config.threshold
@@ -833,7 +833,7 @@ impl MpcManager {
 
     async fn run_key_rotation_as_dealer(
         mpc_manager: &Arc<RwLock<Self>>,
-        previous: &DkgOutput,
+        previous: &MpcOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<()> {
@@ -891,10 +891,10 @@ impl MpcManager {
 
     async fn run_key_rotation_as_party(
         mpc_manager: &Arc<RwLock<Self>>,
-        previous: &DkgOutput,
+        previous: &MpcOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
         let mut certified_dealers = HashSet::new();
         loop {
@@ -1501,7 +1501,7 @@ impl MpcManager {
     fn process_certified_rotation_message(
         &mut self,
         dealer: &Address,
-        previous_dkg_output: &DkgOutput,
+        previous_dkg_output: &MpcOutput,
     ) -> MpcResult<()> {
         let rotation_messages = self
             .rotation_messages
@@ -1569,7 +1569,7 @@ impl MpcManager {
     fn complete_dkg(
         &self,
         certified_dealers: impl Iterator<Item = Address>,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let threshold = self.dkg_config.threshold;
         let certified_dealers: Vec<Address> = certified_dealers.collect();
         tracing::info!(
@@ -1608,7 +1608,7 @@ impl MpcManager {
             self.dkg_config.epoch,
             hex::encode(combined_output.vk.to_byte_array())
         );
-        Ok(DkgOutput {
+        Ok(MpcOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output
@@ -1764,7 +1764,7 @@ impl MpcManager {
 
     fn prepare_rotation_dealer_flow(
         &mut self,
-        previous: &DkgOutput,
+        previous: &MpcOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<DealerFlowData> {
         let messages = match self.rotation_messages.get(&self.address) {
@@ -2089,7 +2089,7 @@ impl MpcManager {
     async fn recover_rotation_shares_via_complaints(
         mpc_manager: &Arc<RwLock<Self>>,
         dealer: &Address,
-        previous_dkg_output: &DkgOutput,
+        previous_dkg_output: &MpcOutput,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<()> {
@@ -2219,7 +2219,7 @@ impl MpcManager {
     fn prepare_rotation_complain_request(
         &self,
         dealer: &Address,
-        previous_dkg_output: &DkgOutput,
+        previous_dkg_output: &MpcOutput,
     ) -> MpcResult<Option<RotationComplainContext>> {
         let rotation_messages = self
             .rotation_messages
@@ -2277,7 +2277,7 @@ impl MpcManager {
 
     fn create_rotation_messages(
         &self,
-        previous_dkg_output: &DkgOutput,
+        previous_dkg_output: &MpcOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> RotationMessages {
         previous_dkg_output
@@ -2304,7 +2304,7 @@ impl MpcManager {
 
     fn try_sign_rotation_messages(
         &mut self,
-        previous_dkg_output: &DkgOutput,
+        previous_dkg_output: &MpcOutput,
         dealer: Address,
         messages: &Messages,
     ) -> MpcResult<BLS12381Signature> {
@@ -2388,9 +2388,9 @@ impl MpcManager {
 
     fn complete_key_rotation(
         &mut self,
-        previous_dkg_output: &DkgOutput,
+        previous_dkg_output: &MpcOutput,
         certified_share_indices: &[ShareIndex],
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let threshold = previous_dkg_output.threshold;
         tracing::info!(
             "complete_key_rotation: epoch={}, {} certified_share_indices={:?}, \
@@ -2437,7 +2437,7 @@ impl MpcManager {
                 "Key rotation produced different public key".into(),
             ));
         }
-        Ok(DkgOutput {
+        Ok(MpcOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
             commitments: combined
@@ -2449,7 +2449,7 @@ impl MpcManager {
         })
     }
 
-    fn reconstruct_previous_output(&self, certificates: &[CertificateV1]) -> MpcResult<DkgOutput> {
+    fn reconstruct_previous_output(&self, certificates: &[CertificateV1]) -> MpcResult<MpcOutput> {
         match certificates.first() {
             Some(CertificateV1::Dkg(_)) | None => {
                 self.reconstruct_from_dkg_certificates(certificates)
@@ -2471,7 +2471,7 @@ impl MpcManager {
     fn reconstruct_from_dkg_certificates(
         &self,
         certificates: &[CertificateV1],
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let previous_committee = self.previous_committee.clone().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
         })?;
@@ -2571,7 +2571,7 @@ impl MpcManager {
             "reconstruct_from_dkg_certificates: result vk={}",
             hex::encode(combined_output.vk.to_byte_array()),
         );
-        Ok(DkgOutput {
+        Ok(MpcOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output
@@ -2587,7 +2587,7 @@ impl MpcManager {
         &self,
         certificates: &[CertificateV1],
         previous_threshold: u16,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<MpcOutput> {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
         })?;
@@ -2702,7 +2702,7 @@ impl MpcManager {
             "reconstruct_from_rotation_certificates: result vk={}",
             hex::encode(combined.vk.to_byte_array()),
         );
-        Ok(DkgOutput {
+        Ok(MpcOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
             commitments: combined
@@ -2775,7 +2775,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
-    ) -> MpcResult<(DkgOutput, bool)> {
+    ) -> MpcResult<(MpcOutput, bool)> {
         let (is_member_of_previous_committee, threshold_opt) = {
             let mgr = mpc_manager.read().unwrap();
             let is_member = mgr
@@ -2809,7 +2809,7 @@ impl MpcManager {
                 threshold as u64,
             )
             .await?;
-            DkgOutput {
+            MpcOutput {
                 public_key: public_output.public_key,
                 key_shares: avss::SharesForNode { shares: vec![] },
                 commitments: public_output.commitments,
