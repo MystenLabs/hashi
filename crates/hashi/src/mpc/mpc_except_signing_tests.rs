@@ -92,6 +92,15 @@ impl PublicMessagesStore for MockPublicMessagesStore {
         Ok(())
     }
 
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
+    }
+
     fn list_nonce_messages(
         &self,
         _batch_index: u32,
@@ -1082,6 +1091,15 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         Ok(())
     }
 
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(self.nonce_stored.get(&(batch_index, *dealer)).cloned())
+    }
+
     fn list_nonce_messages(
         &self,
         batch_index: u32,
@@ -1145,6 +1163,15 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         _message: &batch_avss::Message,
     ) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("Storage failure"))
+    }
+
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
     }
 
     fn list_nonce_messages(
@@ -2863,6 +2890,7 @@ async fn test_handle_retrieve_messages_request_success() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: dealer_manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = dealer_manager
         .handle_retrieve_messages_request(&request)
@@ -2886,6 +2914,7 @@ async fn test_handle_retrieve_messages_request_message_not_available() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: dealer_manager.dkg_config.epoch,
+        batch_index: None,
     };
     let result = dealer_manager.handle_retrieve_messages_request(&request);
 
@@ -2918,6 +2947,7 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
 
@@ -2955,6 +2985,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
     assert!(
@@ -2964,7 +2995,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
 }
 
 #[test]
-fn test_handle_retrieve_messages_request_nonce_no_db_fallback() {
+fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let dealer_address = setup.address(0);
@@ -2979,15 +3010,19 @@ fn test_handle_retrieve_messages_request_nonce_no_db_fallback() {
         .unwrap();
     assert!(!manager.nonce_messages.contains_key(&dealer_address));
 
-    // Should return NotFound — DB is NOT consulted for nonce gen.
+    // DB fallback should serve nonce gen messages when batch_index is provided.
     let result = manager.handle_retrieve_messages_request(&RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: manager.dkg_config.epoch,
+        batch_index: Some(0),
     });
-    assert!(
-        matches!(result.unwrap_err(), MpcError::NotFound(_)),
-        "nonce gen must not fall back to DB"
+    let response = result.expect("nonce gen should fall back to DB when batch_index is provided");
+    let expected_hash = compute_messages_hash(&Messages::NonceGeneration(nonce_msg));
+    let received_hash = compute_messages_hash(&response.messages);
+    assert_eq!(
+        received_hash, expected_hash,
+        "DB fallback should serve the correct nonce message"
     );
 }
 
@@ -3005,6 +3040,7 @@ fn test_handle_complain_request_no_message_from_dealer() {
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index: None,
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: manager.dkg_config.epoch,
@@ -3038,6 +3074,7 @@ fn test_handle_complain_request_rederives_output_rejects_invalid_proof() {
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index: None,
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: manager.dkg_config.epoch,
@@ -3095,6 +3132,7 @@ fn test_handle_complain_request_caches_response() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: None,
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: party2_manager.dkg_config.epoch,
@@ -3540,6 +3578,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: party_manager.dkg_config.epoch,
@@ -4256,6 +4295,7 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
         dealer: dealer_addr,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: receiver_manager.dkg_config.epoch,
+        batch_index: None,
     };
     let retrieve_response = receiver_manager
         .handle_retrieve_messages_request(&retrieve_request)
@@ -4453,6 +4493,15 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         Ok(())
     }
 
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
+    }
+
     fn list_nonce_messages(
         &self,
         _batch_index: u32,
@@ -4477,12 +4526,12 @@ impl TrackingP2PChannel {
 }
 
 #[async_trait::async_trait]
-impl crate::communication::P2PChannel for TrackingP2PChannel {
+impl P2PChannel for TrackingP2PChannel {
     async fn send_messages(
         &self,
         recipient: &Address,
         request: &SendMessagesRequest,
-    ) -> crate::communication::ChannelResult<SendMessagesResponse> {
+    ) -> ChannelResult<SendMessagesResponse> {
         self.inner.send_messages(recipient, request).await
     }
 
@@ -4490,7 +4539,7 @@ impl crate::communication::P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> crate::communication::ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<RetrieveMessagesResponse> {
         self.retrieve_count.fetch_add(1, Ordering::SeqCst);
         self.inner.retrieve_messages(party, request).await
     }
@@ -4499,7 +4548,7 @@ impl crate::communication::P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> crate::communication::ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponses> {
         self.inner.complain(party, request).await
     }
 
@@ -4507,7 +4556,7 @@ impl crate::communication::P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &GetPublicDkgOutputRequest,
-    ) -> crate::communication::ChannelResult<GetPublicDkgOutputResponse> {
+    ) -> ChannelResult<GetPublicDkgOutputResponse> {
         self.inner.get_public_dkg_output(party, request).await
     }
 
@@ -4515,7 +4564,7 @@ impl crate::communication::P2PChannel for TrackingP2PChannel {
         &self,
         _party: &Address,
         _request: &GetPartialSignaturesRequest,
-    ) -> crate::communication::ChannelResult<GetPartialSignaturesResponse> {
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
         unimplemented!("TrackingP2PChannel does not implement get_partial_signatures")
     }
 }
@@ -6433,6 +6482,7 @@ fn test_handle_complain_request_success() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: responder_manager.dkg_config.epoch,
@@ -6545,6 +6595,18 @@ impl PublicMessagesStore for SharedMemoryStore {
             .lock()
             .unwrap()
             .store_nonce_message(batch_index, dealer, message)
+    }
+
+    fn get_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get_nonce_message(epoch, batch_index, dealer)
     }
 
     fn list_nonce_messages(
@@ -7549,6 +7611,7 @@ fn retrieve_and_verify_hash(
         dealer: dealer_address,
         protocol_type,
         epoch: manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
     assert_eq!(
@@ -7568,6 +7631,7 @@ fn complain_and_assert_no_message(
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index,
+        batch_index: None,
         complaint,
         protocol_type,
         epoch: manager.dkg_config.epoch,
@@ -7769,6 +7833,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(share_index),
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: receiver.dkg_config.epoch,
@@ -7862,6 +7927,7 @@ fn test_handle_complain_request_rotation_caches_response() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
+        batch_index: None,
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: responder.dkg_config.epoch,
@@ -7998,6 +8064,7 @@ fn test_handle_complain_request_nonce_no_output() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: Some(0),
         complaint,
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: receiver.dkg_config.epoch,
@@ -8061,6 +8128,7 @@ fn test_handle_complain_request_nonce_caches_response() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: Some(0),
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: party2.dkg_config.epoch,

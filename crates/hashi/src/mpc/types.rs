@@ -198,6 +198,7 @@ pub struct RetrieveMessagesRequest {
     pub dealer: Address,
     pub protocol_type: ProtocolTypeIndicator,
     pub epoch: u64,
+    pub batch_index: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,7 +220,8 @@ pub enum ReconstructionOutcome {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
     pub dealer: Address,
-    pub share_index: Option<ShareIndex>, // None for DKG
+    pub share_index: Option<ShareIndex>, // Only for key rotation
+    pub batch_index: Option<u32>,        // Only for nonce generation
     pub complaint: complaint::Complaint,
     pub protocol_type: ProtocolTypeIndicator,
     pub epoch: u64,

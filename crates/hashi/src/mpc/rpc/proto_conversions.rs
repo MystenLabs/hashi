@@ -165,6 +165,7 @@ impl types::RetrieveMessagesRequest {
             epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
+            batch_index: self.batch_index,
         }
     }
 }
@@ -183,6 +184,7 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
             dealer,
             protocol_type,
             epoch,
+            batch_index: value.batch_index,
         })
     }
 }
@@ -280,6 +282,7 @@ impl types::ComplainRequest {
             share_index: self.share_index.map(|idx| idx.get() as u32),
             complaint: Some(serialize_bcs(&self.complaint)),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
+            batch_index: self.batch_index,
         }
     }
 }
@@ -306,6 +309,7 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
         Ok(Self {
             dealer,
             share_index,
+            batch_index: value.batch_index,
             complaint,
             protocol_type,
             epoch,

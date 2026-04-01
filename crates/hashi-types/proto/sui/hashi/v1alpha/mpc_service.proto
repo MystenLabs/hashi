@@ -74,6 +74,9 @@ message RetrieveMessagesRequest {
 
   // The protocol phase whose messages are being requested.
   optional MpcProtocolType protocol_type = 3;
+
+  // For nonce generation: the batch index.
+  optional uint32 batch_index = 4;
 }
 
 message RetrieveMessagesResponse {
@@ -105,6 +108,9 @@ message ComplainRequest {
 
   // The protocol phase this complaint is for.
   optional MpcProtocolType protocol_type = 5;
+
+  // For nonce generation: the batch index. Not set for DKG/rotation.
+  optional uint32 batch_index = 6;
 }
 
 message RotationResponses {
