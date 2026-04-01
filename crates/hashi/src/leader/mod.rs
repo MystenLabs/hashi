@@ -24,6 +24,7 @@ pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
+use futures::future::OptionFuture;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
@@ -41,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
+use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tracing::debug;
 use tracing::error;
@@ -51,7 +53,6 @@ use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const LEADER_PHASE_TIMEOUT: Duration = Duration::from_secs(60);
-const DEPOSIT_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct LeaderService {
     inner: Arc<Hashi>,
@@ -62,6 +63,7 @@ pub struct LeaderService {
     deposit_gc_tasks: JoinSet<(Vec<Address>, anyhow::Result<usize>)>,
     inflight_deposits: HashSet<Address>,
     inflight_deposit_gc_requests: HashSet<Address>,
+    withdrawal_approval_task: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl LeaderService {
@@ -75,6 +77,7 @@ impl LeaderService {
             deposit_gc_tasks: JoinSet::new(),
             inflight_deposits: HashSet::new(),
             inflight_deposit_gc_requests: HashSet::new(),
+            withdrawal_approval_task: None,
         }
     }
 
@@ -98,7 +101,7 @@ impl LeaderService {
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
 
         loop {
-            trace!("Waiting for next checkpoint or deposit completion...");
+            trace!("Waiting for next checkpoint or task completion...");
             tokio::select! {
                 wait_result = checkpoint_rx.changed() => {
                     if let Err(e) = wait_result {
@@ -128,11 +131,8 @@ impl LeaderService {
 
                     self.process_deposit_requests(checkpoint_timestamp_ms);
 
-                    let _ = tokio::time::timeout(
-                        LEADER_PHASE_TIMEOUT,
-                        self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms),
-                    )
-                    .await;
+                    self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
+
                     let _ = tokio::time::timeout(
                         LEADER_PHASE_TIMEOUT,
                         self.process_approved_withdrawal_requests(checkpoint_timestamp_ms),
@@ -168,6 +168,9 @@ impl LeaderService {
                 }
                 Some(result) = self.deposit_gc_tasks.join_next() => {
                     self.handle_completed_deposit_gc_task(result);
+                }
+                Some(result) = OptionFuture::from(self.withdrawal_approval_task.as_mut()) => {
+                    self.handle_completed_withdrawal_approval_task(result);
                 }
             }
         }
@@ -219,6 +222,25 @@ impl LeaderService {
             }
             Err(err) => {
                 error!("Deposit request GC task failed to join: {err}");
+            }
+        }
+    }
+
+    fn handle_completed_withdrawal_approval_task(
+        &mut self,
+        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+    ) {
+        self.withdrawal_approval_task = None;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                error!("Withdrawal approval task failed: {err:#}");
+            }
+            Err(err) if err.is_panic() => {
+                error!("Withdrawal approval task panicked: {err}");
+            }
+            Err(err) => {
+                error!("Withdrawal approval task failed to join: {err}");
             }
         }
     }
@@ -291,7 +313,7 @@ impl LeaderService {
             self.inflight_deposits.insert(deposit_id);
             self.deposit_tasks.spawn(async move {
                 let task_result = tokio::time::timeout(
-                    DEPOSIT_TASK_TIMEOUT,
+                    LEADER_PHASE_TIMEOUT,
                     Self::process_deposit_request(
                         inner.clone(),
                         deposit_retry_tracker.clone(),
@@ -317,7 +339,7 @@ impl LeaderService {
                         );
                         (
                             Err(anyhow::anyhow!(
-                                "deposit task timed out after {DEPOSIT_TASK_TIMEOUT:?}"
+                                "deposit task timed out after {LEADER_PHASE_TIMEOUT:?}"
                             )),
                             Some(kind),
                         )
@@ -363,9 +385,6 @@ impl LeaderService {
         deposit_request: DepositRequest,
         checkpoint_timestamp_ms: u64,
     ) -> anyhow::Result<()> {
-        // TODO: parallelize, and after we have a quorum of sigs, stop waiting for sigs from any
-        // additional validators
-
         info!(deposit_request_id = %deposit_request.id, "Processing deposit request");
 
         // Validate deposit_request before asking for signatures
@@ -396,17 +415,63 @@ impl LeaderService {
             .current_committee_members()
             .expect("No current committee members");
 
-        let mut signatures: Vec<MemberSignature> = Vec::new();
+        let committee = inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+
+        let required_weight = certificate_threshold(committee.total_weight());
+
+        // Fan out signature requests to all members in parallel.
+        let mut sig_tasks = JoinSet::new();
         for member in members {
-            if let Some(signature) =
-                Self::request_deposit_confirmation_signature(&inner, proto_request.clone(), &member)
-                    .await
-            {
-                signatures.push(signature);
+            let inner = inner.clone();
+            let proto_request = proto_request.clone();
+            sig_tasks.spawn(async move {
+                Self::request_deposit_confirmation_signature(&inner, proto_request, &member).await
+            });
+        }
+
+        // Collect signatures, stopping once we reach quorum.
+        let mut aggregator = BlsSignatureAggregator::new(&committee, deposit_request.clone());
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!(deposit_request_id = %deposit_request.id, "Failed to add deposit signature: {e}");
+            }
+            if aggregator.weight() >= required_weight {
+                break;
             }
         }
 
-        Self::submit_deposit_confirmation(&inner, deposit_request.clone(), signatures).await?;
+        if aggregator.weight() < required_weight {
+            anyhow::bail!(
+                "Aggregate weight of signatures {} is less than required weight {required_weight}",
+                aggregator.weight()
+            );
+        }
+
+        let signed_message = aggregator.finish()?;
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        executor
+            .execute_confirm_deposit(&deposit_request, signed_message)
+            .await
+            .inspect(|()| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["confirm_deposit", "success"])
+                    .inc();
+                inner.metrics.deposits_confirmed_total.inc();
+                info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
+            })
+            .inspect_err(|_| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["confirm_deposit", "failure"])
+                    .inc();
+            })?;
         deposit_retry_tracker.clear(&deposit_request.id);
         Ok(())
     }
@@ -463,65 +528,18 @@ impl LeaderService {
             .ok()
     }
 
-    async fn submit_deposit_confirmation(
-        inner: &Arc<Hashi>,
-        deposit_request: DepositRequest,
-        signatures: Vec<MemberSignature>,
-    ) -> anyhow::Result<()> {
-        info!(deposit_request_id = %deposit_request.id, "Aggregating signatures and submitting deposit confirmation");
-
-        let committee = inner
-            .onchain_state()
-            .current_committee()
-            .expect("No current committee");
-
-        // Aggregate signatures
-        let mut signature_aggregator =
-            BlsSignatureAggregator::new(&committee, deposit_request.clone());
-        for signature in signatures {
-            signature_aggregator.add_signature(signature)?;
-        }
-
-        // Check for quorum
-        // TODO: better way to check for quorom than hardcoding
-        let weight = signature_aggregator.weight();
-        let required_weight = certificate_threshold(committee.total_weight());
-        if weight < required_weight {
-            anyhow::bail!(
-                "Aggregate weight of signatures {weight} is less than required weight {required_weight}"
-            );
-        }
-
-        // Submit onchain
-        let signed_message = signature_aggregator.finish()?;
-        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
-        executor
-            .execute_confirm_deposit(&deposit_request, signed_message)
-            .await
-            .inspect(|()| {
-                inner
-                    .metrics
-                    .sui_tx_submissions_total
-                    .with_label_values(&["confirm_deposit", "success"])
-                    .inc();
-                inner.metrics.deposits_confirmed_total.inc();
-                info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
-            })
-            .inspect_err(|_| {
-                inner
-                    .metrics
-                    .sui_tx_submissions_total
-                    .with_label_values(&["confirm_deposit", "failure"])
-                    .inc();
-            })
-    }
-
     // ========================================================================
     // Step 1: Approve unapproved withdrawal requests
     // ========================================================================
 
-    async fn process_unapproved_withdrawal_requests(&self, checkpoint_timestamp_ms: u64) {
+    fn process_unapproved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_unapproved_withdrawal_requests");
+
+        if self.withdrawal_approval_task.is_some() {
+            debug!("Withdrawal approval task already in-flight, skipping");
+            return;
+        }
+
         let mut unapproved: Vec<_> = self
             .inner
             .onchain_state()
@@ -535,116 +553,14 @@ impl LeaderService {
         self.withdrawal_approval_retry_tracker
             .prune(&unapproved_ids);
 
-        if unapproved.is_empty() {
-            return;
-        }
-
-        let this_validator_address = self
-            .inner
-            .config
-            .validator_address()
-            .expect("No configured validator address");
-
-        let members = self
-            .inner
-            .onchain_state()
-            .current_committee_members()
-            .expect("No current committee members");
-
-        let committee = self
-            .inner
-            .onchain_state()
-            .current_committee()
-            .expect("No current committee");
-
-        // Collect a per-request BLS certificate for each unapproved request.
-        // Validators independently validate each request (including sanctions checks),
-        let mut certified: Vec<(Address, CommitteeSignature)> = Vec::new();
-        for request in &unapproved {
-            if self
-                .withdrawal_approval_retry_tracker
-                .should_skip(&request.id, checkpoint_timestamp_ms)
-            {
-                continue;
-            }
-
-            let approval = WithdrawalRequestApproval {
-                request_id: request.id,
-            };
-
-            // Validate, screen, and sign locally first
-            let local_sig = match self
-                .inner
-                .validate_and_sign_withdrawal_request_approval(&approval)
-                .await
-            {
-                Ok(sig) => {
-                    self.withdrawal_approval_retry_tracker.clear(&request.id);
-                    parse_member_signature(sig).unwrap()
-                }
-                Err(e) => {
-                    let kind = e.kind();
-                    self.inner
-                        .metrics
-                        .leader_retries_total
-                        .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
-                        .inc();
-                    self.withdrawal_approval_retry_tracker.record_failure(
-                        kind,
-                        request.id,
-                        checkpoint_timestamp_ms,
-                    );
-                    continue;
-                }
-            };
-
-            let proto_request = approval.to_proto();
-            let mut signatures: Vec<MemberSignature> = vec![local_sig];
-            for member in &members {
-                if member.validator_address() == this_validator_address {
-                    continue;
-                }
-                if let Some(signature) = self
-                    .request_withdrawal_approval_signature(proto_request.clone(), member)
-                    .await
-                {
-                    signatures.push(signature);
-                }
-            }
-
-            let mut aggregator = BlsSignatureAggregator::new(&committee, approval);
-            for sig in signatures {
-                if let Err(e) = aggregator.add_signature(sig) {
-                    error!(withdrawal_request_id = %request.id, "Failed to add approval signature: {e}");
-                }
-            }
-
-            let weight = aggregator.weight();
-            let required_weight = certificate_threshold(committee.total_weight());
-            if weight < required_weight {
-                self.inner
-                    .metrics
-                    .leader_retries_total
-                    .with_label_values(&["withdrawal_approval", "FailedQuorum"])
-                    .inc();
-                self.withdrawal_approval_retry_tracker.record_failure(
-                    WithdrawalApprovalErrorKind::FailedQuorum,
-                    request.id,
-                    checkpoint_timestamp_ms,
-                );
-                error!(withdrawal_request_id = %request.id, "Insufficient approval signatures: weight {weight} < {required_weight}");
-                continue;
-            }
-
-            match aggregator.finish() {
-                Ok(signed) => {
-                    certified.push((request.id, signed.committee_signature().clone()));
-                }
-                Err(e) => {
-                    error!(withdrawal_request_id = %request.id, "Failed to build approval certificate: {e}");
-                }
-            }
-        }
+        let to_process: Vec<_> = unapproved
+            .into_iter()
+            .filter(|r| {
+                !self
+                    .withdrawal_approval_retry_tracker
+                    .should_skip(&r.id, checkpoint_timestamp_ms)
+            })
+            .collect();
 
         self.inner
             .metrics
@@ -655,37 +571,260 @@ impl LeaderService {
                     .in_backoff_count(checkpoint_timestamp_ms) as i64,
             );
 
-        if certified.is_empty() {
+        if to_process.is_empty() {
             return;
         }
 
-        // Submit all certified approvals in a single PTB.
-        // On failure (e.g. a request was canceled mid-flight), remove the
-        // offending request and retry until we succeed or run out of requests.
-        self.submit_approve_withdrawal_requests_with_retry(certified)
-            .await;
+        let inner = self.inner.clone();
+        let retry_tracker = self.withdrawal_approval_retry_tracker.clone();
+
+        self.withdrawal_approval_task = Some(tokio::task::spawn(async move {
+            Self::process_unapproved_withdrawal_requests_task(
+                inner,
+                retry_tracker,
+                to_process,
+                checkpoint_timestamp_ms,
+            )
+            .await
+        }));
+    }
+
+    async fn process_unapproved_withdrawal_requests_task(
+        inner: Arc<Hashi>,
+        retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
+        to_process: Vec<WithdrawalRequest>,
+        checkpoint_timestamp_ms: u64,
+    ) -> anyhow::Result<()> {
+        let max_concurrent = inner.config.max_concurrent_leader_job_tasks();
+
+        let this_validator_address = inner
+            .config
+            .validator_address()
+            .expect("No configured validator address");
+
+        let members = inner
+            .onchain_state()
+            .current_committee_members()
+            .expect("No current committee members");
+
+        let committee = inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+
+        let mut tasks = JoinSet::new();
+        let mut certified: Vec<(Address, CommitteeSignature)> = Vec::new();
+
+        for request in to_process {
+            if tasks.len() >= max_concurrent {
+                // Wait for one to finish before spawning more.
+                if let Some(result) = tasks.join_next().await {
+                    match &result {
+                        Err(err) if err.is_panic() => {
+                            error!("Withdrawal approval task panicked: {err}")
+                        }
+                        Err(err) => error!("Withdrawal approval task failed to join: {err}"),
+                        Ok(_) => {}
+                    }
+                    if let Ok((_request_id, Ok(Some(cert)))) = result {
+                        certified.push(cert);
+                    }
+                }
+            }
+
+            let inner = inner.clone();
+            let retry_tracker = retry_tracker.clone();
+            let members = members.clone();
+            let committee = committee.clone();
+            tasks.spawn(async move {
+                let request_id = request.id;
+                let task_result = tokio::time::timeout(
+                    LEADER_PHASE_TIMEOUT,
+                    Self::process_unapproved_withdrawal_request(
+                        inner.clone(),
+                        retry_tracker.clone(),
+                        request,
+                        checkpoint_timestamp_ms,
+                        this_validator_address,
+                        &members,
+                        &committee,
+                    ),
+                )
+                .await;
+
+                let (result, failure_kind) = match task_result {
+                    Ok(result) => (result, None),
+                    Err(_) => {
+                        let kind = WithdrawalApprovalErrorKind::TimedOut;
+                        inner
+                            .metrics
+                            .leader_retries_total
+                            .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
+                            .inc();
+                        retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
+                        (Ok(None), Some(kind))
+                    }
+                };
+
+                match &result {
+                    Err(err) => {
+                        if failure_kind.is_none() {
+                            let kind = WithdrawalApprovalErrorKind::TaskFailed;
+                            inner
+                                .metrics
+                                .leader_retries_total
+                                .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
+                                .inc();
+                            retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
+                        }
+                        error!(
+                            withdrawal_request_id = %request_id,
+                            "Withdrawal approval task will retry after failure: {err:#}"
+                        );
+                    }
+                    Ok(None) if failure_kind.is_some() => {
+                        warn!(
+                            withdrawal_request_id = %request_id,
+                            "Withdrawal approval task timed out"
+                        );
+                    }
+                    _ => {}
+                }
+
+                (request_id, result)
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            match &result {
+                Err(err) if err.is_panic() => error!("Withdrawal approval task panicked: {err}"),
+                Err(err) => error!("Withdrawal approval task failed to join: {err}"),
+                Ok(_) => {}
+            }
+            if let Ok((_request_id, Ok(Some(cert)))) = result {
+                certified.push(cert);
+            }
+        }
+
+        if certified.is_empty() {
+            return Ok(());
+        }
+
+        Self::submit_approve_withdrawal_requests_with_retry(&inner, certified).await;
+        Ok(())
+    }
+
+    async fn process_unapproved_withdrawal_request(
+        inner: Arc<Hashi>,
+        retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
+        request: WithdrawalRequest,
+        checkpoint_timestamp_ms: u64,
+        this_validator_address: Address,
+        members: &[CommitteeMember],
+        committee: &hashi_types::committee::Committee,
+    ) -> anyhow::Result<Option<(Address, CommitteeSignature)>> {
+        let approval = WithdrawalRequestApproval {
+            request_id: request.id,
+        };
+
+        // Validate, screen, and sign locally first
+        let local_sig = match inner
+            .validate_and_sign_withdrawal_request_approval(&approval)
+            .await
+        {
+            Ok(sig) => {
+                retry_tracker.clear(&request.id);
+                parse_member_signature(sig).unwrap()
+            }
+            Err(e) => {
+                let kind = e.kind();
+                inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
+                    .inc();
+                retry_tracker.record_failure(kind, request.id, checkpoint_timestamp_ms);
+                return Ok(None);
+            }
+        };
+
+        let proto_request = approval.to_proto();
+        let required_weight = certificate_threshold(committee.total_weight());
+
+        let mut aggregator = BlsSignatureAggregator::new(committee, approval);
+        if let Err(e) = aggregator.add_signature(local_sig) {
+            error!(withdrawal_request_id = %request.id, "Failed to add local approval signature: {e}");
+        }
+
+        // Fan out signature requests to remote members in parallel.
+        let mut sig_tasks = JoinSet::new();
+        for member in members {
+            if member.validator_address() == this_validator_address {
+                continue;
+            }
+            let inner = inner.clone();
+            let proto_request = proto_request.clone();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
+                Self::request_withdrawal_approval_signature(&inner, proto_request, &member).await
+            });
+        }
+
+        // Collect signatures, stopping once we reach quorum.
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!(withdrawal_request_id = %request.id, "Failed to add approval signature: {e}");
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+
+        let weight = aggregator.weight();
+        if weight < required_weight {
+            inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_approval", "FailedQuorum"])
+                .inc();
+            retry_tracker.record_failure(
+                WithdrawalApprovalErrorKind::FailedQuorum,
+                request.id,
+                checkpoint_timestamp_ms,
+            );
+            error!(withdrawal_request_id = %request.id, "Insufficient approval signatures: weight {weight} < {required_weight}");
+            return Ok(None);
+        }
+
+        match aggregator.finish() {
+            Ok(signed) => Ok(Some((request.id, signed.committee_signature().clone()))),
+            Err(e) => {
+                error!(withdrawal_request_id = %request.id, "Failed to build approval certificate: {e}");
+                Ok(None)
+            }
+        }
     }
 
     async fn submit_approve_withdrawal_requests_with_retry(
-        &self,
+        inner: &Arc<Hashi>,
         mut certified: Vec<(Address, CommitteeSignature)>,
     ) {
         loop {
             let approvals: Vec<(Address, &CommitteeSignature)> =
                 certified.iter().map(|(id, cert)| (*id, cert)).collect();
 
-            let result = self
-                .submit_approve_withdrawal_requests(&approvals)
+            let result = Self::submit_approve_withdrawal_requests(inner, &approvals)
                 .await
                 .inspect(|()| {
-                    self.inner
+                    inner
                         .metrics
                         .sui_tx_submissions_total
                         .with_label_values(&["approve_withdrawal", "success"])
                         .inc();
                 })
                 .inspect_err(|_| {
-                    self.inner
+                    inner
                         .metrics
                         .sui_tx_submissions_total
                         .with_label_values(&["approve_withdrawal", "failure"])
@@ -699,7 +838,7 @@ impl LeaderService {
             // Try to identify which request caused the failure by checking
             // which ones no longer exist in the queue (canceled).
             let before_len = certified.len();
-            certified.retain(|(id, _)| self.inner.onchain_state().withdrawal_request(id).is_some());
+            certified.retain(|(id, _)| inner.onchain_state().withdrawal_request(id).is_some());
 
             if certified.len() == before_len {
                 error!("Could not identify failed request, aborting retry");
@@ -1308,7 +1447,7 @@ impl LeaderService {
     }
 
     async fn request_withdrawal_approval_signature(
-        &self,
+        inner: &Arc<Hashi>,
         proto_request: SignWithdrawalRequestApprovalRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
@@ -1318,8 +1457,7 @@ impl LeaderService {
             validator_address
         );
 
-        let mut rpc_client = self
-            .inner
+        let mut rpc_client = inner
             .onchain_state()
             .bridge_service_client(&validator_address)
             .or_else(|| {
@@ -1553,7 +1691,7 @@ impl LeaderService {
     }
 
     async fn submit_approve_withdrawal_requests(
-        &self,
+        inner: &Arc<Hashi>,
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         info!(
@@ -1561,7 +1699,7 @@ impl LeaderService {
             approvals.len()
         );
 
-        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
             .execute_approve_withdrawal_requests(approvals)
             .await
