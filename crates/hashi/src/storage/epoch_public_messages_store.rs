@@ -97,6 +97,17 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to store nonce message: {e}"))
     }
 
+    fn get_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        self.db
+            .get_nonce_message(epoch, batch_index, dealer)
+            .map_err(|e| anyhow::anyhow!("failed to get nonce message: {e}"))
+    }
+
     fn list_nonce_messages(
         &self,
         batch_index: u32,

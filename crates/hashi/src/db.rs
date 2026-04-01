@@ -230,6 +230,32 @@ impl Database {
         clean_up_old_epochs(&self.nonce_messages, epoch)
     }
 
+    pub fn get_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<Option<batch_avss::Message>> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        let bytes = match self.nonce_messages.get(key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let message = bcs::from_bytes(&bytes).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid nonce message",
+            ))
+        })?;
+        Ok(Some(message))
+    }
+
     pub fn list_nonce_messages(
         &self,
         epoch: u64,
@@ -743,6 +769,36 @@ mod tests {
         let db = Database::open(tmpdir.path()).unwrap();
         let result = db.list_nonce_messages(1, 0).unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_get_nonce_message() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let message = create_test_nonce_message();
+
+        // Not found before storing
+        assert!(db.get_nonce_message(1, 0, &dealer).unwrap().is_none());
+
+        // Store and retrieve
+        db.store_nonce_message(1, 0, &dealer, &message).unwrap();
+        let retrieved = db.get_nonce_message(1, 0, &dealer).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&retrieved).unwrap(),
+            bcs::to_bytes(&message).unwrap()
+        );
+
+        // Wrong epoch
+        assert!(db.get_nonce_message(2, 0, &dealer).unwrap().is_none());
+
+        // Wrong batch_index
+        assert!(db.get_nonce_message(1, 1, &dealer).unwrap().is_none());
+
+        // Wrong dealer
+        let other_dealer = Address::new([2u8; 32]);
+        assert!(db.get_nonce_message(1, 0, &other_dealer).unwrap().is_none());
     }
 
     #[test]
