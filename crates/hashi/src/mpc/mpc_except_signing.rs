@@ -491,14 +491,18 @@ impl MpcManager {
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, threshold) = {
             let mgr = mpc_manager.read().unwrap();
-            let weight: u16 = certified
+            let weight: u32 = certified
                 .iter()
                 .filter_map(|d| {
                     let party_id = mgr.committee.index_of(d)? as u16;
-                    mgr.dkg_config.nodes.weight_of(party_id).ok()
+                    mgr.dkg_config
+                        .nodes
+                        .weight_of(party_id)
+                        .ok()
+                        .map(|w| w as u32)
                 })
                 .sum();
-            (weight, mgr.dkg_config.threshold)
+            (weight, mgr.dkg_config.threshold as u32)
         };
         if certified_reduced_weight < threshold
             && let Err(e) = Self::run_dkg_as_dealer(mpc_manager, p2p_channel, tob_channel).await
@@ -591,14 +595,18 @@ impl MpcManager {
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, required_reduced_weight) = {
             let mgr = mpc_manager.read().unwrap();
-            let weight: u16 = certified
+            let weight: u32 = certified
                 .iter()
                 .filter_map(|d| {
                     let party_id = mgr.committee.index_of(d)? as u16;
-                    mgr.dkg_config.nodes.weight_of(party_id).ok()
+                    mgr.dkg_config
+                        .nodes
+                        .weight_of(party_id)
+                        .ok()
+                        .map(|w| w as u32)
                 })
                 .sum();
-            (weight, mgr.required_nonce_weight() as u16)
+            (weight, mgr.required_nonce_weight())
         };
         if certified_reduced_weight < required_reduced_weight
             && let Err(e) =
@@ -752,12 +760,12 @@ impl MpcManager {
     ) -> MpcResult<DkgOutput> {
         let threshold = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.dkg_config.threshold
+            mgr.dkg_config.threshold as u32
         };
         let mut certified_dealers = HashSet::new();
         let mut dealer_weight_sum = 0u32;
         loop {
-            if dealer_weight_sum >= threshold as u32 {
+            if dealer_weight_sum >= threshold {
                 break;
             }
             let cert = tob_channel
@@ -2587,11 +2595,11 @@ impl MpcManager {
         let source_session_id =
             SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::PartialOutput> = HashMap::new();
-        let mut dealer_weight_sum = 0u16;
+        let mut dealer_weight_sum = 0u32;
         for cert in certificates {
             // This matches the behavior of `run_as_party` during DKG, which also
             // stops at threshold.
-            if dealer_weight_sum >= previous_threshold {
+            if dealer_weight_sum >= previous_threshold as u32 {
                 break;
             }
             let CertificateV1::Dkg(dkg_cert) = cert else {
@@ -2636,7 +2644,7 @@ impl MpcManager {
                 let dealer_weight = previous_nodes
                     .weight_of(dealer_party_id)
                     .expect("party_id must be valid");
-                dealer_weight_sum += dealer_weight;
+                dealer_weight_sum += dealer_weight as u32;
                 continue;
             }
             match process_avss_message(
@@ -2663,9 +2671,9 @@ impl MpcManager {
             let dealer_weight = previous_nodes
                 .weight_of(dealer_party_id)
                 .expect("party_id must be valid");
-            dealer_weight_sum += dealer_weight;
+            dealer_weight_sum += dealer_weight as u32;
         }
-        if dealer_weight_sum < previous_threshold {
+        if dealer_weight_sum < previous_threshold as u32 {
             return Err(MpcError::NotEnoughApprovals {
                 needed: previous_threshold as usize,
                 got: dealer_weight_sum as usize,
