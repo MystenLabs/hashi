@@ -186,7 +186,7 @@ pub struct SendMessagesResponse {
     pub signature: BLS12381Signature,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum ProtocolTypeIndicator {
     Dkg,
     KeyRotation,
@@ -214,6 +214,16 @@ pub enum ReconstructionOutcome {
         complaint: complaint::Complaint,
         message: avss::Message,
         protocol_type: ProtocolTypeIndicator,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum NonceReconstructionOutcome {
+    Success(Vec<batch_avss::ReceiverOutput>),
+    NeedsComplaintRecovery {
+        dealer_address: Address,
+        complaint: complaint::Complaint,
+        batch_index: u32,
     },
 }
 
