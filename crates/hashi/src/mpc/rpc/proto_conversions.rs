@@ -273,9 +273,9 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
 //
 
 impl types::ComplainRequest {
-    pub fn to_proto(&self, epoch: u64) -> proto::ComplainRequest {
+    pub fn to_proto(&self) -> proto::ComplainRequest {
         proto::ComplainRequest {
-            epoch: Some(epoch),
+            epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             share_index: self.share_index.map(|idx| idx.get() as u32),
             complaint: Some(serialize_bcs(&self.complaint)),
@@ -288,6 +288,7 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::ComplainRequest) -> Result<Self, Self::Error> {
+        let epoch = *required(value.epoch.as_ref(), "epoch")?;
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
         let share_index = value
             .share_index
@@ -307,6 +308,7 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
             share_index,
             complaint,
             protocol_type,
+            epoch,
         })
     }
 }

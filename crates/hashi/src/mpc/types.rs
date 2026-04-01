@@ -205,12 +205,24 @@ pub struct RetrieveMessagesResponse {
     pub messages: Messages,
 }
 
+#[allow(clippy::large_enum_variant)]
+pub enum ReconstructionOutcome {
+    Success(DkgOutput),
+    NeedsComplaintRecovery {
+        dealer_address: Address,
+        complaint: complaint::Complaint,
+        message: avss::Message,
+        protocol_type: ProtocolTypeIndicator,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
     pub dealer: Address,
     pub share_index: Option<ShareIndex>, // None for DKG
     pub complaint: complaint::Complaint,
     pub protocol_type: ProtocolTypeIndicator,
+    pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

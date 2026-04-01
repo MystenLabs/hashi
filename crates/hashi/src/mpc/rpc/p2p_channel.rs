@@ -72,7 +72,7 @@ impl P2PChannel for RpcP2PChannel {
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses> {
         self.get_client(party)?
-            .complain(self.epoch, request)
+            .complain(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }

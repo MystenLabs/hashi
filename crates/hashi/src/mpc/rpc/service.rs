@@ -56,15 +56,11 @@ impl MpcService for HttpService {
         let response = {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
-            let epoch = external_request
-                .epoch
-                .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
-            if epoch != mgr.dkg_config.epoch && epoch != mgr.source_epoch {
-                return Err(Status::failed_precondition(format!(
-                    "epoch mismatch: expected {} or {}, got {}",
-                    mgr.dkg_config.epoch, mgr.source_epoch, epoch
-                )));
-            }
+            validate_epoch_current_or_source(
+                mgr.dkg_config.epoch,
+                mgr.source_epoch,
+                internal_request.epoch,
+            )?;
             mgr.handle_retrieve_messages_request(&internal_request)
                 .map_err(dkg_error_to_status)?
         };
@@ -85,7 +81,11 @@ impl MpcService for HttpService {
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
+            validate_epoch_current_or_source(
+                mgr.dkg_config.epoch,
+                mgr.source_epoch,
+                internal_request.epoch,
+            )?;
             mgr.handle_complain_request(&internal_request)
                 .map_err(dkg_error_to_status)
         })
@@ -165,6 +165,19 @@ fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Statu
     if epoch != expected {
         return Err(Status::failed_precondition(format!(
             "epoch mismatch: expected {expected}, got {epoch}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_epoch_current_or_source(
+    current_epoch: u64,
+    source_epoch: u64,
+    request_epoch: u64,
+) -> Result<(), Status> {
+    if request_epoch != current_epoch && request_epoch != source_epoch {
+        return Err(Status::failed_precondition(format!(
+            "epoch mismatch: expected {current_epoch} or {source_epoch}, got {request_epoch}"
         )));
     }
     Ok(())

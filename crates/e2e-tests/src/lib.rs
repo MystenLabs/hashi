@@ -1451,7 +1451,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_dkg_complaint_recovery() -> Result<()> {
+    async fn test_complaint_recovery() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         tracing_subscriber::fmt()
@@ -1463,12 +1463,13 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = TestNetworksBuilder::new()
+        let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .with_corrupt_shares_target(0) // all others corrupt shares for node 0
             .build()
             .await?;
 
+        // 1. DKG with complaint recovery
         let nodes = test_networks.hashi_network().nodes();
         let mpc_key_futures: Vec<_> = nodes
             .iter()
@@ -1479,6 +1480,23 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
         assert_nodes_agree_on_mpc_key(nodes);
+
+        // 2. Sign to verify nonce gen presigs (built via complaint recovery) work
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(nodes, b"complaint test", epoch, request_id, 0).await;
+        assert_all_signatures_match(results);
+
+        // 3. First rotation — reconstruct_previous_output hits corrupted DKG
+        //    messages → DKG reconstruction complaint recovery via RPC →
+        //    rotation dealers also corrupted → complaint recovery → key preserved
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+
+        // 4. Second rotation — reconstruct_previous_output hits corrupted
+        //    rotation messages → rotation reconstruction complaint recovery
+        force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
 
         Ok(())
     }

@@ -128,12 +128,8 @@ impl Client {
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
-    pub async fn complain(
-        &self,
-        epoch: u64,
-        request: &ComplainRequest,
-    ) -> Result<ComplaintResponses> {
-        let proto_request = request.to_proto(epoch);
+    pub async fn complain(&self, request: &ComplainRequest) -> Result<ComplaintResponses> {
+        let proto_request = request.to_proto();
         let response = self.mpc_service_client().complain(proto_request).await?;
         ComplaintResponses::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))

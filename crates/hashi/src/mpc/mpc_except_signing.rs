@@ -28,6 +28,7 @@ pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
 pub use crate::mpc::types::PublicDkgOutput;
+use crate::mpc::types::ReconstructionOutcome;
 pub use crate::mpc::types::RetrieveMessagesRequest;
 pub use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::RotationComplainContext;
@@ -315,36 +316,55 @@ impl MpcManager {
             return Ok(cached_response.clone());
         }
         let messages = self
-            .get_dealer_messages(request.protocol_type, &request.dealer)
-            .ok_or_else(|| MpcError::ProtocolFailed("No message from dealer".into()))?;
+            .get_dealer_messages_with_db_fallback(
+                request.protocol_type,
+                &request.dealer,
+                request.epoch,
+            )
+            .ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?;
         let responses = match messages {
             Messages::Dkg(message) => {
-                let partial_output = self
-                    .dealer_outputs
-                    .get(&DealerOutputsKey::Dkg(request.dealer))
-                    .ok_or_else(|| {
-                        MpcError::ProtocolFailed("No output for complained dealer".into())
-                    })?;
-                let session_id = self.session_id.dealer_session_id(&request.dealer);
+                let partial_output =
+                    self.get_or_derive_dkg_output(&request.dealer, &message, request.epoch)?;
+                let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
+                let session_id = self
+                    .base_session_id_for_epoch(request.epoch, &ProtocolType::Dkg)
+                    .dealer_session_id(&request.dealer);
                 let receiver = avss::Receiver::new(
-                    self.dkg_config.nodes.clone(),
-                    self.party_id,
-                    self.dkg_config.threshold,
+                    nodes,
+                    party_id,
+                    threshold,
                     session_id.to_vec(),
                     None,
                     self.encryption_key.clone(),
                 );
                 let complaint_response =
-                    receiver.handle_complaint(&message, &request.complaint, partial_output)?;
+                    receiver.handle_complaint(&message, &request.complaint, &partial_output)?;
                 ComplaintResponses::Dkg(complaint_response)
             }
             Messages::Rotation(rotation_messages) => {
                 let previous_output = self.previous_output.as_ref().ok_or_else(|| {
-                    MpcError::ProtocolFailed("No previous DKG output for rotation".into())
+                    MpcError::NotFound(
+                        "Rotation not started yet — previous output not available".into(),
+                    )
                 })?;
                 let complained_share_index = request.share_index.ok_or_else(|| {
                     MpcError::ProtocolFailed("Rotation complaint requires share_index".into())
                 })?;
+                let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
+                let mut all_outputs: BTreeMap<ShareIndex, avss::PartialOutput> = BTreeMap::new();
+                for (&share_index, message) in &rotation_messages {
+                    all_outputs.insert(
+                        share_index,
+                        self.get_or_derive_rotation_output(
+                            &request.dealer,
+                            share_index,
+                            message,
+                            previous_output,
+                            request.epoch,
+                        )?,
+                    );
+                }
                 let complained_message = rotation_messages
                     .get(&complained_share_index)
                     .ok_or_else(|| {
@@ -353,10 +373,8 @@ impl MpcManager {
                             complained_share_index
                         ))
                     })?;
-                let complained_output = self
-                    .dealer_outputs
-                    .get(&DealerOutputsKey::Rotation(complained_share_index))
-                    .ok_or_else(|| {
+                let complained_output =
+                    all_outputs.get(&complained_share_index).ok_or_else(|| {
                         MpcError::ProtocolFailed("No output for complained share".into())
                     })?;
                 let commitment = previous_output
@@ -364,12 +382,12 @@ impl MpcManager {
                     .get(&complained_share_index)
                     .copied();
                 let session_id = self
-                    .session_id
+                    .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
                     .rotation_session_id(&request.dealer, complained_share_index);
                 let receiver = avss::Receiver::new(
-                    self.dkg_config.nodes.clone(),
-                    self.party_id,
-                    self.dkg_config.threshold,
+                    nodes,
+                    party_id,
+                    threshold,
                     session_id.to_vec(),
                     commitment,
                     self.encryption_key.clone(),
@@ -380,16 +398,11 @@ impl MpcManager {
                     complained_output,
                 )?;
                 let mut responses = BTreeMap::new();
-                for &share_index in rotation_messages.keys() {
+                for (&share_index, output) in &all_outputs {
                     let response = if share_index == complained_share_index {
                         complained_response.clone()
-                    } else if let Some(output) = self
-                        .dealer_outputs
-                        .get(&DealerOutputsKey::Rotation(share_index))
-                    {
-                        complaint::ComplaintResponse::new(self.party_id, output.my_shares.clone())
                     } else {
-                        continue;
+                        complaint::ComplaintResponse::new(self.party_id, output.my_shares.clone())
                     };
                     responses.insert(share_index, response);
                 }
@@ -585,9 +598,7 @@ impl MpcManager {
             mgr.dkg_config.epoch,
             dealers.len(),
         );
-        Ok(std::mem::take(&mut mgr.dealer_nonce_outputs)
-            .into_values()
-            .collect())
+        Ok(mgr.dealer_nonce_outputs.values().cloned().collect())
     }
 
     pub fn reconstruct_presignatures(
@@ -803,8 +814,15 @@ impl MpcManager {
                         .signers(&mgr.committee)
                         .expect("certificate verified above")
                 };
-                Self::recover_shares_via_complaint(mpc_manager, &dealer, signers, p2p_channel)
-                    .await?;
+                let epoch = mpc_manager.read().unwrap().dkg_config.epoch;
+                Self::recover_shares_via_complaint(
+                    mpc_manager,
+                    &dealer,
+                    signers,
+                    p2p_channel,
+                    epoch,
+                )
+                .await?;
             }
             let dealer_weight = {
                 let mgr = mpc_manager.read().unwrap();
@@ -1018,12 +1036,14 @@ impl MpcManager {
                     .signers(&mgr.committee)
                     .expect("certificate verified above")
             };
+            let epoch = mpc_manager.read().unwrap().dkg_config.epoch;
             Self::recover_rotation_shares_via_complaints(
                 mpc_manager,
                 &dealer,
                 previous,
                 signers,
                 p2p_channel,
+                epoch,
             )
             .await?;
             // Only add indices not already tracked (avoids duplicates when
@@ -1197,6 +1217,10 @@ impl MpcManager {
                 .await?
             };
             if has_complaint {
+                tracing::info!(
+                    "Nonce gen complaint detected for dealer {:?}, recovering via Complain RPC",
+                    dealer
+                );
                 let signers = {
                     let mgr = mpc_manager.read().unwrap();
                     nonce_cert
@@ -1395,8 +1419,9 @@ impl MpcManager {
             batch_index,
             &self.address,
         );
+        let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
         let dealer = batch_avss::Dealer::new(
-            self.dkg_config.nodes.clone(),
+            nodes,
             self.party_id,
             self.dkg_config.threshold,
             self.dkg_config.max_faulty,
@@ -1917,6 +1942,7 @@ impl MpcManager {
         dealer: &Address,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
+        epoch: u64,
     ) -> MpcResult<()> {
         let (complaint_request, receiver, message) = {
             let mgr = mpc_manager.read().unwrap();
@@ -1924,17 +1950,21 @@ impl MpcManager {
                 .complaints_to_process
                 .get(&ComplaintsToProcessKey::Dkg(*dealer))
                 .ok_or_else(|| MpcError::ProtocolFailed("No complaint for dealer".into()))?;
+            let (nodes, party_id, threshold) = mgr.config_for_epoch(epoch)?;
             let complaint_request = ComplainRequest {
                 dealer: *dealer,
                 share_index: None,
                 complaint: complaint.clone(),
                 protocol_type: ProtocolTypeIndicator::Dkg,
+                epoch,
             };
-            let dealer_session_id = mgr.session_id.dealer_session_id(dealer);
+            let dealer_session_id = mgr
+                .base_session_id_for_epoch(epoch, &ProtocolType::Dkg)
+                .dealer_session_id(dealer);
             let receiver = avss::Receiver::new(
-                mgr.dkg_config.nodes.clone(),
-                mgr.party_id,
-                mgr.dkg_config.threshold,
+                nodes,
+                party_id,
+                threshold,
                 dealer_session_id.to_vec(),
                 None,
                 mgr.encryption_key.clone(),
@@ -2015,6 +2045,7 @@ impl MpcManager {
                 share_index: None,
                 complaint: complaint.clone(),
                 protocol_type: ProtocolTypeIndicator::NonceGeneration,
+                epoch: mgr.dkg_config.epoch,
             };
             let nonce = mgr
                 .nonce_messages
@@ -2101,16 +2132,21 @@ impl MpcManager {
         previous_dkg_output: &DkgOutput,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
+        epoch: u64,
     ) -> MpcResult<()> {
         let (request, recovery_contexts) = {
             let mgr = mpc_manager.read().unwrap();
             let Some(RotationComplainContext {
                 request,
                 recovery_contexts,
-            }) = mgr.prepare_rotation_complain_request(dealer, previous_dkg_output)?
+            }) = mgr.prepare_rotation_complain_request(dealer, previous_dkg_output, epoch)?
             else {
                 return Ok(());
             };
+            tracing::info!(
+                "Rotation complaint detected for dealer {:?}, recovering via Complain RPC",
+                dealer
+            );
             (request, recovery_contexts)
         };
         // Wrap receivers in Arc for use in `spawn_blocking` across loop iterations.
@@ -2194,11 +2230,10 @@ impl MpcManager {
             }
         }
         if !pending_shares.is_empty() {
-            tracing::info!(
-                "Could not recover all shares for dealer {:?}: missing {:?}",
-                dealer,
-                pending_shares
-            );
+            return Err(MpcError::ProtocolFailed(format!(
+                "Not enough valid complaint responses for dealer {:?}: missing shares {:?}",
+                dealer, pending_shares
+            )));
         }
         Ok(())
     }
@@ -2229,6 +2264,7 @@ impl MpcManager {
         &self,
         dealer: &Address,
         previous_dkg_output: &DkgOutput,
+        epoch: u64,
     ) -> MpcResult<Option<RotationComplainContext>> {
         let rotation_messages = self
             .rotation_messages
@@ -2247,15 +2283,17 @@ impl MpcManager {
         if complained_shares.is_empty() {
             return Ok(None);
         }
+        let (nodes, party_id, threshold) = self.config_for_epoch(epoch)?;
+        let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation);
         let mut recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)> =
             HashMap::new();
         for (share_index, _complaint) in &complained_shares {
-            let session_id = self.session_id.rotation_session_id(dealer, *share_index);
+            let session_id = base_sid.rotation_session_id(dealer, *share_index);
             let commitment = previous_dkg_output.commitments.get(share_index).copied();
             let receiver = avss::Receiver::new(
-                self.dkg_config.nodes.clone(),
-                self.party_id,
-                self.dkg_config.threshold,
+                nodes.clone(),
+                party_id,
+                threshold,
                 session_id.to_vec(),
                 commitment,
                 self.encryption_key.clone(),
@@ -2277,6 +2315,7 @@ impl MpcManager {
             share_index: Some(*first_share_index),
             complaint: first_complaint.clone(),
             protocol_type: ProtocolTypeIndicator::KeyRotation,
+            epoch,
         };
         Ok(Some(RotationComplainContext {
             request,
@@ -2297,9 +2336,10 @@ impl MpcManager {
                 let sid = self
                     .session_id
                     .rotation_session_id(&self.address, share.index);
+                let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
                 let dealer = avss::Dealer::new(
                     Some(share.value),
-                    self.dkg_config.nodes.clone(),
+                    nodes,
                     self.dkg_config.threshold,
                     self.dkg_config.max_faulty,
                     sid.to_vec(),
@@ -2458,7 +2498,10 @@ impl MpcManager {
         })
     }
 
-    fn reconstruct_previous_output(&self, certificates: &[CertificateV1]) -> MpcResult<DkgOutput> {
+    fn reconstruct_previous_output(
+        &self,
+        certificates: &[CertificateV1],
+    ) -> MpcResult<ReconstructionOutcome> {
         match certificates.first() {
             Some(CertificateV1::Dkg(_)) | None => {
                 self.reconstruct_from_dkg_certificates(certificates)
@@ -2480,7 +2523,7 @@ impl MpcManager {
     fn reconstruct_from_dkg_certificates(
         &self,
         certificates: &[CertificateV1],
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<ReconstructionOutcome> {
         let previous_committee = self.previous_committee.clone().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
         })?;
@@ -2536,6 +2579,18 @@ impl MpcManager {
             let session_id = source_session_id
                 .dealer_session_id(&dealer_address)
                 .to_vec();
+            // Check for previously recovered output (from complaint recovery on a prior attempt).
+            if let Some(output) = self
+                .dealer_outputs
+                .get(&DealerOutputsKey::Dkg(dealer_address))
+            {
+                outputs.insert(dealer_party_id, output.clone());
+                let dealer_weight = previous_nodes
+                    .weight_of(dealer_party_id)
+                    .expect("party_id must be valid");
+                dealer_weight_sum += dealer_weight;
+                continue;
+            }
             match process_avss_message(
                 &self.encryption_key,
                 previous_nodes.clone(),
@@ -2548,11 +2603,13 @@ impl MpcManager {
                 avss::ProcessedMessage::Valid(output) => {
                     outputs.insert(dealer_party_id, output);
                 }
-                avss::ProcessedMessage::Complaint(_) => {
-                    return Err(MpcError::ProtocolFailed(format!(
-                        "Complaint during DKG reconstruction for dealer {:?}",
-                        dealer_address
-                    )));
+                avss::ProcessedMessage::Complaint(complaint) => {
+                    return Ok(ReconstructionOutcome::NeedsComplaintRecovery {
+                        dealer_address,
+                        complaint,
+                        message,
+                        protocol_type: ProtocolTypeIndicator::Dkg,
+                    });
                 }
             }
             let dealer_weight = previous_nodes
@@ -2580,7 +2637,7 @@ impl MpcManager {
             "reconstruct_from_dkg_certificates: result vk={}",
             hex::encode(combined_output.vk.to_byte_array()),
         );
-        Ok(DkgOutput {
+        Ok(ReconstructionOutcome::Success(DkgOutput {
             public_key: combined_output.vk,
             key_shares: combined_output.my_shares,
             commitments: combined_output
@@ -2589,14 +2646,14 @@ impl MpcManager {
                 .map(|c| (c.index, c.value))
                 .collect(),
             threshold: previous_threshold,
-        })
+        }))
     }
 
     fn reconstruct_from_rotation_certificates(
         &self,
         certificates: &[CertificateV1],
         previous_threshold: u16,
-    ) -> MpcResult<DkgOutput> {
+    ) -> MpcResult<ReconstructionOutcome> {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
         })?;
@@ -2643,10 +2700,18 @@ impl MpcManager {
                 )));
             }
             for (share_index, message) in rotation_msgs {
+                // Check for previously recovered output (from complaint recovery on a prior attempt).
+                if let Some(output) = self
+                    .dealer_outputs
+                    .get(&DealerOutputsKey::Rotation(share_index))
+                {
+                    local_outputs.insert(share_index, output.clone());
+                    certified_share_indices.push(share_index);
+                    continue;
+                }
                 let session_id = source_session_id
                     .rotation_session_id(&dealer_address, share_index)
                     .to_vec();
-                // Pass None for commitment. Re-verification would be redundant since we trust the certificates.
                 match process_avss_message(
                     &self.encryption_key,
                     previous_nodes.clone(),
@@ -2659,11 +2724,13 @@ impl MpcManager {
                     avss::ProcessedMessage::Valid(output) => {
                         local_outputs.insert(share_index, output);
                     }
-                    avss::ProcessedMessage::Complaint(_) => {
-                        return Err(MpcError::ProtocolFailed(format!(
-                            "Complaint during rotation reconstruction for dealer {:?} share {}",
-                            dealer_address, share_index
-                        )));
+                    avss::ProcessedMessage::Complaint(complaint) => {
+                        return Ok(ReconstructionOutcome::NeedsComplaintRecovery {
+                            dealer_address,
+                            complaint,
+                            message,
+                            protocol_type: ProtocolTypeIndicator::KeyRotation,
+                        });
                     }
                 }
                 certified_share_indices.push(share_index);
@@ -2711,7 +2778,7 @@ impl MpcManager {
             "reconstruct_from_rotation_certificates: result vk={}",
             hex::encode(combined.vk.to_byte_array()),
         );
-        Ok(DkgOutput {
+        Ok(ReconstructionOutcome::Success(DkgOutput {
             public_key: combined.vk,
             key_shares: combined.my_shares,
             commitments: combined
@@ -2720,7 +2787,7 @@ impl MpcManager {
                 .map(|c| (c.index, c.value))
                 .collect(),
             threshold: previous_threshold,
-        })
+        }))
     }
 
     pub async fn fetch_public_dkg_output_from_quorum(
@@ -2801,12 +2868,11 @@ impl MpcManager {
                 p2p_channel,
             )
             .await?;
-            let mgr = Arc::clone(mpc_manager);
-            let certs = previous_certificates.to_vec();
-            spawn_blocking(move || {
-                let mgr = mgr.read().unwrap();
-                mgr.reconstruct_previous_output(&certs)
-            })
+            Self::reconstruct_with_complaint_recovery(
+                mpc_manager,
+                previous_certificates,
+                p2p_channel,
+            )
             .await?
         } else {
             let threshold = threshold_opt.ok_or_else(|| {
@@ -2831,6 +2897,110 @@ impl MpcManager {
             hex::encode(previous.public_key.to_byte_array()),
         );
         Ok((previous, is_member_of_previous_committee))
+    }
+
+    async fn reconstruct_with_complaint_recovery(
+        mpc_manager: &Arc<RwLock<Self>>,
+        previous_certificates: &[CertificateV1],
+        p2p_channel: &impl P2PChannel,
+    ) -> MpcResult<DkgOutput> {
+        loop {
+            let mgr = Arc::clone(mpc_manager);
+            let certs = previous_certificates.to_vec();
+            match spawn_blocking(move || {
+                let mgr = mgr.read().unwrap();
+                mgr.reconstruct_previous_output(&certs)
+            })
+            .await?
+            {
+                ReconstructionOutcome::Success(output) => return Ok(output),
+                ReconstructionOutcome::NeedsComplaintRecovery {
+                    dealer_address,
+                    complaint,
+                    message,
+                    protocol_type,
+                } => {
+                    tracing::info!(
+                        "Complaint during {:?} reconstruction for dealer {:?}, recovering via Complain RPC",
+                        protocol_type,
+                        dealer_address
+                    );
+                    let signers = {
+                        let mut mgr = mpc_manager.write().unwrap();
+                        match protocol_type {
+                            ProtocolTypeIndicator::Dkg => {
+                                mgr.complaints_to_process
+                                    .insert(ComplaintsToProcessKey::Dkg(dealer_address), complaint);
+                                mgr.dkg_messages.insert(dealer_address, message);
+                            }
+                            ProtocolTypeIndicator::KeyRotation => {
+                                if let Ok(Some(rotation_msgs)) = mgr
+                                    .public_messages_store
+                                    .get_rotation_messages(mgr.source_epoch, &dealer_address)
+                                {
+                                    mgr.rotation_messages.insert(dealer_address, rotation_msgs);
+                                }
+                            }
+                            ProtocolTypeIndicator::NonceGeneration => {}
+                        }
+                        let previous_committee = mgr
+                            .previous_committee
+                            .as_ref()
+                            .expect("previous_committee must be set");
+                        previous_certificates
+                            .iter()
+                            .filter_map(|c| {
+                                let msg = match c {
+                                    CertificateV1::Dkg(dc) => dc.message(),
+                                    CertificateV1::Rotation(rc) => rc.message(),
+                                    _ => return None,
+                                };
+                                if msg.dealer_address == dealer_address {
+                                    c.signers(previous_committee).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .next()
+                            .unwrap_or_default()
+                    };
+                    match protocol_type {
+                        ProtocolTypeIndicator::Dkg => {
+                            let source_epoch = mpc_manager.read().unwrap().source_epoch;
+                            Self::recover_shares_via_complaint(
+                                mpc_manager,
+                                &dealer_address,
+                                signers,
+                                p2p_channel,
+                                source_epoch,
+                            )
+                            .await?;
+                        }
+                        ProtocolTypeIndicator::KeyRotation => {
+                            let (previous_output, source_epoch) = {
+                                let mgr = mpc_manager.read().unwrap();
+                                (
+                                    mgr.previous_output
+                                        .clone()
+                                        .expect("previous_output must be set"),
+                                    mgr.source_epoch,
+                                )
+                            };
+                            Self::recover_rotation_shares_via_complaints(
+                                mpc_manager,
+                                &dealer_address,
+                                &previous_output,
+                                signers,
+                                p2p_channel,
+                                source_epoch,
+                            )
+                            .await?;
+                        }
+                        ProtocolTypeIndicator::NonceGeneration => {}
+                    }
+                }
+            }
+        }
     }
 
     async fn retrieve_missing_previous_messages(
@@ -2961,6 +3131,101 @@ impl MpcManager {
         )))
     }
 
+    fn base_session_id_for_epoch(&self, epoch: u64, protocol_type: &ProtocolType) -> SessionId {
+        if epoch == self.dkg_config.epoch {
+            self.session_id.clone()
+        } else {
+            SessionId::new(&self.chain_id, self.source_epoch, protocol_type)
+        }
+    }
+
+    fn config_for_epoch(&self, epoch: u64) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
+        if epoch == self.dkg_config.epoch {
+            Ok((
+                self.dkg_config.nodes.clone(),
+                self.party_id,
+                self.dkg_config.threshold,
+            ))
+        } else {
+            let committee = self.previous_committee.as_ref().ok_or_else(|| {
+                MpcError::InvalidConfig("No previous committee for cross-epoch complaint".into())
+            })?;
+            let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+                MpcError::InvalidConfig("No previous nodes for cross-epoch complaint".into())
+            })?;
+            let threshold = self.previous_threshold.ok_or_else(|| {
+                MpcError::InvalidConfig("No previous threshold for cross-epoch complaint".into())
+            })?;
+            let party_id = committee.index_of(&self.address).ok_or_else(|| {
+                MpcError::InvalidConfig("This node is not in the previous committee".into())
+            })? as u16;
+            Ok((nodes.clone(), party_id, threshold))
+        }
+    }
+
+    fn get_or_derive_dkg_output(
+        &self,
+        dealer: &Address,
+        message: &avss::Message,
+        epoch: u64,
+    ) -> MpcResult<avss::PartialOutput> {
+        if let Some(output) = self.dealer_outputs.get(&DealerOutputsKey::Dkg(*dealer)) {
+            return Ok(output.clone());
+        }
+        // Cross-epoch fallback: re-derive from message
+        let (nodes, party_id, threshold) = self.config_for_epoch(epoch)?;
+        let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::Dkg);
+        let session_id = base_sid.dealer_session_id(dealer);
+        match process_avss_message(
+            &self.encryption_key,
+            nodes,
+            party_id,
+            threshold,
+            session_id.to_vec(),
+            message,
+            None,
+        )? {
+            avss::ProcessedMessage::Valid(output) => Ok(output),
+            avss::ProcessedMessage::Complaint(_) => Err(MpcError::ProtocolFailed(
+                "Peer is also a victim of this dealer — cannot help with complaint".into(),
+            )),
+        }
+    }
+
+    fn get_or_derive_rotation_output(
+        &self,
+        dealer: &Address,
+        share_index: ShareIndex,
+        message: &avss::Message,
+        previous_output: &DkgOutput,
+        epoch: u64,
+    ) -> MpcResult<avss::PartialOutput> {
+        if let Some(output) = self
+            .dealer_outputs
+            .get(&DealerOutputsKey::Rotation(share_index))
+        {
+            return Ok(output.clone());
+        }
+        let (nodes, party_id, threshold) = self.config_for_epoch(epoch)?;
+        let commitment = previous_output.commitments.get(&share_index).copied();
+        let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation);
+        let session_id = base_sid.rotation_session_id(dealer, share_index);
+        match process_avss_message(
+            &self.encryption_key,
+            nodes,
+            party_id,
+            threshold,
+            session_id.to_vec(),
+            message,
+            commitment,
+        )? {
+            avss::ProcessedMessage::Valid(output) => Ok(output),
+            avss::ProcessedMessage::Complaint(_) => Err(MpcError::ProtocolFailed(
+                "Peer is also a victim of this dealer — cannot help with rotation complaint".into(),
+            )),
+        }
+    }
+
     fn get_dealer_messages(
         &self,
         protocol_type: ProtocolTypeIndicator,
@@ -2979,6 +3244,32 @@ impl MpcManager {
                 .nonce_messages
                 .get(dealer)
                 .map(|m| Messages::NonceGeneration(m.clone())),
+        }
+    }
+
+    fn get_dealer_messages_with_db_fallback(
+        &self,
+        protocol_type: ProtocolTypeIndicator,
+        dealer: &Address,
+        epoch: u64,
+    ) -> Option<Messages> {
+        if let Some(messages) = self.get_dealer_messages(protocol_type, dealer) {
+            return Some(messages);
+        }
+        match protocol_type {
+            ProtocolTypeIndicator::Dkg => self
+                .public_messages_store
+                .get_dealer_message(epoch, dealer)
+                .ok()
+                .flatten()
+                .map(Messages::Dkg),
+            ProtocolTypeIndicator::KeyRotation => self
+                .public_messages_store
+                .get_rotation_messages(epoch, dealer)
+                .ok()
+                .flatten()
+                .map(Messages::Rotation),
+            ProtocolTypeIndicator::NonceGeneration => None,
         }
     }
 
