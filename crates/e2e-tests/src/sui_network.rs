@@ -369,14 +369,16 @@ impl SuiNetworkHandle {
             .concat(),
         };
 
+        let gas_payment_objects = gas_objects
+            .iter()
+            .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
+            .collect::<Result<Vec<_>>>()?;
+
         let publish_transaction = Transaction {
             kind: TransactionKind::ProgrammableTransaction(pt),
             sender,
             gas_payment: GasPayment {
-                objects: gas_objects
-                    .iter()
-                    .map(|o| (&o.object_reference()).try_into())
-                    .collect::<Result<_, _>>()?,
+                objects: gas_payment_objects,
                 owner: sender,
                 price,
                 budget: 1_000_000_000,
@@ -461,14 +463,16 @@ impl SuiNetworkHandle {
             })],
         };
 
+        let gas_payment_objects = gas_objects
+            .iter()
+            .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
+            .collect::<Result<Vec<_>>>()?;
+
         let transaction = Transaction {
             kind: TransactionKind::ProgrammableTransaction(pt),
             sender,
             gas_payment: GasPayment {
-                objects: gas_objects
-                    .iter()
-                    .map(|o| (&o.object_reference()).try_into())
-                    .collect::<Result<_, _>>()?,
+                objects: gas_payment_objects,
                 owner: sender,
                 price,
                 budget: 1_000_000_000,

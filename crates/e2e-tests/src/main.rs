@@ -621,14 +621,16 @@ async fn cmd_faucet_sui(address: &str, amount: u64, data_dir: &Path) -> Result<(
         ],
     };
 
+    let gas_payment_objects = gas_objects
+        .iter()
+        .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
+        .collect::<Result<Vec<_>>>()?;
+
     let tx = Transaction {
         kind: TransactionKind::ProgrammableTransaction(pt),
         sender,
         gas_payment: GasPayment {
-            objects: gas_objects
-                .iter()
-                .map(|o| (&o.object_reference()).try_into())
-                .collect::<Result<_, _>>()?,
+            objects: gas_payment_objects,
             owner: sender,
             price,
             budget: 50_000_000,
