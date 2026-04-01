@@ -1949,6 +1949,9 @@ pub struct RetrieveMessagesRequest {
     /// The protocol phase whose messages are being requested.
     #[prost(enumeration = "MpcProtocolType", optional, tag = "3")]
     pub protocol_type: ::core::option::Option<i32>,
+    /// For nonce generation: the batch index.
+    #[prost(uint32, optional, tag = "4")]
+    pub batch_index: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {
@@ -1988,6 +1991,9 @@ pub struct ComplainRequest {
     /// The protocol phase this complaint is for.
     #[prost(enumeration = "MpcProtocolType", optional, tag = "5")]
     pub protocol_type: ::core::option::Option<i32>,
+    /// For nonce generation: the batch index. Not set for DKG/rotation.
+    #[prost(uint32, optional, tag = "6")]
+    pub batch_index: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RotationResponses {

@@ -56,6 +56,16 @@ pub trait PublicMessagesStore: Send + Sync {
         message: &batch_avss::Message,
     ) -> Result<()>;
 
+    /// Retrieve a dealer's nonce message for the given epoch and batch.
+    ///
+    ///  Returns None if no message exists for this dealer.
+    fn get_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<Option<batch_avss::Message>>;
+
     /// List all nonce messages for the current epoch and given batch.
     fn list_nonce_messages(&self, batch_index: u32) -> Result<Vec<(Address, batch_avss::Message)>>;
 }
