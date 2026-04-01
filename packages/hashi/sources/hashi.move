@@ -31,6 +31,9 @@ public struct Hashi has key {
     proposals: Bag,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     tob: Bag,
+    /// Number of presignatures consumed in the current epoch.
+    /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
+    num_consumed_presigs: u64,
 }
 
 #[allow(unused_function)]
@@ -46,6 +49,7 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         proposals: bag::new(ctx),
         tob: bag::new(ctx),
+        num_consumed_presigs: 0,
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
@@ -177,6 +181,20 @@ public(package) fun epoch_certs(
     self.tob.borrow_mut(key)
 }
 
+public(package) fun num_consumed_presigs(self: &Hashi): u64 {
+    self.num_consumed_presigs
+}
+
+public(package) fun allocate_presigs(self: &mut Hashi, count: u64): u64 {
+    let start = self.num_consumed_presigs;
+    self.num_consumed_presigs = self.num_consumed_presigs + count;
+    start
+}
+
+public(package) fun reset_num_consumed_presigs(self: &mut Hashi) {
+    self.num_consumed_presigs = 0;
+}
+
 // ======== Test-only Functions ========
 
 #[test_only]
@@ -197,6 +215,7 @@ public fun create_for_testing(
         treasury,
         proposals,
         tob,
+        num_consumed_presigs: 0,
     };
     df::add(&mut hashi.id, bitcoin_state::key(), btc_state);
     hashi

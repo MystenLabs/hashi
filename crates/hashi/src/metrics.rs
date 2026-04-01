@@ -470,7 +470,7 @@ impl Metrics {
             }
         }
         self.num_consumed_presigs
-            .set(hashi.withdrawal_queue.num_consumed_presigs() as i64);
+            .set(hashi.num_consumed_presigs as i64);
         for (type_tag, cap) in &hashi.treasury.treasury_caps {
             if let sui_sdk_types::TypeTag::Struct(struct_tag) = type_tag {
                 self.treasury_supply

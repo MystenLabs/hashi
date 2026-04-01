@@ -155,8 +155,7 @@ entry fun commit_withdrawal_tx(
     // accounting and event emission inside new_pending_withdrawal.
     let inputs = selected_utxos.map!(|utxo_id| hashi.bitcoin().utxo_pool().get_utxo(utxo_id));
 
-    let presig_start_index = hashi.bitcoin().withdrawal_queue().num_consumed_presigs();
-    hashi.bitcoin_mut().withdrawal_queue_mut().increment_num_consumed_presigs(inputs.length());
+    let presig_start_index = hashi.allocate_presigs(inputs.length());
 
     let approval = WithdrawalCommitmentMessage {
         request_ids,
@@ -231,10 +230,15 @@ entry fun allocate_presigs_for_pending_withdrawal(
 ) {
     hashi.config().assert_version_enabled();
     let epoch = hashi.committee_set().epoch();
+    let num_inputs = hashi
+        .bitcoin()
+        .withdrawal_queue()
+        .pending_withdrawal_num_inputs(withdrawal_id);
+    let presig_start_index = hashi.allocate_presigs(num_inputs);
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
-        .allocate_presigs_for_pending_withdrawal(withdrawal_id, epoch);
+        .reassign_presigs_for_pending_withdrawal(withdrawal_id, presig_start_index, epoch);
 }
 
 entry fun sign_withdrawal(
