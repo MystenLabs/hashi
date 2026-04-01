@@ -319,9 +319,3 @@ public fun cancel_withdrawal(
     let (_, btc) = hashi::withdrawal_queue::request_into_parts(request);
     coin::from_balance(btc, ctx)
 }
-
-public fun delete_expired_spent_utxo(hashi: &mut Hashi, utxo_id: UtxoId) {
-    hashi.config().assert_version_enabled();
-    let current_epoch = hashi.committee_set().epoch();
-    hashi.bitcoin_mut().utxo_pool_mut().delete_expired_spent_utxo(utxo_id, current_epoch);
-}

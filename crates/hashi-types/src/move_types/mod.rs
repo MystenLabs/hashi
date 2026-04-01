@@ -458,7 +458,6 @@ pub enum HashiEvent {
     WithdrawalSignedEvent(WithdrawalSignedEvent),
     WithdrawalConfirmedEvent(WithdrawalConfirmedEvent),
     UtxoSpentEvent(UtxoSpentEvent),
-    SpentUtxoDeletedEvent(SpentUtxoDeletedEvent),
     StartReconfigEvent(StartReconfigEvent),
     EndReconfigEvent(EndReconfigEvent),
     AbortReconfigEvent(AbortReconfigEvent),
@@ -522,9 +521,6 @@ impl HashiEvent {
                 WithdrawalConfirmedEvent::from_bcs(bcs.value())?.into()
             }
             UtxoSpentEvent::MODULE_NAME => UtxoSpentEvent::from_bcs(bcs.value())?.into(),
-            SpentUtxoDeletedEvent::MODULE_NAME => {
-                SpentUtxoDeletedEvent::from_bcs(bcs.value())?.into()
-            }
             StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
             EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
             AbortReconfigEvent::MODULE_NAME => AbortReconfigEvent::from_bcs(bcs.value())?.into(),
@@ -984,22 +980,6 @@ impl MoveType for UtxoSpentEvent {
 impl From<UtxoSpentEvent> for HashiEvent {
     fn from(value: UtxoSpentEvent) -> Self {
         Self::UtxoSpentEvent(value)
-    }
-}
-
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct SpentUtxoDeletedEvent {
-    pub utxo_id: UtxoId,
-}
-
-impl MoveType for SpentUtxoDeletedEvent {
-    const MODULE: &'static str = "utxo_pool";
-    const NAME: &'static str = "SpentUtxoDeletedEvent";
-}
-
-impl From<SpentUtxoDeletedEvent> for HashiEvent {
-    fn from(value: SpentUtxoDeletedEvent) -> Self {
-        Self::SpentUtxoDeletedEvent(value)
     }
 }
 
