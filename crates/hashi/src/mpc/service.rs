@@ -365,7 +365,7 @@ impl MpcService {
         let (num_consumed, epoch, committee) = {
             let state = self.inner.onchain_state().state();
             let hashi = state.hashi();
-            let num_consumed = hashi.withdrawal_queue.num_consumed_presigs();
+            let num_consumed = hashi.num_consumed_presigs;
             let epoch = hashi.committees.epoch();
             let committee = hashi
                 .committees
