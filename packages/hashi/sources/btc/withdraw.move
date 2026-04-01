@@ -21,6 +21,11 @@ use fun btc_config::withdrawal_cancellation_cooldown_ms as
     Config.withdrawal_cancellation_cooldown_ms;
 
 #[error]
+const EBelowMinimumWithdrawal: vector<u8> = b"Withdrawal amount is below the minimum";
+#[error]
+const EInvalidBitcoinAddress: vector<u8> =
+    b"Bitcoin address must be 20 bytes (P2WPKH) or 32 bytes (P2TR)";
+#[error]
 const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can cancel";
 #[error]
 const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
@@ -100,11 +105,11 @@ public fun request_withdrawal(
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
 
-    assert!(btc.value() >= hashi.config().withdrawal_minimum());
+    assert!(btc.value() >= hashi.config().withdrawal_minimum(), EBelowMinimumWithdrawal);
 
     // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
     let addr_len = bitcoin_address.length();
-    assert!(addr_len == 20 || addr_len == 32);
+    assert!(addr_len == 20 || addr_len == 32, EInvalidBitcoinAddress);
 
     // Deduct protocol fee upfront and send to Hashi's address balance.
     let fee_coin = btc.split(hashi.config().withdrawal_fee_btc(), ctx);

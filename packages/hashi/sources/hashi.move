@@ -14,6 +14,15 @@ use hashi::{
 };
 use sui::{bag::{Self, Bag}, dynamic_field as df};
 
+#[error]
+const ESystemPaused: vector<u8> = b"System is currently paused";
+#[error]
+const EReconfiguring: vector<u8> = b"System is currently reconfiguring";
+#[error]
+const ENoCommittee: vector<u8> = b"No committee exists for the current epoch";
+#[error]
+const EWrongUpgradeCap: vector<u8> = b"Upgrade cap does not belong to this package";
+
 public struct Hashi has key {
     id: UID,
     committee_set: CommitteeSet,
@@ -46,7 +55,7 @@ fun init(ctx: &mut TxContext) {
 
 public(package) fun assert_unpaused(self: &Hashi) {
     // Check if state is PAUSED
-    assert!(!self.config().paused());
+    assert!(!self.config().paused(), ESystemPaused);
 }
 
 /// Verify a committee signature over a message.
@@ -75,9 +84,9 @@ public(package) fun verify_with_committee<T>(
 
 public(package) fun assert_not_reconfiguring(self: &Hashi) {
     // Check that we are not reconfiguring
-    assert!(!self.committee_set().is_reconfiguring());
+    assert!(!self.committee_set().is_reconfiguring(), EReconfiguring);
     // Check that we still don't need to do genesis
-    assert!(self.committee_set().has_committee(self.committee_set().epoch()));
+    assert!(self.committee_set().has_committee(self.committee_set().epoch()), ENoCommittee);
 }
 
 // Function that needs to be called immediately after publishing to finalize
@@ -93,7 +102,7 @@ entry fun finish_publish(
 
     let this_package_id = std::type_name::original_id<Hashi>().to_id();
     // Ensure that the provided cap is for this package
-    assert!(upgrade_cap.package() == this_package_id);
+    assert!(upgrade_cap.package() == this_package_id, EWrongUpgradeCap);
 
     self.config_mut().set_upgrade_cap(upgrade_cap);
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
