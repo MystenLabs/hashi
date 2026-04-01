@@ -120,6 +120,11 @@ impl LeaderService {
                         continue;
                     }
 
+                    // Drain all completed deposit tasks before spawning new ones.
+                    while let Some(result) = self.deposit_tasks.try_join_next() {
+                        self.handle_completed_deposit_task(result);
+                    }
+
                     self.process_deposit_requests(checkpoint_timestamp_ms);
 
                     let _ = tokio::time::timeout(
