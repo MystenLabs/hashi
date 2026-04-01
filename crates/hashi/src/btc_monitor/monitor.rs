@@ -453,10 +453,10 @@ impl Monitor {
         txid: bitcoin::Txid,
         result_tx: oneshot::Sender<Result<TxStatus>>,
     ) {
-        let result = match self.bitcoind_rpc.get_raw_transaction_info(&txid, None) {
-            Ok(tx_info) => {
-                if tx_info.blockhash.is_some() {
-                    let confirmations = tx_info.confirmations.unwrap_or(0);
+        let result = match getrawtransaction_brief(&self.bitcoind_rpc, &txid) {
+            Ok(tx_brief) => {
+                if tx_brief.blockhash.is_some() {
+                    let confirmations = tx_brief.confirmations.unwrap_or(0);
                     Ok(TxStatus::Confirmed { confirmations })
                 } else {
                     Ok(TxStatus::InMempool)
@@ -523,19 +523,18 @@ impl Monitor {
                     "Looking up block for transaction {}",
                     pending_deposit.outpoint.txid
                 );
-                let tx_info = match bitcoind_rpc
-                    .get_raw_transaction_info(&pending_deposit.outpoint.txid, None)
-                {
-                    Ok(tx_info) => tx_info,
-                    Err(e) => {
-                        error!(
-                            "Failed to look up txid {}: {e}",
-                            pending_deposit.outpoint.txid
-                        );
-                        return;
-                    }
-                };
-                let Some(block_hash) = tx_info.blockhash else {
+                let tx_brief =
+                    match getrawtransaction_brief(&bitcoind_rpc, &pending_deposit.outpoint.txid) {
+                        Ok(tx_brief) => tx_brief,
+                        Err(e) => {
+                            error!(
+                                "Failed to look up txid {}: {e}",
+                                pending_deposit.outpoint.txid
+                            );
+                            return;
+                        }
+                    };
+                let Some(block_hash) = tx_brief.blockhash else {
                     debug!(
                         "Transaction {} is not yet included in a block",
                         pending_deposit.outpoint.txid
@@ -686,6 +685,22 @@ impl Drop for PendingDepositGuard {
             warn!("Failed to re-enqueue PendingDeposit on drop: {e}");
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+struct RawTransactionBrief {
+    blockhash: Option<bitcoin::BlockHash>,
+    confirmations: Option<u32>,
+}
+
+fn getrawtransaction_brief(
+    rpc: &bitcoincore_rpc::Client,
+    txid: &bitcoin::Txid,
+) -> std::result::Result<RawTransactionBrief, bitcoincore_rpc::Error> {
+    rpc.call(
+        "getrawtransaction",
+        &[serde_json::json!(txid), serde_json::json!(true)],
+    )
 }
 
 #[derive(Clone)]
