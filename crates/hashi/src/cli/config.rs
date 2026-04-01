@@ -7,6 +7,7 @@
 //! CLI arguments take precedence over config file values.
 
 use crate::config::load_ed25519_private_key_from_path;
+use age::x25519;
 use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
@@ -38,6 +39,9 @@ pub struct BitcoinConfig {
 /// CLI Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
+    #[serde(skip)]
+    pub loaded_from_path: Option<PathBuf>,
+
     /// Sui RPC endpoint URL
     #[serde(default = "default_sui_rpc_url")]
     pub sui_rpc_url: String,
@@ -50,6 +54,10 @@ pub struct CliConfig {
 
     /// Path to the keypair file for signing transactions
     pub keypair_path: Option<PathBuf>,
+
+    /// Age recipient public key used for config backups
+    #[serde(with = "optional_age_recipient")]
+    pub backup_age_pubkey: Option<x25519::Recipient>,
 
     /// Optional: Gas coin object ID to use for transactions
     pub gas_coin: Option<Address>,
@@ -69,10 +77,12 @@ const DEFAULT_CONFIG_PATH: &str = ".hashi/localnet/hashi-cli.toml";
 impl Default for CliConfig {
     fn default() -> Self {
         Self {
+            loaded_from_path: None,
             sui_rpc_url: default_sui_rpc_url(),
             package_id: None,
             hashi_object_id: None,
             keypair_path: None,
+            backup_age_pubkey: None,
             gas_coin: None,
             bitcoin: None,
         }
@@ -144,8 +154,10 @@ impl CliConfig {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse config file: {}", path.display()))
+        let mut config: Self = toml::from_str(&contents)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        config.loaded_from_path = Some(path.to_path_buf());
+        Ok(config)
     }
 
     fn apply_btc_overrides(&mut self, overrides: BitcoinOverrides) {
@@ -197,6 +209,9 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
 
 # Path to your keypair file for signing transactions (PEM or DER format)
 # keypair_path = "/path/to/keypair.pem"
+
+# Age recipient public key used by `hashi config backup`
+# backup_age_pubkey = "age1..."
 
 # Optional: Specific gas coin to use for transactions
 # If not specified, the CLI will select an available SUI coin
@@ -254,6 +269,27 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
         Ok(Some(pk))
     }
 
+    /// All file paths which must be backed up to enable full node recovery
+    pub fn backup_file_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        if let Some(path) = &self.loaded_from_path {
+            paths.push(path.clone());
+        }
+
+        if let Some(path) = &self.keypair_path {
+            paths.push(path.clone());
+        }
+
+        if let Some(bitcoin) = &self.bitcoin
+            && let Some(path) = &bitcoin.private_key_path
+        {
+            paths.push(path.clone());
+        }
+
+        paths
+    }
+
     /// Get a Bitcoin RPC client from the config, if configured.
     pub fn btc_rpc_client(&self) -> Result<Option<bitcoincore_rpc::Client>> {
         let Some(ref btc) = self.bitcoin else {
@@ -288,5 +324,33 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
         std::fs::write(path, contents)
             .with_context(|| format!("Failed to write config to {}", path.display()))?;
         Ok(())
+    }
+}
+
+mod optional_age_recipient {
+    use age::x25519;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serializer;
+    use std::str::FromStr;
+
+    pub fn serialize<S>(value: &Option<x25519::Recipient>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(recipient) => serializer.serialize_some(&recipient.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<x25519::Recipient>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?;
+        value
+            .map(|value| x25519::Recipient::from_str(&value).map_err(serde::de::Error::custom))
+            .transpose()
     }
 }

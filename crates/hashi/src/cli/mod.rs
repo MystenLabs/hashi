@@ -221,6 +221,13 @@ pub enum ConfigCommands {
     /// Show the current effective configuration
     Show,
 
+    /// Save an encrypted backup of the current config and referenced files
+    Backup {
+        /// Age recipient public key used to encrypt the backup
+        #[clap(long)]
+        backup_age_pubkey: Option<String>,
+    },
+
     /// View on-chain configuration values
     OnChain,
 }
@@ -554,6 +561,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             ConfigCommands::Show => {
                 commands::config::show_config(&config)?;
+            }
+            ConfigCommands::Backup { backup_age_pubkey } => {
+                commands::config::backup(&config, backup_age_pubkey)?;
             }
             ConfigCommands::OnChain => {
                 commands::config::show_onchain_config(&config).await?;

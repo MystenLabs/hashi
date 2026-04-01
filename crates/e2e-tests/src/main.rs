@@ -824,6 +824,7 @@ fn cli_config_path(data_dir: &Path) -> std::path::PathBuf {
 /// Write a `hashi-cli.toml` config file that the main `hashi` CLI can read.
 fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
     let config = hashi::cli::config::CliConfig {
+        loaded_from_path: None,
         sui_rpc_url: state.sui_rpc_url.clone(),
         package_id: state.package_id.parse().ok(),
         hashi_object_id: state.hashi_object_id.parse().ok(),
@@ -831,6 +832,7 @@ fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
             .funded_sui_keypair_path
             .as_ref()
             .map(std::path::PathBuf::from),
+        backup_age_pubkey: None,
         gas_coin: None,
         bitcoin: Some(hashi::cli::config::BitcoinConfig {
             rpc_url: Some(state.btc_rpc_url.clone()),
