@@ -579,10 +579,11 @@ impl Monitor {
         };
 
         // Check if the deposit has enough confirmations yet.
-        if block_info.height > tip.height - confirmation_threshold - 1 {
+        let confirmations = (tip.height + 1).saturating_sub(block_info.height);
+        if confirmations < confirmation_threshold {
             debug!(
-                "Transaction {} is not yet confirmed. Block height is {}, tip is {}. Waiting for more blocks.",
-                pending_deposit.outpoint.txid, block_info.height, tip.height
+                "Transaction {} has {confirmations}/{confirmation_threshold} confirmations. Waiting for more blocks.",
+                pending_deposit.outpoint.txid,
             );
             return;
         }
