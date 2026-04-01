@@ -10,6 +10,7 @@ use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
 use crate::deposits::DepositRequestErrorKind;
 use crate::leader::retry::RetryTracker;
+use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
@@ -428,7 +429,11 @@ impl LeaderService {
         }
 
         // Collect signatures, stopping once we reach quorum.
-        let mut aggregator = BlsSignatureAggregator::new(&committee, deposit_request.clone());
+        let confirmation_message = DepositConfirmationMessage {
+            request_id: deposit_request.id,
+            utxo: deposit_request.utxo.clone(),
+        };
+        let mut aggregator = BlsSignatureAggregator::new(&committee, confirmation_message);
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
@@ -1761,7 +1766,7 @@ impl DepositRequest {
                 .derivation_path
                 .map(|p| p.as_bytes().to_vec().into()),
             timestamp_ms: self.timestamp_ms,
-            requester_address: self.requester_address.as_bytes().to_vec().into(),
+            requester_address: self.sender.as_bytes().to_vec().into(),
             sui_tx_digest: self.sui_tx_digest.as_bytes().to_vec().into(),
         }
     }

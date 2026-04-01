@@ -178,7 +178,6 @@ fn parse_deposit_request(
         .as_ref()
         .map(|bytes| parse_address(bytes))
         .transpose()?;
-
     let requester_address = parse_address(&request.requester_address)?;
     let sui_tx_digest = sui_sdk_types::Digest::new(
         request
@@ -190,6 +189,9 @@ fn parse_deposit_request(
 
     Ok(DepositRequest {
         id,
+        sender: requester_address,
+        timestamp_ms: request.timestamp_ms,
+        sui_tx_digest,
         utxo: Utxo {
             id: UtxoId {
                 txid,
@@ -198,9 +200,6 @@ fn parse_deposit_request(
             amount: request.amount,
             derivation_path,
         },
-        timestamp_ms: request.timestamp_ms,
-        requester_address,
-        sui_tx_digest,
     })
 }
 

@@ -8,8 +8,9 @@ use hashi::{
     btc_config,
     committee::CommitteeSignature,
     config::Config,
+    deposit_queue,
     hashi::Hashi,
-    utxo::UtxoId
+    utxo::{Utxo, UtxoId}
 };
 use sui::{coin::{Self, Coin}, sui::SUI};
 
@@ -23,10 +24,26 @@ const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum (
 #[error]
 const EUtxoAlreadyUsed: vector<u8> = b"UTXO has already been deposited or is currently active";
 
+/// Message signed by the committee to confirm a deposit.
+public struct DepositConfirmationMessage has copy, drop, store {
+    request_id: address,
+    utxo: Utxo,
+}
+
+#[test_only]
+public fun new_deposit_confirmation_message(
+    request_id: address,
+    utxo: Utxo,
+): DepositConfirmationMessage {
+    DepositConfirmationMessage { request_id, utxo }
+}
+
 public fun deposit(
     hashi: &mut Hashi,
-    request: hashi::deposit_queue::DepositRequest,
+    utxo: hashi::utxo::Utxo,
     fee: Coin<SUI>,
+    clock: &sui::clock::Clock,
+    ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
     // Check that the system isn't paused, but still allow users to request
@@ -38,23 +55,27 @@ public fun deposit(
     sui::coin::send_funds(fee, hashi.id().to_address());
 
     // Check that the deposit amount meets the dust minimum
-    assert!(request.utxo().amount() >= hashi.config().deposit_minimum(), EBelowMinimumDeposit);
+    assert!(utxo.amount() >= hashi.config().deposit_minimum(), EBelowMinimumDeposit);
 
     // Check that the UTXO isn't already active or previously spent (replay protection)
-    assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(request.utxo().id()), EUtxoAlreadyUsed);
+    assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(utxo.id()), EUtxoAlreadyUsed);
 
-    let deposit_requested_event = DepositRequestedEvent {
-        request_id: request.id(),
-        utxo_id: request.utxo().id(),
-        amount: request.utxo().amount(),
-        derivation_path: request.utxo().derivation_path(),
-        timestamp_ms: request.timestamp_ms(),
-        requester_address: request.requester_address(),
-        sui_tx_digest: request.sui_tx_digest(),
-    };
+    let request = deposit_queue::create_deposit(utxo, clock, ctx);
+    let request_id = request.request_id().to_address();
 
-    hashi.bitcoin_mut().deposit_queue_mut().insert(request);
-    sui::event::emit(deposit_requested_event);
+    let utxo_ref = request.request_utxo();
+    sui::event::emit(DepositRequestedEvent {
+        request_id,
+        utxo_id: utxo_ref.id(),
+        amount: utxo_ref.amount(),
+        derivation_path: utxo_ref.derivation_path(),
+        timestamp_ms: request.request_timestamp_ms(),
+        requester_address: request.request_sender(),
+        sui_tx_digest: request.request_sui_tx_digest(),
+    });
+
+    // Insert into the active requests bag.
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
 }
 
 public fun confirm_deposit(
@@ -69,31 +90,34 @@ public fun confirm_deposit(
     // delays the confirmation to be done by the next epoch's committee.
     hashi.assert_not_reconfiguring();
 
-    let request = hashi.bitcoin_mut().deposit_queue_mut().remove(request_id);
+    // Remove from active requests and copy the UTXO
+    let request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
+    let utxo = request.utxo();
 
-    let deposit_confirmed_event = DepositConfirmedEvent {
-        request_id: request.id(),
-        utxo_id: request.utxo().id(),
-        amount: request.utxo().amount(),
-        derivation_path: request.utxo().derivation_path(),
-    };
+    // Verify the committee certificate over the request ID + UTXO
+    hashi.verify(DepositConfirmationMessage { request_id, utxo }, cert);
 
-    // Verify the certificate over the request.
-    let request = hashi.verify(request, cert).into_message();
+    sui::event::emit(DepositConfirmedEvent {
+        request_id,
+        utxo_id: utxo.id(),
+        amount: utxo.amount(),
+        derivation_path: utxo.derivation_path(),
+    });
 
-    let utxo = request.into_utxo();
     let derivation_path = utxo.derivation_path();
 
     if (derivation_path.is_some()) {
         let recipient = derivation_path.destroy_some();
         let amount = utxo.amount();
-        // XXX Do we want to check an inflow limit here?
         let btc = hashi.treasury_mut().mint_balance<BTC>(amount);
         transfer::public_transfer(coin::from_balance(btc, ctx), recipient);
     };
 
+    // Insert UTXO into active pool
     hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
-    sui::event::emit(deposit_confirmed_event);
+
+    // Move request to processed bag and index by recipient
+    hashi.bitcoin_mut().deposit_queue_mut().insert_processed(request, ctx);
 }
 
 public fun delete_expired_deposit(
@@ -104,10 +128,7 @@ public fun delete_expired_deposit(
     hashi.config().assert_version_enabled();
     hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, clock);
 
-    let expired_deposit_deleted_event = ExpiredDepositDeletedEvent {
-        request_id,
-    };
-    sui::event::emit(expired_deposit_deleted_event);
+    sui::event::emit(ExpiredDepositDeletedEvent { request_id });
 }
 
 public struct DepositRequestedEvent has copy, drop {
@@ -125,7 +146,6 @@ public struct DepositConfirmedEvent has copy, drop {
     utxo_id: UtxoId,
     amount: u64,
     derivation_path: Option<address>,
-    // signature: CommitteeSignature,
 }
 
 public struct ExpiredDepositDeletedEvent has copy, drop {

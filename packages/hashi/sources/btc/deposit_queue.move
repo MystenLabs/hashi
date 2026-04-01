@@ -4,104 +4,177 @@
 module hashi::deposit_queue;
 
 use hashi::utxo::Utxo;
-use sui::{bag::Bag, clock::Clock};
+use sui::{bag::Bag, clock::Clock, object_bag::ObjectBag, table::Table};
 
 const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
 
 #[error(code = 0)]
 const EDepositRequestNotExpired: vector<u8> = b"Deposit request not expired";
+#[error]
+const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been processed";
+
+// ======== Core Structs ========
+
+/// Deposit request object stored in the `requests` bag until confirmed or expired.
+public struct DepositRequest has key, store {
+    id: UID,
+    sender: address,
+    timestamp_ms: u64,
+    sui_tx_digest: vector<u8>,
+    utxo: Utxo,
+}
 
 public struct DepositRequestQueue has store {
-    // XXX bag or table?
-    requests: Bag,
+    /// Active deposits awaiting confirmation.
+    /// ObjectBag so DepositRequest UIDs are directly accessible via getObject.
+    requests: ObjectBag,
+    /// Completed deposits (confirmed or expired).
+    processed: ObjectBag,
+    /// Per-sender index: sender address -> Bag of request IDs.
+    /// Allows clients to discover all deposit requests for a given address.
+    user_requests: Table<address, Bag>,
 }
 
-public struct DepositRequest has store {
-    id: address,
-    utxo: Utxo,
-    timestamp_ms: u64,
-    requester_address: address,
-    sui_tx_digest: vector<u8>,
-}
+// ======== Constructors ========
 
-public fun deposit_request(utxo: Utxo, clock: &Clock, ctx: &mut TxContext): DepositRequest {
-    DepositRequest {
-        // Create a unique id for this request in order to prevent griefing of
-        // malicious users front-running deposit requests
-        id: ctx.fresh_object_address(),
-        utxo,
-        timestamp_ms: clock.timestamp_ms(),
-        requester_address: ctx.sender(),
-        sui_tx_digest: *ctx.digest(),
+public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
+    DepositRequestQueue {
+        requests: sui::object_bag::new(ctx),
+        processed: sui::object_bag::new(ctx),
+        user_requests: sui::table::new(ctx),
     }
 }
 
+/// Create a deposit request with the given UTXO.
+public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContext): DepositRequest {
+    DepositRequest {
+        id: object::new(ctx),
+        sender: ctx.sender(),
+        timestamp_ms: clock.timestamp_ms(),
+        sui_tx_digest: *ctx.digest(),
+        utxo,
+    }
+}
+
+// ======== Lifecycle Functions ========
+
+/// Insert a new deposit request into the active requests bag.
+public(package) fun insert_deposit(self: &mut DepositRequestQueue, request: DepositRequest) {
+    let request_id = request.id.to_address();
+    self.requests.add(request_id, request);
+}
+
+/// Check if an active deposit request exists.
 public(package) fun contains(self: &DepositRequestQueue, id: address): bool {
     self.requests.contains(id)
 }
 
-public(package) fun remove(self: &mut DepositRequestQueue, id: address): DepositRequest {
-    self.requests.remove(id)
+/// Remove an active deposit request.
+public(package) fun remove_request(
+    self: &mut DepositRequestQueue,
+    request_id: address,
+): DepositRequest {
+    self.requests.remove(request_id)
 }
 
-public(package) fun insert(self: &mut DepositRequestQueue, request: DepositRequest) {
-    self.requests.add(request.id(), request)
+/// Copy the UTXO out of a deposit request (Utxo has copy).
+public(package) fun utxo(request: &DepositRequest): Utxo {
+    request.utxo
 }
 
-public(package) fun into_utxo(self: DepositRequest): Utxo {
-    let DepositRequest { id: _, utxo, timestamp_ms: _, requester_address: _, sui_tx_digest: _ } =
-        self;
-    utxo
+/// Index a deposit request by a user address.
+/// Called at confirmation time to index by the recipient (derivation_path).
+public(package) fun index_by_user(
+    self: &mut DepositRequestQueue,
+    request_id: address,
+    user: address,
+    ctx: &mut TxContext,
+) {
+    if (!self.user_requests.contains(user)) {
+        self.user_requests.add(user, sui::bag::new(ctx));
+    };
+    self.user_requests[user].add(request_id, true);
 }
 
-public(package) fun utxo(self: &DepositRequest): &Utxo {
-    &self.utxo
+/// Insert a completed deposit into the processed bag and index by recipient.
+public(package) fun insert_processed(
+    self: &mut DepositRequestQueue,
+    request: DepositRequest,
+    ctx: &mut TxContext,
+) {
+    let request_id = request.id.to_address();
+
+    // Index by recipient so they can discover their deposits.
+    let recipient_opt = request.utxo.derivation_path();
+    if (recipient_opt.is_some()) {
+        self.index_by_user(request_id, *recipient_opt.borrow(), ctx);
+    };
+
+    self.processed.add(request_id, request);
 }
 
-public(package) fun id(self: &DepositRequest): address {
-    self.id
-}
-
-public(package) fun timestamp_ms(self: &DepositRequest): u64 {
-    self.timestamp_ms
-}
-
-public(package) fun requester_address(self: &DepositRequest): address {
-    self.requester_address
-}
-
-public(package) fun sui_tx_digest(self: &DepositRequest): vector<u8> {
-    self.sui_tx_digest
-}
-
-public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
-    DepositRequestQueue {
-        requests: sui::bag::new(ctx),
-    }
-}
-
-fun is_expired(deposit_request: &DepositRequest, clock: &Clock): bool {
-    clock.timestamp_ms() > deposit_request.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
-}
-
+/// Delete an expired deposit request.
+/// Expired requests are never confirmed, so they won't be in the user index.
 public(package) fun delete_expired(
     self: &mut DepositRequestQueue,
     request_id: address,
     clock: &Clock,
 ) {
-    let deposit_request: DepositRequest = self.requests.remove(request_id);
+    assert!(!self.processed.contains(request_id), EDepositAlreadyProcessed);
+    let request: DepositRequest = self.requests.remove(request_id);
+    assert!(is_expired(&request, clock), EDepositRequestNotExpired);
 
-    assert!(deposit_request.is_expired(clock), EDepositRequestNotExpired);
-    deposit_request.delete();
+    let DepositRequest { id, sender: _, timestamp_ms: _, sui_tx_digest: _, utxo } = request;
+    id.delete();
+    utxo.delete();
 }
 
-public(package) fun delete(deposit_request: DepositRequest) {
-    let DepositRequest {
-        id: _,
-        utxo,
-        timestamp_ms: _,
-        requester_address: _,
-        sui_tx_digest: _,
-    } = deposit_request;
-    utxo.delete();
+/// Borrow an active deposit request.
+public(package) fun borrow_request(
+    self: &DepositRequestQueue,
+    request_id: address,
+): &DepositRequest {
+    self.requests.borrow(request_id)
+}
+
+// ======== Accessors ========
+
+public(package) fun request_id(self: &DepositRequest): ID {
+    self.id.to_inner()
+}
+
+public(package) fun request_sender(self: &DepositRequest): address {
+    self.sender
+}
+
+public(package) fun request_timestamp_ms(self: &DepositRequest): u64 {
+    self.timestamp_ms
+}
+
+public(package) fun request_sui_tx_digest(self: &DepositRequest): vector<u8> {
+    self.sui_tx_digest
+}
+
+public(package) fun request_utxo(self: &DepositRequest): &Utxo {
+    &self.utxo
+}
+
+/// Check if a user has any requests indexed.
+public(package) fun has_user_requests(self: &DepositRequestQueue, sender: address): bool {
+    self.user_requests.contains(sender)
+}
+
+/// Check if a specific request ID is in a user's index.
+public(package) fun user_has_request(
+    self: &DepositRequestQueue,
+    sender: address,
+    request_id: address,
+): bool {
+    self.user_requests.contains(sender) && self.user_requests[sender].contains(request_id)
+}
+
+// ======== Internal ========
+
+fun is_expired(request: &DepositRequest, clock: &Clock): bool {
+    clock.timestamp_ms() > request.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
 }

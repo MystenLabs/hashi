@@ -219,6 +219,9 @@ pub struct Coin {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequestQueue {
     pub requests: Bag,
+    pub processed: Bag,
+    /// Table<address, Bag> has the same BCS layout as Bag (id + size).
+    pub user_requests: Bag,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequestQueue type.
@@ -275,10 +278,10 @@ pub struct OutputUtxo {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequest {
     pub id: Address,
-    pub utxo: Utxo,
+    pub sender: Address,
     pub timestamp_ms: u64,
-    pub requester_address: Address,
     pub sui_tx_digest: Digest,
+    pub utxo: Utxo,
 }
 
 #[derive(Debug, serde_derive::Deserialize)]

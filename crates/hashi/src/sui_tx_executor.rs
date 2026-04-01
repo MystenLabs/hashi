@@ -85,6 +85,7 @@ use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::onchain;
 use crate::onchain::OnchainState;
+use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::withdrawals::WithdrawalTxCommitment;
 
@@ -201,7 +202,7 @@ impl SuiTxExecutor {
     pub async fn execute_confirm_deposit(
         &mut self,
         deposit_request: &DepositRequest,
-        signed_message: SignedMessage<DepositRequest>,
+        signed_message: SignedMessage<DepositConfirmationMessage>,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
 
@@ -283,9 +284,8 @@ impl SuiTxExecutor {
     ///
     /// Creates a deposit request on-chain by:
     /// 1. Creating a UTXO object (txid, vout, amount, derivation_path)
-    /// 2. Creating a DepositRequest using the Clock
-    /// 3. Splitting SUI for the deposit fee
-    /// 4. Calling the deposit() function on Hashi
+    /// 2. Splitting SUI for the deposit fee
+    /// 3. Calling deposit(hashi, utxo, fee, clock) which creates the DepositRequest on-chain
     ///
     /// Returns the deposit request ID on success.
     ///
@@ -337,30 +337,20 @@ impl SuiTxExecutor {
             vec![utxo_id_arg, amount_arg, derivation_path_arg],
         );
 
-        // 3. Create DepositRequest: deposit_queue::deposit_request(utxo, clock)
-        let deposit_request_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("deposit_queue"),
-                Identifier::from_static("deposit_request"),
-            ),
-            vec![utxo_arg, clock_arg],
-        );
-
-        // 4. Split zero SUI for fee coin
+        // 3. Split zero SUI for fee coin
         let zero_arg = builder.pure(&0u64);
         let gas_arg = builder.gas();
         let fee_coins = builder.split_coins(gas_arg, vec![zero_arg]);
         let fee_coin_arg = fee_coins.into_iter().next().unwrap();
 
-        // 5. Call deposit(hashi, request, fee)
+        // 4. Call deposit(hashi, utxo, fee, clock)
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("deposit"),
             ),
-            vec![hashi_arg, deposit_request_arg, fee_coin_arg],
+            vec![hashi_arg, utxo_arg, fee_coin_arg, clock_arg],
         );
 
         let response = self.execute(builder).await?;
@@ -391,9 +381,8 @@ impl SuiTxExecutor {
     /// Creates multiple deposit requests on-chain in a single PTB by repeating
     /// the deposit sequence for each UTXO output:
     /// 1. Creating a UTXO object (txid, vout, amount, derivation_path)
-    /// 2. Creating a DepositRequest using the Clock
-    /// 3. Splitting SUI for the deposit fee
-    /// 4. Calling the deposit() function on Hashi
+    /// 2. Splitting SUI for the deposit fee
+    /// 3. Calling deposit(hashi, utxo, fee, clock) which creates the DepositRequest on-chain
     ///
     /// Returns the deposit request IDs on success.
     pub async fn execute_create_deposit_requests_batch(
@@ -445,29 +434,19 @@ impl SuiTxExecutor {
                 vec![utxo_id_arg, amount_arg, derivation_path_arg],
             );
 
-            // 3. Create DepositRequest
-            let deposit_request_arg = builder.move_call(
-                Function::new(
-                    self.hashi_ids.package_id,
-                    Identifier::from_static("deposit_queue"),
-                    Identifier::from_static("deposit_request"),
-                ),
-                vec![utxo_arg, clock_arg],
-            );
-
-            // 4. Split SUI for fee coin
+            // 3. Split SUI for fee coin
             let zero_arg = builder.pure(&0u64);
             let fee_coins = builder.split_coins(gas_arg, vec![zero_arg]);
             let fee_coin_arg = fee_coins.into_iter().next().unwrap();
 
-            // 5. Call deposit(hashi, request, fee)
+            // 4. Call deposit(hashi, utxo, fee, clock)
             builder.move_call(
                 Function::new(
                     self.hashi_ids.package_id,
                     Identifier::from_static("deposit"),
                     Identifier::from_static("deposit"),
                 ),
-                vec![hashi_arg, deposit_request_arg, fee_coin_arg],
+                vec![hashi_arg, utxo_arg, fee_coin_arg, clock_arg],
             );
         }
 

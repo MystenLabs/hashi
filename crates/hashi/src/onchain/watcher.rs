@@ -240,14 +240,14 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 tracing::info!(deposit_request_id = %deposit_requested_event.request_id, "Deposit request detected");
                 let deposit_request = DepositRequest {
                     id: deposit_requested_event.request_id,
+                    sender: deposit_requested_event.requester_address,
+                    timestamp_ms: deposit_requested_event.timestamp_ms,
+                    sui_tx_digest: deposit_requested_event.sui_tx_digest,
                     utxo: super::types::Utxo {
                         id: deposit_requested_event.utxo_id.into(),
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
-                    timestamp_ms: deposit_requested_event.timestamp_ms,
-                    requester_address: deposit_requested_event.requester_address,
-                    sui_tx_digest: deposit_requested_event.sui_tx_digest,
                 };
                 state
                     .state_mut()

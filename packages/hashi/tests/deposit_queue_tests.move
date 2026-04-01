@@ -24,9 +24,9 @@ fun test_delete_deposit_request() {
     // Create a UTXO and deposit request, insert into queue
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
-    let request = deposit_queue::deposit_request(utxo, &clock, ctx);
-    let request_id = request.id();
-    hashi.bitcoin_mut().deposit_queue_mut().insert(request);
+    let request = deposit_queue::create_deposit(utxo, &clock, ctx);
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
     assert!(hashi.bitcoin().deposit_queue().contains(request_id));
 
     // Advance clock past the expiration time (3 days + 1 ms)
@@ -53,9 +53,9 @@ fun test_delete_unexpired_deposit_request() {
     // Create a UTXO and deposit request, insert into queue
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
-    let request = deposit_queue::deposit_request(utxo, &clock, ctx);
-    let request_id = request.id();
-    hashi.bitcoin_mut().deposit_queue_mut().insert(request);
+    let request = deposit_queue::create_deposit(utxo, &clock, ctx);
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
     assert!(hashi.bitcoin().deposit_queue().contains(request_id));
 
     // Advance clock by only 1 day (not enough to expire)
