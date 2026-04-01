@@ -60,6 +60,7 @@ pub struct Metrics {
     package_version_enabled: IntGaugeVec,
 
     pub deposits_confirmed_total: IntCounter,
+    pub deposits_rejected_utxo_spent: IntCounter,
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
@@ -273,6 +274,12 @@ impl Metrics {
             deposits_confirmed_total: register_int_counter_with_registry!(
                 "hashi_deposits_confirmed_total",
                 "Total number of deposits successfully confirmed on Sui",
+                registry,
+            )
+            .unwrap(),
+            deposits_rejected_utxo_spent: register_int_counter_with_registry!(
+                "hashi_deposits_rejected_utxo_spent_total",
+                "Deposit requests rejected because the UTXO was already spent",
                 registry,
             )
             .unwrap(),
