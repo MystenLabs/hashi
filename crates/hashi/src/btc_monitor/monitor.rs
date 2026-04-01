@@ -37,6 +37,14 @@ pub enum TxStatus {
     NotFound,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DepositConfirmError {
+    #[error("UTXO {txid}:{vout} has already been spent on Bitcoin")]
+    UtxoSpent { txid: bitcoin::Txid, vout: u32 },
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
 enum KyotoEventLoopExit {
     ConnectivityLost,
     Shutdown,
@@ -620,11 +628,43 @@ impl Monitor {
             return;
         };
 
-        let result = transaction.tx_out(pending_deposit.outpoint.vout.try_into().unwrap());
-        let pending_deposit = pending_deposit.take();
-        let _ = pending_deposit
-            .result_tx
-            .send(result.cloned().map_err(|e| e.into()));
+        let txout = match transaction.tx_out(pending_deposit.outpoint.vout.try_into().unwrap()) {
+            Ok(txout) => txout.clone(),
+            Err(e) => {
+                let pending_deposit = pending_deposit.take();
+                let _ = pending_deposit
+                    .result_tx
+                    .send(Err(anyhow::anyhow!(e).into()));
+                return;
+            }
+        };
+
+        // Verify the UTXO is still unspent in Bitcoin's UTXO set (including mempool).
+        match bitcoind_rpc.get_tx_out(
+            &pending_deposit.outpoint.txid,
+            pending_deposit.outpoint.vout,
+            Some(true),
+        ) {
+            Ok(Some(_)) => {
+                let pending_deposit = pending_deposit.take();
+                let _ = pending_deposit.result_tx.send(Ok(txout));
+            }
+            Ok(None) => {
+                warn!(
+                    "Deposit UTXO {}:{} has already been spent on Bitcoin. Rejecting deposit.",
+                    pending_deposit.outpoint.txid, pending_deposit.outpoint.vout,
+                );
+                let txid = pending_deposit.outpoint.txid;
+                let vout = pending_deposit.outpoint.vout;
+                let pending_deposit = pending_deposit.take();
+                let _ = pending_deposit
+                    .result_tx
+                    .send(Err(DepositConfirmError::UtxoSpent { txid, vout }));
+            }
+            Err(e) => {
+                error!("Failed to check UTXO spent status via gettxout: {e}");
+            }
+        }
     }
 }
 
@@ -632,7 +672,7 @@ impl Monitor {
 struct PendingDeposit {
     outpoint: bitcoin::OutPoint,
     block_info: Option<kyoto::HeaderCheckpoint>,
-    result_tx: oneshot::Sender<Result<bitcoin::TxOut>>,
+    result_tx: oneshot::Sender<Result<bitcoin::TxOut, DepositConfirmError>>,
     checked_at_height: u32,
 }
 
@@ -709,7 +749,10 @@ pub struct MonitorClient {
 }
 
 impl MonitorClient {
-    pub async fn confirm_deposit(&self, outpoint: bitcoin::OutPoint) -> Result<bitcoin::TxOut> {
+    pub async fn confirm_deposit(
+        &self,
+        outpoint: bitcoin::OutPoint,
+    ) -> Result<bitcoin::TxOut, DepositConfirmError> {
         let (tx, rx) = oneshot::channel();
         let pending_deposit = PendingDeposit {
             outpoint,
