@@ -437,14 +437,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .spent_utxos
                     .insert(utxo_id, utxo_spent_event.spent_epoch);
             }
-            HashiEvent::SpentUtxoDeletedEvent(spent_utxo_deleted_event) => {
-                state
-                    .state_mut()
-                    .hashi
-                    .utxo_pool
-                    .spent_utxos
-                    .remove(&spent_utxo_deleted_event.utxo_id.into());
-            }
             HashiEvent::StartReconfigEvent(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;
                 // Fetch new committee

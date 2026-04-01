@@ -7,7 +7,6 @@ use super::LeaderService;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
-use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
 use std::sync::Arc;
 use sui_sdk_types::Address;
@@ -21,10 +20,6 @@ const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
 
 const MAX_PROPOSAL_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
 const PROPOSAL_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
-
-const MAX_SPENT_UTXO_AGE_EPOCHS: u64 = 7; // 7 epochs
-const SPENT_UTXO_DELETE_DELAY_EPOCHS: u64 = 1; // 1 epoch
-const MAX_SPENT_UTXO_DELETIONS_PER_GC: usize = 500;
 
 impl LeaderService {
     /// Check for and delete expired deposit requests.
@@ -223,102 +218,6 @@ impl LeaderService {
         let response = executor.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!("Transaction failed to delete expired proposals");
-        }
-        Ok(())
-    }
-
-    /// Check for and delete expired spent UTXOs.
-    /// Spent UTXOs are sorted by spent_epoch and deleted if they are older than MAX_SPENT_UTXO_AGE_EPOCHS.
-    pub(crate) async fn check_delete_spent_utxos(&self) {
-        debug!("Entering check_delete_spent_utxos");
-        let mut spent_utxos_sorted = self.inner.onchain_state().spent_utxos_entries();
-        spent_utxos_sorted.sort_by_key(|(_, epoch)| *epoch);
-        let current_epoch = self.inner.onchain_state().epoch();
-
-        // Check if it's time to delete
-        let Some((_, oldest_epoch)) = spent_utxos_sorted.first() else {
-            return;
-        };
-
-        // If there aren't any spent UTXOs at least 8 epochs old (7 epochs max + 1 epoch delay), don't do anything
-        if current_epoch < oldest_epoch + MAX_SPENT_UTXO_AGE_EPOCHS + SPENT_UTXO_DELETE_DELAY_EPOCHS
-        {
-            return;
-        }
-
-        // Find all expired spent UTXOs (older than 7 epochs)
-        let expired_utxo_ids: Vec<UtxoId> = spent_utxos_sorted
-            .iter()
-            .filter(|(_, spent_epoch)| current_epoch > spent_epoch + MAX_SPENT_UTXO_AGE_EPOCHS)
-            .take(MAX_SPENT_UTXO_DELETIONS_PER_GC)
-            .map(|(id, _)| *id)
-            .collect();
-
-        if expired_utxo_ids.is_empty() {
-            return;
-        }
-
-        info!("Deleting {} expired spent UTXOs", expired_utxo_ids.len());
-
-        let result = self
-            .delete_expired_spent_utxos_batch(&expired_utxo_ids)
-            .await;
-        if let Err(e) = result {
-            error!("Failed to delete expired spent UTXOs: {e}");
-        } else {
-            info!(
-                "Successfully deleted {} expired spent UTXOs",
-                expired_utxo_ids.len()
-            );
-        }
-    }
-
-    async fn delete_expired_spent_utxos_batch(
-        &self,
-        expired_utxo_ids: &[UtxoId],
-    ) -> anyhow::Result<()> {
-        use sui_sdk_types::Identifier;
-        use sui_transaction_builder::Function;
-        use sui_transaction_builder::ObjectInput;
-        use sui_transaction_builder::TransactionBuilder;
-
-        let mut executor = SuiTxExecutor::from_hashi(self.inner.clone())?;
-        let hashi_ids = self.inner.config.hashi_ids();
-
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-
-        // Add a move call for each expired spent UTXO
-        for utxo_id in expired_utxo_ids {
-            let txid_arg = builder.pure(&utxo_id.txid);
-            let vout_arg = builder.pure(&utxo_id.vout);
-            let utxo_id_arg = builder.move_call(
-                Function::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("utxo"),
-                    Identifier::from_static("utxo_id"),
-                ),
-                vec![txid_arg, vout_arg],
-            );
-
-            builder.move_call(
-                Function::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("withdraw"),
-                    Identifier::from_static("delete_expired_spent_utxo"),
-                ),
-                vec![hashi_arg, utxo_id_arg],
-            );
-        }
-
-        let response = executor.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!("Transaction failed to delete expired spent UTXOs");
         }
         Ok(())
     }

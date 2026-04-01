@@ -153,11 +153,6 @@ impl LeaderService {
                         self.check_delete_proposals(checkpoint_timestamp_ms),
                     )
                     .await;
-                    let _ = tokio::time::timeout(
-                        LEADER_PHASE_TIMEOUT,
-                        self.check_delete_spent_utxos(),
-                    )
-                    .await;
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
