@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Hashi;
+use crate::btc_monitor::monitor::DepositConfirmError;
 use crate::leader::RetryPolicy;
 use crate::onchain::types::DepositRequest;
 use anyhow::Context;
@@ -156,7 +157,15 @@ impl Hashi {
             .btc_monitor()
             .confirm_deposit(outpoint)
             .await
-            .map_err(|e| DepositValidationError::BitcoinConfirmFailed(anyhow!(e)))?;
+            .map_err(|e| match e {
+                DepositConfirmError::UtxoSpent { .. } => {
+                    self.metrics.deposits_rejected_utxo_spent.inc();
+                    DepositValidationError::NeverRetry(anyhow!(e))
+                }
+                DepositConfirmError::Other(err) => {
+                    DepositValidationError::BitcoinConfirmFailed(err)
+                }
+            })?;
         if txout.value.to_sat() != deposit_request.utxo.amount {
             return Err(DepositValidationError::NeverRetry(anyhow!(
                 "Bitcoin deposit amount mismatch: got {}, onchain is {}",
