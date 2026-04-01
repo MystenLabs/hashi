@@ -298,7 +298,10 @@ impl RetryPolicy for DepositRequestErrorKind {
     }
 
     fn max_delay_ms(self) -> u64 {
-        60 * 1000
+        match self {
+            Self::BitcoinConfirmFailed | Self::TimedOut => 10 * 60 * 1000,
+            _ => 60 * 1000,
+        }
     }
 
     fn max_retries(self) -> u32 {
