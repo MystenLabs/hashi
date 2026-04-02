@@ -30,6 +30,8 @@ pub struct BitcoinNodeHandle {
     #[allow(unused)]
     data_dir: PathBuf,
     process: Child,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
     rpc_url: String,
     rpc_port: u16,
     p2p_port: u16,
@@ -45,9 +47,9 @@ impl BitcoinNodeHandle {
         );
 
         let stdout_name = data_dir.join("bitcoin.stdout");
-        let stdout = std::fs::File::create(stdout_name)?;
+        let stdout = std::fs::File::create(&stdout_name)?;
         let stderr_name = data_dir.join("bitcoin.stderr");
-        let stderr = std::fs::File::create(stderr_name)?;
+        let stderr = std::fs::File::create(&stderr_name)?;
 
         let mut process = Command::new(&bitcoin_core_path)
             .arg("-regtest")
@@ -101,6 +103,8 @@ impl BitcoinNodeHandle {
             rpc_client,
             data_dir,
             process,
+            stdout_path: stdout_name,
+            stderr_path: stderr_name,
             rpc_url,
             rpc_port,
             p2p_port,
@@ -112,7 +116,10 @@ impl BitcoinNodeHandle {
         let timeout = Duration::from_secs(BITCOIN_CORE_STARTUP_TIMEOUT_SECS);
         loop {
             if start.elapsed() > timeout {
-                return Err(anyhow!("Bitcoin Core failed to start within timeout"));
+                return Err(anyhow!(
+                    "Bitcoin Core failed to start within timeout. {}",
+                    self.startup_diagnostics()
+                ));
             }
             match self.rpc_client.get_blockchain_info() {
                 Ok(_) => {
@@ -135,6 +142,31 @@ impl BitcoinNodeHandle {
                 }
             }
         }
+    }
+
+    fn startup_diagnostics(&self) -> String {
+        let mut diagnostics = Vec::new();
+
+        for (label, path) in [
+            ("stderr", &self.stderr_path),
+            ("stdout", &self.stdout_path),
+            ("debug.log", &self.data_dir.join("regtest/debug.log")),
+        ] {
+            let contents = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|contents| {
+                    let lines: Vec<_> = contents.lines().rev().take(20).collect();
+                    if lines.is_empty() {
+                        None
+                    } else {
+                        Some(lines.into_iter().rev().collect::<Vec<_>>().join(" | "))
+                    }
+                })
+                .unwrap_or_else(|| format!("<empty or unavailable at {}>", path.display()));
+            diagnostics.push(format!("{label}: {contents}"));
+        }
+
+        diagnostics.join("; ")
     }
 
     pub fn generate_blocks(&self, count: u64) -> Result<Vec<BlockHash>> {
