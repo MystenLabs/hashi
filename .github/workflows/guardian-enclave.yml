@@ -1,0 +1,93 @@
+name: Guardian Enclave Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket_name:
+        description: 'S3 bucket name for the build'
+        required: true
+        default: 'guardian-test-bucket'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build enclave EIF
+        working-directory: docker/hashi-guardian
+        env:
+          BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
+        run: make BUCKET_NAME=$BUCKET_NAME
+
+      - name: Print PCRs
+        working-directory: docker/hashi-guardian
+        run: cat out/nitro.pcrs
+
+      - name: Upload PCRs
+        uses: actions/upload-artifact@v4
+        with:
+          name: nitro-pcrs-${{ matrix.os }}
+          path: docker/hashi-guardian/out/nitro.pcrs
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download ubuntu-latest PCRs
+        uses: actions/download-artifact@v4
+        with:
+          name: nitro-pcrs-ubuntu-latest
+          path: pcrs-latest
+
+      - name: Download ubuntu-22.04 PCRs
+        uses: actions/download-artifact@v4
+        with:
+          name: nitro-pcrs-ubuntu-22.04
+          path: pcrs-22
+
+      - name: Compare PCRs
+        id: compare
+        run: |
+          LATEST=$(cat pcrs-latest/nitro.pcrs)
+          OLDER=$(cat pcrs-22/nitro.pcrs)
+          if diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Extract individual PCR values
+          PCR0=$(awk '/PCR0/ {print $1}' pcrs-latest/nitro.pcrs)
+          PCR1=$(awk '/PCR1/ {print $1}' pcrs-latest/nitro.pcrs)
+          PCR2=$(awk '/PCR2/ {print $1}' pcrs-latest/nitro.pcrs)
+          echo "pcr0=$PCR0" >> "$GITHUB_OUTPUT"
+          echo "pcr1=$PCR1" >> "$GITHUB_OUTPUT"
+          echo "pcr2=$PCR2" >> "$GITHUB_OUTPUT"
+
+      - name: Print results
+        run: |
+          echo "## Guardian Enclave PCR Measurements" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PCR | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PCR0 | \`${{ steps.compare.outputs.pcr0 }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Bucket**: \`${{ inputs.bucket_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if PCRs differ
+        if: steps.compare.outputs.match != 'true'
+        run: |
+          echo "PCRs differ across platforms!"
+          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs
+          exit 1

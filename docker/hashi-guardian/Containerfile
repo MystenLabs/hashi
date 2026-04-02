@@ -1,0 +1,117 @@
+# Copyright (c), Mysten Labs, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# This containerfile uses StageX (https://stagex.tools) images, which provide a
+# full source bootstrapped, deterministic, and hermetic build toolchain
+
+FROM stagex/core-binutils@sha256:32cf240bca6ebd61e53a9d21ceba43b32f334ff6052194317550562e0e7e2085 AS core-binutils
+FROM stagex/core-ca-certificates@sha256:90d28341b8002c1930616e3fb1d20927ab07e7bab2533a6348c572a32c8c3d00 AS core-ca-certificates
+FROM stagex/core-gcc@sha256:ceae6035d43fe3653e142e638fd78d72950cd51e7a5dba4755d1db081c54de77 AS core-gcc
+FROM stagex/core-git@sha256:d22602980b8ce635fadb67689adfd97a9551ed086fd720ba46acc6650eca858b AS core-git
+FROM stagex/core-zlib@sha256:6c36ec363c95ebd07266a4a6cbf1642fc2e37bf0f02bfd7f56b1e8d062fe444e AS core-zlib
+FROM stagex/core-libffi@sha256:3ee2163917f777829d46f35aaf7186d0d34772d3e8224db4663c8b0b3246d3ec AS core-libffi
+FROM stagex/core-llvm@sha256:d293f851c6427ec89913402232880d4732997cdf46f64b251ec80066157212ae AS core-llvm
+FROM stagex/core-openssl@sha256:4ecf4f42ad958a25d4622b246aacdbccd523aacbb8ce036f387d39e8a17b9840 AS core-openssl
+FROM stagex/core-rust@sha256:2b8f903454d6d79bbf5ed6fbc79a42a3062cc09bd31d8397f3c245960bc845e4 AS core-rust
+FROM stagex/core-musl@sha256:89e2d41321862f61cad0165741fc04fc001bb8fc06702820d2311530008c5371 AS core-musl
+FROM stagex/core-libunwind@sha256:b6915f100585cf071af2652843e23c7365be48043afc61d0154b6ef1eb626c0b AS core-libunwind
+FROM stagex/core-pkgconf@sha256:b40c471ca1046ce61904a2a8cf9480631b08a8733fdcd38d799b1633307c3dd6 AS core-pkgconf
+FROM stagex/core-busybox@sha256:d608daa946e4799cf28b105aba461db00187657bd55ea7c2935ff11dac237e27 AS core-busybox
+FROM stagex/core-python@sha256:2c04a2511b3307220fc9e1da9d3fa0820a9cb05e0d0235798ae9f874e2ca64a2 AS core-python
+FROM stagex/core-libzstd@sha256:dd234de20cd651715ffc67ced1bb06cc3ac3011d881055beda335869d7d4210f AS core-libzstd
+FROM stagex/user-eif_build@sha256:e2b942f290b74c9b1ac15d9abdb5f96451e3f8c659bd398d7d1f8c0d2a84562b AS user-eif_build
+FROM stagex/user-gen_initramfs@sha256:fcb68e3bea6e99b64087974a46f3e55bb216cf23f66efea2703835b9d784c19a AS user-gen_initramfs
+FROM stagex/user-linux-nitro@sha256:dd86f125dbe918e3d19c470a89f004da577ab228bb4b62854435bdb0603d1a1d AS user-linux-nitro
+FROM stagex/user-cpio@sha256:6e11cb71e8466c5673de5da6259d2c0e4b316a0f74e6a9fc31d7aa978be2c4ed AS user-cpio
+FROM stagex/user-socat@sha256:7f859e5b7a605488e70939068f7ded36d35c249e33343d703f7ca26763ce5b85 AS user-socat
+FROM stagex/user-jq@sha256:1b551175e7507d1a5d3564c01d6d0c458aa2be0172e03ccec8d2263e217c4c78 AS user-jq
+FROM stagex/user-nit@sha256:58c6df1887e5a46c14283b7faa29fadb1bf6b7dbc04027f09050726926280cd9 AS user-nit
+
+FROM scratch AS base
+COPY --from=core-busybox . /
+COPY --from=core-musl . /
+COPY --from=core-libunwind . /
+COPY --from=core-openssl . /
+COPY --from=core-zlib . /
+COPY --from=core-ca-certificates . /
+COPY --from=core-libzstd . /
+COPY --from=core-binutils . /
+COPY --from=core-pkgconf . /
+COPY --from=core-git . /
+COPY --from=core-rust . /
+COPY --from=user-gen_initramfs . /
+COPY --from=user-eif_build . /
+COPY --from=core-llvm . /
+COPY --from=core-libffi . /
+COPY --from=core-gcc . /
+COPY --from=user-cpio . /
+COPY --from=user-linux-nitro /bzImage .
+COPY --from=user-linux-nitro /linux.config .
+
+FROM base AS build
+ARG BUCKET_NAME
+ARG AWS_REGION=us-east-1
+COPY crates /crates
+COPY Cargo.toml /Cargo.toml
+COPY Cargo.lock /Cargo.lock
+
+WORKDIR /
+ENV OPENSSL_STATIC=true
+ENV TARGET=x86_64-unknown-linux-musl
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
+RUN cargo build --locked --no-default-features --release --target "$TARGET" -p hashi-guardian
+
+WORKDIR /build_cpio
+ENV KBUILD_BUILD_TIMESTAMP=1
+RUN mkdir initramfs/
+COPY --from=core-busybox . initramfs
+COPY --from=core-python . initramfs
+COPY --from=core-musl . initramfs
+COPY --from=core-ca-certificates /etc/ssl/certs initramfs
+COPY --from=core-busybox /bin/sh initramfs/sh
+COPY --from=user-jq /bin/jq initramfs
+COPY --from=user-socat /bin/socat . initramfs
+COPY --from=user-nit /bin/init initramfs
+RUN cp /target/${TARGET}/release/hashi-guardian initramfs/guardian
+COPY docker/hashi-guardian/traffic_forwarder.py initramfs/
+COPY docker/hashi-guardian/run.sh initramfs/
+RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g" initramfs/run.sh
+RUN chmod 755 initramfs/run.sh && chmod 644 initramfs/traffic_forwarder.py
+
+COPY <<-EOF initramfs/etc/environment
+SSL_CERT_FILE=/ca-certificates.crt
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
+EOF
+
+RUN <<-EOF
+    set -eux
+    cd initramfs
+    find . -exec touch -hcd "@0" "{}" + -print0 \
+    | sort -z \
+    | cpio \
+        --null \
+        --create \
+        --verbose \
+        --reproducible \
+        --format=newc \
+    | gzip --best \
+    > /build_cpio/rootfs.cpio
+EOF
+
+WORKDIR /build_eif
+RUN eif_build \
+	--kernel /bzImage \
+	--kernel_config /linux.config \
+	--ramdisk /build_cpio/rootfs.cpio \
+	--pcrs_output /nitro.pcrs \
+	--output /nitro.eif \
+	--cmdline 'reboot=k initrd=0x2000000,3228672 root=/dev/ram0 panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh'
+
+FROM base AS install
+WORKDIR /rootfs
+COPY --from=build /nitro.eif .
+COPY --from=build /nitro.pcrs .
+COPY --from=build /build_cpio/rootfs.cpio .
+
+FROM scratch AS package
+COPY --from=install /rootfs .
