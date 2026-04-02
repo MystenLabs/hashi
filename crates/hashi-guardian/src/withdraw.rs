@@ -3,6 +3,7 @@
 
 use crate::Enclave;
 use bitcoin::Txid;
+use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
 use hashi_types::guardian::GuardianError::InternalError;
@@ -82,7 +83,20 @@ async fn normal_withdrawal_inner(
     // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
     //    The returned guard holds the mutex — no other withdrawal can proceed
     //    until this one is committed or reverted.
-    // TODO: Check that timestamp_secs is somewhat recent?
+    //
+    // Reject timestamps too far in the future (clock skew protection).
+    // Old timestamps are safe — the limiter's monotonicity check prevents replay,
+    // and old timestamps result in less refill (conservative).
+    const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
+    let guardian_now = now_timestamp_secs();
+    if request.timestamp_secs() > guardian_now + MAX_CLOCK_SKEW_SECS {
+        return Err(InvalidInputs(format!(
+            "request timestamp {} is too far in the future (guardian clock: {})",
+            request.timestamp_secs(),
+            guardian_now
+        )));
+    }
+
     info!("Checking rate limits.");
     let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
     let limiter_guard = enclave

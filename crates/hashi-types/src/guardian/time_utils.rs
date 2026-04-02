@@ -19,6 +19,12 @@ pub fn now_timestamp_ms() -> UnixMillis {
         .as_millis() as UnixMillis
 }
 
+/// Seconds since Unix epoch.
+/// Panics if the system clock is before `UNIX_EPOCH`.
+pub fn now_timestamp_secs() -> UnixSeconds {
+    unix_millis_to_seconds(now_timestamp_ms())
+}
+
 pub fn unix_millis_to_seconds(ms: UnixMillis) -> UnixSeconds {
     ms / MILLIS_PER_SECOND
 }

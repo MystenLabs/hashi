@@ -108,3 +108,83 @@ impl RateLimiter {
         self.state = self.prev_state;
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn make_limiter() -> (LimiterConfig, LimiterState) {
+        let config = LimiterConfig {
+            refill_rate: 1_000,
+            max_bucket_capacity: 2_000_000,
+        };
+        let state = LimiterState {
+            num_tokens_available: 0,
+            last_updated_at: 0,
+            next_seq: 0,
+        };
+
+        (config, state)
+    }
+
+    #[test]
+    fn test_basic() {
+        let (config, state) = make_limiter();
+        let mut limiter = RateLimiter::new(config, state).unwrap();
+        assert!(limiter.consume(0, 1, config.refill_rate).is_ok());
+
+        let target_amount = 1_000_000u64;
+        let num_secs_required = target_amount.div_ceil(config.refill_rate);
+        assert!(
+            limiter
+                .consume(1, num_secs_required, target_amount)
+                .is_err()
+        );
+        assert!(
+            limiter
+                .consume(1, 1 + num_secs_required, target_amount)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_limits() {
+        let (config, state) = make_limiter();
+        let mut limiter = RateLimiter::new(config, state).unwrap();
+        assert!(
+            limiter
+                .consume(0, u64::MAX, config.max_bucket_capacity + 1)
+                .is_err()
+        );
+        assert!(
+            limiter
+                .consume(0, u64::MAX, config.max_bucket_capacity)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_revert_restores_pre_refill_state() {
+        let (config, state) = make_limiter();
+        let mut limiter = RateLimiter::new(config, state).unwrap();
+        // Consume after refill, then revert — should restore original state.
+        limiter.consume(0, 100, 50_000).unwrap();
+        assert_eq!(limiter.state().num_tokens_available, 50_000); // 100*1000 - 50_000
+        limiter.revert();
+        assert_eq!(limiter.state().num_tokens_available, 0);
+        assert_eq!(limiter.state().last_updated_at, 0);
+        assert_eq!(limiter.state().next_seq, 0);
+    }
+
+    #[test]
+    fn test_rejects_wrong_seq_and_old_timestamp() {
+        let (config, state) = make_limiter();
+        let mut limiter = RateLimiter::new(config, state).unwrap();
+        // Wrong seq.
+        assert!(limiter.consume(1, 0, 0).is_err());
+        // Advance state.
+        limiter.consume(0, 100, 1_000).unwrap();
+        // Old timestamp.
+        assert!(limiter.consume(1, 50, 1_000).is_err());
+    }
+}

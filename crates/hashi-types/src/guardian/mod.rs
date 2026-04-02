@@ -16,6 +16,7 @@ pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
+pub use time_utils::now_timestamp_secs;
 pub use time_utils::unix_millis_to_seconds;
 
 use self::bitcoin_utils::InputUTXO;

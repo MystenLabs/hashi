@@ -18,7 +18,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-
+use std::time::Duration;
 use tonic::transport::Server;
 use tracing::info;
 
@@ -354,6 +354,10 @@ impl EnclaveState {
     /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
     /// The guard holds the mutex lock — no other withdrawal can start until it is
     /// committed or dropped (which reverts).
+    /// Timeout for acquiring the limiter lock. If a withdrawal is in progress and
+    /// takes longer than this, we bail rather than queue up requests indefinitely.
+    const LIMITER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
     pub async fn consume_from_limiter(
         &self,
         seq: u64,
@@ -364,7 +368,12 @@ impl EnclaveState {
             .rate_limiter
             .get()
             .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
-        let mut guard = rate_limiter.clone().lock_owned().await;
+        let mut guard = tokio::time::timeout(
+            Self::LIMITER_LOCK_TIMEOUT,
+            rate_limiter.clone().lock_owned(),
+        )
+        .await
+        .map_err(|_| InvalidInputs("timed out waiting for rate limiter lock".into()))?;
         guard.consume(seq, timestamp, amount_sats)?;
         Ok(LimiterGuard::new(guard))
     }
