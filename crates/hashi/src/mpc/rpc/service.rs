@@ -38,7 +38,10 @@ impl MpcService for HttpService {
             let mut mgr = mpc_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
-                .map_err(dkg_error_to_status)
+                .map_err(|e| {
+                    tracing::warn!("send_messages from {sender:?} failed: {e}",);
+                    mpc_error_to_status(e)
+                })
         })
         .await?;
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
@@ -62,7 +65,10 @@ impl MpcService for HttpService {
                 internal_request.epoch,
             )?;
             mgr.handle_retrieve_messages_request(&internal_request)
-                .map_err(dkg_error_to_status)?
+                .map_err(|e| {
+                    tracing::warn!("retrieve_messages failed: {e}");
+                    mpc_error_to_status(e)
+                })?
         };
         Ok(tonic::Response::new(RetrieveMessagesResponse::from(
             &response,
@@ -86,8 +92,10 @@ impl MpcService for HttpService {
                 mgr.source_epoch,
                 internal_request.epoch,
             )?;
-            mgr.handle_complain_request(&internal_request)
-                .map_err(dkg_error_to_status)
+            mgr.handle_complain_request(&internal_request).map_err(|e| {
+                tracing::warn!("complain failed: {e}");
+                mpc_error_to_status(e)
+            })
         })
         .await?;
         Ok(tonic::Response::new(ComplainResponse::from(&response)))
@@ -106,7 +114,10 @@ impl MpcService for HttpService {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
             mgr.handle_get_public_mpc_output_request(&internal_request)
-                .map_err(dkg_error_to_status)?
+                .map_err(|e| {
+                    tracing::warn!("get_public_mpc_output failed: {e}");
+                    mpc_error_to_status(e)
+                })?
         };
         Ok(tonic::Response::new(GetPublicMpcOutputResponse::from(
             &response,
@@ -143,7 +154,10 @@ impl MpcService for HttpService {
             let mgr = signing_manager.read().unwrap();
             validate_epoch(mgr.epoch(), external_request.epoch)?;
             mgr.handle_get_partial_signatures_request(&internal_request)
-                .map_err(signing_error_to_status)?
+                .map_err(|e| {
+                    tracing::warn!("get_partial_signatures failed: {e}");
+                    signing_error_to_status(e)
+                })?
         };
         Ok(tonic::Response::new(GetPartialSignaturesResponse::from(
             &response,
@@ -197,7 +211,7 @@ fn signing_error_to_status(err: SigningError) -> Status {
     }
 }
 
-fn dkg_error_to_status(err: MpcError) -> Status {
+fn mpc_error_to_status(err: MpcError) -> Status {
     use types::MpcError::*;
     match &err {
         InvalidThreshold(_) | InvalidMessage { .. } | InvalidCertificate(_) => {
