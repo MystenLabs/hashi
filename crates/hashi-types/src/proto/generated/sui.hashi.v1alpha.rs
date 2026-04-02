@@ -2009,13 +2009,13 @@ pub mod complain_response {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetPublicDkgOutputRequest {
-    /// The epoch for which to retrieve the public DKG output.
+pub struct GetPublicMpcOutputRequest {
+    /// The epoch for which to retrieve the public MPC output.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetPublicDkgOutputResponse {
+pub struct GetPublicMpcOutputResponse {
     /// The aggregated public key.
     #[prost(message, optional, tag = "1")]
     pub public_key: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
@@ -2254,12 +2254,12 @@ pub mod mpc_service_client {
                 .insert(GrpcMethod::new("sui.hashi.v1alpha.MpcService", "Complain"));
             self.inner.unary(req, path, codec).await
         }
-        /// Get public DKG output.
-        pub async fn get_public_dkg_output(
+        /// Get public MPC output.
+        pub async fn get_public_mpc_output(
             &mut self,
-            request: impl tonic::IntoRequest<super::GetPublicDkgOutputRequest>,
+            request: impl tonic::IntoRequest<super::GetPublicMpcOutputRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetPublicDkgOutputResponse>,
+            tonic::Response<super::GetPublicMpcOutputResponse>,
             tonic::Status,
         > {
             self.inner
@@ -2272,12 +2272,12 @@ pub mod mpc_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.MpcService/GetPublicDkgOutput",
+                "/sui.hashi.v1alpha.MpcService/GetPublicMpcOutput",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("sui.hashi.v1alpha.MpcService", "GetPublicDkgOutput"),
+                    GrpcMethod::new("sui.hashi.v1alpha.MpcService", "GetPublicMpcOutput"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -2382,12 +2382,12 @@ pub mod mpc_service_server {
             tonic::Response<super::ComplainResponse>,
             tonic::Status,
         >;
-        /// Get public DKG output.
-        async fn get_public_dkg_output(
+        /// Get public MPC output.
+        async fn get_public_mpc_output(
             &self,
-            request: tonic::Request<super::GetPublicDkgOutputRequest>,
+            request: tonic::Request<super::GetPublicMpcOutputRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetPublicDkgOutputResponse>,
+            tonic::Response<super::GetPublicMpcOutputResponse>,
             tonic::Status,
         >;
         /// Get a validator's signature on the reconfig completion message.
@@ -2618,25 +2618,25 @@ pub mod mpc_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.MpcService/GetPublicDkgOutput" => {
+                "/sui.hashi.v1alpha.MpcService/GetPublicMpcOutput" => {
                     #[allow(non_camel_case_types)]
-                    struct GetPublicDkgOutputSvc<T: MpcService>(pub Arc<T>);
+                    struct GetPublicMpcOutputSvc<T: MpcService>(pub Arc<T>);
                     impl<
                         T: MpcService,
-                    > tonic::server::UnaryService<super::GetPublicDkgOutputRequest>
-                    for GetPublicDkgOutputSvc<T> {
-                        type Response = super::GetPublicDkgOutputResponse;
+                    > tonic::server::UnaryService<super::GetPublicMpcOutputRequest>
+                    for GetPublicMpcOutputSvc<T> {
+                        type Response = super::GetPublicMpcOutputResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::GetPublicDkgOutputRequest>,
+                            request: tonic::Request<super::GetPublicMpcOutputRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as MpcService>::get_public_dkg_output(&inner, request)
+                                <T as MpcService>::get_public_mpc_output(&inner, request)
                                     .await
                             };
                             Box::pin(fut)
@@ -2648,7 +2648,7 @@ pub mod mpc_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = GetPublicDkgOutputSvc(inner);
+                        let method = GetPublicMpcOutputSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

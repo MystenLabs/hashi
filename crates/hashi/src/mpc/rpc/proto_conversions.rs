@@ -400,32 +400,32 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
 }
 
 //
-// GetPublicDkgOutputRequest
+// GetPublicMpcOutputRequest
 //
 
-impl types::GetPublicDkgOutputRequest {
-    pub fn to_proto(&self) -> proto::GetPublicDkgOutputRequest {
-        proto::GetPublicDkgOutputRequest {
+impl types::GetPublicMpcOutputRequest {
+    pub fn to_proto(&self) -> proto::GetPublicMpcOutputRequest {
+        proto::GetPublicMpcOutputRequest {
             epoch: Some(self.epoch),
         }
     }
 }
 
-impl TryFrom<&proto::GetPublicDkgOutputRequest> for types::GetPublicDkgOutputRequest {
+impl TryFrom<&proto::GetPublicMpcOutputRequest> for types::GetPublicMpcOutputRequest {
     type Error = TryFromProtoError;
 
-    fn try_from(value: &proto::GetPublicDkgOutputRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: &proto::GetPublicMpcOutputRequest) -> Result<Self, Self::Error> {
         let epoch = required(value.epoch, "epoch")?;
         Ok(Self { epoch })
     }
 }
 
 //
-// GetPublicDkgOutputResponse
+// GetPublicMpcOutputResponse
 //
 
-impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputResponse {
-    fn from(value: &types::GetPublicDkgOutputResponse) -> Self {
+impl From<&types::GetPublicMpcOutputResponse> for proto::GetPublicMpcOutputResponse {
+    fn from(value: &types::GetPublicMpcOutputResponse) -> Self {
         Self {
             public_key: Some(serialize_bcs(&value.output.public_key)),
             commitments: value
@@ -438,10 +438,10 @@ impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputRespo
     }
 }
 
-impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputResponse {
+impl TryFrom<&proto::GetPublicMpcOutputResponse> for types::GetPublicMpcOutputResponse {
     type Error = TryFromProtoError;
 
-    fn try_from(value: &proto::GetPublicDkgOutputResponse) -> Result<Self, Self::Error> {
+    fn try_from(value: &proto::GetPublicMpcOutputResponse) -> Result<Self, Self::Error> {
         use fastcrypto_tbls::threshold_schnorr::G;
 
         let public_key = deserialize_bcs(
@@ -457,7 +457,7 @@ impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputRe
             commitments.insert(share_index, commitment_value);
         }
         Ok(Self {
-            output: types::PublicDkgOutput {
+            output: types::PublicMpcOutput {
                 public_key,
                 commitments,
             },
