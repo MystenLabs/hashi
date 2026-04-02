@@ -66,6 +66,9 @@ impl BitcoinNodeHandle {
             .arg("-blockfilterindex=1") // Enable compact block filters (BIP-158)
             .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
             .arg("-txindex=1") // Enable transaction index for RPC queries
+            // Disable onion since it tries to listen on port+1
+            .arg("-noonion")
+            .arg("-nolistenonion")
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
