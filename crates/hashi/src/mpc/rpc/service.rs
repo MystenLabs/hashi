@@ -10,8 +10,8 @@ use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPartialSignaturesRequest;
 use hashi_types::proto::GetPartialSignaturesResponse;
-use hashi_types::proto::GetPublicDkgOutputRequest;
-use hashi_types::proto::GetPublicDkgOutputResponse;
+use hashi_types::proto::GetPublicMpcOutputRequest;
+use hashi_types::proto::GetPublicMpcOutputResponse;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
 use hashi_types::proto::GetReconfigCompletionSignatureResponse;
 use hashi_types::proto::RetrieveMessagesRequest;
@@ -94,21 +94,21 @@ impl MpcService for HttpService {
     }
 
     #[tracing::instrument(skip(self, request))]
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
-        request: tonic::Request<GetPublicDkgOutputRequest>,
-    ) -> Result<tonic::Response<GetPublicDkgOutputResponse>, Status> {
+        request: tonic::Request<GetPublicMpcOutputRequest>,
+    ) -> Result<tonic::Response<GetPublicMpcOutputResponse>, Status> {
         authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let internal_request = types::GetPublicDkgOutputRequest::try_from(&external_request)
+        let internal_request = types::GetPublicMpcOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
-            mgr.handle_get_public_dkg_output_request(&internal_request)
+            mgr.handle_get_public_mpc_output_request(&internal_request)
                 .map_err(dkg_error_to_status)?
         };
-        Ok(tonic::Response::new(GetPublicDkgOutputResponse::from(
+        Ok(tonic::Response::new(GetPublicMpcOutputResponse::from(
             &response,
         )))
     }

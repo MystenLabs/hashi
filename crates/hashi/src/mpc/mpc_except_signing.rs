@@ -17,8 +17,8 @@ use crate::mpc::types::DealerMessagesHash;
 pub use crate::mpc::types::DealerOutputsKey;
 use crate::mpc::types::DkgConfig;
 pub use crate::mpc::types::EncryptionGroupElement;
-pub use crate::mpc::types::GetPublicDkgOutputRequest;
-pub use crate::mpc::types::GetPublicDkgOutputResponse;
+pub use crate::mpc::types::GetPublicMpcOutputRequest;
+pub use crate::mpc::types::GetPublicMpcOutputResponse;
 pub use crate::mpc::types::MessageHash;
 pub use crate::mpc::types::Messages;
 pub use crate::mpc::types::MpcError;
@@ -28,7 +28,7 @@ pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
-pub use crate::mpc::types::PublicDkgOutput;
+pub use crate::mpc::types::PublicMpcOutput;
 use crate::mpc::types::ReconstructionOutcome;
 pub use crate::mpc::types::RetrieveMessagesRequest;
 pub use crate::mpc::types::RetrieveMessagesResponse;
@@ -456,10 +456,10 @@ impl MpcManager {
         Ok(responses)
     }
 
-    pub fn handle_get_public_dkg_output_request(
+    pub fn handle_get_public_mpc_output_request(
         &self,
-        request: &GetPublicDkgOutputRequest,
-    ) -> MpcResult<GetPublicDkgOutputResponse> {
+        request: &GetPublicMpcOutputRequest,
+    ) -> MpcResult<GetPublicMpcOutputResponse> {
         let previous_epoch = self
             .dkg_config
             .epoch
@@ -477,8 +477,8 @@ impl MpcManager {
                 request.epoch
             ))
         })?;
-        Ok(GetPublicDkgOutputResponse {
-            output: PublicDkgOutput::from_dkg_output(output),
+        Ok(GetPublicMpcOutputResponse {
+            output: PublicMpcOutput::from_mpc_output(output),
         })
     }
 
@@ -2846,11 +2846,11 @@ impl MpcManager {
         }))
     }
 
-    pub async fn fetch_public_dkg_output_from_quorum(
+    pub async fn fetch_public_mpc_output_from_quorum(
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         previous_committee_threshold: u64,
-    ) -> MpcResult<PublicDkgOutput> {
+    ) -> MpcResult<PublicMpcOutput> {
         let (previous_committee, epoch) = {
             let mgr = mpc_manager.read().unwrap();
             let previous_committee = mgr
@@ -2864,7 +2864,7 @@ impl MpcManager {
                 .expect("key rotation requires epoch > 0");
             (previous_committee, epoch)
         };
-        let request = GetPublicDkgOutputRequest { epoch };
+        let request = GetPublicMpcOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
             .iter()
@@ -2873,16 +2873,16 @@ impl MpcManager {
                 let weight = member.weight();
                 let req = request.clone();
                 async move {
-                    let result = p2p_channel.get_public_dkg_output(&addr, &req).await;
+                    let result = p2p_channel.get_public_mpc_output(&addr, &req).await;
                     (addr, weight, result)
                 }
             })
             .collect();
-        let mut responses: HashMap<[u8; 32], (PublicDkgOutput, u64)> = HashMap::new();
+        let mut responses: HashMap<[u8; 32], (PublicMpcOutput, u64)> = HashMap::new();
         while let Some((addr, weight, result)) = futures.next().await {
             match result {
                 Ok(response) => {
-                    let hash = hash_public_dkg_output(&response.output);
+                    let hash = hash_public_mpc_output(&response.output);
                     let (output, weight_sum) = responses
                         .entry(hash)
                         .or_insert((response.output.clone(), 0));
@@ -2934,7 +2934,7 @@ impl MpcManager {
             let threshold = threshold_opt.ok_or_else(|| {
                 MpcError::InvalidConfig("Key rotation requires previous threshold".into())
             })?;
-            let public_output = Self::fetch_public_dkg_output_from_quorum(
+            let public_output = Self::fetch_public_mpc_output_from_quorum(
                 mpc_manager,
                 p2p_channel,
                 threshold as u64,
@@ -3506,7 +3506,7 @@ fn build_reduced_nodes(
         .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 
-fn hash_public_dkg_output(output: &PublicDkgOutput) -> [u8; 32] {
+fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {
     let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
     Blake2b256::digest(&bytes).digest
 }
