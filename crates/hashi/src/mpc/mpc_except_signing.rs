@@ -1089,11 +1089,19 @@ impl MpcManager {
                 epoch,
             )
             .await?;
-            // Only add indices not already tracked (avoids duplicates when
-            // the dealer phase already stored outputs for this node's own shares).
-            for idx in dealer_share_indices {
-                if !certified_share_indices.contains(&idx) {
-                    certified_share_indices.push(idx);
+            // Only add indices that have outputs (avoids adding indices for
+            // dealers with empty rotation messages, e.g. a node that rejoined
+            // with no shares from the new-member fallback).
+            {
+                let mgr = mpc_manager.read().unwrap();
+                for idx in dealer_share_indices {
+                    if !certified_share_indices.contains(&idx)
+                        && mgr
+                            .dealer_outputs
+                            .contains_key(&DealerOutputsKey::Rotation(idx))
+                    {
+                        certified_share_indices.push(idx);
+                    }
                 }
             }
             certified_dealers.insert(dealer);
@@ -2918,34 +2926,31 @@ impl MpcManager {
             (is_member, mgr.previous_threshold)
         };
         let previous = if is_member_of_previous_committee {
-            Self::retrieve_missing_previous_messages(
-                mpc_manager,
-                previous_certificates,
-                p2p_channel,
-            )
-            .await?;
-            Self::reconstruct_with_complaint_recovery(
-                mpc_manager,
-                previous_certificates,
-                p2p_channel,
-            )
-            .await?
-        } else {
-            let threshold = threshold_opt.ok_or_else(|| {
-                MpcError::InvalidConfig("Key rotation requires previous threshold".into())
-            })?;
-            let public_output = Self::fetch_public_mpc_output_from_quorum(
-                mpc_manager,
-                p2p_channel,
-                threshold as u64,
-            )
-            .await?;
-            MpcOutput {
-                public_key: public_output.public_key,
-                key_shares: avss::SharesForNode { shares: vec![] },
-                commitments: public_output.commitments,
-                threshold,
+            let reconstruction_result = async {
+                Self::retrieve_missing_previous_messages(
+                    mpc_manager,
+                    previous_certificates,
+                    p2p_channel,
+                )
+                .await?;
+                Self::reconstruct_with_complaint_recovery(
+                    mpc_manager,
+                    previous_certificates,
+                    p2p_channel,
+                )
+                .await
             }
+            .await;
+            match reconstruction_result {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::info!("Reconstruction failed ({e}), falling back to new-member path");
+                    Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt)
+                        .await?
+                }
+            }
+        } else {
+            Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt).await?
         };
         tracing::info!(
             "prepare_previous_output: is_member_of_previous_committee={is_member_of_previous_committee}, \
@@ -2953,6 +2958,25 @@ impl MpcManager {
             hex::encode(previous.public_key.to_byte_array()),
         );
         Ok((previous, is_member_of_previous_committee))
+    }
+
+    async fn fetch_and_build_public_output(
+        mpc_manager: &Arc<RwLock<Self>>,
+        p2p_channel: &impl P2PChannel,
+        threshold_opt: Option<u16>,
+    ) -> MpcResult<MpcOutput> {
+        let threshold = threshold_opt.ok_or_else(|| {
+            MpcError::InvalidConfig("Key rotation requires previous threshold".into())
+        })?;
+        let public_output =
+            Self::fetch_public_mpc_output_from_quorum(mpc_manager, p2p_channel, threshold as u64)
+                .await?;
+        Ok(MpcOutput {
+            public_key: public_output.public_key,
+            key_shares: avss::SharesForNode { shares: vec![] },
+            commitments: public_output.commitments,
+            threshold,
+        })
     }
 
     /// Reconstruct the previous epoch's output, recovering via Complain RPCs
