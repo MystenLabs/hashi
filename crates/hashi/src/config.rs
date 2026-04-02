@@ -145,6 +145,36 @@ pub struct Config {
     /// Maximum number of tasks to process concurrently for a leader job such as processing deposit requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_leader_job_tasks: Option<usize>,
+
+    /// Minimum time (ms) the leader waits after the oldest approved withdrawal
+    /// request was submitted before committing a batch. The batch fires earlier
+    /// if it reaches `withdrawal_max_batch_size`.
+    ///
+    /// Defaults to 300,000 ms (5 minutes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_batching_delay_ms: Option<u64>,
+
+    /// Maximum number of withdrawal requests to include in a single Bitcoin
+    /// transaction. The batch commits immediately once this many requests are
+    /// ready, without waiting for `withdrawal_batching_delay_ms` to elapse.
+    ///
+    /// Defaults to 50 (the algorithm's hard upper bound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_max_batch_size: Option<usize>,
+
+    /// Maximum number of mempool-only (0-confirmation) ancestors a UTXO may
+    /// have and still be eligible as a coin-selection input. Constrains how
+    /// deep the chain of unconfirmed transactions can grow, staying within
+    /// Bitcoin's relay policy limits.
+    ///
+    /// Defaults to 5.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_mempool_chain_depth: Option<usize>,
+
+    /// Test-only: corrupt AVSS shares sent to this address, triggering the
+    /// complaint recovery flow. Must not be set on mainnet or testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_corrupt_shares_for: Option<Address>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]

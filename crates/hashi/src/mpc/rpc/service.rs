@@ -10,8 +10,8 @@ use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPartialSignaturesRequest;
 use hashi_types::proto::GetPartialSignaturesResponse;
-use hashi_types::proto::GetPublicDkgOutputRequest;
-use hashi_types::proto::GetPublicDkgOutputResponse;
+use hashi_types::proto::GetPublicMpcOutputRequest;
+use hashi_types::proto::GetPublicMpcOutputResponse;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
 use hashi_types::proto::GetReconfigCompletionSignatureResponse;
 use hashi_types::proto::RetrieveMessagesRequest;
@@ -38,7 +38,10 @@ impl MpcService for HttpService {
             let mut mgr = mpc_manager.write().unwrap();
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
-                .map_err(dkg_error_to_status)
+                .map_err(|e| {
+                    tracing::warn!("send_messages from {sender:?} failed: {e}",);
+                    mpc_error_to_status(e)
+                })
         })
         .await?;
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
@@ -56,17 +59,16 @@ impl MpcService for HttpService {
         let response = {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
-            let epoch = external_request
-                .epoch
-                .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
-            if epoch != mgr.dkg_config.epoch && epoch != mgr.source_epoch {
-                return Err(Status::failed_precondition(format!(
-                    "epoch mismatch: expected {} or {}, got {}",
-                    mgr.dkg_config.epoch, mgr.source_epoch, epoch
-                )));
-            }
+            validate_epoch_current_or_source(
+                mgr.dkg_config.epoch,
+                mgr.source_epoch,
+                internal_request.epoch,
+            )?;
             mgr.handle_retrieve_messages_request(&internal_request)
-                .map_err(dkg_error_to_status)?
+                .map_err(|e| {
+                    tracing::warn!("retrieve_messages failed: {e}");
+                    mpc_error_to_status(e)
+                })?
         };
         Ok(tonic::Response::new(RetrieveMessagesResponse::from(
             &response,
@@ -85,30 +87,39 @@ impl MpcService for HttpService {
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
-            mgr.handle_complain_request(&internal_request)
-                .map_err(dkg_error_to_status)
+            validate_epoch_current_or_source(
+                mgr.dkg_config.epoch,
+                mgr.source_epoch,
+                internal_request.epoch,
+            )?;
+            mgr.handle_complain_request(&internal_request).map_err(|e| {
+                tracing::warn!("complain failed: {e}");
+                mpc_error_to_status(e)
+            })
         })
         .await?;
         Ok(tonic::Response::new(ComplainResponse::from(&response)))
     }
 
     #[tracing::instrument(skip(self, request))]
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
-        request: tonic::Request<GetPublicDkgOutputRequest>,
-    ) -> Result<tonic::Response<GetPublicDkgOutputResponse>, Status> {
+        request: tonic::Request<GetPublicMpcOutputRequest>,
+    ) -> Result<tonic::Response<GetPublicMpcOutputResponse>, Status> {
         authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let internal_request = types::GetPublicDkgOutputRequest::try_from(&external_request)
+        let internal_request = types::GetPublicMpcOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let response = {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
-            mgr.handle_get_public_dkg_output_request(&internal_request)
-                .map_err(dkg_error_to_status)?
+            mgr.handle_get_public_mpc_output_request(&internal_request)
+                .map_err(|e| {
+                    tracing::warn!("get_public_mpc_output failed: {e}");
+                    mpc_error_to_status(e)
+                })?
         };
-        Ok(tonic::Response::new(GetPublicDkgOutputResponse::from(
+        Ok(tonic::Response::new(GetPublicMpcOutputResponse::from(
             &response,
         )))
     }
@@ -143,7 +154,10 @@ impl MpcService for HttpService {
             let mgr = signing_manager.read().unwrap();
             validate_epoch(mgr.epoch(), external_request.epoch)?;
             mgr.handle_get_partial_signatures_request(&internal_request)
-                .map_err(signing_error_to_status)?
+                .map_err(|e| {
+                    tracing::warn!("get_partial_signatures failed: {e}");
+                    signing_error_to_status(e)
+                })?
         };
         Ok(tonic::Response::new(GetPartialSignaturesResponse::from(
             &response,
@@ -170,6 +184,19 @@ fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Statu
     Ok(())
 }
 
+fn validate_epoch_current_or_source(
+    current_epoch: u64,
+    source_epoch: u64,
+    request_epoch: u64,
+) -> Result<(), Status> {
+    if request_epoch != current_epoch && request_epoch != source_epoch {
+        return Err(Status::failed_precondition(format!(
+            "epoch mismatch: expected {current_epoch} or {source_epoch}, got {request_epoch}"
+        )));
+    }
+    Ok(())
+}
+
 fn signing_error_to_status(err: SigningError) -> Status {
     match &err {
         SigningError::InvalidMessage { .. } => Status::invalid_argument(err.to_string()),
@@ -184,7 +211,7 @@ fn signing_error_to_status(err: SigningError) -> Status {
     }
 }
 
-fn dkg_error_to_status(err: MpcError) -> Status {
+fn mpc_error_to_status(err: MpcError) -> Status {
     use types::MpcError::*;
     match &err {
         InvalidThreshold(_) | InvalidMessage { .. } | InvalidCertificate(_) => {

@@ -165,6 +165,7 @@ impl types::RetrieveMessagesRequest {
             epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
+            batch_index: self.batch_index,
         }
     }
 }
@@ -183,6 +184,7 @@ impl TryFrom<&proto::RetrieveMessagesRequest> for types::RetrieveMessagesRequest
             dealer,
             protocol_type,
             epoch,
+            batch_index: value.batch_index,
         })
     }
 }
@@ -273,13 +275,14 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
 //
 
 impl types::ComplainRequest {
-    pub fn to_proto(&self, epoch: u64) -> proto::ComplainRequest {
+    pub fn to_proto(&self) -> proto::ComplainRequest {
         proto::ComplainRequest {
-            epoch: Some(epoch),
+            epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             share_index: self.share_index.map(|idx| idx.get() as u32),
             complaint: Some(serialize_bcs(&self.complaint)),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
+            batch_index: self.batch_index,
         }
     }
 }
@@ -288,6 +291,7 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::ComplainRequest) -> Result<Self, Self::Error> {
+        let epoch = *required(value.epoch.as_ref(), "epoch")?;
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
         let share_index = value
             .share_index
@@ -305,8 +309,10 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
         Ok(Self {
             dealer,
             share_index,
+            batch_index: value.batch_index,
             complaint,
             protocol_type,
+            epoch,
         })
     }
 }
@@ -394,32 +400,32 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
 }
 
 //
-// GetPublicDkgOutputRequest
+// GetPublicMpcOutputRequest
 //
 
-impl types::GetPublicDkgOutputRequest {
-    pub fn to_proto(&self) -> proto::GetPublicDkgOutputRequest {
-        proto::GetPublicDkgOutputRequest {
+impl types::GetPublicMpcOutputRequest {
+    pub fn to_proto(&self) -> proto::GetPublicMpcOutputRequest {
+        proto::GetPublicMpcOutputRequest {
             epoch: Some(self.epoch),
         }
     }
 }
 
-impl TryFrom<&proto::GetPublicDkgOutputRequest> for types::GetPublicDkgOutputRequest {
+impl TryFrom<&proto::GetPublicMpcOutputRequest> for types::GetPublicMpcOutputRequest {
     type Error = TryFromProtoError;
 
-    fn try_from(value: &proto::GetPublicDkgOutputRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: &proto::GetPublicMpcOutputRequest) -> Result<Self, Self::Error> {
         let epoch = required(value.epoch, "epoch")?;
         Ok(Self { epoch })
     }
 }
 
 //
-// GetPublicDkgOutputResponse
+// GetPublicMpcOutputResponse
 //
 
-impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputResponse {
-    fn from(value: &types::GetPublicDkgOutputResponse) -> Self {
+impl From<&types::GetPublicMpcOutputResponse> for proto::GetPublicMpcOutputResponse {
+    fn from(value: &types::GetPublicMpcOutputResponse) -> Self {
         Self {
             public_key: Some(serialize_bcs(&value.output.public_key)),
             commitments: value
@@ -432,10 +438,10 @@ impl From<&types::GetPublicDkgOutputResponse> for proto::GetPublicDkgOutputRespo
     }
 }
 
-impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputResponse {
+impl TryFrom<&proto::GetPublicMpcOutputResponse> for types::GetPublicMpcOutputResponse {
     type Error = TryFromProtoError;
 
-    fn try_from(value: &proto::GetPublicDkgOutputResponse) -> Result<Self, Self::Error> {
+    fn try_from(value: &proto::GetPublicMpcOutputResponse) -> Result<Self, Self::Error> {
         use fastcrypto_tbls::threshold_schnorr::G;
 
         let public_key = deserialize_bcs(
@@ -451,7 +457,7 @@ impl TryFrom<&proto::GetPublicDkgOutputResponse> for types::GetPublicDkgOutputRe
             commitments.insert(share_index, commitment_value);
         }
         Ok(Self {
-            output: types::PublicDkgOutput {
+            output: types::PublicMpcOutput {
                 public_key,
                 commitments,
             },

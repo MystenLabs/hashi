@@ -237,15 +237,22 @@ impl Hashi {
         let chain_id = self.config.sui_chain_id();
         let batch_size_per_weight =
             if let Some(override_val) = self.config.test_batch_size_per_weight {
-                assert!(
-                    chain_id != constants::SUI_MAINNET_CHAIN_ID
-                        && chain_id != constants::SUI_TESTNET_CHAIN_ID,
-                    "test_batch_size_per_weight must not be set on mainnet or testnet"
+                assert_test_only_config(
+                    chain_id,
+                    self.config.bitcoin_chain_id(),
+                    "test_batch_size_per_weight",
                 );
                 override_val
             } else {
                 BATCH_SIZE_PER_WEIGHT
             };
+        if self.config.test_corrupt_shares_for.is_some() {
+            assert_test_only_config(
+                chain_id,
+                self.config.bitcoin_chain_id(),
+                "test_corrupt_shares_for",
+            );
+        }
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
@@ -257,6 +264,7 @@ impl Hashi {
             chain_id,
             self.config.test_weight_divisor,
             batch_size_per_weight,
+            self.config.test_corrupt_shares_for,
         )?)
     }
 
@@ -483,6 +491,15 @@ impl std::fmt::Display for ServerVersion {
         f.write_str("/")?;
         f.write_str(self.version)
     }
+}
+
+fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_name: &str) {
+    assert!(
+        sui_chain_id != constants::SUI_MAINNET_CHAIN_ID
+            && sui_chain_id != constants::SUI_TESTNET_CHAIN_ID
+            && bitcoin_chain_id == constants::BITCOIN_REGTEST_CHAIN_ID,
+        "{field_name} is only allowed on regtest"
+    );
 }
 
 #[cfg(test)]

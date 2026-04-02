@@ -126,7 +126,7 @@ impl SessionId {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgOutput {
+pub struct MpcOutput {
     pub public_key: G,
     pub key_shares: avss::SharesForNode,
     pub commitments: BTreeMap<ShareIndex, G>,
@@ -134,13 +134,13 @@ pub struct DkgOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicDkgOutput {
+pub struct PublicMpcOutput {
     pub public_key: G,
     pub commitments: BTreeMap<ShareIndex, G>,
 }
 
-impl PublicDkgOutput {
-    pub fn from_dkg_output(output: &DkgOutput) -> Self {
+impl PublicMpcOutput {
+    pub fn from_mpc_output(output: &MpcOutput) -> Self {
         Self {
             public_key: output.public_key,
             commitments: output.commitments.clone(),
@@ -149,13 +149,13 @@ impl PublicDkgOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GetPublicDkgOutputRequest {
+pub struct GetPublicMpcOutputRequest {
     pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GetPublicDkgOutputResponse {
-    pub output: PublicDkgOutput,
+pub struct GetPublicMpcOutputResponse {
+    pub output: PublicMpcOutput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,7 +186,7 @@ pub struct SendMessagesResponse {
     pub signature: BLS12381Signature,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum ProtocolTypeIndicator {
     Dkg,
     KeyRotation,
@@ -198,6 +198,7 @@ pub struct RetrieveMessagesRequest {
     pub dealer: Address,
     pub protocol_type: ProtocolTypeIndicator,
     pub epoch: u64,
+    pub batch_index: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,12 +206,35 @@ pub struct RetrieveMessagesResponse {
     pub messages: Messages,
 }
 
+#[allow(clippy::large_enum_variant)]
+pub enum ReconstructionOutcome {
+    Success(MpcOutput),
+    NeedsComplaintRecovery {
+        dealer_address: Address,
+        complaint: complaint::Complaint,
+        message: avss::Message,
+        protocol_type: ProtocolTypeIndicator,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum NonceReconstructionOutcome {
+    Success(Vec<batch_avss::ReceiverOutput>),
+    NeedsComplaintRecovery {
+        dealer_address: Address,
+        complaint: complaint::Complaint,
+        batch_index: u32,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
     pub dealer: Address,
-    pub share_index: Option<ShareIndex>, // None for DKG
+    pub share_index: Option<ShareIndex>, // Only for key rotation
+    pub batch_index: Option<u32>,        // Only for nonce generation
     pub complaint: complaint::Complaint,
     pub protocol_type: ProtocolTypeIndicator,
+    pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -472,8 +472,8 @@ mod tests {
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
     use crate::mpc::types::ComplaintResponses;
-    use crate::mpc::types::GetPublicDkgOutputRequest;
-    use crate::mpc::types::GetPublicDkgOutputResponse;
+    use crate::mpc::types::GetPublicMpcOutputRequest;
+    use crate::mpc::types::GetPublicMpcOutputResponse;
     use crate::mpc::types::RetrieveMessagesRequest;
     use crate::mpc::types::RetrieveMessagesResponse;
     use crate::mpc::types::SendMessagesRequest;
@@ -541,11 +541,11 @@ mod tests {
         ) -> ChannelResult<ComplaintResponses> {
             unimplemented!()
         }
-        async fn get_public_dkg_output(
+        async fn get_public_mpc_output(
             &self,
             _: &Address,
-            _: &GetPublicDkgOutputRequest,
-        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(
@@ -592,11 +592,11 @@ mod tests {
         ) -> ChannelResult<ComplaintResponses> {
             unimplemented!()
         }
-        async fn get_public_dkg_output(
+        async fn get_public_mpc_output(
             &self,
             _: &Address,
-            _: &GetPublicDkgOutputRequest,
-        ) -> ChannelResult<GetPublicDkgOutputResponse> {
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(

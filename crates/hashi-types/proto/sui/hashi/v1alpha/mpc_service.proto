@@ -14,8 +14,8 @@ service MpcService {
   // Send complaints about invalid shares and receive correct shares.
   rpc Complain(ComplainRequest) returns (ComplainResponse);
 
-  // Get public DKG output.
-  rpc GetPublicDkgOutput(GetPublicDkgOutputRequest) returns (GetPublicDkgOutputResponse);
+  // Get public MPC output.
+  rpc GetPublicMpcOutput(GetPublicMpcOutputRequest) returns (GetPublicMpcOutputResponse);
 
   // Get a validator's signature on the reconfig completion message.
   rpc GetReconfigCompletionSignature(GetReconfigCompletionSignatureRequest) returns (GetReconfigCompletionSignatureResponse);
@@ -74,6 +74,9 @@ message RetrieveMessagesRequest {
 
   // The protocol phase whose messages are being requested.
   optional MpcProtocolType protocol_type = 3;
+
+  // For nonce generation: the batch index.
+  optional uint32 batch_index = 4;
 }
 
 message RetrieveMessagesResponse {
@@ -105,6 +108,9 @@ message ComplainRequest {
 
   // The protocol phase this complaint is for.
   optional MpcProtocolType protocol_type = 5;
+
+  // For nonce generation: the batch index.
+  optional uint32 batch_index = 6;
 }
 
 message RotationResponses {
@@ -124,12 +130,12 @@ message ComplainResponse {
   }
 }
 
-message GetPublicDkgOutputRequest {
-  // The epoch for which to retrieve the public DKG output.
+message GetPublicMpcOutputRequest {
+  // The epoch for which to retrieve the public MPC output.
   optional uint64 epoch = 1;
 }
 
-message GetPublicDkgOutputResponse {
+message GetPublicMpcOutputResponse {
   // The aggregated public key.
   optional sui.rpc.v2.Bcs public_key = 1;
 

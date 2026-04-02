@@ -1,3 +1,6 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use crate::communication::ChannelResult;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -27,6 +30,15 @@ const TEST_ALLOWED_DELTA: u16 = 0;
 const TEST_WEIGHT_DIVISOR: u16 = 1;
 const TEST_CHAIN_ID: &str = "testchain";
 const TEST_BATCH_SIZE_PER_WEIGHT: u16 = 50;
+
+fn unwrap_reconstruction_success(outcome: ReconstructionOutcome) -> MpcOutput {
+    match outcome {
+        ReconstructionOutcome::Success(output) => output,
+        ReconstructionOutcome::NeedsComplaintRecovery { dealer_address, .. } => {
+            panic!("Expected Success, got NeedsComplaintRecovery for dealer {dealer_address}")
+        }
+    }
+}
 
 struct MockPublicMessagesStore;
 
@@ -78,6 +90,15 @@ impl PublicMessagesStore for MockPublicMessagesStore {
         _message: &batch_avss::Message,
     ) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
     }
 
     fn list_nonce_messages(
@@ -267,6 +288,7 @@ impl TestSetup {
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
+            None, // test_corrupt_shares_for
         )
         .unwrap()
     }
@@ -431,11 +453,11 @@ impl P2PChannel for MockP2PChannel {
         Ok(response)
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         party: &Address,
-        request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
         let managers = self.managers.lock().unwrap();
         let manager = managers.get(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -444,7 +466,7 @@ impl P2PChannel for MockP2PChannel {
             ))
         })?;
         let response = manager
-            .handle_get_public_dkg_output_request(request)
+            .handle_get_public_mpc_output_request(request)
             .map_err(|e| {
                 crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
@@ -583,11 +605,11 @@ impl P2PChannel for FailingP2PChannel {
         ))
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -654,12 +676,12 @@ impl P2PChannel for SucceedingP2PChannel {
         unimplemented!("SucceedingP2PChannel does not implement complain")
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        unimplemented!("SucceedingP2PChannel does not implement get_public_dkg_output")
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("SucceedingP2PChannel does not implement get_public_mpc_output")
     }
 
     async fn get_partial_signatures(
@@ -747,12 +769,12 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         unimplemented!("PartiallyFailingP2PChannel does not implement complain")
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        unimplemented!("PartiallyFailingP2PChannel does not implement get_public_dkg_output")
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("PartiallyFailingP2PChannel does not implement get_public_mpc_output")
     }
 
     async fn get_partial_signatures(
@@ -809,12 +831,12 @@ impl P2PChannel for PreCollectedP2PChannel {
             .ok_or_else(|| crate::communication::ChannelError::RequestFailed("No response".into()))
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         _party: &Address,
-        _request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
-        unimplemented!("PreCollectedP2PChannel does not implement get_public_dkg_output")
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("PreCollectedP2PChannel does not implement get_public_mpc_output")
     }
 
     async fn get_partial_signatures(
@@ -879,6 +901,7 @@ fn test_mpc_manager_new_from_committee_set() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .expect("Should create manager from CommitteeSet");
 
@@ -941,6 +964,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     );
 
     let err = match result {
@@ -1067,6 +1091,15 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         Ok(())
     }
 
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(self.nonce_stored.get(&(batch_index, *dealer)).cloned())
+    }
+
     fn list_nonce_messages(
         &self,
         batch_index: u32,
@@ -1130,6 +1163,15 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         _message: &batch_avss::Message,
     ) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("Storage failure"))
+    }
+
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
     }
 
     fn list_nonce_messages(
@@ -2319,7 +2361,7 @@ fn create_weight_based_test_certificate(
 async fn setup_party_and_run(
     test_setup: &WeightBasedTestSetup,
     party_index: usize,
-) -> (MpcResult<DkgOutput>, MockOrderedBroadcastChannel) {
+) -> (MpcResult<MpcOutput>, MockOrderedBroadcastChannel) {
     let party_addr = test_setup.setup.address(party_index);
 
     let mut party_manager = test_setup.setup.create_manager(party_index);
@@ -2848,6 +2890,7 @@ async fn test_handle_retrieve_messages_request_success() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: dealer_manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = dealer_manager
         .handle_retrieve_messages_request(&request)
@@ -2871,6 +2914,7 @@ async fn test_handle_retrieve_messages_request_message_not_available() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: dealer_manager.dkg_config.epoch,
+        batch_index: None,
     };
     let result = dealer_manager.handle_retrieve_messages_request(&request);
 
@@ -2903,6 +2947,7 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
 
@@ -2940,6 +2985,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
     assert!(
@@ -2949,7 +2995,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
 }
 
 #[test]
-fn test_handle_retrieve_messages_request_nonce_no_db_fallback() {
+fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let dealer_address = setup.address(0);
@@ -2964,15 +3010,19 @@ fn test_handle_retrieve_messages_request_nonce_no_db_fallback() {
         .unwrap();
     assert!(!manager.nonce_messages.contains_key(&dealer_address));
 
-    // Should return NotFound — DB is NOT consulted for nonce gen.
+    // DB fallback should serve nonce gen messages when batch_index is provided.
     let result = manager.handle_retrieve_messages_request(&RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: manager.dkg_config.epoch,
+        batch_index: Some(0),
     });
-    assert!(
-        matches!(result.unwrap_err(), MpcError::NotFound(_)),
-        "nonce gen must not fall back to DB"
+    let response = result.expect("nonce gen should fall back to DB when batch_index is provided");
+    let expected_hash = compute_messages_hash(&Messages::NonceGeneration(nonce_msg));
+    let received_hash = compute_messages_hash(&response.messages);
+    assert_eq!(
+        received_hash, expected_hash,
+        "DB fallback should serve the correct nonce message"
     );
 }
 
@@ -2990,8 +3040,10 @@ fn test_handle_complain_request_no_message_from_dealer() {
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index: None,
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch: manager.dkg_config.epoch,
     };
 
     // Manager has no message from this dealer
@@ -2999,12 +3051,12 @@ fn test_handle_complain_request_no_message_from_dealer() {
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, MpcError::ProtocolFailed(_)));
+    assert!(matches!(err, MpcError::NotFound(_)));
     assert!(err.to_string().contains("No message from dealer"));
 }
 
 #[test]
-fn test_handle_complain_request_no_shares_for_dealer() {
+fn test_handle_complain_request_rederives_output_rejects_invalid_proof() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let (dealer_address, dealer_messages, complaint) =
@@ -3022,18 +3074,19 @@ fn test_handle_complain_request_no_shares_for_dealer() {
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index: None,
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch: manager.dkg_config.epoch,
     };
 
-    // Manager has message but no output for the share
+    // Manager has message but no output — the handler re-derives the output
+    // from the message (cross-epoch fallback). The complaint proof was generated
+    // with a wrong key and doesn't match the re-derived output, so
+    // handle_complaint correctly rejects it.
     let result = manager.handle_complain_request(&request);
-
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, MpcError::ProtocolFailed(_)));
-    // DKG error message uses "dealer" not "share"
-    assert!(err.to_string().contains("No output for complained dealer"));
+    assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
 
 #[test]
@@ -3079,8 +3132,10 @@ fn test_handle_complain_request_caches_response() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: None,
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch: party2_manager.dkg_config.epoch,
     };
 
     // First call - should compute and cache
@@ -3091,7 +3146,7 @@ fn test_handle_complain_request_caches_response() {
     assert!(
         party2_manager
             .complaint_responses
-            .contains_key(&dealer_addr)
+            .contains_key(&(dealer_addr, ProtocolTypeIndicator::Dkg))
     );
 
     // Second call - should return cached response
@@ -3160,6 +3215,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         &dealer_addr,
         signer_addresses,
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 
@@ -3237,6 +3293,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         &dealer_addr,
         signer_addresses,
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 
@@ -3296,9 +3353,14 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Call recover_shares_via_complaint - should fail because no complaint exists
-    let result =
-        MpcManager::recover_shares_via_complaint(&party_manager, &dealer_addr, signers, &mock_p2p)
-            .await;
+    let result = MpcManager::recover_shares_via_complaint(
+        &party_manager,
+        &dealer_addr,
+        signers,
+        &mock_p2p,
+        setup.epoch(),
+    )
+    .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -3340,6 +3402,7 @@ async fn test_recover_shares_via_complaint_p2p_failure() {
         &dealer_addr,
         signer_addresses,
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 
@@ -3403,6 +3466,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         &dealer_addr,
         signer_addresses,
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 
@@ -3463,6 +3527,7 @@ async fn test_recover_shares_via_complaint_no_dealer_message() {
         &dealer_addr,
         vec![Address::new([2; 32])],
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 }
@@ -3513,8 +3578,10 @@ async fn test_recover_shares_via_complaint_crypto_error() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch: party_manager.dkg_config.epoch,
     };
 
     let resp3 = mgr3.handle_complain_request(&request).unwrap();
@@ -3546,6 +3613,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
         &dealer_addr,
         vec![addr3, addr4],
         &p2p,
+        setup.epoch(),
     )
     .await;
 
@@ -4227,6 +4295,7 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
         dealer: dealer_addr,
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: receiver_manager.dkg_config.epoch,
+        batch_index: None,
     };
     let retrieve_response = receiver_manager
         .handle_retrieve_messages_request(&retrieve_request)
@@ -4424,6 +4493,15 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         Ok(())
     }
 
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
+    }
+
     fn list_nonce_messages(
         &self,
         _batch_index: u32,
@@ -4448,12 +4526,12 @@ impl TrackingP2PChannel {
 }
 
 #[async_trait::async_trait]
-impl crate::communication::P2PChannel for TrackingP2PChannel {
+impl P2PChannel for TrackingP2PChannel {
     async fn send_messages(
         &self,
         recipient: &Address,
         request: &SendMessagesRequest,
-    ) -> crate::communication::ChannelResult<SendMessagesResponse> {
+    ) -> ChannelResult<SendMessagesResponse> {
         self.inner.send_messages(recipient, request).await
     }
 
@@ -4461,7 +4539,7 @@ impl crate::communication::P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> crate::communication::ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<RetrieveMessagesResponse> {
         self.retrieve_count.fetch_add(1, Ordering::SeqCst);
         self.inner.retrieve_messages(party, request).await
     }
@@ -4470,23 +4548,23 @@ impl crate::communication::P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> crate::communication::ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponses> {
         self.inner.complain(party, request).await
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         party: &Address,
-        request: &GetPublicDkgOutputRequest,
-    ) -> crate::communication::ChannelResult<GetPublicDkgOutputResponse> {
-        self.inner.get_public_dkg_output(party, request).await
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        self.inner.get_public_mpc_output(party, request).await
     }
 
     async fn get_partial_signatures(
         &self,
         _party: &Address,
         _request: &GetPartialSignaturesRequest,
-    ) -> crate::communication::ChannelResult<GetPartialSignaturesResponse> {
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
         unimplemented!("TrackingP2PChannel does not implement get_partial_signatures")
     }
 }
@@ -4768,7 +4846,7 @@ impl RotationTestSetup {
     }
 
     /// Creates a manager that has completed DKG and is ready for rotation.
-    fn create_receiver_with_completed_dkg(&self, receiver_index: usize) -> (MpcManager, DkgOutput) {
+    fn create_receiver_with_completed_dkg(&self, receiver_index: usize) -> (MpcManager, MpcOutput) {
         let mut receiver_manager = self.setup.create_manager(receiver_index);
 
         // Process all dealer messages
@@ -4795,7 +4873,7 @@ impl RotationTestSetup {
     /// Creates a manager with InMemoryPublicMessagesStore and completed DKG.
     /// The store contains all dealer messages for later reconstruction.
     /// The manager is ready for rotation (outputs cleared after DKG completion).
-    fn create_receiver_with_memory_store(&self, receiver_index: usize) -> (MpcManager, DkgOutput) {
+    fn create_receiver_with_memory_store(&self, receiver_index: usize) -> (MpcManager, MpcOutput) {
         let mut receiver_manager = self.setup.create_manager_with_store(
             receiver_index,
             Box::new(InMemoryPublicMessagesStore::new()),
@@ -4824,7 +4902,7 @@ impl RotationTestSetup {
 
     /// Creates a rotation dealer that has completed DKG and generates rotation messages.
     /// The manager is ready for rotation (outputs cleared after DKG completion).
-    fn create_rotation_dealer(&self, dealer_index: usize) -> (MpcManager, DkgOutput, Messages) {
+    fn create_rotation_dealer(&self, dealer_index: usize) -> (MpcManager, MpcOutput, Messages) {
         let mut rng = rand::thread_rng();
         let mut dealer_manager = self.setup.create_manager(dealer_index);
 
@@ -4862,7 +4940,7 @@ impl RotationTestSetup {
     fn create_rotation_dealer_with_memory_store(
         &self,
         dealer_index: usize,
-    ) -> (MpcManager, DkgOutput, Messages) {
+    ) -> (MpcManager, MpcOutput, Messages) {
         let mut rng = rand::thread_rng();
         let mut dealer_manager = self
             .setup
@@ -5756,6 +5834,7 @@ async fn test_prepare_previous_output_for_new_member() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
@@ -5883,7 +5962,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
 
     // Create rotation dealers with KeyRotation session ID.
     let dealer_indices = [0usize, 1, 4];
-    let mut dealers: Vec<(usize, MpcManager, DkgOutput)> = dealer_indices
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
@@ -6277,6 +6356,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         &test_dkg_output,
         signers,
         &mock_p2p,
+        rotation_setup.setup.epoch(),
     )
     .await;
 
@@ -6402,8 +6482,10 @@ fn test_handle_complain_request_success() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: responder_manager.dkg_config.epoch,
     };
 
     // Handle the complaint request
@@ -6434,7 +6516,7 @@ fn test_handle_complain_request_success() {
     assert!(
         responder_manager
             .complaint_responses
-            .contains_key(&dealer_addr),
+            .contains_key(&(dealer_addr, ProtocolTypeIndicator::KeyRotation)),
         "Response should be cached"
     );
 }
@@ -6513,6 +6595,18 @@ impl PublicMessagesStore for SharedMemoryStore {
             .lock()
             .unwrap()
             .store_nonce_message(batch_index, dealer, message)
+    }
+
+    fn get_nonce_message(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get_nonce_message(epoch, batch_index, dealer)
     }
 
     fn list_nonce_messages(
@@ -6875,6 +6969,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
@@ -6892,9 +6987,11 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
 
     // This would panic with "index out of bounds: the len is 5 but the index is 5"
     // if previous committee parameters were not used for decryption.
-    let reconstructed = manager
-        .reconstruct_from_dkg_certificates(&certificates)
-        .unwrap();
+    let reconstructed = unwrap_reconstruction_success(
+        manager
+            .reconstruct_from_dkg_certificates(&certificates)
+            .unwrap(),
+    );
 
     // Verify the reconstructed output matches the original DKG
     assert_eq!(
@@ -7034,15 +7131,18 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
     // Pass all 4 certificates. Without the threshold fix, this would use all 4
     // dealers and produce key_all. With the fix, it stops at threshold (2 dealers)
     // and produces key_threshold.
-    let reconstructed = manager
-        .reconstruct_from_dkg_certificates(&certificates)
-        .unwrap();
+    let reconstructed = unwrap_reconstruction_success(
+        manager
+            .reconstruct_from_dkg_certificates(&certificates)
+            .unwrap(),
+    );
 
     assert_eq!(
         reconstructed.public_key, key_threshold,
@@ -7111,6 +7211,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
+            None, // test_corrupt_shares_for
         )
         .unwrap();
         dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
@@ -7141,6 +7242,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
+            None, // test_corrupt_shares_for
         )
         .unwrap();
         other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
@@ -7227,6 +7329,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
+        None, // test_corrupt_shares_for
     )
     .unwrap();
 
@@ -7245,9 +7348,11 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     let previous_threshold = manager.previous_threshold.unwrap();
 
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
-    let reconstructed = manager
-        .reconstruct_from_rotation_certificates(&rotation_certificates, previous_threshold)
-        .unwrap();
+    let reconstructed = unwrap_reconstruction_success(
+        manager
+            .reconstruct_from_rotation_certificates(&rotation_certificates, previous_threshold)
+            .unwrap(),
+    );
 
     // Verify the reconstructed output has valid data
     assert_eq!(
@@ -7506,6 +7611,7 @@ fn retrieve_and_verify_hash(
         dealer: dealer_address,
         protocol_type,
         epoch: manager.dkg_config.epoch,
+        batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
     assert_eq!(
@@ -7525,13 +7631,15 @@ fn complain_and_assert_no_message(
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index,
+        batch_index: None,
         complaint,
         protocol_type,
+        epoch: manager.dkg_config.epoch,
     };
     let result = manager.handle_complain_request(&request);
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, MpcError::ProtocolFailed(_)));
+    assert!(matches!(err, MpcError::NotFound(_)));
     assert!(
         err.to_string().contains("No message from dealer"),
         "Expected 'No message from dealer', got: {}",
@@ -7676,7 +7784,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
 }
 
 #[test]
-fn test_handle_complain_request_rotation_no_output() {
+fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof() {
     let rotation_setup = RotationTestSetup::new();
     let mut rng = rand::thread_rng();
 
@@ -7725,18 +7833,17 @@ fn test_handle_complain_request_rotation_no_output() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(share_index),
+        batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: receiver.dkg_config.epoch,
     };
+    // Handler re-derives the output from the message (cross-epoch fallback).
+    // The complaint proof was generated with a wrong key and doesn't match
+    // the re-derived output, so handle_complaint correctly rejects it.
     let result = receiver.handle_complain_request(&request);
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, MpcError::ProtocolFailed(_)));
-    assert!(
-        err.to_string().contains("No output for complained share"),
-        "Expected 'No output for complained share', got: {}",
-        err
-    );
+    assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
 
 #[test]
@@ -7820,8 +7927,10 @@ fn test_handle_complain_request_rotation_caches_response() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
+        batch_index: None,
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: responder.dkg_config.epoch,
     };
 
     // First call computes and caches
@@ -7936,7 +8045,7 @@ fn test_handle_complain_request_nonce_no_message_from_dealer() {
 }
 
 #[test]
-fn test_handle_complain_request_nonce_no_output() {
+fn test_handle_complain_request_nonce_rederives_output_rejects_invalid_proof() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
 
@@ -7955,19 +8064,17 @@ fn test_handle_complain_request_nonce_no_output() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: Some(0),
         complaint,
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: receiver.dkg_config.epoch,
     };
+    // Handler re-derives the output from the message (fallback).
+    // The complaint proof was generated with a wrong key and doesn't match
+    // the re-derived output, so handle_complaint correctly rejects it.
     let result = receiver.handle_complain_request(&request);
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, MpcError::ProtocolFailed(_)));
-    assert!(
-        err.to_string()
-            .contains("No nonce output for complained dealer"),
-        "Expected nonce output error, got: {}",
-        err
-    );
+    assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
 
 #[test]
@@ -8017,14 +8124,20 @@ fn test_handle_complain_request_nonce_caches_response() {
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
+        batch_index: Some(0),
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: party2.dkg_config.epoch,
     };
 
     // First call → computes and caches
     let response1 = party2.handle_complain_request(&request).unwrap();
     assert_eq!(party2.complaint_responses.len(), 1);
-    assert!(party2.complaint_responses.contains_key(&dealer_addr));
+    assert!(
+        party2
+            .complaint_responses
+            .contains_key(&(dealer_addr, ProtocolTypeIndicator::NonceGeneration))
+    );
 
     // Second call → returns cached
     let response2 = party2.handle_complain_request(&request).unwrap();
@@ -8493,6 +8606,7 @@ async fn test_recover_nonce_shares_via_complaint() {
         &dealer_addr,
         signers,
         &mock_p2p,
+        setup.epoch(),
     )
     .await;
 

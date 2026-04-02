@@ -12,8 +12,8 @@ use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
-use crate::mpc::types::GetPublicDkgOutputRequest;
-use crate::mpc::types::GetPublicDkgOutputResponse;
+use crate::mpc::types::GetPublicMpcOutputRequest;
+use crate::mpc::types::GetPublicMpcOutputResponse;
 use crate::mpc::types::RetrieveMessagesRequest;
 use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::SendMessagesRequest;
@@ -128,27 +128,23 @@ impl Client {
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
-    pub async fn complain(
-        &self,
-        epoch: u64,
-        request: &ComplainRequest,
-    ) -> Result<ComplaintResponses> {
-        let proto_request = request.to_proto(epoch);
+    pub async fn complain(&self, request: &ComplainRequest) -> Result<ComplaintResponses> {
+        let proto_request = request.to_proto();
         let response = self.mpc_service_client().complain(proto_request).await?;
         ComplaintResponses::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
-    pub async fn get_public_dkg_output(
+    pub async fn get_public_mpc_output(
         &self,
-        request: &GetPublicDkgOutputRequest,
-    ) -> Result<GetPublicDkgOutputResponse> {
+        request: &GetPublicMpcOutputRequest,
+    ) -> Result<GetPublicMpcOutputResponse> {
         let proto_request = request.to_proto();
         let response = self
             .mpc_service_client()
-            .get_public_dkg_output(proto_request)
+            .get_public_mpc_output(proto_request)
             .await?;
-        GetPublicDkgOutputResponse::try_from(response.get_ref())
+        GetPublicMpcOutputResponse::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 

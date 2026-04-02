@@ -139,6 +139,13 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
+        self.hashi_builder = self
+            .hashi_builder
+            .with_corrupt_shares_target(target_node_index);
+        self
+    }
+
     pub fn with_full_voting_power(mut self) -> Self {
         self.hashi_builder = self.hashi_builder.with_full_voting_power();
         self
@@ -1266,6 +1273,319 @@ mod tests {
         }
 
         assert_eq!(signing_manager.read().unwrap().batch_index(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_complaint_recovery() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .with_corrupt_shares_target(0) // all others corrupt shares for node 0
+            .build()
+            .await?;
+
+        // 1. DKG with complaint recovery
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        assert_nodes_agree_on_mpc_key(nodes);
+
+        // 2. Sign to verify nonce generation presigs (built via in-memory complaint recovery) work
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(nodes, b"complaint test", epoch, request_id, 0).await;
+        assert_all_signatures_match(results);
+
+        // 3. First rotation — reconstruct_previous_output hits corrupted DKG
+        //    messages → DKG reconstruction complaint recovery via RPC →
+        //    rotation dealers also corrupted → complaint recovery → key preserved
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+
+        // 4. Second rotation — reconstruct_previous_output hits corrupted
+        //    rotation messages → rotation reconstruction complaint recovery
+        force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_nonce_generation_complaint_recovery_after_restart() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .with_corrupt_shares_target(0)
+            .build()
+            .await?;
+
+        // 1. DKG + nonce gen with complaint recovery
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        // 2. Restart — recover_presigning_state hits corrupted nonce messages
+        //    in DB → nonce gen complaint recovery via RPC
+        test_networks.hashi_network_mut().restart().await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} MPC recovery after restart failed: {e}"));
+        }
+
+        // 3. Sign to verify presigs recovered via nonce gen complaint recovery work
+        let nodes = test_networks.hashi_network().nodes();
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(nodes, b"post-restart", epoch, request_id, 0).await;
+        assert_all_signatures_match(results);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rotation_reconstruction_complaint_recovery_after_restart() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .with_corrupt_shares_target(0)
+            .build()
+            .await?;
+
+        // 1. DKG + first rotation with complaint recovery
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+
+        // 2. Restart — clears dealer_outputs from memory
+        test_networks.hashi_network_mut().restart().await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(ROTATION_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} MPC recovery after restart failed: {e}"));
+        }
+
+        // 3. Second rotation — reconstruct_from_rotation_certificates hits
+        //    corrupted rotation messages from the first rotation → complaint
+        //    recovery via RPC
+        force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_node_2_epochs_behind_rejoins_before_rotation() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // 1. DKG completes on all nodes
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        assert_nodes_agree_on_mpc_key(nodes);
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+
+        // 2. Shut down node 0
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .shutdown()
+            .await;
+
+        // 3. Force 2 epoch changes — nodes 1,2,3 rotate without node 0
+        test_networks.sui_network.force_close_epoch().await.unwrap();
+        wait_for_rotation(
+            &test_networks.hashi_network().nodes()[1..],
+            initial_epoch + 1,
+        )
+        .await;
+
+        test_networks.sui_network.force_close_epoch().await.unwrap();
+        wait_for_rotation(
+            &test_networks.hashi_network().nodes()[1..],
+            initial_epoch + 2,
+        )
+        .await;
+
+        // 4. Start node 0 and wait for it to initialize before triggering rotation.
+        //    Node 0 needs its gRPC server ready to receive SendMessages RPCs
+        //    during the next rotation's dealer phase.
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .start()
+            .await?;
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_mpc_key(ROTATION_TIMEOUT)
+            .await
+            .ok(); // May fail (no shares yet) — that's expected, we just need the server up
+
+        // 5. Force a 3rd epoch change — node 0 joins this rotation as a new
+        //    member (reconstruction fails for stale epoch data, falls back to
+        //    fetching public output from quorum, then gets fresh shares)
+        test_networks.sui_network.force_close_epoch().await.unwrap();
+        let nodes = test_networks.hashi_network().nodes();
+        let epoch_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_epoch(initial_epoch + 3, ROTATION_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(epoch_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| {
+                panic!("Node {i} failed to reach epoch {}: {e}", initial_epoch + 3)
+            });
+        }
+
+        // 6. All nodes agree on key (node 0 got shares from rotation)
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_node_2_epochs_behind_rejoins_after_rotation() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // 1. DKG completes on all nodes
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        assert_nodes_agree_on_mpc_key(nodes);
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+
+        // 2. Shut down node 0
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .shutdown()
+            .await;
+
+        // 3. Force 3 epoch changes — nodes 1,2,3 rotate without node 0
+        for target in 1..=3 {
+            test_networks.sui_network.force_close_epoch().await.unwrap();
+            wait_for_rotation(
+                &test_networks.hashi_network().nodes()[1..],
+                initial_epoch + target,
+            )
+            .await;
+        }
+
+        // 4. Start node 0 AFTER all rotations are done — must recover via
+        //    reconstruct from certs + new-member fallback
+        test_networks.hashi_network_mut().nodes_mut()[0]
+            .start()
+            .await?;
+
+        // 5. Force one more rotation so node 0 can participate and get shares
+        test_networks.sui_network.force_close_epoch().await.unwrap();
+        let nodes = test_networks.hashi_network().nodes();
+        let epoch_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_epoch(initial_epoch + 4, ROTATION_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(epoch_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| {
+                panic!("Node {i} failed to reach epoch {}: {e}", initial_epoch + 4)
+            });
+        }
+
+        // 6. All nodes agree on key
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
         Ok(())
     }
 }

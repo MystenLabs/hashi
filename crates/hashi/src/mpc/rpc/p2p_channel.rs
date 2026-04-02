@@ -9,8 +9,8 @@ use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
-use crate::mpc::types::GetPublicDkgOutputRequest;
-use crate::mpc::types::GetPublicDkgOutputResponse;
+use crate::mpc::types::GetPublicMpcOutputRequest;
+use crate::mpc::types::GetPublicMpcOutputResponse;
 use crate::mpc::types::RetrieveMessagesRequest;
 use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::SendMessagesRequest;
@@ -72,18 +72,18 @@ impl P2PChannel for RpcP2PChannel {
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses> {
         self.get_client(party)?
-            .complain(self.epoch, request)
+            .complain(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
-    async fn get_public_dkg_output(
+    async fn get_public_mpc_output(
         &self,
         party: &Address,
-        request: &GetPublicDkgOutputRequest,
-    ) -> ChannelResult<GetPublicDkgOutputResponse> {
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
         self.get_client(party)?
-            .get_public_dkg_output(request)
+            .get_public_mpc_output(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
