@@ -4,6 +4,7 @@
 use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
 use crate::leader::RetryPolicy;
+use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use anyhow::Context;
 use anyhow::anyhow;
@@ -105,7 +106,7 @@ impl Hashi {
         Ok(())
     }
 
-    /// Validate that the deposit requests exists on Sui
+    /// Validate that the deposit request exists on Sui
     fn validate_deposit_request_on_sui(
         &self,
         deposit_request: &DepositRequest,
@@ -115,13 +116,13 @@ impl Hashi {
         match deposit_queue.requests().get(&deposit_request.id) {
             None => {
                 return Err(DepositValidationError::NeverRetry(anyhow!(
-                    "Invalid deposit request state on Sui"
+                    "Deposit request not found on Sui"
                 )));
             }
             Some(onchain_request) => {
                 if onchain_request != deposit_request {
                     return Err(DepositValidationError::NeverRetry(anyhow!(
-                        "Invalid deposit request state on Sui"
+                        "Deposit request fields do not match on-chain state"
                     )));
                 }
             }
@@ -300,8 +301,13 @@ impl Hashi {
             .ok_or_else(|| anyhow!("No protocol private key configured"))?;
         let public_key_bytes = private_key.public_key().as_bytes().to_vec().into();
 
+        let message = DepositConfirmationMessage {
+            request_id: deposit_request.id,
+            utxo: deposit_request.utxo.clone(),
+        };
+
         let signature_bytes = private_key
-            .sign(epoch, validator_address, deposit_request)
+            .sign(epoch, validator_address, &message)
             .signature()
             .as_bytes()
             .to_vec()

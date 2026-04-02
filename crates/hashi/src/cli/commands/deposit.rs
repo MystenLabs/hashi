@@ -373,7 +373,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                             "vout": dep.utxo.id.vout,
                         },
                         "status": "pending",
-                        "caller": dep.requester_address.to_string(),
+                        "caller": dep.sender.to_string(),
                         "requested_ms": dep.timestamp_ms,
                     })
                 })
@@ -406,15 +406,14 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 for dep in &deposits {
                     let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
                     let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-                    let txid_str = txid.to_string();
                     println!(
                         "  {:<20} {:<14} {}:{:<3} {:<10} {:<20} {}",
                         display::format_address_full(&dep.id),
                         dep.utxo.amount,
-                        txid_str,
+                        txid,
                         dep.utxo.id.vout,
                         "Pending".yellow(),
-                        display::format_address_full(&dep.requester_address),
+                        display::format_address_full(&dep.sender),
                         display::format_timestamp(dep.timestamp_ms)
                     );
                 }

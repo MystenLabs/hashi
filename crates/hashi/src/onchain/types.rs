@@ -541,6 +541,7 @@ pub struct Treasury {
 pub struct DepositRequestQueue {
     pub(super) id: Address,
     pub(super) requests: BTreeMap<Address, DepositRequest>,
+    pub(super) processed_id: Address,
 }
 
 impl DepositRequestQueue {
@@ -550,6 +551,10 @@ impl DepositRequestQueue {
 
     pub fn requests(&self) -> &BTreeMap<Address, DepositRequest> {
         &self.requests
+    }
+
+    pub fn processed_id(&self) -> &Address {
+        &self.processed_id
     }
 }
 
@@ -636,13 +641,21 @@ pub struct OutputUtxo {
     pub bitcoin_address: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DepositRequest {
     pub id: Address,
-    pub utxo: Utxo,
+    pub sender: Address,
     pub timestamp_ms: u64,
-    pub requester_address: Address,
     pub sui_tx_digest: Digest,
+    pub utxo: Utxo,
+}
+
+/// Message signed by the committee to confirm a deposit.
+/// Mirrors Move `deposit::DepositConfirmationMessage`.
+#[derive(Clone, Debug, serde_derive::Serialize)]
+pub struct DepositConfirmationMessage {
+    pub request_id: Address,
+    pub utxo: Utxo,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]

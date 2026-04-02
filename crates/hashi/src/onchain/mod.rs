@@ -649,7 +649,7 @@ async fn scrape_hashi(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
-        scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue.requests.id),
+        scrape_deposit_requests(client.clone(), &bitcoin_state.deposit_queue),
         scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
         scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
         scrape_proposals(client.clone(), proposals),
@@ -1005,8 +1005,9 @@ fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381Public
 
 async fn scrape_deposit_requests(
     client: Client,
-    deposit_queue_id: Address,
+    deposit_queue: &move_types::DepositRequestQueue,
 ) -> Result<types::DepositRequestQueue> {
+    let deposit_queue_id = deposit_queue.requests.id;
     let requests: BTreeMap<Address, types::DepositRequest> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
@@ -1027,20 +1028,19 @@ async fn scrape_deposit_requests(
         .map_ok(
             |move_types::DepositRequest {
                  id,
-                 utxo,
+                 sender,
                  timestamp_ms,
-                 requester_address,
                  sui_tx_digest,
+                 utxo,
              }| {
-                let utxo = convert_move_utxo(utxo);
                 (
                     id,
                     types::DepositRequest {
                         id,
-                        utxo,
+                        sender,
                         timestamp_ms,
-                        requester_address,
                         sui_tx_digest,
+                        utxo: convert_move_utxo(utxo),
                     },
                 )
             },
@@ -1051,6 +1051,7 @@ async fn scrape_deposit_requests(
     let deposit_requests = types::DepositRequestQueue {
         id: deposit_queue_id,
         requests,
+        processed_id: deposit_queue.processed.id,
     };
 
     Ok(deposit_requests)
