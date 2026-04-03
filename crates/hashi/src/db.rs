@@ -92,6 +92,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn latest_encryption_key_epoch(&self) -> Result<Option<u64>> {
+        let mut latest: Option<u64> = None;
+        for guard in self.encryption_keys.iter() {
+            let key = guard.key()?;
+            if let Ok(bytes) = <[u8; 8]>::try_from(key.as_ref()) {
+                let epoch = u64::from_be_bytes(bytes);
+                latest = Some(latest.map_or(epoch, |l: u64| l.max(epoch)));
+            }
+        }
+        Ok(latest)
+    }
+
     pub fn get_encryption_key(&self, epoch: u64) -> Result<Option<EncryptionPrivateKey>> {
         let key = epoch.to_be_bytes();
         let bytes = match self.encryption_keys.get(key) {
@@ -471,6 +483,31 @@ mod tests {
         assert!(db.get_encryption_key(3).unwrap().is_none()); // deleted
         assert_eq!(key4, db.get_encryption_key(4).unwrap().unwrap());
         assert_eq!(key5, db.get_encryption_key(5).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_latest_encryption_key_epoch() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // Empty DB returns None
+        assert!(db.latest_encryption_key_epoch().unwrap().is_none());
+
+        // Single key
+        let key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        db.store_encryption_key(5, &key).unwrap();
+        assert_eq!(db.latest_encryption_key_epoch().unwrap(), Some(5));
+
+        // Two keys — returns the latest
+        let key2 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        db.store_encryption_key(8, &key2).unwrap();
+        assert_eq!(db.latest_encryption_key_epoch().unwrap(), Some(8));
+
+        // After cleanup (store epoch 10 cleans up epoch 5), still returns latest
+        let key3 = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        db.store_encryption_key(10, &key3).unwrap();
+        assert_eq!(db.latest_encryption_key_epoch().unwrap(), Some(10));
+        assert!(db.get_encryption_key(5).unwrap().is_none());
     }
 
     #[test]

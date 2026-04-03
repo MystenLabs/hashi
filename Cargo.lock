@@ -3163,6 +3163,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "internal-tools"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fastcrypto",
+ "fastcrypto-tbls",
+ "hashi",
+ "hashi-types",
+ "hex",
+ "rand 0.8.5",
+ "sui-sdk-types",
+ "tokio",
+ "toml",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "interval-heap"
 version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
