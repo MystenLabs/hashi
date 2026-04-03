@@ -3,7 +3,6 @@
 
 use anyhow::Context;
 use bitcoin::Txid;
-use bitcoincore_rpc::RpcApi;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use tracing::debug;
 use tracing::warn;
@@ -11,16 +10,21 @@ use tracing::warn;
 use crate::config::Config;
 
 pub struct BtcRpcClient {
-    client: bitcoincore_rpc::Client,
+    client: corepc_client::client_sync::v29::Client,
 }
 
 impl BtcRpcClient {
     pub fn new(cfg: &Config) -> anyhow::Result<Self> {
-        let client = bitcoincore_rpc::Client::new(
-            &cfg.btc.rpc_url,
-            cfg.btc.rpc_auth.to_bitcoincore_rpc_auth(),
-        )
-        .with_context(|| format!("failed to connect to bitcoin rpc at {}", cfg.btc.rpc_url))?;
+        let auth = cfg.btc.rpc_auth.to_corepc_auth();
+        let client = match auth {
+            corepc_client::client_sync::Auth::None => {
+                corepc_client::client_sync::v29::Client::new(&cfg.btc.rpc_url)
+            }
+            auth => corepc_client::client_sync::v29::Client::new_with_auth(&cfg.btc.rpc_url, auth)
+                .with_context(|| {
+                    format!("failed to connect to bitcoin rpc at {}", cfg.btc.rpc_url)
+                })?,
+        };
         Ok(Self { client })
     }
 
@@ -31,7 +35,7 @@ impl BtcRpcClient {
     /// - `Err(...)` for all other errors
     pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<UnixSeconds>> {
         // Note: rpc returns Ok(...) even for unconfirmed txid in the mempool.
-        let tx_info = match self.client.get_raw_transaction_info(&txid, None) {
+        let tx_info = match self.client.get_raw_transaction_verbose(txid) {
             Ok(tx_info) => tx_info,
             Err(e) if txid_not_found(&e) => {
                 debug!(%txid, "bitcoin tx not found in mempool or chain yet");
@@ -43,14 +47,18 @@ impl BtcRpcClient {
             }
         };
 
-        let Some(block_hash) = tx_info.blockhash else {
+        let Some(block_hash_hex) = tx_info.block_hash else {
             debug!(%txid, "bitcoin tx found but not mined yet");
             return Ok(None);
         };
 
+        let block_hash: bitcoin::BlockHash = block_hash_hex
+            .parse()
+            .with_context(|| format!("failed to parse block hash '{}'", block_hash_hex))?;
+
         let block_header = self
             .client
-            .get_block_header_info(&block_hash)
+            .get_block_header_verbose(&block_hash)
             .with_context(|| format!("failed to fetch block header for {}", block_hash))?;
 
         let block_time = u64::try_from(block_header.time)
@@ -61,10 +69,10 @@ impl BtcRpcClient {
 }
 
 // https://github.com/bitcoin/bitcoin/blob/v25.0/src/rpc/protocol.h#L41
-fn txid_not_found(error: &bitcoincore_rpc::Error) -> bool {
+fn txid_not_found(error: &corepc_client::client_sync::Error) -> bool {
     matches!(
         error,
-        bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::Error::Rpc(rpc_error))
+        corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(rpc_error))
             if rpc_error.code == -5
     )
 }

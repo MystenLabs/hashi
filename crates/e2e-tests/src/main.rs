@@ -450,19 +450,18 @@ fn cmd_mine(blocks: u64, data_dir: &Path) -> Result<()> {
         anyhow::bail!("Localnet process is not running.");
     }
 
-    let client = bitcoincore_rpc::Client::new(
+    let client = corepc_client::client_sync::v29::Client::new_with_auth(
         &state.btc_rpc_url,
-        bitcoincore_rpc::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
+        corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
     )?;
 
-    use bitcoincore_rpc::RpcApi;
-    let address = client.get_new_address(None, None)?.assume_checked();
-    let hashes = client.generate_to_address(blocks, &address)?;
+    let address = client.new_address()?;
+    let hashes = client.generate_to_address(blocks as usize, &address)?;
 
     print_success(&format!(
         "Mined {} block(s). Latest: {}",
-        hashes.len(),
-        hashes.last().unwrap()
+        hashes.0.len(),
+        hashes.0.last().unwrap()
     ));
 
     Ok(())
@@ -673,17 +672,16 @@ fn cmd_faucet_btc(address: &str, blocks: u64, data_dir: &Path) -> Result<()> {
         .require_network(bitcoin::Network::Regtest)
         .context("Faucet BTC address must be a regtest address")?;
 
-    let client = bitcoincore_rpc::Client::new(
+    let client = corepc_client::client_sync::v29::Client::new_with_auth(
         &state.btc_rpc_url,
-        bitcoincore_rpc::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
+        corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
     )?;
 
-    use bitcoincore_rpc::RpcApi;
-    let hashes = client.generate_to_address(blocks, &btc_addr)?;
+    let hashes = client.generate_to_address(blocks as usize, &btc_addr)?;
 
     print_success(&format!(
         "Mined {} block(s) to {}. Each block rewards ~50 BTC.",
-        hashes.len(),
+        hashes.0.len(),
         address
     ));
 
@@ -763,25 +761,23 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
 
     // Use /wallet/test for Bitcoin Core v28+ regtest
     let wallet_url = format!("{}/wallet/test", state.btc_rpc_url);
-    let btc_rpc = bitcoincore_rpc::Client::new(
+    let btc_rpc = corepc_client::client_sync::v29::Client::new_with_auth(
         &wallet_url,
-        bitcoincore_rpc::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
+        corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
     )?;
 
-    use bitcoincore_rpc::RpcApi;
-    let txid = btc_rpc.send_to_address(
-        &deposit_address,
-        bitcoin::Amount::from_sat(amount),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
+    let send_result =
+        btc_rpc.send_to_address(&deposit_address, bitcoin::Amount::from_sat(amount))?;
+    let txid: bitcoin::Txid = send_result
+        .0
+        .parse()
+        .context("Invalid txid from send_to_address")?;
 
     // Find the vout
-    let tx = btc_rpc.get_raw_transaction(&txid, None)?;
+    let tx = btc_rpc
+        .get_raw_transaction(txid)
+        .and_then(|r| r.transaction().map_err(Into::into))
+        .context("Failed to fetch raw transaction")?;
     let vout = tx
         .output
         .iter()
@@ -795,7 +791,7 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
 
     // Step 2: Mine blocks
     print_info("Mining 10 blocks...");
-    let mine_addr = btc_rpc.get_new_address(None, None)?.assume_checked();
+    let mine_addr = btc_rpc.new_address()?;
     btc_rpc.generate_to_address(10, &mine_addr)?;
     print_success("Mined 10 blocks");
 

@@ -11,8 +11,9 @@ sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "28256
 sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "28256572f954c1c32fc3a511a9ca280ba553aca5" }
 
 sui-http = "0.1.0"
-bitcoin = { version = "0.32.7", features =["serde"] }
-bitcoincore-rpc = "0.19.0"
+bitcoin = { version = "0.32.8", features =["serde"] }
+corepc-client = { version = "0.10.0", features = ["client-sync"] }
+jsonrpc = "0.18.0"
 
 # Dependencies for grpc and protobuf
 tonic = { version = "0.14", features = ["zstd", "transport", "tls-webpki-roots"] }

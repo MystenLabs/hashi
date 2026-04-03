@@ -7,9 +7,8 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::BlockHash;
 use bitcoin::Txid;
-use bitcoincore_rpc::Auth;
-use bitcoincore_rpc::Client;
-use bitcoincore_rpc::RpcApi;
+use corepc_client::client_sync::Auth;
+use corepc_client::client_sync::v29::Client;
 use hashi::config::get_available_port;
 use std::path::Path;
 use std::path::PathBuf;
@@ -99,7 +98,7 @@ impl BitcoinNodeHandle {
             }
         }
 
-        let rpc_client = Client::new(
+        let rpc_client = Client::new_with_auth(
             &rpc_url,
             Auth::UserPass(RPC_USER.to_string(), RPC_PASSWORD.to_string()),
         )?;
@@ -128,10 +127,7 @@ impl BitcoinNodeHandle {
             match self.rpc_client.get_blockchain_info() {
                 Ok(_) => {
                     info!("Bitcoin node is ready");
-                    match self
-                        .rpc_client
-                        .create_wallet("test", None, None, None, None)
-                    {
+                    match self.rpc_client.create_wallet("test") {
                         Ok(_) => info!("Created test wallet"),
                         Err(e) => info!("Wallet creation: {}", e),
                     }
@@ -174,33 +170,38 @@ impl BitcoinNodeHandle {
     }
 
     pub fn generate_blocks(&self, count: u64) -> Result<Vec<BlockHash>> {
-        let blocks = self
+        let result = self
             .rpc_client
-            .generate_to_address(count, &self.get_new_address()?)?;
+            .generate_to_address(count as usize, &self.get_new_address()?)?;
+        let blocks: Vec<BlockHash> = result
+            .0
+            .into_iter()
+            .map(|h| h.parse())
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| anyhow!("invalid block hash: {e}"))?;
         info!("Generated {} blocks", count);
         Ok(blocks)
     }
 
     pub fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
-        let txid = self
-            .rpc_client
-            .send_to_address(address, amount, None, None, None, None, None, None)?;
+        let result = self.rpc_client.send_to_address(address, amount)?;
+        let txid: Txid = result.0.parse().map_err(|e| anyhow!("invalid txid: {e}"))?;
         info!("Sent {} to {}: {}", amount, address, txid);
         Ok(txid)
     }
 
     pub fn get_balance(&self) -> Result<Amount> {
-        let balance = self.rpc_client.get_balance(None, None)?;
-        Ok(balance)
+        let result = self.rpc_client.get_balance()?;
+        Amount::from_btc(result.0).map_err(|e| anyhow!("invalid balance: {e}"))
     }
 
     pub fn get_new_address(&self) -> Result<Address> {
-        let address = self.rpc_client.get_new_address(None, None)?;
-        Ok(address.assume_checked())
+        let address = self.rpc_client.new_address()?;
+        Ok(address)
     }
 
     pub fn get_block_count(&self) -> Result<u64> {
-        Ok(self.rpc_client.get_block_count()?)
+        Ok(self.rpc_client.get_block_count()?.0)
     }
 
     pub async fn wait_for_transaction(&self, txid: &Txid, timeout: Duration) -> Result<()> {
@@ -209,7 +210,7 @@ impl BitcoinNodeHandle {
             if start.elapsed() > timeout {
                 return Err(anyhow!("Transaction {} not found within timeout", txid));
             }
-            match self.rpc_client.get_transaction(txid, None) {
+            match self.rpc_client.get_transaction(*txid) {
                 Ok(_) => {
                     info!("Transaction {} confirmed", txid);
                     return Ok(());

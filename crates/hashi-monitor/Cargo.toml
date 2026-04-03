@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bitcoin.workspace = true
-bitcoincore-rpc.workspace = true
+corepc-client.workspace = true
+jsonrpc.workspace = true
 clap.workspace = true
 hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger

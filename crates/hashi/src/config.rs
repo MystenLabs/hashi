@@ -297,11 +297,11 @@ impl Config {
         self.bitcoin_start_height.unwrap_or(800_000)
     }
 
-    pub fn bitcoin_rpc_auth(&self) -> crate::btc_monitor::config::bitcoincore_rpc::Auth {
+    pub fn bitcoin_rpc_auth(&self) -> crate::btc_monitor::config::corepc_client::client_sync::Auth {
         self.bitcoin_rpc_auth
             .as_ref()
             .unwrap_or(&crate::btc_monitor::config::BtcRpcAuth::None)
-            .to_bitcoincore_rpc_auth()
+            .to_corepc_auth()
     }
 
     pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<crate::btc_monitor::TrustedPeer>> {
