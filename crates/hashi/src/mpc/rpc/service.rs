@@ -39,7 +39,11 @@ impl MpcService for HttpService {
             validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
                 .map_err(|e| {
-                    tracing::warn!("send_messages from {sender:?} failed: {e}",);
+                    if matches!(&e, MpcError::NotReady(_)) {
+                        tracing::info!("send_messages from {sender:?}: {e}");
+                    } else {
+                        tracing::warn!("send_messages from {sender:?} failed: {e}");
+                    }
                     mpc_error_to_status(e)
                 })
         })
@@ -155,7 +159,14 @@ impl MpcService for HttpService {
             validate_epoch(mgr.epoch(), external_request.epoch)?;
             mgr.handle_get_partial_signatures_request(&internal_request)
                 .map_err(|e| {
-                    tracing::warn!("get_partial_signatures failed: {e}");
+                    match &e {
+                        SigningError::NotFound(_) => {
+                            tracing::debug!("get_partial_signatures: {e}");
+                        }
+                        _ => {
+                            tracing::warn!("get_partial_signatures failed: {e}");
+                        }
+                    }
                     signing_error_to_status(e)
                 })?
         };
@@ -218,9 +229,10 @@ fn mpc_error_to_status(err: MpcError) -> Status {
             Status::invalid_argument(err.to_string())
         }
         Timeout { .. } => Status::deadline_exceeded(err.to_string()),
-        NotEnoughParticipants { .. } | NotEnoughApprovals { .. } | InvalidConfig(_) => {
-            Status::failed_precondition(err.to_string())
-        }
+        NotEnoughParticipants { .. }
+        | NotEnoughApprovals { .. }
+        | InvalidConfig(_)
+        | NotReady(_) => Status::failed_precondition(err.to_string()),
         NotFound(_) => Status::not_found(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
