@@ -235,6 +235,11 @@ impl MpcManager {
         Ok(manager)
     }
 
+    // Only for devnet key recovery CLI tool
+    pub fn set_source_epoch(&mut self, epoch: u64) {
+        self.source_epoch = epoch;
+    }
+
     pub fn handle_send_messages_request(
         &mut self,
         sender: Address,
@@ -2562,7 +2567,7 @@ impl MpcManager {
         })
     }
 
-    fn reconstruct_previous_output(
+    pub fn reconstruct_previous_output(
         &self,
         certificates: &[CertificateV1],
     ) -> MpcResult<ReconstructionOutcome> {
