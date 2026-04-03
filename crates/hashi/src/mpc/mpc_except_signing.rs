@@ -15,12 +15,12 @@ use crate::mpc::types::DealerCertificate;
 pub use crate::mpc::types::DealerFlowData;
 use crate::mpc::types::DealerMessagesHash;
 pub use crate::mpc::types::DealerOutputsKey;
-use crate::mpc::types::DkgConfig;
 pub use crate::mpc::types::EncryptionGroupElement;
 pub use crate::mpc::types::GetPublicMpcOutputRequest;
 pub use crate::mpc::types::GetPublicMpcOutputResponse;
 pub use crate::mpc::types::MessageHash;
 pub use crate::mpc::types::Messages;
+use crate::mpc::types::MpcConfig;
 pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
 pub use crate::mpc::types::MpcResult;
@@ -83,7 +83,7 @@ pub struct MpcManager {
     // Immutable during the epoch
     pub party_id: PartyId,
     pub address: Address,
-    pub dkg_config: DkgConfig,
+    pub mpc_config: MpcConfig,
     pub session_id: SessionId,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub signing_key: Bls12381PrivateKey,
@@ -148,7 +148,7 @@ impl MpcManager {
         let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold - 1);
-        let dkg_config = DkgConfig::new(epoch, nodes, threshold, max_faulty)?;
+        let dkg_config = MpcConfig::new(epoch, nodes, threshold, max_faulty)?;
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
@@ -208,7 +208,7 @@ impl MpcManager {
         let mut manager = Self {
             party_id,
             address,
-            dkg_config,
+            mpc_config: dkg_config,
             session_id,
             encryption_key,
             signing_key,
@@ -461,14 +461,14 @@ impl MpcManager {
         request: &GetPublicMpcOutputRequest,
     ) -> MpcResult<GetPublicMpcOutputResponse> {
         let previous_epoch = self
-            .dkg_config
+            .mpc_config
             .epoch
             .checked_sub(1)
             .ok_or_else(|| MpcError::InvalidConfig("no previous epoch exists".to_string()))?;
         if request.epoch != previous_epoch {
             return Err(MpcError::NotFound(format!(
                 "no DKG output for epoch {} (current epoch is {})",
-                request.epoch, self.dkg_config.epoch
+                request.epoch, self.mpc_config.epoch
             )));
         }
         let output = self.previous_output.as_ref().ok_or_else(|| {
@@ -495,14 +495,14 @@ impl MpcManager {
                 .iter()
                 .filter_map(|d| {
                     let party_id = mgr.committee.index_of(d)? as u16;
-                    mgr.dkg_config
+                    mgr.mpc_config
                         .nodes
                         .weight_of(party_id)
                         .ok()
                         .map(|w| w as u32)
                 })
                 .sum();
-            (weight, mgr.dkg_config.threshold as u32)
+            (weight, mgr.mpc_config.threshold as u32)
         };
         if certified_reduced_weight < threshold
             && let Err(e) = Self::run_dkg_as_dealer(mpc_manager, p2p_channel, tob_channel).await
@@ -599,7 +599,7 @@ impl MpcManager {
                 .iter()
                 .filter_map(|d| {
                     let party_id = mgr.committee.index_of(d)? as u16;
-                    mgr.dkg_config
+                    mgr.mpc_config
                         .nodes
                         .weight_of(party_id)
                         .ok()
@@ -630,7 +630,7 @@ impl MpcManager {
         tracing::info!(
             "run_nonce_generation: epoch={}, batch_index={batch_index}, \
              {pre_filter} outputs before filter, {} after. dealers={dealers:?}",
-            mgr.dkg_config.epoch,
+            mgr.mpc_config.epoch,
             dealers.len(),
         );
         Ok(mgr.dealer_nonce_outputs.values().cloned().collect())
@@ -688,7 +688,7 @@ impl MpcManager {
         let mut certified = HashSet::new();
         for (dealer, _) in certs {
             if let Some(party_id) = self.committee.index_of(dealer)
-                && let Ok(w) = self.dkg_config.nodes.weight_of(party_id as u16)
+                && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
             {
                 weight_sum += w as u32;
                 certified.insert(*dealer);
@@ -760,7 +760,7 @@ impl MpcManager {
     ) -> MpcResult<MpcOutput> {
         let threshold = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.dkg_config.threshold as u32
+            mgr.mpc_config.threshold as u32
         };
         let mut certified_dealers = HashSet::new();
         let mut dealer_weight_sum = 0u32;
@@ -857,7 +857,7 @@ impl MpcManager {
                         .signers(&mgr.committee)
                         .expect("certificate verified above")
                 };
-                let epoch = mpc_manager.read().unwrap().dkg_config.epoch;
+                let epoch = mpc_manager.read().unwrap().mpc_config.epoch;
                 Self::recover_shares_via_complaint(
                     mpc_manager,
                     &dealer,
@@ -881,7 +881,7 @@ impl MpcManager {
                     .committee
                     .index_of(&dealer)
                     .expect("dealer must be in committee") as u16;
-                mgr.dkg_config
+                mgr.mpc_config
                     .nodes
                     .weight_of(party_id)
                     .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
@@ -1079,7 +1079,7 @@ impl MpcManager {
                     .signers(&mgr.committee)
                     .expect("certificate verified above")
             };
-            let epoch = mpc_manager.read().unwrap().dkg_config.epoch;
+            let epoch = mpc_manager.read().unwrap().mpc_config.epoch;
             Self::recover_rotation_shares_via_complaints(
                 mpc_manager,
                 &dealer,
@@ -1284,7 +1284,7 @@ impl MpcManager {
                         .signers(&mgr.committee)
                         .expect("certificate verified above")
                 };
-                let epoch = mpc_manager.read().unwrap().dkg_config.epoch;
+                let epoch = mpc_manager.read().unwrap().mpc_config.epoch;
                 Self::recover_nonce_shares_via_complaint(
                     mpc_manager,
                     &dealer,
@@ -1304,7 +1304,7 @@ impl MpcManager {
                     .committee
                     .index_of(&dealer)
                     .expect("dealer must be in committee") as u16;
-                mgr.dkg_config
+                mgr.mpc_config
                     .nodes
                     .weight_of(party_id)
                     .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
@@ -1320,12 +1320,12 @@ impl MpcManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> avss::Message {
         let dealer_session_id = self.session_id.dealer_session_id(&self.address);
-        let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
+        let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
         let dealer = avss::Dealer::new(
             None,
             nodes,
-            self.dkg_config.threshold,
-            self.dkg_config.max_faulty,
+            self.mpc_config.threshold,
+            self.mpc_config.max_faulty,
             dealer_session_id.to_vec(),
         )
         .expect("checked threshold above");
@@ -1409,9 +1409,9 @@ impl MpcManager {
         };
         let dealer_session_id = self.session_id.dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
+            self.mpc_config.nodes.clone(),
             self.party_id,
-            self.dkg_config.threshold,
+            self.mpc_config.threshold,
             dealer_session_id.to_vec(),
             None, // commitment: None for initial DKG
             self.encryption_key.clone(),
@@ -1427,7 +1427,7 @@ impl MpcManager {
                 };
                 let signature =
                     self.signing_key
-                        .sign(self.dkg_config.epoch, self.address, &dkg_message);
+                        .sign(self.mpc_config.epoch, self.address, &dkg_message);
                 Ok(signature.signature().clone())
             }
             avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
@@ -1451,15 +1451,15 @@ impl MpcManager {
                 })? as u16;
         let dealer_session_id = SessionId::nonce_dealer_session_id(
             &self.chain_id,
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             batch_index,
             &dealer,
         );
         batch_avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
+            self.mpc_config.nodes.clone(),
             self.party_id,
             dealer_party_id,
-            self.dkg_config.threshold,
+            self.mpc_config.threshold,
             dealer_session_id.to_vec(),
             self.encryption_key.clone(),
             self.batch_size_per_weight,
@@ -1474,16 +1474,16 @@ impl MpcManager {
     ) -> MpcResult<Messages> {
         let dealer_sid = SessionId::nonce_dealer_session_id(
             &self.chain_id,
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             batch_index,
             &self.address,
         );
-        let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
+        let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
         let dealer = batch_avss::Dealer::new(
             nodes,
             self.party_id,
-            self.dkg_config.threshold,
-            self.dkg_config.max_faulty,
+            self.mpc_config.threshold,
+            self.mpc_config.max_faulty,
             dealer_sid.to_vec(),
             self.batch_size_per_weight,
         )
@@ -1519,7 +1519,7 @@ impl MpcManager {
                 };
                 let signature =
                     self.signing_key
-                        .sign(self.dkg_config.epoch, self.address, &nonce_message);
+                        .sign(self.mpc_config.epoch, self.address, &nonce_message);
                 Ok(signature.signature().clone())
             }
             batch_avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
@@ -1539,9 +1539,9 @@ impl MpcManager {
             .clone();
         let session_id = self.session_id.dealer_session_id(&dealer).to_vec();
         self.process_and_store_message(
-            self.dkg_config.nodes.clone(),
+            self.mpc_config.nodes.clone(),
             self.party_id,
-            self.dkg_config.threshold,
+            self.mpc_config.threshold,
             session_id,
             &message,
             None,
@@ -1565,15 +1565,15 @@ impl MpcManager {
                 })? as u16;
         let dealer_sid = SessionId::nonce_dealer_session_id(
             &self.chain_id,
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             batch_index,
             &dealer,
         );
         let receiver = batch_avss::Receiver::new(
-            self.dkg_config.nodes.clone(),
+            self.mpc_config.nodes.clone(),
             self.party_id,
             dealer_party_id,
-            self.dkg_config.threshold,
+            self.mpc_config.threshold,
             dealer_sid.to_vec(),
             self.encryption_key.clone(),
             self.batch_size_per_weight,
@@ -1615,9 +1615,9 @@ impl MpcManager {
                 .to_vec();
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             self.process_and_store_message(
-                self.dkg_config.nodes.clone(),
+                self.mpc_config.nodes.clone(),
                 self.party_id,
-                self.dkg_config.threshold,
+                self.mpc_config.threshold,
                 session_id,
                 &message,
                 commitment,
@@ -1663,11 +1663,11 @@ impl MpcManager {
         &self,
         certified_dealers: impl Iterator<Item = Address>,
     ) -> MpcResult<MpcOutput> {
-        let threshold = self.dkg_config.threshold;
+        let threshold = self.mpc_config.threshold;
         let certified_dealers: Vec<Address> = certified_dealers.collect();
         tracing::info!(
             "complete_dkg: epoch={}, {} certified dealers={:?}, dealer_outputs has {} entries",
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             certified_dealers.len(),
             certified_dealers,
             self.dealer_outputs.len(),
@@ -1694,11 +1694,11 @@ impl MpcManager {
             })
             .collect::<Result<_, MpcError>>()?;
         let combined_output =
-            avss::ReceiverOutput::complete_dkg(threshold, &self.dkg_config.nodes, outputs)
+            avss::ReceiverOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
             "complete_dkg: epoch={}, result vk={}",
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             hex::encode(combined_output.vk.to_byte_array())
         );
         Ok(MpcOutput {
@@ -1734,7 +1734,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type: ProtocolTypeIndicator::Dkg,
-                epoch: mgr.dkg_config.epoch,
+                epoch: mgr.mpc_config.epoch,
                 batch_index: None,
             };
             let signers = certificate
@@ -1799,7 +1799,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type: ProtocolTypeIndicator::NonceGeneration,
-                epoch: mgr.dkg_config.epoch,
+                epoch: mgr.mpc_config.epoch,
                 batch_index: Some(batch_index),
             };
             let signers = certificate
@@ -1899,7 +1899,7 @@ impl MpcManager {
         messages: Messages,
         signature: BLS12381Signature,
     ) -> DealerFlowData {
-        let my_signature = MemberSignature::new(self.dkg_config.epoch, self.address, signature);
+        let my_signature = MemberSignature::new(self.mpc_config.epoch, self.address, signature);
         let messages_hash = DealerMessagesHash {
             dealer_address: self.address,
             messages_hash: compute_messages_hash(&messages),
@@ -1911,14 +1911,14 @@ impl MpcManager {
             .map(|m| m.validator_address())
             .filter(|addr| *addr != self.address)
             .collect();
-        let required_reduced_weight = self.dkg_config.threshold + self.dkg_config.max_faulty;
+        let required_reduced_weight = self.mpc_config.threshold + self.mpc_config.max_faulty;
         let reduced_weights: HashMap<Address, u16> = self
             .committee
             .members()
             .iter()
             .filter_map(|m| {
                 let party_id = self.committee.index_of(&m.validator_address())? as u16;
-                let weight = self.dkg_config.nodes.weight_of(party_id).ok()?;
+                let weight = self.mpc_config.nodes.weight_of(party_id).ok()?;
                 Some((m.validator_address(), weight))
             })
             .collect();
@@ -1955,7 +1955,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type: ProtocolTypeIndicator::KeyRotation,
-                epoch: mgr.dkg_config.epoch,
+                epoch: mgr.mpc_config.epoch,
                 batch_index: None,
             };
             let signers = certificate.signers(&mgr.committee).map_err(|_| {
@@ -2400,12 +2400,12 @@ impl MpcManager {
                 let sid = self
                     .session_id
                     .rotation_session_id(&self.address, share.index);
-                let nodes = self.maybe_corrupt_nodes_for_testing(&self.dkg_config.nodes);
+                let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
                 let dealer = avss::Dealer::new(
                     Some(share.value),
                     nodes,
-                    self.dkg_config.threshold,
-                    self.dkg_config.max_faulty,
+                    self.mpc_config.threshold,
+                    self.mpc_config.max_faulty,
                     sid.to_vec(),
                 )
                 .expect(EXPECT_THRESHOLD_VALIDATED);
@@ -2468,9 +2468,9 @@ impl MpcManager {
             let session_id = self.session_id.rotation_session_id(&dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
-                self.dkg_config.nodes.clone(),
+                self.mpc_config.nodes.clone(),
                 self.party_id,
-                self.dkg_config.threshold,
+                self.mpc_config.threshold,
                 session_id.to_vec(),
                 commitment,
                 self.encryption_key.clone(),
@@ -2495,7 +2495,7 @@ impl MpcManager {
         };
         let signature =
             self.signing_key
-                .sign(self.dkg_config.epoch, self.address, &rotation_message);
+                .sign(self.mpc_config.epoch, self.address, &rotation_message);
         Ok(signature.signature().clone())
     }
 
@@ -2508,7 +2508,7 @@ impl MpcManager {
         tracing::info!(
             "complete_key_rotation: epoch={}, {} certified_share_indices={:?}, \
              previous_vk={}, threshold={threshold}",
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             certified_share_indices.len(),
             certified_share_indices,
             hex::encode(previous_dkg_output.public_key.to_byte_array()),
@@ -2535,13 +2535,13 @@ impl MpcManager {
         let combined = avss::ReceiverOutput::complete_key_rotation(
             threshold,
             self.party_id,
-            &self.dkg_config.nodes,
+            &self.mpc_config.nodes,
             &indexed_outputs,
         )
         .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
             "complete_key_rotation: epoch={}, result vk={}, matches_previous={}",
-            self.dkg_config.epoch,
+            self.mpc_config.epoch,
             hex::encode(combined.vk.to_byte_array()),
             combined.vk == previous_dkg_output.public_key,
         );
@@ -2558,7 +2558,7 @@ impl MpcManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: self.dkg_config.threshold,
+            threshold: self.mpc_config.threshold,
         })
     }
 
@@ -2866,7 +2866,7 @@ impl MpcManager {
                 .clone()
                 .expect("key rotation requires previous committee");
             let epoch = mgr
-                .dkg_config
+                .mpc_config
                 .epoch
                 .checked_sub(1)
                 .expect("key rotation requires epoch > 0");
@@ -3291,7 +3291,7 @@ impl MpcManager {
     }
 
     fn base_session_id_for_epoch(&self, epoch: u64, protocol_type: &ProtocolType) -> SessionId {
-        if epoch == self.dkg_config.epoch {
+        if epoch == self.mpc_config.epoch {
             self.session_id.clone()
         } else {
             SessionId::new(&self.chain_id, self.source_epoch, protocol_type)
@@ -3299,11 +3299,11 @@ impl MpcManager {
     }
 
     fn config_for_epoch(&self, epoch: u64) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
-        if epoch == self.dkg_config.epoch {
+        if epoch == self.mpc_config.epoch {
             Ok((
-                self.dkg_config.nodes.clone(),
+                self.mpc_config.nodes.clone(),
                 self.party_id,
-                self.dkg_config.threshold,
+                self.mpc_config.threshold,
             ))
         } else {
             let committee = self.previous_committee.as_ref().ok_or_else(|| {
@@ -3446,7 +3446,7 @@ impl MpcManager {
     }
 
     fn required_nonce_weight(&self) -> u32 {
-        2 * self.dkg_config.max_faulty as u32 + 1
+        2 * self.mpc_config.max_faulty as u32 + 1
     }
 
     fn maybe_corrupt_nodes_for_testing(

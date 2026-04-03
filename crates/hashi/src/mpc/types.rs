@@ -39,7 +39,7 @@ const DOMAIN_HASHI: &str =
     "754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959::hashi";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DkgConfig {
+pub struct MpcConfig {
     pub epoch: u64,
     pub nodes: Nodes<EncryptionGroupElement>,
     /// Threshold for signing (t)
@@ -48,7 +48,7 @@ pub struct DkgConfig {
     pub max_faulty: u16,
 }
 
-impl DkgConfig {
+impl MpcConfig {
     pub fn new(
         epoch: u64,
         nodes: Nodes<EncryptionGroupElement>,
@@ -566,7 +566,7 @@ mod tests {
     fn test_dkg_config_threshold_too_low() {
         let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
         let nodes = build_nodes(validators);
-        let config = DkgConfig::new(100, nodes, 2, 2);
+        let config = MpcConfig::new(100, nodes, 2, 2);
         assert!(config.is_err());
         match config.unwrap_err() {
             MpcError::InvalidThreshold(msg) => {
@@ -580,7 +580,7 @@ mod tests {
     fn test_dkg_config_threshold_equals_faulty() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
         let nodes = build_nodes(validators);
-        let config = DkgConfig::new(100, nodes, 3, 3);
+        let config = MpcConfig::new(100, nodes, 3, 3);
         assert!(config.is_err());
         match config.unwrap_err() {
             MpcError::InvalidThreshold(msg) => {
@@ -594,7 +594,7 @@ mod tests {
     fn test_dkg_config_byzantine_constraint_violated() {
         let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
         let nodes = build_nodes(validators);
-        let config = DkgConfig::new(100, nodes, 4, 2);
+        let config = MpcConfig::new(100, nodes, 4, 2);
         assert!(config.is_err());
         match config.unwrap_err() {
             MpcError::InvalidThreshold(msg) => {
@@ -608,7 +608,7 @@ mod tests {
     fn test_dkg_config_minimum_validators() {
         let validators = (0..3).map(|i| create_test_validator(i, 1)).collect();
         let nodes = build_nodes(validators);
-        let config = DkgConfig::new(100, nodes, 2, 0);
+        let config = MpcConfig::new(100, nodes, 2, 0);
         assert!(config.is_ok());
     }
 
@@ -616,7 +616,7 @@ mod tests {
     fn test_dkg_config_single_validator() {
         let validators = vec![create_test_validator(0, 1)];
         let nodes = build_nodes(validators);
-        let config = DkgConfig::new(100, nodes, 1, 0);
+        let config = MpcConfig::new(100, nodes, 1, 0);
         assert!(config.is_ok());
     }
 
@@ -633,7 +633,7 @@ mod tests {
     fn test_optimal_byzantine_tolerance() {
         let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
         let nodes = build_nodes(validators);
-        let config = DkgConfig::new(100, nodes, 3, 2);
+        let config = MpcConfig::new(100, nodes, 3, 2);
         assert!(config.is_ok());
     }
 

@@ -120,7 +120,7 @@ fn receive_dealer_messages(
     manager.store_dkg_message(dealer, msg)?;
     let sig = manager.try_sign_dkg_message(dealer, messages)?;
     Ok(MemberSignature::new(
-        manager.dkg_config.epoch,
+        manager.mpc_config.epoch,
         manager.address,
         sig,
     ))
@@ -330,8 +330,8 @@ impl TestSetup {
         self.committee_set.epoch()
     }
 
-    fn dkg_config(&self) -> DkgConfig {
-        self.create_manager(0).dkg_config.clone()
+    fn dkg_config(&self) -> MpcConfig {
+        self.create_manager(0).mpc_config.clone()
     }
 }
 
@@ -910,8 +910,8 @@ fn test_mpc_manager_new_from_committee_set() {
     assert_eq!(manager.address, address);
 
     // Verify DkgConfig was built correctly
-    assert_eq!(manager.dkg_config.epoch, setup.epoch());
-    assert_eq!(manager.dkg_config.nodes.num_nodes(), 5);
+    assert_eq!(manager.mpc_config.epoch, setup.epoch());
+    assert_eq!(manager.mpc_config.nodes.num_nodes(), 5);
     assert_eq!(manager.committee.members().len(), 5);
 }
 
@@ -984,8 +984,8 @@ fn test_mpc_manager_new_with_weighted_committee() {
     let manager = setup.create_manager(0);
 
     // With total_weight=15: max_faulty = (15-1)/3 = 4, threshold = 5
-    assert_eq!(manager.dkg_config.threshold, 5);
-    assert_eq!(manager.dkg_config.max_faulty, 4);
+    assert_eq!(manager.mpc_config.threshold, 5);
+    assert_eq!(manager.mpc_config.max_faulty, 4);
 }
 
 #[test]
@@ -1372,7 +1372,7 @@ async fn test_run_dkg() {
     // Phase 3: Test run_as_dealer() and run_as_party() for validator 0 with mocked channels
     // Remove validator 0 from managers (it will call run_dkg)
     let mut test_manager = managers.remove(0);
-    let threshold = test_manager.dkg_config.threshold;
+    let threshold = test_manager.mpc_config.threshold;
 
     // Create mock P2P channel with remaining managers (validators 1-4)
     let other_managers: HashMap<_, _> = managers
@@ -1735,7 +1735,7 @@ async fn test_run_as_party_success() {
     let mut managers: Vec<_> = (0..num_validators)
         .map(|i| setup.create_manager(i))
         .collect();
-    let threshold = managers[0].dkg_config.threshold;
+    let threshold = managers[0].mpc_config.threshold;
 
     // Pre-create dealer messages and certificates for threshold validators
     // Each dealer's message is wrapped with their share_index = party_id + 1
@@ -2458,7 +2458,7 @@ async fn test_run_as_party_with_reduced_weights() {
         .weight_of(&manager.address)
         .unwrap() as u16;
     let reduced_weight = manager
-        .dkg_config
+        .mpc_config
         .nodes
         .weight_of(manager.party_id)
         .unwrap();
@@ -2889,7 +2889,7 @@ async fn test_handle_retrieve_messages_request_success() {
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: dealer_manager.dkg_config.epoch,
+        epoch: dealer_manager.mpc_config.epoch,
         batch_index: None,
     };
     let response = dealer_manager
@@ -2913,7 +2913,7 @@ async fn test_handle_retrieve_messages_request_message_not_available() {
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: dealer_manager.dkg_config.epoch,
+        epoch: dealer_manager.mpc_config.epoch,
         batch_index: None,
     };
     let result = dealer_manager.handle_retrieve_messages_request(&request);
@@ -2946,7 +2946,7 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
         batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
@@ -2984,7 +2984,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
         batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
@@ -3014,7 +3014,7 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     let result = manager.handle_retrieve_messages_request(&RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
         batch_index: Some(0),
     });
     let response = result.expect("nonce gen should fall back to DB when batch_index is provided");
@@ -3043,7 +3043,7 @@ fn test_handle_complain_request_no_message_from_dealer() {
         batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
     };
 
     // Manager has no message from this dealer
@@ -3077,7 +3077,7 @@ fn test_handle_complain_request_rederives_output_rejects_invalid_proof() {
         batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
     };
 
     // Manager has message but no output — the handler re-derives the output
@@ -3135,7 +3135,7 @@ fn test_handle_complain_request_caches_response() {
         batch_index: None,
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: party2_manager.dkg_config.epoch,
+        epoch: party2_manager.mpc_config.epoch,
     };
 
     // First call - should compute and cache
@@ -3581,7 +3581,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
         batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: party_manager.dkg_config.epoch,
+        epoch: party_manager.mpc_config.epoch,
     };
 
     let resp3 = mgr3.handle_complain_request(&request).unwrap();
@@ -3601,7 +3601,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
             .collect(),
     )
     .unwrap();
-    party_manager.dkg_config.nodes = smaller_nodes;
+    party_manager.mpc_config.nodes = smaller_nodes;
 
     let p2p = PreCollectedP2PChannel::new(responses);
 
@@ -4294,7 +4294,7 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
     let retrieve_request = RetrieveMessagesRequest {
         dealer: dealer_addr,
         protocol_type: ProtocolTypeIndicator::Dkg,
-        epoch: receiver_manager.dkg_config.epoch,
+        epoch: receiver_manager.mpc_config.epoch,
         batch_index: None,
     };
     let retrieve_response = receiver_manager
@@ -5217,7 +5217,7 @@ async fn test_run_key_rotation() {
             let own_sig = manager
                 .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
                 .unwrap();
-            let epoch = manager.dkg_config.epoch;
+            let epoch = manager.mpc_config.epoch;
             (rotation_messages, own_sig, epoch, prev_output)
         };
 
@@ -5347,7 +5347,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 let own_sig = manager
                     .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
                     .unwrap();
-                (rotation_messages, own_sig, manager.dkg_config.epoch)
+                (rotation_messages, own_sig, manager.mpc_config.epoch)
             };
 
             // Get a second signature from validator 1
@@ -5479,7 +5479,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             own_sig = manager
                 .try_sign_rotation_messages(&prev_output, addr_2, &correct_messages)
                 .unwrap();
-            epoch = manager.dkg_config.epoch;
+            epoch = manager.mpc_config.epoch;
         }
 
         let addr_1 = rotation_setup.setup.address(1);
@@ -5522,7 +5522,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             let own_sig = manager
                 .try_sign_rotation_messages(&prev_output, addr_3, &rotation_messages)
                 .unwrap();
-            (rotation_messages, own_sig, manager.dkg_config.epoch)
+            (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
 
         let addr_1 = rotation_setup.setup.address(1);
@@ -5655,7 +5655,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     let cheating_rotation_messages = Messages::Rotation(cheating_map);
 
     // Collect signatures for the certificate before moving managers into MockP2P
-    let epoch = cheating_dealer_mgr.dkg_config.epoch;
+    let epoch = cheating_dealer_mgr.mpc_config.epoch;
 
     // Signature from cheating dealer itself (validator 3)
     let cheating_dealer_sig = {
@@ -6141,9 +6141,9 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         .session_id
         .rotation_session_id(&rotation_dealer_addr, share3_index);
     let receiver = avss::Receiver::new(
-        receiver_manager.dkg_config.nodes.clone(),
+        receiver_manager.mpc_config.nodes.clone(),
         receiver_manager.party_id,
-        receiver_manager.dkg_config.threshold,
+        receiver_manager.mpc_config.threshold,
         session_id.to_vec(),
         None,
         receiver_manager.encryption_key.clone(),
@@ -6278,9 +6278,9 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         .session_id
         .rotation_session_id(&dealer_addr, first_share_index);
     let receiver = avss::Receiver::new(
-        test_manager.dkg_config.nodes.clone(),
+        test_manager.mpc_config.nodes.clone(),
         test_manager.party_id,
-        test_manager.dkg_config.threshold,
+        test_manager.mpc_config.threshold,
         session_id.to_vec(),
         None, // No expected commitment
         test_manager.encryption_key.clone(),
@@ -6447,9 +6447,9 @@ fn test_handle_complain_request_success() {
         .get(&first_share_index)
         .copied();
     let receiver = avss::Receiver::new(
-        victim_manager.dkg_config.nodes.clone(),
+        victim_manager.mpc_config.nodes.clone(),
         victim_manager.party_id,
-        victim_manager.dkg_config.threshold,
+        victim_manager.mpc_config.threshold,
         session_id.to_vec(),
         commitment,
         victim_manager.encryption_key.clone(),
@@ -6485,7 +6485,7 @@ fn test_handle_complain_request_success() {
         batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
-        epoch: responder_manager.dkg_config.epoch,
+        epoch: responder_manager.mpc_config.epoch,
     };
 
     // Handle the complaint request
@@ -6827,9 +6827,9 @@ fn test_party_restart_uses_stored_rotation_messages() {
                 .to_vec();
             party_manager
                 .process_and_store_message(
-                    party_manager.dkg_config.nodes.clone(),
+                    party_manager.mpc_config.nodes.clone(),
                     party_manager.party_id,
-                    party_manager.dkg_config.threshold,
+                    party_manager.mpc_config.threshold,
                     session_id,
                     message,
                     None,
@@ -7251,7 +7251,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             .unwrap();
 
         // Create rotation certificate
-        let epoch_for_cert = dealer_manager.dkg_config.epoch;
+        let epoch_for_cert = dealer_manager.mpc_config.epoch;
         let committee_for_cert = rotation_committee_set
             .committees()
             .get(&rotation_epoch)
@@ -7610,7 +7610,7 @@ fn retrieve_and_verify_hash(
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
         batch_index: None,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
@@ -7634,7 +7634,7 @@ fn complain_and_assert_no_message(
         batch_index: None,
         complaint,
         protocol_type,
-        epoch: manager.dkg_config.epoch,
+        epoch: manager.mpc_config.epoch,
     };
     let result = manager.handle_complain_request(&request);
     assert!(result.is_err());
@@ -7762,9 +7762,9 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
     };
     let msg = map.get(&share_index).unwrap();
     let avss_receiver = avss::Receiver::new(
-        receiver.dkg_config.nodes.clone(),
+        receiver.mpc_config.nodes.clone(),
         receiver.party_id,
-        receiver.dkg_config.threshold,
+        receiver.mpc_config.threshold,
         session_id.to_vec(),
         commitment,
         wrong_key,
@@ -7818,9 +7818,9 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
     };
     let msg = map.get(&share_index).unwrap();
     let avss_receiver = avss::Receiver::new(
-        receiver.dkg_config.nodes.clone(),
+        receiver.mpc_config.nodes.clone(),
         receiver.party_id,
-        receiver.dkg_config.threshold,
+        receiver.mpc_config.threshold,
         session_id.to_vec(),
         commitment,
         wrong_key,
@@ -7836,7 +7836,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
         batch_index: None,
         complaint,
         protocol_type: ProtocolTypeIndicator::KeyRotation,
-        epoch: receiver.dkg_config.epoch,
+        epoch: receiver.mpc_config.epoch,
     };
     // Handler re-derives the output from the message (cross-epoch fallback).
     // The complaint proof was generated with a wrong key and doesn't match
@@ -7898,9 +7898,9 @@ fn test_handle_complain_request_rotation_caches_response() {
         .get(&first_share_index)
         .copied();
     let receiver = avss::Receiver::new(
-        victim_manager.dkg_config.nodes.clone(),
+        victim_manager.mpc_config.nodes.clone(),
         victim_manager.party_id,
-        victim_manager.dkg_config.threshold,
+        victim_manager.mpc_config.threshold,
         session_id.to_vec(),
         commitment,
         victim_manager.encryption_key.clone(),
@@ -7930,7 +7930,7 @@ fn test_handle_complain_request_rotation_caches_response() {
         batch_index: None,
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::KeyRotation,
-        epoch: responder.dkg_config.epoch,
+        epoch: responder.mpc_config.epoch,
     };
 
     // First call computes and caches
@@ -8067,7 +8067,7 @@ fn test_handle_complain_request_nonce_rederives_output_rejects_invalid_proof() {
         batch_index: Some(0),
         complaint,
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
-        epoch: receiver.dkg_config.epoch,
+        epoch: receiver.mpc_config.epoch,
     };
     // Handler re-derives the output from the message (fallback).
     // The complaint proof was generated with a wrong key and doesn't match
@@ -8127,7 +8127,7 @@ fn test_handle_complain_request_nonce_caches_response() {
         batch_index: Some(0),
         complaint: complaint.clone(),
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
-        epoch: party2.dkg_config.epoch,
+        epoch: party2.mpc_config.epoch,
     };
 
     // First call → computes and caches
@@ -8177,7 +8177,7 @@ async fn test_run_nonce_generation() {
         for manager in managers.iter_mut() {
             let response = send_and_assert_ok(manager, dealer_addr, &messages);
             let sig = MemberSignature::new(
-                manager.dkg_config.epoch,
+                manager.mpc_config.epoch,
                 manager.address,
                 response.signature,
             );
@@ -8191,7 +8191,7 @@ async fn test_run_nonce_generation() {
 
     // Phase 3: Test run_as_nonce_dealer() and run_as_nonce_party() for validator 0
     let mut test_manager = managers.remove(0);
-    let max_faulty = test_manager.dkg_config.max_faulty;
+    let max_faulty = test_manager.mpc_config.max_faulty;
     let required_weight = 2 * max_faulty + 1;
 
     // Create mock P2P channel with remaining managers
@@ -8405,7 +8405,7 @@ async fn test_run_nonce_generation_skips_dealer_phase() {
         for manager in managers.iter_mut() {
             let response = send_and_assert_ok(manager, dealer_addr, &messages);
             let sig = MemberSignature::new(
-                manager.dkg_config.epoch,
+                manager.mpc_config.epoch,
                 manager.address,
                 response.signature,
             );
@@ -8484,7 +8484,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
         for manager in managers.iter_mut() {
             let response = send_and_assert_ok(manager, dealer_addr, &messages);
             let sig = MemberSignature::new(
-                manager.dkg_config.epoch,
+                manager.mpc_config.epoch,
                 manager.address,
                 response.signature,
             );
@@ -8499,7 +8499,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     // Phase 3: Simulate restart — clear validator 0's in-memory nonce state
     // but keep the store intact (simulates restart where DB persists).
     let mut test_manager = managers.remove(0);
-    let required_weight = 2 * test_manager.dkg_config.max_faulty + 1;
+    let required_weight = 2 * test_manager.mpc_config.max_faulty + 1;
     test_manager.nonce_messages.clear();
     test_manager.dealer_nonce_outputs.clear();
     test_manager.message_responses.clear();
@@ -8671,7 +8671,7 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
             }
             let response = send_and_assert_ok(manager, dealer_addr, &messages);
             let sig = MemberSignature::new(
-                manager.dkg_config.epoch,
+                manager.mpc_config.epoch,
                 manager.address,
                 response.signature,
             );
@@ -8685,7 +8685,7 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
 
     // Phase 3: Run for validator 0
     let test_manager = managers.remove(0);
-    let max_faulty = test_manager.dkg_config.max_faulty;
+    let max_faulty = test_manager.mpc_config.max_faulty;
     let required_weight = 2 * max_faulty + 1;
 
     let other_managers: HashMap<_, _> = managers

@@ -546,9 +546,9 @@ mod tests {
             let mpc_mgr = nodes[0].hashi().mpc_manager().unwrap();
             let mgr = mpc_mgr.read().unwrap();
             (
-                mgr.dkg_config.threshold,
-                mgr.dkg_config.max_faulty,
-                mgr.dkg_config.nodes.total_weight(),
+                mgr.mpc_config.threshold,
+                mgr.mpc_config.max_faulty,
+                mgr.mpc_config.nodes.total_weight(),
             )
         };
         let node_infos: Vec<_> = nodes
@@ -556,7 +556,7 @@ mod tests {
             .map(|node| {
                 let mpc_mgr = node.hashi().mpc_manager().unwrap();
                 let mgr = mpc_mgr.read().unwrap();
-                let share_ids = mgr.dkg_config.nodes.share_ids_of(mgr.party_id).unwrap();
+                let share_ids = mgr.mpc_config.nodes.share_ids_of(mgr.party_id).unwrap();
                 NodeDkgInfo {
                     address: mgr.address,
                     share_ids,

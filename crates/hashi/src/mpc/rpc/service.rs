@@ -36,7 +36,7 @@ impl MpcService for HttpService {
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch(mgr.dkg_config.epoch, external_request.epoch)?;
+            validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
             mgr.handle_send_messages_request(sender, &internal_request)
                 .map_err(|e| {
                     if matches!(&e, MpcError::NotReady(_)) {
@@ -64,7 +64,7 @@ impl MpcService for HttpService {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
             validate_epoch_current_or_source(
-                mgr.dkg_config.epoch,
+                mgr.mpc_config.epoch,
                 mgr.source_epoch,
                 internal_request.epoch,
             )?;
@@ -92,7 +92,7 @@ impl MpcService for HttpService {
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
             validate_epoch_current_or_source(
-                mgr.dkg_config.epoch,
+                mgr.mpc_config.epoch,
                 mgr.source_epoch,
                 internal_request.epoch,
             )?;

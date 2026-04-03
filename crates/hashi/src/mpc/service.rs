@@ -334,7 +334,7 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
-                mgr.dkg_config.max_faulty as usize,
+                mgr.mpc_config.max_faulty as usize,
             )
         };
         let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
@@ -383,7 +383,7 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
-                mgr.dkg_config.max_faulty as usize,
+                mgr.mpc_config.max_faulty as usize,
             )
         };
         // Walk through batches to find the one containing `num_consumed`.
