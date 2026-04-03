@@ -56,7 +56,10 @@ impl BitcoinNodeHandle {
             .arg("-server")
             .arg(format!("-datadir={}", data_dir.display()))
             .arg(format!("-rpcport={}", rpc_port))
-            .arg(format!("-port={}", p2p_port))
+            // Use -bind instead of -port to prevent Bitcoin Core from
+            // also opening an onion listener on port+1.
+            .arg(format!("-bind=127.0.0.1:{}", p2p_port))
+            .arg("-listen=1")
             .arg(format!("-rpcuser={}", RPC_USER))
             .arg(format!("-rpcpassword={}", RPC_PASSWORD))
             .arg("-rpcbind=127.0.0.1")
@@ -66,9 +69,7 @@ impl BitcoinNodeHandle {
             .arg("-blockfilterindex=1") // Enable compact block filters (BIP-158)
             .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
             .arg("-txindex=1") // Enable transaction index for RPC queries
-            // Disable onion since it tries to listen on port+1
-            .arg("-noonion")
-            .arg("-nolistenonion")
+            .arg("-listenonion=0")
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
