@@ -44,7 +44,7 @@ For the initial YubiKey setup, we must use a machine with a physical USB drive. 
     - Tap the YubiKey to confirm.
     - Confirm that the output matches the original test file.
 
-5. Store the YubiKey(s) in a secure location, such as in a company safe. 
+5. Store the YubiKey(s) in a secure location, such as in a company safe. Be sure to also save the identity file somewhere.
 
 ### Option 2: Create a local private key file
 

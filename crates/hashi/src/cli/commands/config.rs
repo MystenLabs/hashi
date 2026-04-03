@@ -3,9 +3,14 @@
 
 //! Config command implementations
 
+use age::Encryptor;
+use age::x25519;
 use anyhow::Result;
 use colored::Colorize;
+use std::fs::File;
 use std::path::Path;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::cli::client::HashiClient;
 use crate::cli::config::CliConfig;
@@ -126,6 +131,82 @@ pub fn show_config(config: &CliConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Save an encrypted backup of the current config and referenced files
+pub fn backup(config: &CliConfig, backup_age_pubkey_override: Option<String>) -> Result<()> {
+    let age_pubkey = backup_age_pubkey_override
+        .map(|value| x25519::Recipient::from_str(&value).map_err(anyhow::Error::msg))
+        .transpose()?
+        .or_else(|| config.backup_age_pubkey.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No age public key configured. Pass --backup-age-pubkey or set backup_age_pubkey in the config file."
+            )
+        })?;
+
+    if config.loaded_from_path.is_none() {
+        anyhow::bail!(
+            "No config file is currently in use. Pass --config with a config file path before running backup."
+        );
+    }
+
+    let files = config.backup_file_paths();
+
+    for file in &files {
+        if !file.exists() {
+            anyhow::bail!("Backup input does not exist: {}", file.display());
+        }
+    }
+
+    print_info(&format!(
+        "Backing up {} file(s) using age recipient {}",
+        files.len(),
+        age_pubkey
+    ));
+
+    let output_path = encrypt_files_to_age_archive(&files, &age_pubkey)?;
+
+    print_success(&format!("Backup completed: {}", output_path.display()));
+
+    Ok(())
+}
+
+fn encrypt_files_to_age_archive(
+    files: &[PathBuf],
+    age_pubkey: &x25519::Recipient,
+) -> Result<PathBuf> {
+    let output_path = encrypted_backup_output_path();
+    let output = File::create(&output_path)?;
+    let encryptor = Encryptor::with_recipients(std::iter::once(age_pubkey as _))?;
+    let mut encrypted = encryptor.wrap_output(output)?;
+    let mut archive = tar::Builder::new(&mut encrypted);
+
+    for file in files {
+        let archive_path = PathBuf::from(file.file_name().ok_or_else(|| {
+            anyhow::anyhow!("Backup input does not have a file name: {}", file.display())
+        })?);
+        archive.append_path_with_name(file, &archive_path)?;
+        print_info(&format!(
+            "Added {} to {}",
+            file.display(),
+            archive_path.display()
+        ));
+    }
+
+    archive.finish()?;
+    drop(archive);
+    encrypted.finish()?;
+
+    Ok(output_path)
+}
+
+fn encrypted_backup_output_path() -> PathBuf {
+    let timestamp = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .strftime("%Y-%m-%d-%H-%M-%S-%Z")
+        .to_string();
+    PathBuf::from(format!("hashi-config-backup-{timestamp}.tar.age"))
 }
 
 /// Show on-chain configuration values
