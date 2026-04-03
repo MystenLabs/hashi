@@ -429,6 +429,9 @@ pub enum MpcError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    #[error("Not ready: {0}")]
+    NotReady(String),
+
     #[error("Protocol failed: {0}")]
     ProtocolFailed(String),
 }

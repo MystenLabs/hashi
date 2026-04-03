@@ -268,7 +268,7 @@ impl MpcManager {
                 let previous = self
                     .previous_output
                     .clone()
-                    .ok_or_else(|| MpcError::ProtocolFailed("Rotation not started".into()))?;
+                    .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
                 self.store_rotation_messages(sender, msgs)?;
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
