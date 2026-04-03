@@ -203,7 +203,6 @@ public fun create_for_testing(
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    btc_state: BitcoinState,
     proposals: Bag,
     tob: Bag,
     ctx: &mut TxContext,
@@ -217,6 +216,6 @@ public fun create_for_testing(
         tob,
         num_consumed_presigs: 0,
     };
-    df::add(&mut hashi.id, bitcoin_state::key(), btc_state);
+    df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi
 }

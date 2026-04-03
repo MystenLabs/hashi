@@ -529,7 +529,7 @@ impl LeaderService {
             .onchain_state()
             .withdrawal_requests()
             .into_iter()
-            .filter(|r| !r.approved)
+            .filter(|r| r.status.is_requested())
             .collect();
         unapproved.sort_by_key(|r| r.timestamp_ms);
 
@@ -847,7 +847,7 @@ impl LeaderService {
             .onchain_state()
             .withdrawal_requests()
             .into_iter()
-            .filter(|r| r.approved)
+            .filter(|r| r.status.is_approved())
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
@@ -1147,7 +1147,7 @@ impl LeaderService {
         // 3. Build the WithdrawalTxSigning and get BLS certificate via fan-out
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: pending.id,
-            request_ids: pending.request_ids(),
+            request_ids: pending.request_ids.clone(),
             signatures: witness_signatures.clone(),
         };
 
@@ -1193,7 +1193,7 @@ impl LeaderService {
         Self::submit_sign_withdrawal(
             &inner,
             &pending.id,
-            &pending.request_ids(),
+            &pending.request_ids.clone(),
             &witness_signatures,
             signed.committee_signature(),
         )

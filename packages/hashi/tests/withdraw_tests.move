@@ -24,9 +24,14 @@ fun setup_withdrawal_request(
 ): address {
     let btc = sui::balance::create_for_testing<BTC>(btc_amount);
     let bitcoin_address = x"0000000000000000000000000000000000000000"; // 20 bytes
-    let request = withdrawal_queue::withdrawal_request(btc, bitcoin_address, clock, ctx);
-    let request_id = request.request_id();
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_request(request);
+    let request = withdrawal_queue::create_withdrawal(
+        btc,
+        bitcoin_address,
+        clock,
+        ctx,
+    );
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request, ctx);
     request_id
 }
 
@@ -131,17 +136,19 @@ fun test_approve_request_with_certificate() {
     let cert2 = test_utils::sign_certificate(epoch, &message_bytes2, 3);
     hashi::withdraw::approve_request(&mut hashi, id2, cert2);
 
-    // Verify both requests are now approved by removing them as approved
-    let r1 = hashi.bitcoin_mut().withdrawal_queue_mut().remove_approved_request(id1);
-    let r2 = hashi.bitcoin_mut().withdrawal_queue_mut().remove_approved_request(id2);
+    // Verify both requests are now approved by committing them
+    let pending_id = ctx.fresh_object_address();
+    let (_, btc_balance) = hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .commit_requests(
+            &vector[id1, id2],
+            pending_id,
+        );
+    // Total: 10_000 + 20_000 = 30_000
+    assert!(btc_balance.value() == 30_000);
 
-    let (_, btc1) = withdrawal_queue::request_into_parts(r1);
-    let (_, btc2) = withdrawal_queue::request_into_parts(r2);
-    assert!(btc1.value() == 10_000);
-    assert!(btc2.value() == 20_000);
-
-    btc1.destroy_for_testing();
-    btc2.destroy_for_testing();
+    btc_balance.destroy_for_testing();
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
@@ -169,7 +176,7 @@ fun test_approve_request_bad_signature() {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::withdraw::ERequestAlreadyApproved)]
+#[expected_failure(abort_code = hashi::withdraw::ECannotCancelAfterApproval)]
 fun test_approve_then_cancel() {
     let epoch = 0u64;
     let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);

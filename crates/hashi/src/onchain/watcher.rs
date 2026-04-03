@@ -295,12 +295,14 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 tracing::info!(withdrawal_request_id = %withdrawal_requested_event.request_id, "Withdrawal request detected");
                 let withdrawal_request = WithdrawalRequest {
                     id: withdrawal_requested_event.request_id,
+                    sender: withdrawal_requested_event.requester_address,
                     btc_amount: withdrawal_requested_event.btc_amount,
                     bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
                     timestamp_ms: withdrawal_requested_event.timestamp_ms,
-                    requester_address: withdrawal_requested_event.requester_address,
+                    status: super::types::WithdrawalStatus::Requested,
+                    pending_withdrawal_id: None,
                     sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
-                    approved: false,
+                    btc: withdrawal_requested_event.btc_amount,
                 };
                 state
                     .state_mut()
@@ -318,7 +320,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .requests
                     .get_mut(&event.request_id)
                 {
-                    request.approved = true;
+                    request.status = super::types::WithdrawalStatus::Approved;
                 }
             }
             HashiEvent::WithdrawalPickedForProcessingEvent(event) => {

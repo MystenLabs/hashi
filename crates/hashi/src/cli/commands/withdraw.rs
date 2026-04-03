@@ -140,7 +140,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         println!(
             "  {} {}",
             "Requester:".bold(),
-            display::format_address(&wr.requester_address)
+            display::format_address(&wr.sender)
         );
         println!(
             "  {} {}",
@@ -149,13 +149,13 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         );
         println!();
 
-        let status_label = if wr.approved {
+        let status_label = if wr.status.is_approved() {
             "Approved".green()
         } else {
             "Requested".yellow()
         };
 
-        let step = if wr.approved { 2 } else { 1 };
+        let step = if wr.status.is_approved() { 2 } else { 1 };
         println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
         println!(
             "    {} Requested",
@@ -181,7 +181,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     // Check committed/signed pending withdrawals
     else if let Some(pw) = pending_withdrawals
         .iter()
-        .find(|p| p.request_ids().contains(&req_addr))
+        .find(|p| p.request_ids.contains(&req_addr))
     {
         let txid_bytes: [u8; 32] = pw.id.into();
         let txid = bitcoin::Txid::from_byte_array(txid_bytes);
@@ -260,8 +260,8 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     serde_json::json!({
                         "request_id": wr.id.to_string(),
                         "amount_sats": wr.btc_amount,
-                        "status": if wr.approved { "approved" } else { "requested" },
-                        "caller": wr.requester_address.to_string(),
+                        "status": if wr.status.is_approved() { "approved" } else { "requested" },
+                        "caller": wr.sender.to_string(),
                         "requested_ms": wr.timestamp_ms,
                     })
                 })
@@ -275,7 +275,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     serde_json::json!({
                         "txid": txid.to_string(),
                         "status": if pw.signatures.is_some() { "signed" } else { "committed" },
-                        "request_count": pw.request_ids().len(),
+                        "request_count": pw.request_ids.len(),
                     })
                 })
                 .collect();
@@ -308,13 +308,17 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         "Requested".bold()
                     );
                     for wr in &requests {
-                        let status = if wr.approved { "Approved" } else { "Requested" };
+                        let status = if wr.status.is_approved() {
+                            "Approved"
+                        } else {
+                            "Requested"
+                        };
                         println!(
                             "  {:<20} {:<14} {:<10} {:<20} {}",
                             display::format_address_full(&wr.id),
                             wr.btc_amount,
                             status,
-                            display::format_address_full(&wr.requester_address),
+                            display::format_address_full(&wr.sender),
                             display::format_timestamp(wr.timestamp_ms)
                         );
                     }
@@ -337,7 +341,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                             "  txid: {}  status: {}  requests: {}",
                             txid,
                             status,
-                            pw.request_ids().len()
+                            pw.request_ids.len()
                         );
                     }
                 }

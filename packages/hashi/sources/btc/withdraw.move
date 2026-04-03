@@ -11,7 +11,7 @@ use hashi::{
     config::Config,
     hashi::Hashi,
     utxo::UtxoId,
-    withdrawal_queue::{OutputUtxo, withdrawal_request}
+    withdrawal_queue::OutputUtxo
 };
 use sui::{clock::Clock, coin::{Self, Coin}, random::Random};
 
@@ -30,7 +30,7 @@ const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can 
 #[error]
 const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
 #[error]
-const ERequestAlreadyApproved: vector<u8> = b"Request has already been approved";
+const ECannotCancelAfterApproval: vector<u8> = b"Cannot cancel a withdrawal that has been approved";
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
@@ -115,10 +115,17 @@ public fun request_withdrawal(
     let fee_coin = btc.split(hashi.config().withdrawal_fee_btc(), ctx);
     sui::coin::send_funds(fee_coin, hashi.id().to_address());
 
-    // Store remaining BTC (net of protocol fee) in the withdrawal request.
-    let request = withdrawal_request(btc.into_balance(), bitcoin_address, clock, ctx);
-    request.emit_withdrawal_requested();
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_request(request);
+    // Create the withdrawal request.
+    let request = hashi::withdrawal_queue::create_withdrawal(
+        btc.into_balance(),
+        bitcoin_address,
+        clock,
+        ctx,
+    );
+    hashi::withdrawal_queue::emit_withdrawal_requested(&request);
+
+    // Insert into the active requests bag and index by sender.
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request, ctx);
 }
 
 entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: CommitteeSignature) {
@@ -127,7 +134,7 @@ entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: Committe
     hashi.assert_not_reconfiguring();
     hashi.verify(RequestApprovalMessage { request_id }, cert);
 
-    hashi.bitcoin_mut().withdrawal_queue_mut().approve_request(request_id);
+    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(request_id);
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
 }
 
@@ -151,12 +158,6 @@ entry fun commit_withdrawal_tx(
 
     let epoch = hashi.committee_set().epoch();
 
-    // Copy the full UTXO data from the pool before locking — used for fee
-    // accounting and event emission inside new_pending_withdrawal.
-    let inputs = selected_utxos.map!(|utxo_id| hashi.bitcoin().utxo_pool().get_utxo(utxo_id));
-
-    let presig_start_index = hashi.allocate_presigs(inputs.length());
-
     let approval = WithdrawalCommitmentMessage {
         request_ids,
         selected_utxos,
@@ -166,30 +167,36 @@ entry fun commit_withdrawal_tx(
 
     hashi.verify(approval, cert);
 
-    let WithdrawalCommitmentMessage {
-        outputs,
-        txid,
-        ..,
-    } = approval;
+    let WithdrawalCommitmentMessage { outputs, txid, .. } = approval;
 
-    let requests = request_ids.map!(|request_id| {
-        let request = hashi
-            .bitcoin_mut()
-            .withdrawal_queue_mut()
-            .remove_approved_request(request_id);
-        let (request, btc) = hashi::withdrawal_queue::request_into_parts(request);
+    // Generate the pending withdrawal ID upfront so we can reference it in request statuses.
+    let pending_id = ctx.fresh_object_address();
 
-        // burn BTC
-        hashi.treasury_mut().burn(btc);
+    // Copy the full UTXO data from the pool before locking — used for fee
+    // accounting and event emission inside new_pending_withdrawal.
+    let inputs = selected_utxos.map!(|utxo_id| hashi.bitcoin().utxo_pool().get_utxo(utxo_id));
 
-        request
-    });
+    // Borrow BitcoinState: lock UTXOs, commit requests (drain BTC, move to processed bag)
+    let btc = hashi.bitcoin_mut();
+    inputs.do_ref!(|utxo| btc.utxo_pool_mut().lock(utxo.id(), pending_id));
+    let (request_infos, btc_to_burn) = btc
+        .withdrawal_queue_mut()
+        .commit_requests(&request_ids, pending_id);
+    // btc borrow released
+
+    // Allocate presigs from core counter (must happen after btc borrow is released)
+    let presig_start_index = hashi.allocate_presigs(inputs.length());
+
+    // Burn BTC balance
+    hashi.treasury_mut().burn(btc_to_burn);
 
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(32);
 
     let pending_withdrawal = hashi::withdrawal_queue::new_pending_withdrawal(
-        requests,
+        pending_id,
+        request_ids,
+        &request_infos,
         inputs,
         outputs,
         txid,
@@ -198,14 +205,7 @@ entry fun commit_withdrawal_tx(
         hashi.config(),
         clock,
         randomness,
-        ctx,
     );
-
-    // Lock inputs and insert the pending change UTXO using the withdrawal's
-    // freshly-assigned ID. UTXOs remain in the pool until confirm_withdrawal()
-    // finalizes them as spent.
-    let withdrawal_id = pending_withdrawal.pending_withdrawal_id();
-    inputs.do_ref!(|utxo| hashi.bitcoin_mut().utxo_pool_mut().lock(utxo.id(), withdrawal_id));
 
     // Insert the pending change UTXO into the pool immediately so it can be
     // selected by subsequent transactions before this one confirms on Bitcoin.
@@ -214,12 +214,13 @@ entry fun commit_withdrawal_tx(
         hashi
             .bitcoin_mut()
             .utxo_pool_mut()
-            .insert_pending(change_utxo_opt.destroy_some(), withdrawal_id);
+            .insert_pending(change_utxo_opt.destroy_some(), pending_id);
     } else {
         change_utxo_opt.destroy_none();
     };
 
     pending_withdrawal.emit_withdrawal_picked_for_processing();
+
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_pending_withdrawal(pending_withdrawal);
 }
 
@@ -250,20 +251,17 @@ entry fun sign_withdrawal(
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
-    // Do not allow signing of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
-    let approval = WithdrawalSignedMessage {
-        withdrawal_id,
-        request_ids,
-        signatures,
-    };
+    let approval = WithdrawalSignedMessage { withdrawal_id, request_ids, signatures };
 
     hashi.verify(approval, cert);
 
     let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
 
-    hashi.bitcoin_mut().withdrawal_queue_mut().sign_pending_withdrawal(withdrawal_id, signatures);
+    let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
+    queue.sign_pending_withdrawal(withdrawal_id, signatures);
+    queue.update_requests_signed(&request_ids, withdrawal_id);
 }
 
 entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: CommitteeSignature) {
@@ -277,7 +275,10 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
         .remove_pending_withdrawal(withdrawal_id);
     withdrawal.emit_withdrawal_confirmed();
 
-    let (input_utxos, change_id) = withdrawal.destroy_pending_withdrawal();
+    let (request_ids, input_utxos, txid, change_id) = withdrawal.destroy_pending_withdrawal();
+
+    hashi.bitcoin_mut().withdrawal_queue_mut().update_requests_confirmed(&request_ids, txid);
+
     let epoch = hashi.committee_set().epoch();
 
     // Move each locked input to the spent set now that the Bitcoin transaction
@@ -308,23 +309,23 @@ public fun cancel_withdrawal(
 ): Coin<BTC> {
     hashi.config().assert_version_enabled();
 
+    let request = hashi.bitcoin().withdrawal_queue().borrow_request(request_id);
+
     assert!(
         !hashi.bitcoin().withdrawal_queue().is_request_approved(request_id),
-        ERequestAlreadyApproved,
+        ECannotCancelAfterApproval,
     );
 
-    let request = hashi.bitcoin_mut().withdrawal_queue_mut().remove_request(request_id);
-
     // Only the original requester can cancel
-    assert!(request.requester_address() == ctx.sender(), EUnauthorizedCancellation);
+    assert!(request.request_sender() == ctx.sender(), EUnauthorizedCancellation);
 
     // Enforce cooldown
     let cooldown = hashi.config().withdrawal_cancellation_cooldown_ms();
-    assert!(clock.timestamp_ms() >= request.timestamp_ms() + cooldown, ECooldownNotElapsed);
+    assert!(clock.timestamp_ms() >= request.request_timestamp_ms() + cooldown, ECooldownNotElapsed);
 
-    request.emit_withdrawal_cancelled();
+    hashi::withdrawal_queue::emit_withdrawal_cancelled(request);
 
     // Return BTC to the requester
-    let (_, btc) = hashi::withdrawal_queue::request_into_parts(request);
+    let btc = hashi.bitcoin_mut().withdrawal_queue_mut().cancel_withdrawal(request_id);
     coin::from_balance(btc, ctx)
 }

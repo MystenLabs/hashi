@@ -32,6 +32,7 @@ public struct DepositRequestQueue has store {
     processed: ObjectBag,
     /// Per-sender index: sender address -> Bag of request IDs.
     /// Allows clients to discover all deposit requests for a given address.
+    /// TODO: consider unifying this with the user_requests index in the withdrawal_queue
     user_requests: Table<address, Bag>,
 }
 
