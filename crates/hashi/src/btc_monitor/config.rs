@@ -19,8 +19,10 @@ pub struct MonitorConfig {
     /// Number of confirmations required for a transaction to be considered canonical
     pub confirmation_threshold: u32,
 
-    /// Initial peer addresses for P2P connections
-    pub trusted_peers: Vec<kyoto::TrustedPeer>,
+    /// Peers for P2P connections, identified by hostname (or IP) and port.
+    /// Re-resolved via DNS on each connection attempt, so IP changes
+    /// (e.g., Kubernetes pod rotation) are followed automatically.
+    pub dns_peers: Vec<kyoto::DnsPeer>,
 
     /// Starting block height for synchronization
     pub start_height: u32,
@@ -40,7 +42,7 @@ impl Default for MonitorConfig {
         Self {
             network: Network::Bitcoin,
             confirmation_threshold: 6,
-            trusted_peers: Vec::new(),
+            dns_peers: Vec::new(),
             start_height: 800_000,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
             bitcoind_rpc_auth: corepc_client::client_sync::Auth::None,
@@ -61,7 +63,7 @@ impl MonitorConfig {
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
     confirmation_threshold: Option<u32>,
-    trusted_peers: Vec<kyoto::TrustedPeer>,
+    dns_peers: Vec<kyoto::DnsPeer>,
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
     bitcoind_rpc_auth: Option<corepc_client::client_sync::Auth>,
@@ -81,9 +83,10 @@ impl MonitorConfigBuilder {
         self
     }
 
-    /// Set peer addresses for P2P connections.
-    pub fn trusted_peers(mut self, addresses: Vec<kyoto::TrustedPeer>) -> Self {
-        self.trusted_peers = addresses;
+    /// Set peers for P2P connections. Accepts hostnames or IPs with port.
+    /// Hostnames are re-resolved via DNS on each connection attempt.
+    pub fn dns_peers(mut self, peers: Vec<kyoto::DnsPeer>) -> Self {
+        self.dns_peers = peers;
         self
     }
 
@@ -118,11 +121,7 @@ impl MonitorConfigBuilder {
             confirmation_threshold: self
                 .confirmation_threshold
                 .unwrap_or(default.confirmation_threshold),
-            trusted_peers: if self.trusted_peers.is_empty() {
-                default.trusted_peers
-            } else {
-                self.trusted_peers
-            },
+            dns_peers: self.dns_peers,
             start_height: self.start_height,
             bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
             bitcoind_rpc_auth: self.bitcoind_rpc_auth.unwrap_or(default.bitcoind_rpc_auth),
