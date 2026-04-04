@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -304,22 +303,23 @@ impl Config {
             .to_corepc_auth()
     }
 
-    pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<crate::btc_monitor::TrustedPeer>> {
+    /// Parse configured Bitcoin peer strings as DNS peers. The hostnames are
+    /// NOT resolved here — kyoto re-resolves them on each connection attempt,
+    /// so IP changes (e.g., Kubernetes pod rotation) are followed automatically.
+    pub fn bitcoin_dns_peers(&self) -> anyhow::Result<Vec<kyoto::DnsPeer>> {
         let Some(peer_strs) = self.bitcoin_trusted_peers.as_ref() else {
             return Ok(Vec::new());
         };
 
         let mut peers = Vec::new();
-        for addr in peer_strs {
-            let resolved: Vec<_> = addr
-                .to_socket_addrs()
-                .map_err(|e| anyhow::anyhow!("Failed to resolve bitcoin peer '{addr}': {e}"))?
-                .map(crate::btc_monitor::TrustedPeer::from)
-                .collect();
-            if resolved.is_empty() {
-                tracing::warn!("No addresses resolved for bitcoin peer '{addr}'");
-            }
-            peers.extend(resolved);
+        for s in peer_strs {
+            let (host, port_str) = s.rsplit_once(':').ok_or_else(|| {
+                anyhow::anyhow!("Invalid bitcoin peer '{s}': expected 'host:port' format")
+            })?;
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|e| anyhow::anyhow!("Invalid port in bitcoin peer '{s}': {e}"))?;
+            peers.push(kyoto::DnsPeer::new(host, port));
         }
         Ok(peers)
     }

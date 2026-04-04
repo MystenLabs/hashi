@@ -11,15 +11,13 @@
 //! cargo run --example testnet_monitor -- --bitcoind-url http://localhost:18332 --bitcoind-user myuser --bitcoind-password mypass
 //! ```
 use std::io::Write;
-use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::str::FromStr;
 
 use bitcoin::Network;
 use clap::Parser;
 use hashi::btc_monitor::config::MonitorConfig;
 use hashi::btc_monitor::monitor::Monitor;
-use kyoto::TrustedPeer;
+use kyoto::DnsPeer;
 use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -73,52 +71,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     info!("Starting BTC testnet4 monitor");
-    let mut testnet_peers = Vec::new();
 
-    // Attempt to resolve DNS seeds
-    let dns_seeds = [
-        "seed.testnet4.bitcoin.sprovoost.nl",
-        "seed.testnet4.wiz.biz",
+    // DNS peers are re-resolved by kyoto on each connection attempt.
+    let dns_peers = vec![
+        DnsPeer::new("seed.testnet4.bitcoin.sprovoost.nl", 48333),
+        DnsPeer::new("seed.testnet4.wiz.biz", 48333),
     ];
-    for seed in dns_seeds {
-        info!("Resolving seed: {}", seed);
-        match (seed, 48333).to_socket_addrs() {
-            Ok(addrs) => {
-                let mut count = 0;
-                for addr in addrs {
-                    testnet_peers.push(TrustedPeer::from(addr));
-                    count += 1;
-                }
-                info!("  Found {} peers from {}", count, seed);
-            }
-            Err(e) => {
-                error!("  Failed to resolve {}: {}", seed, e);
-            }
-        }
-    }
-
-    // Fallback to hardcoded peers if DNS resolution yields few results
-    if testnet_peers.is_empty() {
-        info!("No peers found via DNS. using fallback hardcoded peers.");
-        let fallback_peers = vec![
-            "178.63.87.163:48333",
-            "91.83.65.73:48333",
-            "54.74.158.50:48333",
-            "148.135.67.253:48333",
-            "80.253.94.252:48333",
-        ];
-
-        for peer_str in fallback_peers {
-            if let Ok(addr) = peer_str.parse::<SocketAddr>() {
-                testnet_peers.push(TrustedPeer::from(addr));
-            }
-        }
-    }
-
-    if testnet_peers.is_empty() {
-        error!("No peers found. The monitor cannot start.");
-        return Err("No peers available".into());
-    }
 
     let bitcoind_auth = match (args.bitcoind_user, args.bitcoind_password) {
         (Some(user), Some(pass)) => corepc_client::client_sync::Auth::UserPass(user, pass),
@@ -134,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = MonitorConfig::builder()
         .network(Network::Testnet4)
         .confirmation_threshold(args.confirmations)
-        .trusted_peers(testnet_peers)
+        .dns_peers(dns_peers)
         .start_height(args.start_height)
         .bitcoind_rpc_config(args.bitcoind_url.clone(), bitcoind_auth)
         .build();
@@ -147,10 +105,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("  Starting height: {}", config.start_height);
     info!("  bitcoind RPC URL: {}", config.bitcoind_rpc_url);
-    info!("  Initial peers: {}", config.trusted_peers.len());
+    info!("  Initial peers: {}", config.dns_peers.len());
     info!("  Peer addresses:");
-    for peer in &config.trusted_peers {
-        info!("    - {:?}:{:?}", peer.address(), peer.port());
+    for peer in &config.dns_peers {
+        info!("    - {}:{}", peer.hostname, peer.port);
     }
 
     // Create and start the monitor
