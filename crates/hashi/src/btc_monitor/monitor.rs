@@ -329,6 +329,9 @@ impl Monitor {
                     ));
                     self.metrics.kyoto_best_height.set(new_tip.height as i64);
                 }
+                // Re-check pending deposits — some may have been on the
+                // reorged branch and need re-verification.
+                self.process_pending_deposits();
             }
             kyoto::chain::BlockHeaderChanges::ForkAdded(indexed_header) => {
                 debug!(
@@ -589,51 +592,26 @@ impl Monitor {
                     );
                     return;
                 };
-                let block_header = match bitcoind_rpc.get_block_header_verbose(&block_hash) {
-                    Ok(block_header) => block_header,
-                    Err(e) => {
-                        error!("Failed to look up block header {}: {e}", block_hash);
-                        return;
-                    }
-                };
-                let block_header = match block_header.into_model() {
-                    Ok(header) => header,
-                    Err(e) => {
-                        error!("Failed to parse block header {}: {e}", block_hash);
-                        return;
-                    }
-                };
-                // Double check header with Kyoto to verify the height reported by bitcoind.
-                let kyoto_header = match requester.get_header(block_header.height).await {
-                    Ok(Some(header)) => header,
+                // Verify the block hash is in kyoto's independently-validated
+                // chain of most work. This catches a malicious bitcoind reporting
+                // a fake or forked block hash.
+                let height = match requester.height_of_hash(block_hash).await {
+                    Ok(Some(height)) => height,
                     Ok(None) => {
                         warn!(
-                            "Header at height {} not found in kyoto's chain \
-                             (may be above current tip or below checkpoint)",
-                            block_header.height
+                            "Block hash {block_hash} not found in kyoto's chain of most work. \
+                             Possibly malicious behavior by the Bitcoin Core node."
                         );
                         return;
                     }
                     Err(e) => {
-                        error!(
-                            "Failed to look up header at height {}: {e}",
-                            block_header.height
-                        );
+                        error!("Failed to look up block hash {block_hash} in kyoto: {e}");
                         return;
                     }
                 };
-                if kyoto_header.block_hash() != block_hash {
-                    warn!(
-                        "Block hash mismatch at height {}! Possibly malicious behavior by the Bitcoin Core node. {} != {}",
-                        block_header.height,
-                        kyoto_header.block_hash(),
-                        block_hash
-                    );
-                    return;
-                }
                 let block_info = kyoto::HeaderCheckpoint {
-                    height: block_header.height,
-                    hash: block_header.hash,
+                    height,
+                    hash: block_hash,
                 };
                 pending_deposit.block_info = Some(block_info);
                 block_info
