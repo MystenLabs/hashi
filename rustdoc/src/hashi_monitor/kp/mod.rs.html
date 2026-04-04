@@ -1,0 +1,158 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi-monitor/src/kp/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="hashi_monitor" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">hashi_monitor/kp/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="kw">use </span>hpke::Deserializable;
+<a href=#5 id=5 data-nosnippet>5</a><span class="kw">mod </span><a href="config.rs.html#4-143">config</a>;
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">mod </span><a href="heartbeat_checks.rs.html#4-221">heartbeat_checks</a>;
+<a href=#7 id=7 data-nosnippet>7</a>
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span><a href="config.rs.html#24-27"><span class="kw">crate</span>::kp::config::GuardianConfig</a>;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span><a href="https://docs.rs/anyhow/1.0.100/anyhow/trait.Context.html">anyhow::Context</a>;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span><a href="../../../hashi_guardian/s3_logger/struct.S3Logger.html">hashi_guardian::s3_logger::S3Logger</a>;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span><a href="../../../hashi_types/guardian/crypto/type.EncPubKey.html">hashi_types::guardian::EncPubKey</a>;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><a href="../../../hashi_types/guardian/struct.GetGuardianInfoResponse.html">hashi_types::guardian::GetGuardianInfoResponse</a>;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><a href="../../../hashi_types/guardian/struct.GuardianInfo.html">hashi_types::guardian::GuardianInfo</a>;
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><a href="../../../hashi_types/guardian/limiter/struct.LimiterState.html">hashi_types::guardian::LimiterState</a>;
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span><a href="../../../hashi_types/guardian/struct.ProvisionerInitRequest.html">hashi_types::guardian::ProvisionerInitRequest</a>;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span><a href="../../../hashi_types/guardian/struct.ProvisionerInitState.html">hashi_types::guardian::ProvisionerInitState</a>;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><a href="../../../hashi_types/guardian/proto_conversions/fn.provisioner_init_request_to_pb.html">hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb</a>;
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><a href="../../../hashi_types/guardian/fn.session_id_from_signing_pubkey.html">hashi_types::guardian::session_id_from_signing_pubkey</a>;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span><a href="../../../hashi_types/guardian/fn.verify_enclave_attestation.html">hashi_types::guardian::verify_enclave_attestation</a>;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span><a href="../../../hashi_types/proto/index.html">hashi_types::proto</a> <span class="kw">as </span>pb;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span><a href="https://rust-random.github.io/rand/rand/rngs/thread/fn.thread_rng.html">rand::thread_rng</a>;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span>tracing::info;
+<a href=#23 id=23 data-nosnippet>23</a>
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub use </span><a href="config.rs.html#58-75">config::ProvisionerConfig</a>;
+<a href=#25 id=25 data-nosnippet>25</a>
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub async fn </span><a href="../../../hashi_monitor/kp/fn.run.html">run</a>(cfg: <a href="config.rs.html#58-75">ProvisionerConfig</a>) -&gt; anyhow::Result&lt;()&gt; {
+<a href=#27 id=27 data-nosnippet>27</a>    <span class="kw">let </span>s3_client = S3Logger::new_checked(<span class="kw-2">&amp;</span>cfg.s3)
+<a href=#28 id=28 data-nosnippet>28</a>        .<span class="kw">await
+<a href=#29 id=29 data-nosnippet>29</a>        </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(e))<span class="question-mark">?</span>;
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="comment">// 1. Check no past enclave's heartbeats remain &amp; gather the latest enclave's session id.
+<a href=#32 id=32 data-nosnippet>32</a>    </span><span class="kw">let </span>session_id = heartbeat_checks::kp_heartbeat_audit(<span class="kw-2">&amp;</span>s3_client).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="macro">info!</span>(session_id, <span class="string">"heartbeat checks passed for selected session"</span>);
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a>    <span class="comment">// 2. Check that enclave's config is as expected (valid attestation, expected s3 bucket &amp; share commitments)
+<a href=#36 id=36 data-nosnippet>36</a>    </span><span class="kw">let </span>guardian_info = get_guardian_info_from_s3(<span class="kw-2">&amp;</span>s3_client, <span class="kw-2">&amp;</span>session_id).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#37 id=37 data-nosnippet>37</a>    <span class="kw">let </span>expected_guardian_config = cfg.expected_guardian_config()<span class="question-mark">?</span>;
+<a href=#38 id=38 data-nosnippet>38</a>    expected_guardian_config.ensure_matches_info(<span class="kw-2">&amp;</span>guardian_info)<span class="question-mark">?</span>;
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="macro">info!</span>(session_id, <span class="string">"init checks passed for selected session"</span>);
+<a href=#40 id=40 data-nosnippet>40</a>
+<a href=#41 id=41 data-nosnippet>41</a>    <span class="comment">// TODO: replace mock limiter state with actual state from S3 logs.
+<a href=#42 id=42 data-nosnippet>42</a>    </span><span class="kw">let </span>committee = cfg.hashi_committee.try_into()<span class="question-mark">?</span>;
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="kw">let </span>mock_limiter_state = LimiterState {
+<a href=#44 id=44 data-nosnippet>44</a>        num_tokens_available: cfg.withdrawal_config.max_bucket_capacity_sats,
+<a href=#45 id=45 data-nosnippet>45</a>        last_updated_at: <span class="number">0</span>,
+<a href=#46 id=46 data-nosnippet>46</a>        next_seq: <span class="number">0</span>,
+<a href=#47 id=47 data-nosnippet>47</a>    };
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="kw">let </span>state = ProvisionerInitState::new(
+<a href=#49 id=49 data-nosnippet>49</a>        committee,
+<a href=#50 id=50 data-nosnippet>50</a>        cfg.withdrawal_config,
+<a href=#51 id=51 data-nosnippet>51</a>        mock_limiter_state,
+<a href=#52 id=52 data-nosnippet>52</a>        cfg.hashi_btc_master_pubkey,
+<a href=#53 id=53 data-nosnippet>53</a>    )
+<a href=#54 id=54 data-nosnippet>54</a>    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(e))<span class="question-mark">?</span>;
+<a href=#55 id=55 data-nosnippet>55</a>
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="kw">let </span>guardian_pub_key =
+<a href=#57 id=57 data-nosnippet>57</a>        EncPubKey::from_bytes(<span class="kw-2">&amp;</span>guardian_info.encryption_pubkey).map_err(|e| <span class="macro">anyhow::anyhow!</span>(e))<span class="question-mark">?</span>;
+<a href=#58 id=58 data-nosnippet>58</a>    <span class="kw">let </span>request = ProvisionerInitRequest::build_from_share_and_state(
+<a href=#59 id=59 data-nosnippet>59</a>        <span class="kw-2">&amp;</span>cfg.share.to_domain()<span class="question-mark">?</span>,
+<a href=#60 id=60 data-nosnippet>60</a>        <span class="kw-2">&amp;</span>guardian_pub_key,
+<a href=#61 id=61 data-nosnippet>61</a>        state,
+<a href=#62 id=62 data-nosnippet>62</a>        <span class="kw-2">&amp;mut </span>thread_rng(),
+<a href=#63 id=63 data-nosnippet>63</a>    );
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="kw">let </span>share_id = request.encrypted_share().id.get();
+<a href=#65 id=65 data-nosnippet>65</a>    <span class="kw">let </span>state_digest_hex = hex::encode(request.state().digest());
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="macro">info!</span>(
+<a href=#67 id=67 data-nosnippet>67</a>        share_id,
+<a href=#68 id=68 data-nosnippet>68</a>        state_digest = state_digest_hex,
+<a href=#69 id=69 data-nosnippet>69</a>        <span class="string">"built provisioner-init request"
+<a href=#70 id=70 data-nosnippet>70</a>    </span>);
+<a href=#71 id=71 data-nosnippet>71</a>
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(endpoint) = cfg.guardian_endpoint {
+<a href=#73 id=73 data-nosnippet>73</a>        submit_provisioner_init_to_guardian(
+<a href=#74 id=74 data-nosnippet>74</a>            <span class="kw-2">&amp;</span>endpoint,
+<a href=#75 id=75 data-nosnippet>75</a>            <span class="kw-2">&amp;</span>session_id,
+<a href=#76 id=76 data-nosnippet>76</a>            <span class="kw-2">&amp;</span>expected_guardian_config,
+<a href=#77 id=77 data-nosnippet>77</a>            request,
+<a href=#78 id=78 data-nosnippet>78</a>        )
+<a href=#79 id=79 data-nosnippet>79</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#80 id=80 data-nosnippet>80</a>    }
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="prelude-val">Ok</span>(())
+<a href=#82 id=82 data-nosnippet>82</a>}
+<a href=#83 id=83 data-nosnippet>83</a>
+<a href=#84 id=84 data-nosnippet>84</a><span class="doccomment">/// Implements check B of IOP-225.
+<a href=#85 id=85 data-nosnippet>85</a></span><span class="kw">pub async fn </span><a href="../../../hashi_monitor/kp/fn.get_guardian_info_from_s3.html">get_guardian_info_from_s3</a>(
+<a href=#86 id=86 data-nosnippet>86</a>    s3_client: <span class="kw-2">&amp;</span><a href="../../../hashi_guardian/s3_logger/struct.S3Logger.html">S3Logger</a>,
+<a href=#87 id=87 data-nosnippet>87</a>    session_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#88 id=88 data-nosnippet>88</a>) -&gt; anyhow::Result&lt;GuardianInfo&gt; {
+<a href=#89 id=89 data-nosnippet>89</a>    <span class="kw">let </span>(attestation, signing_pubkey) = s3_client
+<a href=#90 id=90 data-nosnippet>90</a>        .get_attestation(session_id)
+<a href=#91 id=91 data-nosnippet>91</a>        .<span class="kw">await
+<a href=#92 id=92 data-nosnippet>92</a>        </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(e))<span class="question-mark">?</span>;
+<a href=#93 id=93 data-nosnippet>93</a>    verify_enclave_attestation(attestation).map_err(|e| <span class="macro">anyhow::anyhow!</span>(e))<span class="question-mark">?</span>;
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a>    s3_client
+<a href=#96 id=96 data-nosnippet>96</a>        .get_guardian_info(session_id, <span class="kw-2">&amp;</span>signing_pubkey)
+<a href=#97 id=97 data-nosnippet>97</a>        .<span class="kw">await
+<a href=#98 id=98 data-nosnippet>98</a>        </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(e))
+<a href=#99 id=99 data-nosnippet>99</a>}
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a><span class="kw">async fn </span>submit_provisioner_init_to_guardian(
+<a href=#102 id=102 data-nosnippet>102</a>    endpoint: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#103 id=103 data-nosnippet>103</a>    expected_session_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#104 id=104 data-nosnippet>104</a>    expected_guardian_config: <span class="kw-2">&amp;</span><a href="config.rs.html#24-27">GuardianConfig</a>,
+<a href=#105 id=105 data-nosnippet>105</a>    request: <a href="../../../hashi_types/guardian/struct.ProvisionerInitRequest.html">ProvisionerInitRequest</a>,
+<a href=#106 id=106 data-nosnippet>106</a>) -&gt; anyhow::Result&lt;()&gt; {
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="kw">let </span><span class="kw-2">mut </span>client =
+<a href=#108 id=108 data-nosnippet>108</a>        pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
+<a href=#109 id=109 data-nosnippet>109</a>            .<span class="kw">await
+<a href=#110 id=110 data-nosnippet>110</a>            </span>.with_context(|| <span class="macro">format!</span>(<span class="string">"failed to connect to guardian endpoint {endpoint}"</span>))<span class="question-mark">?</span>;
+<a href=#111 id=111 data-nosnippet>111</a>
+<a href=#112 id=112 data-nosnippet>112</a>    prechecks(<span class="kw-2">&amp;mut </span>client, expected_session_id, expected_guardian_config)
+<a href=#113 id=113 data-nosnippet>113</a>        .<span class="kw">await
+<a href=#114 id=114 data-nosnippet>114</a>        </span>.with_context(|| <span class="string">"guardian endpoint pre-check failed"</span>)<span class="question-mark">?</span>;
+<a href=#115 id=115 data-nosnippet>115</a>
+<a href=#116 id=116 data-nosnippet>116</a>    <span class="macro">info!</span>(<span class="string">"prechecks passed, submitting ProvisionerInit"</span>);
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="kw">let </span>pb_request = provisioner_init_request_to_pb(request)<span class="question-mark">?</span>;
+<a href=#118 id=118 data-nosnippet>118</a>    client
+<a href=#119 id=119 data-nosnippet>119</a>        .provisioner_init(pb_request)
+<a href=#120 id=120 data-nosnippet>120</a>        .<span class="kw">await
+<a href=#121 id=121 data-nosnippet>121</a>        </span>.with_context(|| <span class="macro">format!</span>(<span class="string">"guardian ProvisionerInit RPC failed at {endpoint}"</span>))<span class="question-mark">?</span>;
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="macro">info!</span>(<span class="string">"successfully submitted ProvisionerInit request"</span>);
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="prelude-val">Ok</span>(())
+<a href=#125 id=125 data-nosnippet>125</a>}
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a><span class="kw">async fn </span>prechecks(
+<a href=#128 id=128 data-nosnippet>128</a>    client: <span class="kw-2">&amp;mut </span><a href="../../../hashi_types/proto/guardian_service_client/struct.GuardianServiceClient.html">pb::guardian_service_client::GuardianServiceClient</a>&lt;tonic::transport::Channel&gt;,
+<a href=#129 id=129 data-nosnippet>129</a>    expected_session_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#130 id=130 data-nosnippet>130</a>    expected_guardian_config: <span class="kw-2">&amp;</span><a href="config.rs.html#24-27">GuardianConfig</a>,
+<a href=#131 id=131 data-nosnippet>131</a>) -&gt; anyhow::Result&lt;()&gt; {
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="kw">let </span>resp_pb = client
+<a href=#133 id=133 data-nosnippet>133</a>        .get_guardian_info(pb::GetGuardianInfoRequest {})
+<a href=#134 id=134 data-nosnippet>134</a>        .<span class="kw">await
+<a href=#135 id=135 data-nosnippet>135</a>        </span>.with_context(|| <span class="string">"GetGuardianInfo RPC failed"</span>)<span class="question-mark">?
+<a href=#136 id=136 data-nosnippet>136</a>        </span>.into_inner();
+<a href=#137 id=137 data-nosnippet>137</a>
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="kw">let </span>resp = &lt;GetGuardianInfoResponse <span class="kw">as </span>TryFrom&lt;pb::GetGuardianInfoResponse&gt;&gt;::try_from(resp_pb)
+<a href=#139 id=139 data-nosnippet>139</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(e.to_string()))<span class="question-mark">?</span>;
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="kw">let </span>signing_pub_key = resp.signing_pub_key;
+<a href=#142 id=142 data-nosnippet>142</a>    <span class="kw">let </span>actual_session_id = session_id_from_signing_pubkey(<span class="kw-2">&amp;</span>signing_pub_key);
+<a href=#143 id=143 data-nosnippet>143</a>    <span class="macro">anyhow::ensure!</span>(
+<a href=#144 id=144 data-nosnippet>144</a>        actual_session_id == expected_session_id,
+<a href=#145 id=145 data-nosnippet>145</a>        <span class="string">"guardian endpoint session mismatch: expected {}, got {}"</span>,
+<a href=#146 id=146 data-nosnippet>146</a>        expected_session_id,
+<a href=#147 id=147 data-nosnippet>147</a>        actual_session_id
+<a href=#148 id=148 data-nosnippet>148</a>    );
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="kw">let </span>info = resp
+<a href=#151 id=151 data-nosnippet>151</a>        .signed_info
+<a href=#152 id=152 data-nosnippet>152</a>        .verify(<span class="kw-2">&amp;</span>signing_pub_key)
+<a href=#153 id=153 data-nosnippet>153</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(e.to_string()))<span class="question-mark">?</span>;
+<a href=#154 id=154 data-nosnippet>154</a>
+<a href=#155 id=155 data-nosnippet>155</a>    expected_guardian_config.ensure_matches_info(<span class="kw-2">&amp;</span>info)<span class="question-mark">?</span>;
+<a href=#156 id=156 data-nosnippet>156</a>
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="prelude-val">Ok</span>(())
+<a href=#158 id=158 data-nosnippet>158</a>}</code></pre></div></section></main></body></html>

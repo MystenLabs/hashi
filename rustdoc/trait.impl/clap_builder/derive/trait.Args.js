@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["hashi",[["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.CliGlobalOpts.html\" title=\"struct hashi::cli::CliGlobalOpts\">CliGlobalOpts</a>"],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.MetadataArgs.html\" title=\"struct hashi::cli::MetadataArgs\">MetadataArgs</a>"],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.PublishOpts.html\" title=\"struct hashi::cli::PublishOpts\">PublishOpts</a>"],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.RegisterOpts.html\" title=\"struct hashi::cli::RegisterOpts\">RegisterOpts</a>"]]],["hashi_localnet",[["impl Args for <a class=\"struct\" href=\"hashi_localnet/struct.Cli.html\" title=\"struct hashi_localnet::Cli\">Cli</a>"],["impl Args for <a class=\"struct\" href=\"hashi_localnet/struct.LocalnetOpts.html\" title=\"struct hashi_localnet::LocalnetOpts\">LocalnetOpts</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[575,294]}
