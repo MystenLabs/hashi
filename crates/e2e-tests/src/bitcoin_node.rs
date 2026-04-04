@@ -170,29 +170,34 @@ impl BitcoinNodeHandle {
     }
 
     pub fn generate_blocks(&self, count: u64) -> Result<Vec<BlockHash>> {
-        let result = self
+        let blocks = self
             .rpc_client
-            .generate_to_address(count as usize, &self.get_new_address()?)?;
-        let blocks: Vec<BlockHash> = result
-            .0
-            .into_iter()
-            .map(|h| h.parse())
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|e| anyhow!("invalid block hash: {e}"))?;
+            .generate_to_address(count as usize, &self.get_new_address()?)?
+            .into_model()
+            .map_err(|e| anyhow!("invalid block hash: {e}"))?
+            .0;
         info!("Generated {} blocks", count);
         Ok(blocks)
     }
 
     pub fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
-        let result = self.rpc_client.send_to_address(address, amount)?;
-        let txid: Txid = result.0.parse().map_err(|e| anyhow!("invalid txid: {e}"))?;
+        let txid = self
+            .rpc_client
+            .send_to_address(address, amount)?
+            .into_model()
+            .map_err(|e| anyhow!("invalid txid: {e}"))?
+            .txid;
         info!("Sent {} to {}: {}", amount, address, txid);
         Ok(txid)
     }
 
     pub fn get_balance(&self) -> Result<Amount> {
-        let result = self.rpc_client.get_balance()?;
-        Amount::from_btc(result.0).map_err(|e| anyhow!("invalid balance: {e}"))
+        Ok(self
+            .rpc_client
+            .get_balance()?
+            .into_model()
+            .map_err(|e| anyhow!("invalid balance: {e}"))?
+            .0)
     }
 
     pub fn get_new_address(&self) -> Result<Address> {

@@ -36,7 +36,9 @@ impl BtcRpcClient {
     pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<UnixSeconds>> {
         // Note: rpc returns Ok(...) even for unconfirmed txid in the mempool.
         let tx_info = match self.client.get_raw_transaction_verbose(txid) {
-            Ok(tx_info) => tx_info,
+            Ok(tx_info) => tx_info
+                .into_model()
+                .with_context(|| format!("failed to parse transaction info for {txid}"))?,
             Err(e) if txid_not_found(&e) => {
                 debug!(%txid, "bitcoin tx not found in mempool or chain yet");
                 return Ok(None);
@@ -47,22 +49,19 @@ impl BtcRpcClient {
             }
         };
 
-        let Some(block_hash_hex) = tx_info.block_hash else {
+        let Some(block_hash) = tx_info.block_hash else {
             debug!(%txid, "bitcoin tx found but not mined yet");
             return Ok(None);
         };
 
-        let block_hash: bitcoin::BlockHash = block_hash_hex
-            .parse()
-            .with_context(|| format!("failed to parse block hash '{}'", block_hash_hex))?;
-
         let block_header = self
             .client
             .get_block_header_verbose(&block_hash)
-            .with_context(|| format!("failed to fetch block header for {}", block_hash))?;
+            .with_context(|| format!("failed to fetch block header for {}", block_hash))?
+            .into_model()
+            .with_context(|| format!("failed to parse block header for {}", block_hash))?;
 
-        let block_time = u64::try_from(block_header.time)
-            .with_context(|| format!("invalid block timestamp for {}", block_hash))?;
+        let block_time = u64::from(block_header.time);
 
         Ok(Some(block_time))
     }

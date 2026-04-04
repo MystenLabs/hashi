@@ -397,12 +397,10 @@ impl Monitor {
             .bitcoind_rpc
             .estimate_smart_fee(conf_target as u32)
             .map_err(anyhow::Error::from)
+            .and_then(|res| Ok(res.into_model()?))
             .map(|res| {
                 let sat_per_kwu = match res.fee_rate {
-                    Some(btc_per_kvb) => {
-                        // Convert from BTC/kvB to sat/kwu (1 kvB = 4 kwu).
-                        (btc_per_kvb * 100_000_000.0) as u64 / 4
-                    }
+                    Some(fee_rate) => fee_rate.to_sat_per_kwu(),
                     None => {
                         warn!(
                             conf_target,
@@ -464,14 +462,17 @@ impl Monitor {
         result_tx: oneshot::Sender<Result<TxStatus>>,
     ) {
         let result = match self.bitcoind_rpc.get_raw_transaction_verbose(txid) {
-            Ok(tx_info) => {
-                if tx_info.block_hash.is_some() {
-                    let confirmations = tx_info.confirmations.unwrap_or(0) as u32;
-                    Ok(TxStatus::Confirmed { confirmations })
-                } else {
-                    Ok(TxStatus::InMempool)
+            Ok(tx_info) => match tx_info.into_model() {
+                Ok(tx_info) => {
+                    if tx_info.block_hash.is_some() {
+                        let confirmations = tx_info.confirmations.unwrap_or(0) as u32;
+                        Ok(TxStatus::Confirmed { confirmations })
+                    } else {
+                        Ok(TxStatus::InMempool)
+                    }
                 }
-            }
+                Err(e) => Err(anyhow::anyhow!("Failed to parse transaction info: {e}")),
+            },
             Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
                 if e.code == -5 =>
             {
@@ -544,19 +545,22 @@ impl Monitor {
                             return;
                         }
                     };
-                let Some(block_hash_hex) = tx_info.block_hash else {
+                let tx_info = match tx_info.into_model() {
+                    Ok(info) => info,
+                    Err(e) => {
+                        error!(
+                            "Failed to parse transaction info for {}: {e}",
+                            pending_deposit.outpoint.txid
+                        );
+                        return;
+                    }
+                };
+                let Some(block_hash) = tx_info.block_hash else {
                     debug!(
                         "Transaction {} is not yet included in a block",
                         pending_deposit.outpoint.txid
                     );
                     return;
-                };
-                let block_hash: bitcoin::BlockHash = match block_hash_hex.parse() {
-                    Ok(h) => h,
-                    Err(e) => {
-                        error!("Failed to parse block hash '{block_hash_hex}': {e}");
-                        return;
-                    }
                 };
                 let block_header = match bitcoind_rpc.get_block_header_verbose(&block_hash) {
                     Ok(block_header) => block_header,
@@ -565,15 +569,15 @@ impl Monitor {
                         return;
                     }
                 };
-                let header_hash: bitcoin::BlockHash = match block_header.hash.parse() {
-                    Ok(h) => h,
+                let block_header = match block_header.into_model() {
+                    Ok(header) => header,
                     Err(e) => {
-                        error!("Failed to parse header hash '{}': {e}", block_header.hash);
+                        error!("Failed to parse block header {}: {e}", block_hash);
                         return;
                     }
                 };
                 // Double check header with Kyoto to verify the height reported by bitcoind.
-                let kyoto_header = match requester.get_header(block_header.height as u32).await {
+                let kyoto_header = match requester.get_header(block_header.height).await {
                     Ok(kyoto_header) => kyoto_header,
                     Err(e) => {
                         error!(
@@ -593,8 +597,8 @@ impl Monitor {
                     return;
                 }
                 let block_info = kyoto::HeaderCheckpoint {
-                    height: block_header.height as u32,
-                    hash: header_hash,
+                    height: block_header.height,
+                    hash: block_header.hash,
                 };
                 pending_deposit.block_info = Some(block_info);
                 block_info

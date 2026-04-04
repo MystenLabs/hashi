@@ -456,7 +456,9 @@ fn cmd_mine(blocks: u64, data_dir: &Path) -> Result<()> {
     )?;
 
     let address = client.new_address()?;
-    let hashes = client.generate_to_address(blocks as usize, &address)?;
+    let hashes = client
+        .generate_to_address(blocks as usize, &address)?
+        .into_model()?;
 
     print_success(&format!(
         "Mined {} block(s). Latest: {}",
@@ -677,7 +679,9 @@ fn cmd_faucet_btc(address: &str, blocks: u64, data_dir: &Path) -> Result<()> {
         corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
     )?;
 
-    let hashes = client.generate_to_address(blocks as usize, &btc_addr)?;
+    let hashes = client
+        .generate_to_address(blocks as usize, &btc_addr)?
+        .into_model()?;
 
     print_success(&format!(
         "Mined {} block(s) to {}. Each block rewards ~50 BTC.",
@@ -766,12 +770,11 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
         corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
     )?;
 
-    let send_result =
-        btc_rpc.send_to_address(&deposit_address, bitcoin::Amount::from_sat(amount))?;
-    let txid: bitcoin::Txid = send_result
-        .0
-        .parse()
-        .context("Invalid txid from send_to_address")?;
+    let txid = btc_rpc
+        .send_to_address(&deposit_address, bitcoin::Amount::from_sat(amount))?
+        .into_model()
+        .context("Invalid txid from send_to_address")?
+        .txid;
 
     // Find the vout
     let tx = btc_rpc
