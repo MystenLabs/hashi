@@ -63,6 +63,18 @@ pub struct Monitor {
     pending_deposit_workers: JoinSet<()>,
 }
 
+/// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
+async fn btc_rpc_call<F, T>(client: &Arc<corepc_client::client_sync::v29::Client>, f: F) -> T
+where
+    F: FnOnce(&corepc_client::client_sync::v29::Client) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let client = Arc::clone(client);
+    tokio::task::spawn_blocking(move || f(&client))
+        .await
+        .expect("btc_rpc_call: spawn_blocking task panicked")
+}
+
 impl Monitor {
     fn build_kyoto_node(config: &MonitorConfig) -> (kyoto::Node, kyoto::Client) {
         let checkpoint = match config.network {
@@ -217,7 +229,7 @@ impl Monitor {
                     self.process_kyoto_event(event);
                 }
                 Some(msg) = client_rx.recv() => {
-                    self.process_client_message(msg);
+                    self.process_client_message(msg).await;
                 }
                 Some(msg) = kyoto_client.info_rx.recv() => {
                     info!("Kyoto: {msg}");
@@ -358,19 +370,19 @@ impl Monitor {
         self.process_pending_deposits();
     }
 
-    fn process_client_message(&mut self, msg: MonitorMessage) {
+    async fn process_client_message(&mut self, msg: MonitorMessage) {
         match msg {
             MonitorMessage::ConfirmDeposit(pending_deposit) => {
                 self.confirm_deposit(pending_deposit);
             }
             MonitorMessage::GetRecentFeeRate(conf_target, result_tx) => {
-                self.get_recent_fee_rate(conf_target, result_tx);
+                self.get_recent_fee_rate(conf_target, result_tx).await;
             }
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
-                self.broadcast_transaction(tx, result_tx);
+                self.broadcast_transaction(tx, result_tx).await;
             }
             MonitorMessage::GetTransactionStatus(txid, result_tx) => {
-                self.get_transaction_status(txid, result_tx);
+                self.get_transaction_status(txid, result_tx).await;
             }
         }
     }
@@ -410,37 +422,38 @@ impl Monitor {
             ));
     }
 
-    fn get_recent_fee_rate(
+    async fn get_recent_fee_rate(
         &mut self,
         conf_target: u16,
         result_tx: oneshot::Sender<Result<FeeRate>>,
     ) {
-        let result = self
-            .bitcoind_rpc
-            .estimate_smart_fee(conf_target as u32)
-            .map_err(anyhow::Error::from)
-            .and_then(|res| Ok(res.into_model()?))
-            .map(|res| {
-                let sat_per_kwu = match res.fee_rate {
-                    Some(fee_rate) => fee_rate.to_sat_per_kwu(),
-                    None => {
-                        warn!(
-                            conf_target,
-                            fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
-                            "Node could not estimate fee rate; falling back to minimum relay fee"
-                        );
-                        FALLBACK_FEE_RATE_SAT_PER_KWU
-                    }
-                };
-                self.metrics
-                    .btc_fee_rate_sat_per_kvb
-                    .set((sat_per_kwu * 4) as i64);
-                FeeRate::from_sat_per_kwu(sat_per_kwu)
-            });
+        let result = btc_rpc_call(&self.bitcoind_rpc, move |rpc| {
+            rpc.estimate_smart_fee(conf_target as u32)
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|res| Ok(res.into_model()?))
+        .map(|res| {
+            let sat_per_kwu = match res.fee_rate {
+                Some(fee_rate) => fee_rate.to_sat_per_kwu(),
+                None => {
+                    warn!(
+                        conf_target,
+                        fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
+                        "Node could not estimate fee rate; falling back to minimum relay fee"
+                    );
+                    FALLBACK_FEE_RATE_SAT_PER_KWU
+                }
+            };
+            self.metrics
+                .btc_fee_rate_sat_per_kvb
+                .set((sat_per_kwu * 4) as i64);
+            FeeRate::from_sat_per_kwu(sat_per_kwu)
+        });
         let _ = result_tx.send(result);
     }
 
-    fn broadcast_transaction(
+    async fn broadcast_transaction(
         &mut self,
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
@@ -448,10 +461,12 @@ impl Monitor {
         // Temp hack to get warning messages when a transaction would be rejected
         // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
         let txid = tx.compute_txid();
-        match self
-            .bitcoind_rpc
-            .test_mempool_accept(std::slice::from_ref(&tx))
-        {
+        let accept_result = btc_rpc_call(&self.bitcoind_rpc, {
+            let tx = tx.clone();
+            move |rpc| rpc.test_mempool_accept(std::slice::from_ref(&tx))
+        })
+        .await;
+        match accept_result {
             Ok(results) => match results.0.first() {
                 Some(result) if !result.allowed => {
                     error!(
@@ -471,27 +486,28 @@ impl Monitor {
             }
         }
 
-        let requester = self.requester.clone();
-        tokio::spawn(async move {
-            match requester.broadcast_tx(tx).await {
-                Ok(wtxid) => {
-                    info!("Transaction {txid} broadcast acknowledged (wtxid: {wtxid})");
-                    let _ = result_tx.send(Ok(()));
-                }
-                Err(e) => {
-                    error!("Failed to broadcast transaction {txid}: {e}");
-                    let _ = result_tx.send(Err(anyhow::anyhow!(e)));
-                }
+        match self.requester.broadcast_tx(tx).await {
+            Ok(wtxid) => {
+                info!("Transaction {txid} broadcast acknowledged (wtxid: {wtxid})");
+                let _ = result_tx.send(Ok(()));
             }
-        });
+            Err(e) => {
+                error!("Failed to broadcast transaction {txid}: {e}");
+                let _ = result_tx.send(Err(anyhow::anyhow!(e)));
+            }
+        }
     }
 
-    fn get_transaction_status(
+    async fn get_transaction_status(
         &self,
         txid: bitcoin::Txid,
         result_tx: oneshot::Sender<Result<TxStatus>>,
     ) {
-        let result = match self.bitcoind_rpc.get_raw_transaction_verbose(txid) {
+        let rpc_result = btc_rpc_call(&self.bitcoind_rpc, move |rpc| {
+            rpc.get_raw_transaction_verbose(txid)
+        })
+        .await;
+        let result = match rpc_result {
             Ok(tx_info) => match tx_info.into_model() {
                 Ok(tx_info) => {
                     if tx_info.block_hash.is_some() {
@@ -564,17 +580,18 @@ impl Monitor {
                     "Looking up block for transaction {}",
                     pending_deposit.outpoint.txid
                 );
-                let tx_info =
-                    match bitcoind_rpc.get_raw_transaction_verbose(pending_deposit.outpoint.txid) {
-                        Ok(tx_info) => tx_info,
-                        Err(e) => {
-                            error!(
-                                "Failed to look up txid {}: {e}",
-                                pending_deposit.outpoint.txid
-                            );
-                            return;
-                        }
-                    };
+                let txid = pending_deposit.outpoint.txid;
+                let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
+                    rpc.get_raw_transaction_verbose(txid)
+                })
+                .await
+                {
+                    Ok(tx_info) => tx_info,
+                    Err(e) => {
+                        error!("Failed to look up txid {txid}: {e}");
+                        return;
+                    }
+                };
                 let tx_info = match tx_info.into_model() {
                     Ok(info) => info,
                     Err(e) => {
@@ -675,14 +692,20 @@ impl Monitor {
         // Verify the UTXO is still unspent in Bitcoin's UTXO set (including mempool).
         // Use raw `call()` because gettxout returns null when the UTXO is spent,
         // and the typed `get_tx_out` method doesn't return Option.
-        match bitcoind_rpc.call::<Option<serde_json::Value>>(
-            "gettxout",
-            &[
-                serde_json::json!(pending_deposit.outpoint.txid),
-                serde_json::json!(pending_deposit.outpoint.vout),
-                serde_json::json!(true), // include_mempool
-            ],
-        ) {
+        let outpoint_txid = pending_deposit.outpoint.txid;
+        let outpoint_vout = pending_deposit.outpoint.vout;
+        let gettxout_result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
+            rpc.call::<Option<serde_json::Value>>(
+                "gettxout",
+                &[
+                    serde_json::json!(outpoint_txid),
+                    serde_json::json!(outpoint_vout),
+                    serde_json::json!(true), // include_mempool
+                ],
+            )
+        })
+        .await;
+        match gettxout_result {
             Ok(Some(_)) => {
                 let pending_deposit = pending_deposit.take();
                 let _ = pending_deposit.result_tx.send(Ok(txout));
