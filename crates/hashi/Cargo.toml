@@ -17,7 +17,7 @@ hashi-types = { path = "../hashi-types" }
 bitcoin.workspace = true
 corepc-client.workspace = true
 jsonrpc.workspace = true
-kyoto-cbf = "0.13.2"
+kyoto = { package = "bip157", git = "https://github.com/0xsiddharthks/kyoto", rev = "9a8a16b8" }
 
 # Dependencies for the protobuf definitions
 tonic.workspace = true
