@@ -230,9 +230,10 @@ async fn request_all(
     // Look up the transaction and find all matching outputs
     let parsed_txid: bitcoin::Txid = txid.parse().context("Invalid txid")?;
 
-    use bitcoincore_rpc::RpcApi;
     let raw_tx = btc_rpc
-        .get_raw_transaction(&parsed_txid, None)
+        .get_raw_transaction(parsed_txid)
+        .map_err(anyhow::Error::from)
+        .and_then(|resp| resp.transaction().map_err(anyhow::Error::from))
         .context("Failed to fetch transaction from Bitcoin RPC")?;
 
     let matching_utxos: Vec<(u32, u64)> = raw_tx
@@ -334,12 +335,11 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     if let Ok(Some(btc_rpc)) = config.btc_rpc_client() {
         println!();
         println!("  {}", "BTC Context:".bold());
-        use bitcoincore_rpc::RpcApi;
-        match btc_rpc.get_raw_transaction_info(&txid, None) {
+        match btc_rpc.get_raw_transaction_verbose(txid) {
             Ok(info) => {
                 let confirmations = info.confirmations.unwrap_or(0);
                 println!("    {} {}", "Confirmations:".bold(), confirmations);
-                if let Some(ref blockhash) = info.blockhash {
+                if let Some(ref blockhash) = info.block_hash {
                     println!("    {} {}", "Block:".bold(), blockhash);
                 }
             }

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use bitcoincore_rpc::RpcApi;
 use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
 use kyoto::Warning;
@@ -57,7 +56,7 @@ enum KyotoEventLoopExit {
 pub struct Monitor {
     config: MonitorConfig,
     metrics: Arc<Metrics>,
-    bitcoind_rpc: Arc<bitcoincore_rpc::Client>,
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
     tip: Option<HeaderCheckpoint>,
@@ -91,7 +90,7 @@ impl Monitor {
     /// Run a BTC monitor with the given configuration.
     /// Returns the client for interacting with the monitor and a Service for lifecycle management.
     pub fn run(config: MonitorConfig, metrics: Arc<Metrics>) -> Result<(MonitorClient, Service)> {
-        let bitcoind_rpc = bitcoincore_rpc::Client::new(
+        let bitcoind_rpc = crate::btc_monitor::config::new_rpc_client(
             config.bitcoind_rpc_url.as_str(),
             config.bitcoind_rpc_auth.clone(),
         )?;
@@ -396,14 +395,12 @@ impl Monitor {
     ) {
         let result = self
             .bitcoind_rpc
-            .estimate_smart_fee(conf_target, None)
+            .estimate_smart_fee(conf_target as u32)
             .map_err(anyhow::Error::from)
+            .and_then(|res| Ok(res.into_model()?))
             .map(|res| {
                 let sat_per_kwu = match res.fee_rate {
-                    Some(amount) => {
-                        // Convert from BTC/kvB to sat/kwu (1 kvB = 4 kwu).
-                        amount.to_sat() / 4
-                    }
+                    Some(fee_rate) => fee_rate.to_sat_per_kwu(),
                     None => {
                         warn!(
                             conf_target,
@@ -429,8 +426,11 @@ impl Monitor {
         // Temp hack to get warning messages when a transaction would be rejected
         // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
         let txid = tx.compute_txid();
-        match self.bitcoind_rpc.test_mempool_accept(&[&tx]) {
-            Ok(results) => match results.first() {
+        match self
+            .bitcoind_rpc
+            .test_mempool_accept(std::slice::from_ref(&tx))
+        {
+            Ok(results) => match results.0.first() {
                 Some(result) if !result.allowed => {
                     error!(
                         "Bitcoin Core mempool will reject tx {txid}: {}",
@@ -461,18 +461,21 @@ impl Monitor {
         txid: bitcoin::Txid,
         result_tx: oneshot::Sender<Result<TxStatus>>,
     ) {
-        let result = match getrawtransaction_brief(&self.bitcoind_rpc, &txid) {
-            Ok(tx_brief) => {
-                if tx_brief.blockhash.is_some() {
-                    let confirmations = tx_brief.confirmations.unwrap_or(0);
-                    Ok(TxStatus::Confirmed { confirmations })
-                } else {
-                    Ok(TxStatus::InMempool)
+        let result = match self.bitcoind_rpc.get_raw_transaction_verbose(txid) {
+            Ok(tx_info) => match tx_info.into_model() {
+                Ok(tx_info) => {
+                    if tx_info.block_hash.is_some() {
+                        let confirmations = tx_info.confirmations.unwrap_or(0) as u32;
+                        Ok(TxStatus::Confirmed { confirmations })
+                    } else {
+                        Ok(TxStatus::InMempool)
+                    }
                 }
-            }
-            Err(bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(
-                ref e,
-            ))) if e.code == -5 => {
+                Err(e) => Err(anyhow::anyhow!("Failed to parse transaction info: {e}")),
+            },
+            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
+                if e.code == -5 =>
+            {
                 // RPC error -5: "No such mempool or blockchain transaction"
                 Ok(TxStatus::NotFound)
             }
@@ -510,7 +513,7 @@ impl Monitor {
     async fn process_pending_deposit(
         tip: HeaderCheckpoint,
         confirmation_threshold: u32,
-        bitcoind_rpc: Arc<bitcoincore_rpc::Client>,
+        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         requester: kyoto::Requester,
         client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
         mut pending_deposit: PendingDeposit,
@@ -531,9 +534,9 @@ impl Monitor {
                     "Looking up block for transaction {}",
                     pending_deposit.outpoint.txid
                 );
-                let tx_brief =
-                    match getrawtransaction_brief(&bitcoind_rpc, &pending_deposit.outpoint.txid) {
-                        Ok(tx_brief) => tx_brief,
+                let tx_info =
+                    match bitcoind_rpc.get_raw_transaction_verbose(pending_deposit.outpoint.txid) {
+                        Ok(tx_info) => tx_info,
                         Err(e) => {
                             error!(
                                 "Failed to look up txid {}: {e}",
@@ -542,22 +545,39 @@ impl Monitor {
                             return;
                         }
                     };
-                let Some(block_hash) = tx_brief.blockhash else {
+                let tx_info = match tx_info.into_model() {
+                    Ok(info) => info,
+                    Err(e) => {
+                        error!(
+                            "Failed to parse transaction info for {}: {e}",
+                            pending_deposit.outpoint.txid
+                        );
+                        return;
+                    }
+                };
+                let Some(block_hash) = tx_info.block_hash else {
                     debug!(
                         "Transaction {} is not yet included in a block",
                         pending_deposit.outpoint.txid
                     );
                     return;
                 };
-                let block_header = match bitcoind_rpc.get_block_header_info(&block_hash) {
+                let block_header = match bitcoind_rpc.get_block_header_verbose(&block_hash) {
                     Ok(block_header) => block_header,
                     Err(e) => {
                         error!("Failed to look up block header {}: {e}", block_hash);
                         return;
                     }
                 };
+                let block_header = match block_header.into_model() {
+                    Ok(header) => header,
+                    Err(e) => {
+                        error!("Failed to parse block header {}: {e}", block_hash);
+                        return;
+                    }
+                };
                 // Double check header with Kyoto to verify the height reported by bitcoind.
-                let kyoto_header = match requester.get_header(block_header.height as u32).await {
+                let kyoto_header = match requester.get_header(block_header.height).await {
                     Ok(kyoto_header) => kyoto_header,
                     Err(e) => {
                         error!(
@@ -577,7 +597,7 @@ impl Monitor {
                     return;
                 }
                 let block_info = kyoto::HeaderCheckpoint {
-                    height: block_header.height as u32,
+                    height: block_header.height,
                     hash: block_header.hash,
                 };
                 pending_deposit.block_info = Some(block_info);
@@ -640,10 +660,15 @@ impl Monitor {
         };
 
         // Verify the UTXO is still unspent in Bitcoin's UTXO set (including mempool).
-        match bitcoind_rpc.get_tx_out(
-            &pending_deposit.outpoint.txid,
-            pending_deposit.outpoint.vout,
-            Some(true),
+        // Use raw `call()` because gettxout returns null when the UTXO is spent,
+        // and the typed `get_tx_out` method doesn't return Option.
+        match bitcoind_rpc.call::<Option<serde_json::Value>>(
+            "gettxout",
+            &[
+                serde_json::json!(pending_deposit.outpoint.txid),
+                serde_json::json!(pending_deposit.outpoint.vout),
+                serde_json::json!(true), // include_mempool
+            ],
         ) {
             Ok(Some(_)) => {
                 let pending_deposit = pending_deposit.take();
@@ -725,22 +750,6 @@ impl Drop for PendingDepositGuard {
             warn!("Failed to re-enqueue PendingDeposit on drop: {e}");
         }
     }
-}
-
-#[derive(serde::Deserialize)]
-struct RawTransactionBrief {
-    blockhash: Option<bitcoin::BlockHash>,
-    confirmations: Option<u32>,
-}
-
-fn getrawtransaction_brief(
-    rpc: &bitcoincore_rpc::Client,
-    txid: &bitcoin::Txid,
-) -> std::result::Result<RawTransactionBrief, bitcoincore_rpc::Error> {
-    rpc.call(
-        "getrawtransaction",
-        &[serde_json::json!(txid), serde_json::json!(true)],
-    )
 }
 
 #[derive(Clone)]

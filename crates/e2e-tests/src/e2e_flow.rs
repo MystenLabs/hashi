@@ -8,7 +8,6 @@ mod tests {
     use bitcoin::Amount;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash;
-    use bitcoincore_rpc::RpcApi;
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::move_types::DepositConfirmedEvent;
@@ -243,7 +242,8 @@ mod tests {
         let tx = networks
             .bitcoin_node
             .rpc_client()
-            .get_raw_transaction(&txid, None)?;
+            .get_raw_transaction(txid)
+            .and_then(|r| r.transaction().map_err(Into::into))?;
         let vout = tx
             .output
             .iter()
@@ -323,18 +323,15 @@ mod tests {
             let stop_clone = stop_flag.clone();
             let rpc_url = bitcoin_node.rpc_url().to_string();
             let handle = std::thread::spawn(move || {
-                let rpc = bitcoincore_rpc::Client::new(
+                let rpc = corepc_client::client_sync::v29::Client::new_with_auth(
                     &rpc_url,
-                    bitcoincore_rpc::Auth::UserPass(
+                    corepc_client::client_sync::Auth::UserPass(
                         crate::bitcoin_node::RPC_USER.to_string(),
                         crate::bitcoin_node::RPC_PASSWORD.to_string(),
                     ),
                 )
                 .expect("failed to create mining RPC client");
-                let addr = rpc
-                    .get_new_address(None, None)
-                    .expect("failed to get mining address")
-                    .assume_checked();
+                let addr = rpc.new_address().expect("failed to get mining address");
                 while !stop_clone.load(Ordering::Relaxed) {
                     let _ = rpc.generate_to_address(1, &addr);
                     std::thread::sleep(Duration::from_secs(1));
@@ -391,18 +388,19 @@ mod tests {
 
         // Wait until the tx is visible (either in mempool or already confirmed).
         loop {
-            if bitcoin_node.rpc_client().get_mempool_entry(txid).is_ok() {
+            if bitcoin_node.rpc_client().get_mempool_entry(*txid).is_ok() {
                 info!("Withdrawal tx {} is in mempool", txid);
                 break;
             }
             // The background miner may have already confirmed it.
-            if let Ok(info) = bitcoin_node
-                .rpc_client()
-                .get_raw_transaction_info(txid, None)
+            if let Ok(info) = bitcoin_node.rpc_client().get_raw_transaction_verbose(*txid)
                 && info.confirmations.unwrap_or(0) > 0
             {
                 info!("Withdrawal tx {} is already confirmed", txid);
-                let tx = bitcoin_node.rpc_client().get_raw_transaction(txid, None)?;
+                let tx = bitcoin_node
+                    .rpc_client()
+                    .get_raw_transaction(*txid)
+                    .and_then(|r| r.transaction().map_err(Into::into))?;
                 if !check_output(&tx) {
                     return Err(anyhow!(
                         "Withdrawal tx {} is confirmed but does not pay [{}, {}] to {}",
@@ -431,7 +429,7 @@ mod tests {
                 .last()
                 .copied()
                 .ok_or_else(|| anyhow!("Expected at least one mined block"))?;
-            let block = bitcoin_node.rpc_client().get_block(&block_hash)?;
+            let block = bitcoin_node.rpc_client().get_block(block_hash)?;
 
             if !block.txdata.iter().any(|tx| tx.compute_txid() == *txid) {
                 if start.elapsed() >= timeout {
@@ -447,7 +445,8 @@ mod tests {
 
             let tx = bitcoin_node
                 .rpc_client()
-                .get_raw_transaction(txid, Some(&block_hash))?;
+                .get_raw_transaction(*txid)
+                .and_then(|r| r.transaction().map_err(Into::into))?;
             if !check_output(&tx) {
                 return Err(anyhow!(
                     "Withdrawal tx {} is confirmed but does not pay [{}, {}] to {}",
