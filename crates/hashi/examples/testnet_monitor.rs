@@ -121,8 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let bitcoind_auth = match (args.bitcoind_user, args.bitcoind_password) {
-        (Some(user), Some(pass)) => bitcoincore_rpc::Auth::UserPass(user, pass),
-        (None, None) => bitcoincore_rpc::Auth::None,
+        (Some(user), Some(pass)) => corepc_client::client_sync::Auth::UserPass(user, pass),
+        (None, None) => corepc_client::client_sync::Auth::None,
         _ => {
             eprintln!(
                 "Error: Both --bitcoind-user and --bitcoind-password must be provided together"

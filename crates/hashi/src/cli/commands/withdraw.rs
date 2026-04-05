@@ -219,10 +219,9 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         if let Ok(Some(btc_rpc)) = config.btc_rpc_client() {
             println!();
             println!("  {}", "BTC Context:".bold());
-            use bitcoincore_rpc::RpcApi;
-            match btc_rpc.get_raw_transaction_info(&txid, None) {
+            match btc_rpc.get_raw_transaction_verbose(txid) {
                 Ok(info) => {
-                    let confirmations = info.confirmations.unwrap_or(0);
+                    let confirmations = info.confirmations.unwrap_or(0) as u32;
                     let tx_status = if confirmations > 0 {
                         "Confirmed".to_string()
                     } else {

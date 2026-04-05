@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::anyhow;
-use bitcoincore_rpc::Auth;
+use corepc_client::client_sync::Auth;
 use hashi_types::guardian::S3Config;
 use serde::Deserialize;
 
@@ -63,7 +63,7 @@ pub enum BtcRpcAuth {
 }
 
 impl BtcRpcAuth {
-    pub fn to_bitcoincore_rpc_auth(&self) -> Auth {
+    pub fn to_corepc_auth(&self) -> Auth {
         match self {
             BtcRpcAuth::None => Auth::None,
             BtcRpcAuth::UserPass { username, password } => {

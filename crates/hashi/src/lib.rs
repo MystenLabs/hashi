@@ -325,14 +325,12 @@ impl Hashi {
 
     /// Verify the connected bitcoind is on the expected network.
     fn verify_bitcoind_network(&self) -> anyhow::Result<()> {
-        use bitcoincore_rpc::RpcApi;
-
-        let rpc = bitcoincore_rpc::Client::new(
+        let rpc = crate::btc_monitor::config::new_rpc_client(
             self.config.bitcoin_rpc(),
             self.config.bitcoin_rpc_auth(),
         )?;
 
-        let info = rpc.get_blockchain_info()?;
+        let info = rpc.get_blockchain_info()?.into_model()?;
         let expected = self.config.bitcoin_network();
 
         anyhow::ensure!(

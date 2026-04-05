@@ -255,7 +255,7 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
     }
 
     /// Get a Bitcoin RPC client from the config, if configured.
-    pub fn btc_rpc_client(&self) -> Result<Option<bitcoincore_rpc::Client>> {
+    pub fn btc_rpc_client(&self) -> Result<Option<corepc_client::client_sync::v29::Client>> {
         let Some(ref btc) = self.bitcoin else {
             return Ok(None);
         };
@@ -264,17 +264,19 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
         };
 
         let auth = match (&btc.rpc_user, &btc.rpc_password) {
-            (Some(user), Some(pass)) => bitcoincore_rpc::Auth::UserPass(user.clone(), pass.clone()),
-            _ => bitcoincore_rpc::Auth::None,
+            (Some(user), Some(pass)) => {
+                corepc_client::client_sync::Auth::UserPass(user.clone(), pass.clone())
+            }
+            _ => corepc_client::client_sync::Auth::None,
         };
 
-        let client = bitcoincore_rpc::Client::new(url, auth)
+        let client = crate::btc_monitor::config::new_rpc_client(url, auth)
             .with_context(|| format!("Failed to connect to Bitcoin RPC at {}", url))?;
         Ok(Some(client))
     }
 
     /// Require a Bitcoin RPC client, returning an error if not configured.
-    pub fn require_btc_rpc_client(&self) -> Result<bitcoincore_rpc::Client> {
+    pub fn require_btc_rpc_client(&self) -> Result<corepc_client::client_sync::v29::Client> {
         self.btc_rpc_client()?.ok_or_else(|| {
             anyhow::anyhow!(
                 "Bitcoin RPC not configured. Set [bitcoin] in your config file or use --btc-rpc-url"
