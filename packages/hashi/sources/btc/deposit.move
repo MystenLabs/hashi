@@ -12,7 +12,7 @@ use hashi::{
     hashi::Hashi,
     utxo::{Utxo, UtxoId}
 };
-use sui::{coin::{Self, Coin}, sui::SUI};
+use sui::{coin::Coin, sui::SUI};
 
 use fun btc_config::deposit_fee as Config.deposit_fee;
 use fun btc_config::deposit_minimum as Config.deposit_minimum;
@@ -110,7 +110,7 @@ public fun confirm_deposit(
         let recipient = derivation_path.destroy_some();
         let amount = utxo.amount();
         let btc = hashi.treasury_mut().mint_balance<BTC>(amount);
-        transfer::public_transfer(coin::from_balance(btc, ctx), recipient);
+        sui::balance::send_funds(btc, recipient);
     };
 
     // Insert UTXO into active pool
