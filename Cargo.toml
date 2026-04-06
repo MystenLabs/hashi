@@ -5,10 +5,10 @@ default-members = ["crates/hashi"]
 
 [workspace.dependencies]
 # sui sdk crates
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "28256572f954c1c32fc3a511a9ca280ba553aca5", features = ["serde", "hash"] }
-sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "28256572f954c1c32fc3a511a9ca280ba553aca5", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
-sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "28256572f954c1c32fc3a511a9ca280ba553aca5" }
-sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "28256572f954c1c32fc3a511a9ca280ba553aca5" }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1", features = ["serde", "hash"] }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
+sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
 
 sui-http = "0.1.0"
 bitcoin = { version = "0.32.8", features =["serde"] }
@@ -32,7 +32,7 @@ serde = "1.0.219"
 serde_derive = "1.0.219"
 
 axum = "0.8.4"
-tower = "0.5.2"
+tower = "0.5.3"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
 tokio = { version = "1.46.1", features = ["full"] }
 prometheus = "0.14"

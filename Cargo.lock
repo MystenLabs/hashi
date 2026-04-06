@@ -2138,7 +2138,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3059,7 +3059,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "tokio",
  "tower-service",
  "tracing",
@@ -3262,7 +3262,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4250,7 +4250,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.36",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -4287,9 +4287,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4591,7 +4591,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4781,7 +4781,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
- "bitcoin_hashes 0.12.0",
+ "bitcoin_hashes 0.14.1",
  "rand 0.8.5",
  "secp256k1-sys 0.10.1",
  "serde",
@@ -5225,8 +5225,8 @@ checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
 
 [[package]]
 name = "sui-crypto"
-version = "0.2.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=28256572f954c1c32fc3a511a9ca280ba553aca5#28256572f954c1c32fc3a511a9ca280ba553aca5"
+version = "0.3.0"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
 dependencies = [
  "ed25519-dalek",
  "k256",
@@ -5275,14 +5275,15 @@ dependencies = [
 
 [[package]]
 name = "sui-rpc"
-version = "0.2.2"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=28256572f954c1c32fc3a511a9ca280ba553aca5#28256572f954c1c32fc3a511a9ca280ba553aca5"
+version = "0.3.0"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
 dependencies = [
  "base64 0.22.1",
  "bcs",
  "bytes",
  "futures",
  "http 1.4.0",
+ "http-body 1.0.1",
  "prost",
  "prost-types",
  "serde",
@@ -5292,12 +5293,13 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-prost",
+ "tower",
 ]
 
 [[package]]
 name = "sui-sdk-types"
-version = "0.2.2"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=28256572f954c1c32fc3a511a9ca280ba553aca5#28256572f954c1c32fc3a511a9ca280ba553aca5"
+version = "0.3.0"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
 dependencies = [
  "base64ct",
  "bcs",
@@ -5317,8 +5319,8 @@ dependencies = [
 
 [[package]]
 name = "sui-transaction-builder"
-version = "0.2.2"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=28256572f954c1c32fc3a511a9ca280ba553aca5#28256572f954c1c32fc3a511a9ca280ba553aca5"
+version = "0.3.0"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
 dependencies = [
  "async-trait",
  "bcs",
@@ -5410,7 +5412,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5779,9 +5781,9 @@ dependencies = [
 
 [[package]]
 name = "tower"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d039ad9159c98b70ecfd540b2573b97f7f52c3e8d9f8ad57a24b916a536975f9"
+checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -6177,7 +6179,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
