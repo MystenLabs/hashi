@@ -15,6 +15,7 @@ use hashi::onchain::OnchainState;
 mod dump_utxos;
 mod key_recovery;
 pub mod sweep_utxos;
+mod utxo_csv;
 
 #[derive(Parser)]
 #[command(name = "internal-tools", about = "Internal operator tools for Hashi")]

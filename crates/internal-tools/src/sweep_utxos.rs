@@ -46,6 +46,7 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use futures::stream::StreamExt;
 use futures::stream::{self};
+use hashi::onchain::types::Utxo;
 use hashi_types::guardian::bitcoin_utils;
 
 const VERIFY_CONCURRENCY: usize = 64;
@@ -85,14 +86,6 @@ pub struct Args {
 
     #[arg(long, default_value_t = false)]
     broadcast: bool,
-}
-
-#[derive(Debug, Clone)]
-struct UtxoRecord {
-    txid: [u8; 32],
-    vout: u32,
-    derivation_path: Option<[u8; 32]>,
-    amount: u64,
 }
 
 struct PreparedInput {
@@ -192,62 +185,6 @@ fn derive_child_secret_key(parent_sk: &S, parent_pk: &G, derivation_path: &[u8; 
     *parent_sk + tweak
 }
 
-fn parse_hex_bytes_32(hex_str: &str) -> anyhow::Result<[u8; 32]> {
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(hex_str).context("invalid hex")?;
-    bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| anyhow!("expected 32 bytes, got {}", v.len()))
-}
-
-fn parse_csv(path: &std::path::Path) -> anyhow::Result<Vec<UtxoRecord>> {
-    let mut reader = csv::Reader::from_path(path).context("failed to open CSV")?;
-    let mut records = Vec::new();
-
-    for (i, result) in reader.records().enumerate() {
-        let record = result.with_context(|| format!("failed to read CSV row {}", i + 1))?;
-
-        let txid_str = record
-            .get(0)
-            .ok_or_else(|| anyhow!("row {}: missing txid", i + 1))?;
-        let vout_str = record
-            .get(1)
-            .ok_or_else(|| anyhow!("row {}: missing vout", i + 1))?;
-        let deriv_str = record
-            .get(2)
-            .ok_or_else(|| anyhow!("row {}: missing derivation_path", i + 1))?;
-        let amount_str = record
-            .get(3)
-            .ok_or_else(|| anyhow!("row {}: missing amount", i + 1))?;
-
-        let txid =
-            parse_hex_bytes_32(txid_str).with_context(|| format!("row {}: bad txid", i + 1))?;
-        let vout: u32 = vout_str
-            .parse()
-            .with_context(|| format!("row {}: bad vout", i + 1))?;
-        let derivation_path = if deriv_str.is_empty() {
-            None
-        } else {
-            Some(
-                parse_hex_bytes_32(deriv_str)
-                    .with_context(|| format!("row {}: bad derivation_path", i + 1))?,
-            )
-        };
-        let amount: u64 = amount_str
-            .parse()
-            .with_context(|| format!("row {}: bad amount", i + 1))?;
-
-        records.push(UtxoRecord {
-            txid,
-            vout,
-            derivation_path,
-            amount,
-        });
-    }
-
-    Ok(records)
-}
-
 fn parse_network(s: &str) -> anyhow::Result<Network> {
     match s {
         "mainnet" | "bitcoin" => Ok(Network::Bitcoin),
@@ -266,22 +203,23 @@ fn estimate_tx_weight(n_inputs: usize) -> Weight {
 }
 
 fn estimate_fee(n_inputs: usize, fee_rate: FeeRate) -> Amount {
-    let weight = estimate_tx_weight(n_inputs);
-    fee_rate.fee_wu(weight).unwrap_or(Amount::from_sat(0))
+    fee_rate
+        .fee_wu(estimate_tx_weight(n_inputs))
+        .unwrap_or(Amount::from_sat(0))
 }
 
 fn prepare_inputs(
-    records: &[UtxoRecord],
+    utxos: &[Utxo],
     parent_sk: &S,
     parent_pk: &G,
     network: Network,
 ) -> anyhow::Result<Vec<PreparedInput>> {
     let secp = Secp256k1::new();
-    let mut inputs = Vec::with_capacity(records.len());
+    let mut inputs = Vec::with_capacity(utxos.len());
 
-    for (i, rec) in records.iter().enumerate() {
-        let child_sk_scalar = match &rec.derivation_path {
-            Some(path) => derive_child_secret_key(parent_sk, parent_pk, path),
+    for (i, utxo) in utxos.iter().enumerate() {
+        let child_sk_scalar = match &utxo.derivation_path {
+            Some(path) => derive_child_secret_key(parent_sk, parent_pk, &path.into_inner()),
             None => *parent_sk,
         };
 
@@ -312,14 +250,12 @@ fn prepare_inputs(
             );
         }
 
-        let outpoint = OutPoint {
-            txid: Txid::from_byte_array(rec.txid),
-            vout: rec.vout,
-        };
-
         inputs.push(PreparedInput {
-            outpoint,
-            amount: Amount::from_sat(rec.amount),
+            outpoint: OutPoint {
+                txid: Txid::from_byte_array(utxo.id.txid.into_inner()),
+                vout: utxo.id.vout,
+            },
+            amount: Amount::from_sat(utxo.amount),
             secret_key,
             tapscript,
             control_block,
@@ -360,16 +296,14 @@ fn build_and_sign_sweep_tx(
         })
         .collect();
 
-    let tx_outputs = vec![TxOut {
-        value: output_amount,
-        script_pubkey: destination.script_pubkey(),
-    }];
-
     let mut tx = Transaction {
         version: Version::TWO,
         lock_time: LockTime::ZERO,
         input: tx_inputs,
-        output: tx_outputs,
+        output: vec![TxOut {
+            value: output_amount,
+            script_pubkey: destination.script_pubkey(),
+        }],
     };
 
     let prevouts: Vec<TxOut> = inputs
@@ -395,18 +329,15 @@ fn build_and_sign_sweep_tx(
         let keypair = secp256k1::Keypair::from_secret_key(&secp, &inp.secret_key);
         let schnorr_sig = secp.sign_schnorr_no_aux_rand(&message, &keypair);
 
-        let signature = Signature {
-            signature: schnorr_sig,
-            sighash_type: TapSighashType::Default,
-        };
-
-        let witness = Witness::from_slice(&[
-            signature.to_vec(),
+        tx.input[idx].witness = Witness::from_slice(&[
+            Signature {
+                signature: schnorr_sig,
+                sighash_type: TapSighashType::Default,
+            }
+            .to_vec(),
             inp.tapscript.to_bytes(),
             inp.control_block.serialize(),
         ]);
-
-        tx.input[idx].witness = witness;
     }
 
     Ok((tx, fee))
@@ -438,15 +369,8 @@ async fn verify_utxos_against_node(
                 }
 
                 match rpc.get_tx_out(&txid_str, vout).await {
-                    Ok(Some(addr)) => {
-                        if addr == expected_addr {
-                            (i, true)
-                        } else {
-                            skipped.fetch_add(1, Ordering::Relaxed);
-                            (i, false)
-                        }
-                    }
-                    Ok(None) => {
+                    Ok(Some(addr)) if addr == expected_addr => (i, true),
+                    Ok(Some(_)) | Ok(None) => {
                         skipped.fetch_add(1, Ordering::Relaxed);
                         (i, false)
                     }
@@ -539,7 +463,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             )
         })?;
 
-    let sk_bytes = parse_hex_bytes_32(&args.private_key).context("invalid private key hex")?;
+    let sk_bytes: [u8; 32] = hex::decode(&args.private_key)
+        .context("invalid private key hex")?
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow!("expected 32 bytes, got {}", v.len()))?;
     let parent_sk = S::from_byte_array(&sk_bytes).map_err(|e| anyhow!("invalid scalar: {e}"))?;
 
     let parent_pk = G::generator() * parent_sk;
@@ -554,18 +481,17 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     println!("Master deposit address: {}", master_address);
 
     println!("\nParsing CSV: {}", args.csv.display());
-    let records = parse_csv(&args.csv)?;
-    let total_utxos = records.len();
-    let total_amount: u64 = records.iter().map(|r| r.amount).sum();
+    let utxos = crate::utxo_csv::parse_csv(&args.csv)?;
+    let total_amount: u64 = utxos.iter().map(|u| u.amount).sum();
     println!(
         "Parsed {} UTXOs, total: {} sat ({:.8} BTC)",
-        total_utxos,
+        utxos.len(),
         total_amount,
         total_amount as f64 / 1e8
     );
 
     println!("\nDeriving keys and computing addresses...");
-    let mut inputs = prepare_inputs(&records, &parent_sk, &parent_pk, network)?;
+    let mut inputs = prepare_inputs(&utxos, &parent_sk, &parent_pk, network)?;
     println!("Prepared {} inputs successfully", inputs.len());
 
     let rpc = Arc::new(BitcoinRpc::new(
