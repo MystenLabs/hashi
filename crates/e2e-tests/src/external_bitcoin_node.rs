@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! A lightweight Bitcoin node handle that connects to an already-running node
-//! (e.g. a local signet node). Unlike [`BitcoinNodeHandle`], this does NOT
+//! (e.g. a local signet node). Unlike [`crate::BitcoinNodeHandle`], this does NOT
 //! spawn or manage the bitcoind process.
 
 use anyhow::Result;
