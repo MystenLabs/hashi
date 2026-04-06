@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+const TEST_THRESHOLD_BASIS_POINTS: u16 = 3333;
 /// Use 0 for allowed_delta in tests to disable weight reduction.
 const TEST_ALLOWED_DELTA: u16 = 0;
 /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
@@ -287,6 +288,7 @@ impl TestSetup {
             self.encryption_keys[validator_index].clone(),
             self.signing_keys[validator_index].clone(),
             store,
+            TEST_THRESHOLD_BASIS_POINTS,
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
@@ -900,6 +902,7 @@ fn test_mpc_manager_new_from_committee_set() {
         encryption_key,
         signing_key,
         Box::new(MockPublicMessagesStore),
+        TEST_THRESHOLD_BASIS_POINTS,
         TEST_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -963,6 +966,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         encryption_keys[0].clone(),
         signing_keys[0].clone(),
         Box::new(MockPublicMessagesStore),
+        TEST_THRESHOLD_BASIS_POINTS,
         TEST_ALLOWED_DELTA,
         "test",
         None,
@@ -986,7 +990,8 @@ fn test_mpc_manager_new_with_weighted_committee() {
 
     let manager = setup.create_manager(0);
 
-    // With total_weight=15: max_faulty = (15-1)/3 = 4, threshold = 5
+    // With total_weight=15, threshold=ceil(15*3333/10000)=ceil(4.9995)=5
+    // max_faulty = min((15-5)/2, 5-1) = min(5, 4) = 4
     assert_eq!(manager.mpc_config.threshold, 5);
     assert_eq!(manager.mpc_config.max_faulty, 4);
 }
@@ -1271,7 +1276,7 @@ fn test_complete_dkg_success() {
     let mut rng = rand::thread_rng();
 
     // Use different weights: [3, 2, 4, 1, 2] (total = 12)
-    // threshold = (12 - 1) / 3 + 1 = 4
+    // threshold = ceil(12 * 3333 / 10000) = 4
     let weights = [3, 2, 4, 1, 2];
     let setup = TestSetup::with_weights(&weights);
 
@@ -4892,8 +4897,8 @@ struct RotationTestSetup {
 
 impl RotationTestSetup {
     /// Creates a rotation test setup with weighted validators and completed DKG.
-    /// Uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4).
-    /// Dealers are validators 0, 1, 4 (total weight = 7 >= threshold).
+    /// Uses weights [3, 2, 4, 1, 2] (total = 12, threshold = ceil(12*3333/10000) = 4).
+    /// Dealers are validators 0, 1, 4 (total weight = 7 >= threshold + max_faulty = 7).
     fn new() -> Self {
         let mut rng = rand::thread_rng();
         let weights = [3, 2, 4, 1, 2];
@@ -4952,8 +4957,13 @@ impl RotationTestSetup {
     /// This matches `run_as_party` behavior during live DKG.
     fn threshold_dealer_addresses(&self) -> Vec<Address> {
         let committee = self.setup.committee();
-        let (nodes, threshold) =
-            build_reduced_nodes(committee, TEST_ALLOWED_DELTA, TEST_WEIGHT_DIVISOR).unwrap();
+        let (nodes, threshold) = build_reduced_nodes(
+            committee,
+            TEST_THRESHOLD_BASIS_POINTS,
+            TEST_ALLOWED_DELTA,
+            TEST_WEIGHT_DIVISOR,
+        )
+        .unwrap();
         let mut result = Vec::new();
         let mut weight_sum = 0u16;
         for addr in self.certificates.keys() {
@@ -4973,8 +4983,13 @@ impl RotationTestSetup {
     fn prepare_for_rotation(&self, manager: &mut MpcManager) {
         let previous_committee = self.setup.committee_set.previous_committee().cloned();
         if let Some(ref prev) = previous_committee {
-            let (nodes, threshold) =
-                build_reduced_nodes(prev, TEST_ALLOWED_DELTA, TEST_WEIGHT_DIVISOR).unwrap();
+            let (nodes, threshold) = build_reduced_nodes(
+                prev,
+                TEST_THRESHOLD_BASIS_POINTS,
+                TEST_ALLOWED_DELTA,
+                TEST_WEIGHT_DIVISOR,
+            )
+            .unwrap();
             manager.previous_nodes = Some(nodes);
             manager.previous_threshold = Some(threshold);
         }
@@ -6118,6 +6133,7 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_encryption_key,
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
+        TEST_THRESHOLD_BASIS_POINTS,
         TEST_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -7258,6 +7274,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
+        TEST_THRESHOLD_BASIS_POINTS,
         TEST_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -7420,6 +7437,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         setup.encryption_keys[target_index].clone(),
         setup.signing_keys[target_index].clone(),
         Box::new(store),
+        TEST_THRESHOLD_BASIS_POINTS,
         TEST_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -7500,6 +7518,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_THRESHOLD_BASIS_POINTS,
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
@@ -7531,6 +7550,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_THRESHOLD_BASIS_POINTS,
             TEST_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
@@ -7618,6 +7638,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
+        TEST_THRESHOLD_BASIS_POINTS,
         TEST_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,

@@ -394,6 +394,14 @@ impl OnchainState {
         self.state().hashi().config.bitcoin_confirmation_threshold()
     }
 
+    pub fn mpc_threshold_basis_points(&self) -> u16 {
+        self.state().hashi().config.mpc_threshold_basis_points()
+    }
+
+    pub fn mpc_allowed_delta(&self) -> u16 {
+        self.state().hashi().config.mpc_allowed_delta()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

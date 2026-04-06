@@ -113,14 +113,18 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         let session_id = SessionId::new(chain_id, reconstruction_epoch, &ProtocolType::KeyRotation);
         let mut manager = {
             let state = onchain_state.state();
+            let hashi = state.hashi();
+            let threshold_basis_points = hashi.config.mpc_threshold_basis_points();
+            let allowed_delta = hashi.config.mpc_allowed_delta();
             MpcManager::new(
                 validator_address,
-                &state.hashi().committees,
+                &hashi.committees,
                 session_id,
                 encryption_key,
                 dummy_signing_key.clone(),
                 Box::new(store),
-                800, // allowed_delta (same as devnet)
+                threshold_basis_points,
+                allowed_delta,
                 chain_id,
                 None, // weight_divisor
                 0,    // batch_size_per_weight (unused for reconstruction)

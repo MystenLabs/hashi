@@ -74,6 +74,7 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
+const MAX_BASIS_POINTS: u32 = 10000;
 
 pub struct MpcManager {
     // Immutable during the epoch
@@ -120,6 +121,7 @@ impl MpcManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
+        threshold_basis_points: u16,
         allowed_delta: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
@@ -141,8 +143,12 @@ impl MpcManager {
             .get(&epoch)
             .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
-        // TODO: Pass t and f as arguments instead of computing them
-        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
+        let (nodes, threshold) = build_reduced_nodes(
+            &committee,
+            threshold_basis_points,
+            allowed_delta,
+            weight_divisor,
+        )?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold - 1);
         let dkg_config = MpcConfig::new(epoch, nodes, threshold, max_faulty)?;
@@ -196,8 +202,12 @@ impl MpcManager {
         };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold) =
-                    build_reduced_nodes(prev_committee, allowed_delta, weight_divisor)?;
+                let (nodes, threshold) = build_reduced_nodes(
+                    prev_committee,
+                    threshold_basis_points,
+                    allowed_delta,
+                    weight_divisor,
+                )?;
                 (Some(nodes), Some(threshold))
             }
             None => (None, None),
@@ -3579,17 +3589,9 @@ fn compute_messages_hash(messages: &Messages) -> MessageHash {
     MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
 
-fn compute_bft_threshold(total_weight: u16) -> MpcResult<u16> {
-    if total_weight == 0 {
-        return Err(MpcError::InvalidConfig(
-            "committee has zero total weight".into(),
-        ));
-    }
-    Ok((total_weight - 1) / 3 + 1)
-}
-
 fn build_reduced_nodes(
     committee: &Committee,
+    threshold_basis_points: u16,
     allowed_delta: u16,
     test_weight_divisor: u16,
 ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16)> {
@@ -3604,7 +3606,8 @@ fn build_reduced_nodes(
         })
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
-    let threshold = compute_bft_threshold(total_weight)?;
+    let threshold =
+        (total_weight as u32 * threshold_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
     Nodes::new_reduced(nodes_vec, threshold, allowed_delta, 1)
         .map_err(|e| MpcError::CryptoError(e.to_string()))
 }

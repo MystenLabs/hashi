@@ -28,9 +28,6 @@ pub mod tls;
 pub mod utxo_pool;
 pub mod withdrawals;
 
-/// The allowed delta for weight reduction in basis points (800 means 8%).
-/// This matches Sui's `random_beacon_reduction_allowed_delta` configuration.
-const WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 // TODO: Tune based on production workload.
 const BATCH_SIZE_PER_WEIGHT: u16 = 10;
 
@@ -220,7 +217,10 @@ impl Hashi {
         protocol_type: mpc::types::ProtocolType,
     ) -> anyhow::Result<mpc::MpcManager> {
         let state = self.onchain_state().state();
-        let committee_set = &state.hashi().committees;
+        let hashi = state.hashi();
+        let committee_set = &hashi.committees;
+        let threshold_basis_points = hashi.config.mpc_threshold_basis_points();
+        let allowed_delta = hashi.config.mpc_allowed_delta();
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let encryption_key = self.config.encryption_private_key()?;
         self.db
@@ -261,7 +261,8 @@ impl Hashi {
             encryption_key,
             signing_key,
             store,
-            WEIGHT_REDUCTION_ALLOWED_DELTA,
+            threshold_basis_points,
+            allowed_delta,
             chain_id,
             self.config.test_weight_divisor,
             batch_size_per_weight,
