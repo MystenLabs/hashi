@@ -382,16 +382,16 @@ impl OnchainState {
         self.state().hashi().config.withdrawal_fee_btc()
     }
 
-    pub fn bitcoin_min_withdrawal(&self) -> u64 {
-        self.state().hashi().config.bitcoin_min_withdrawal()
+    pub fn bitcoin_deposit_minimum(&self) -> u64 {
+        self.state().hashi().config.bitcoin_deposit_minimum()
+    }
+
+    pub fn bitcoin_withdrawal_minimum(&self) -> u64 {
+        self.state().hashi().config.bitcoin_withdrawal_minimum()
     }
 
     pub fn worst_case_network_fee(&self) -> u64 {
         self.state().hashi().config.worst_case_network_fee()
-    }
-
-    pub fn withdrawal_minimum(&self) -> u64 {
-        self.state().hashi().config.withdrawal_minimum()
     }
 
     pub fn bitcoin_confirmation_threshold(&self) -> u32 {

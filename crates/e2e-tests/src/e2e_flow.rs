@@ -1081,8 +1081,8 @@ mod tests {
             .await?;
 
         // Deposit enough to cover two withdrawals plus fees.
-        // Each withdrawal must be at least withdrawal_minimum (~28 517 sats
-        // at default config), so use 30 000 sats per request.
+        // Each withdrawal must be at least bitcoin_withdrawal_minimum
+        // (30,000 sats at default config).
         let deposit_amount_sats = 200_000u64;
         let withdrawal_amount_sats = 30_000u64;
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -1182,8 +1182,8 @@ mod tests {
             .build()
             .await?;
 
-        // Each withdrawal must be at least withdrawal_minimum (~28 517 sats
-        // at default config), so use 30 000 sats per request.
+        // Each withdrawal must be at least bitcoin_withdrawal_minimum
+        // (30,000 sats at default config).
         let deposit_amount_sats = 200_000u64;
         let withdrawal_amount_sats = 30_000u64;
         create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;

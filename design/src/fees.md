@@ -9,8 +9,8 @@ addition to the protocol fee, every withdrawal absorbs the Bitcoin
 
 Deposits pay a flat `SUI` fee at request time (`deposit_fee` config key,
 initially `0 SUI`). The fee must match exactly; it is transferred to
-the Hashi balance on Sui. Deposits must also meet the dust minimum
-(`546 sats`) to avoid creating unspendable UTXOs on Bitcoin.
+the Hashi balance on Sui. Deposits must also meet the configurable
+`bitcoin_deposit_minimum` (initially `30,000 sats`).
 
 ## Withdrawal fees
 
@@ -82,13 +82,13 @@ a form of opportunistic UTXO smashing that keeps the pool healthy
 without requiring dedicated consolidation transactions.
 
 The worst-case miner fee per withdrawal is derived from the
-governance-configured `bitcoin_min_withdrawal` parameter:
+governance-configured `bitcoin_withdrawal_minimum` parameter:
 
 ```
-worst_case_network_fee = bitcoin_min_withdrawal - DUST_RELAY_MIN_VALUE
+worst_case_network_fee = bitcoin_withdrawal_minimum - withdrawal_fee_btc - DUST_RELAY_MIN_VALUE
 ```
 
-With defaults: `27,971 - 546 = 27,425` sats.
+With defaults: `30,000 - 546 - 546 = 28,908` sats.
 
 The actual miner fee is usually well below the worst case. Users are
 only charged for the real transaction weight, not the worst-case

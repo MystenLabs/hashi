@@ -462,25 +462,29 @@ impl Config {
         }
     }
 
-    /// Minimum net withdrawal amount (after the protocol fee), mirroring
-    /// the floor logic in btc_config.move.
-    pub fn bitcoin_min_withdrawal(&self) -> u64 {
-        match self.config.get("bitcoin_min_withdrawal") {
-            Some(ConfigValue::U64(v)) => (*v).max(DUST_RELAY_MIN_VALUE * 2),
-            _ => DUST_RELAY_MIN_VALUE * 2,
+    /// Minimum deposit amount, mirroring the floor logic in btc_config.move.
+    pub fn bitcoin_deposit_minimum(&self) -> u64 {
+        match self.config.get("bitcoin_deposit_minimum") {
+            Some(ConfigValue::U64(v)) => (*v).max(DUST_RELAY_MIN_VALUE),
+            _ => DUST_RELAY_MIN_VALUE,
+        }
+    }
+
+    /// Minimum total withdrawal amount (including the protocol fee),
+    /// mirroring the floor logic in btc_config.move.
+    pub fn bitcoin_withdrawal_minimum(&self) -> u64 {
+        let floor = self.withdrawal_fee_btc() + DUST_RELAY_MIN_VALUE + 1;
+        match self.config.get("bitcoin_withdrawal_minimum") {
+            Some(ConfigValue::U64(v)) => (*v).max(floor),
+            _ => floor,
         }
     }
 
     /// Worst-case network (miner) fee for a withdrawal transaction,
-    /// derived from bitcoin_min_withdrawal minus the dust threshold.
+    /// derived from bitcoin_withdrawal_minimum minus the protocol fee
+    /// and dust threshold.
     pub fn worst_case_network_fee(&self) -> u64 {
-        self.bitcoin_min_withdrawal() - DUST_RELAY_MIN_VALUE
-    }
-
-    /// Minimum withdrawal amount the user must provide, covering the
-    /// protocol fee plus the net minimum withdrawal.
-    pub fn withdrawal_minimum(&self) -> u64 {
-        self.bitcoin_min_withdrawal() + self.withdrawal_fee_btc()
+        self.bitcoin_withdrawal_minimum() - self.withdrawal_fee_btc() - DUST_RELAY_MIN_VALUE
     }
 
     pub fn paused(&self) -> bool {

@@ -821,12 +821,12 @@ fun test_miner_fee_exceeds_max_aborts() {
     let clock = clock::create_for_testing(ctx);
     let mut config = config::create();
     hashi::btc_config::init_defaults(&mut config);
-    // Use the floor bitcoin_min_withdrawal (DUST_RELAY_MIN_VALUE * 2 = 1092)
-    // to get the smallest max_network_fee: 1092 - 546 = 546.
-    hashi::btc_config::set_bitcoin_min_withdrawal(&mut config, 1092);
+    // Set bitcoin_withdrawal_minimum = 1200 to get a small max_network_fee:
+    // worst_case_fee = 1200 - 546 - 546 = 108.
+    hashi::btc_config::set_bitcoin_withdrawal_minimum(&mut config, 1200);
 
     let btc_amount = 30_000u64;
-    let miner_fee = 550u64; // exceeds max_network_fee of 546
+    let miner_fee = 110u64; // exceeds max_network_fee of 108
     let user_output = btc_amount - miner_fee;
     let input_amount = user_output + miner_fee + 5_000;
     let change = 5_000u64;

@@ -27,7 +27,9 @@ public(package) fun is_valid_config_entry(
         value.is_u64()
     } else if (k == &b"withdrawal_fee_btc") {
         value.is_u64()
-    } else if (k == &b"bitcoin_min_withdrawal") {
+    } else if (k == &b"bitcoin_deposit_minimum") {
+        value.is_u64()
+    } else if (k == &b"bitcoin_withdrawal_minimum") {
         value.is_u64()
     } else if (k == &b"bitcoin_confirmation_threshold") {
         value.is_u64()
@@ -66,17 +68,17 @@ public(package) fun set_withdrawal_fee_btc(self: &mut Config, fee: u64) {
     self.upsert(b"withdrawal_fee_btc", config_value::new_u64(fee))
 }
 
-/// Minimum net withdrawal amount (satoshis) after the protocol fee.
-/// This is the amount that must cover the worst-case miner fee plus
-/// the dust threshold for the user's output. Returns the greater of
-/// configured value or DUST_RELAY_MIN_VALUE * 2, ensuring the
-/// worst-case network fee is always at least DUST_RELAY_MIN_VALUE.
-public(package) fun bitcoin_min_withdrawal(self: &Config): u64 {
-    self.get(b"bitcoin_min_withdrawal").as_u64().max(DUST_RELAY_MIN_VALUE * 2)
+/// Minimum total withdrawal amount (satoshis) including the protocol
+/// fee. The worst-case network fee is derived from this value minus
+/// the protocol fee and dust threshold. The floor ensures the
+/// worst-case network fee is always at least 1 sat.
+public(package) fun bitcoin_withdrawal_minimum(self: &Config): u64 {
+    let floor = withdrawal_fee_btc(self) + DUST_RELAY_MIN_VALUE + 1;
+    self.get(b"bitcoin_withdrawal_minimum").as_u64().max(floor)
 }
 
-public(package) fun set_bitcoin_min_withdrawal(self: &mut Config, min_withdrawal: u64) {
-    self.upsert(b"bitcoin_min_withdrawal", config_value::new_u64(min_withdrawal))
+public(package) fun set_bitcoin_withdrawal_minimum(self: &mut Config, min_withdrawal: u64) {
+    self.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(min_withdrawal))
 }
 
 /// The dust relay minimum value as a pure constant accessor.
@@ -84,22 +86,26 @@ public(package) fun dust_relay_min_value(): u64 {
     DUST_RELAY_MIN_VALUE
 }
 
-/// Minimum deposit amount (satoshis). Below this, the UTXO is dust.
-public(package) fun deposit_minimum(_self: &Config): u64 {
-    DUST_RELAY_MIN_VALUE
+/// Minimum deposit amount (satoshis). Returns the greater of configured
+/// value or DUST_RELAY_MIN_VALUE, ensuring deposits are never below dust.
+public(package) fun bitcoin_deposit_minimum(self: &Config): u64 {
+    self.get(b"bitcoin_deposit_minimum").as_u64().max(DUST_RELAY_MIN_VALUE)
+}
+
+public(package) fun set_bitcoin_deposit_minimum(self: &mut Config, min_deposit: u64) {
+    self.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(min_deposit))
+}
+
+/// Minimum deposit amount (satoshis). Alias for `bitcoin_deposit_minimum`.
+public(package) fun deposit_minimum(self: &Config): u64 {
+    bitcoin_deposit_minimum(self)
 }
 
 /// Worst-case Bitcoin miner fee for a withdrawal transaction, derived
-/// from the flat `bitcoin_min_withdrawal` config minus the dust
+/// from `bitcoin_withdrawal_minimum` minus the protocol fee and dust
 /// threshold. This caps the per-user miner fee deduction.
 public(package) fun worst_case_network_fee(self: &Config): u64 {
-    bitcoin_min_withdrawal(self) - DUST_RELAY_MIN_VALUE
-}
-
-/// Minimum withdrawal amount (satoshis) the user must provide,
-/// covering the protocol fee plus the net minimum withdrawal.
-public(package) fun withdrawal_minimum(self: &Config): u64 {
-    bitcoin_min_withdrawal(self) + withdrawal_fee_btc(self)
+    bitcoin_withdrawal_minimum(self) - withdrawal_fee_btc(self) - DUST_RELAY_MIN_VALUE
 }
 
 public(package) fun bitcoin_confirmation_threshold(self: &Config): u64 {
@@ -124,7 +130,8 @@ public(package) fun set_withdrawal_cancellation_cooldown_ms(self: &mut Config, c
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(b"deposit_fee", config_value::new_u64(0));
     config.upsert(b"withdrawal_fee_btc", config_value::new_u64(DUST_RELAY_MIN_VALUE));
-    config.upsert(b"bitcoin_min_withdrawal", config_value::new_u64(27_971));
+    config.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(30_000));
+    config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(1)); // TODO: set to 6 before mainnet
     config.upsert(b"withdrawal_cancellation_cooldown_ms", config_value::new_u64(1000 * 60 * 60)); // 1 hour
 }

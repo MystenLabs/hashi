@@ -15,7 +15,7 @@ use hashi::{
 };
 use sui::{clock::Clock, coin::{Self, Coin}, random::Random};
 
-use fun btc_config::withdrawal_minimum as Config.withdrawal_minimum;
+use fun btc_config::bitcoin_withdrawal_minimum as Config.bitcoin_withdrawal_minimum;
 use fun btc_config::withdrawal_fee_btc as Config.withdrawal_fee_btc;
 use fun btc_config::withdrawal_cancellation_cooldown_ms as
     Config.withdrawal_cancellation_cooldown_ms;
@@ -93,8 +93,8 @@ public(package) fun new_withdrawal_confirmation_message(
 /// amount (net of fee) is stored in the withdrawal request and determines
 /// the user's Bitcoin output at commitment time.
 ///
-/// The user must provide at least `withdrawal_minimum()` sats, which
-/// guarantees the net amount covers worst-case miner fees plus dust.
+/// The user must provide at least `bitcoin_withdrawal_minimum()` sats,
+/// which guarantees the net amount covers worst-case miner fees plus dust.
 public fun request_withdrawal(
     hashi: &mut Hashi,
     clock: &Clock,
@@ -105,7 +105,7 @@ public fun request_withdrawal(
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
 
-    assert!(btc.value() >= hashi.config().withdrawal_minimum(), EBelowMinimumWithdrawal);
+    assert!(btc.value() >= hashi.config().bitcoin_withdrawal_minimum(), EBelowMinimumWithdrawal);
 
     // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
     let addr_len = bitcoin_address.length();

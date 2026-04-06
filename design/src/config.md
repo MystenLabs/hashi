@@ -34,21 +34,33 @@ Flat protocol fee in BTC deducted from the user's withdrawal amount upfront.
 The effective value is always at least `546 sats` regardless of what is
 configured, preventing misconfiguration from producing unspendable outputs.
 
-### `bitcoin_min_withdrawal`
+### `bitcoin_deposit_minimum`
 
 | | |
 |---|---|
 | **Type** | `u64` |
-| **Default** | `27971` |
+| **Default** | `30000` |
 | **Unit** | satoshis |
-| **Floor** | `1094` (dust relay minimum * 2) |
+| **Floor** | `546` (dust relay minimum) |
 
-The minimum net withdrawal amount (after the protocol fee) in satoshis. This
-flat value replaces the previous `max_fee_rate` and `input_budget` parameters
-and their on-chain vbyte calculation. The `worst_case_network_fee` is derived
-as `bitcoin_min_withdrawal - 546`, which caps the per-user miner fee deduction.
-The effective value is always at least `1094 sats`, ensuring the worst-case
-network fee is at least `546 sats`.
+The minimum deposit amount in satoshis. Deposits below this value are rejected
+on-chain. The effective value is always at least `546 sats` to prevent creating
+unspendable UTXOs.
+
+### `bitcoin_withdrawal_minimum`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `30000` |
+| **Unit** | satoshis |
+| **Floor** | `withdrawal_fee_btc + 546 + 1` (1093 at default fee) |
+
+The minimum total withdrawal amount in satoshis, including the protocol fee.
+The `worst_case_network_fee` is derived as
+`bitcoin_withdrawal_minimum - withdrawal_fee_btc - 546`, which caps the
+per-user miner fee deduction. The floor ensures the worst-case network fee is
+always at least `1 sat`.
 
 ### `bitcoin_confirmation_threshold`
 
@@ -105,27 +117,17 @@ stored directly.
 ### `deposit_minimum`
 
 ```
-deposit_minimum = 546 sats
+deposit_minimum = bitcoin_deposit_minimum
 ```
 
-The minimum deposit amount. Fixed at the dust relay minimum to prevent
-creating unspendable UTXOs.
+The minimum deposit amount. With defaults: `30,000 sats`.
 
 ### `worst_case_network_fee`
 
 ```
-worst_case_network_fee = bitcoin_min_withdrawal - 546
+worst_case_network_fee = bitcoin_withdrawal_minimum - withdrawal_fee_btc - 546
 ```
 
 The maximum miner fee the contract will accept for a withdrawal transaction,
-derived from the flat `bitcoin_min_withdrawal` config. With defaults:
-`27,971 - 546 = 27,425 sats`.
-
-### `withdrawal_minimum`
-
-```
-withdrawal_minimum = bitcoin_min_withdrawal + withdrawal_fee_btc
-```
-
-The minimum withdrawal amount the user must provide, covering the protocol fee
-plus the net minimum. With defaults: `27,971 + 546 = 28,517 sats`.
+derived from `bitcoin_withdrawal_minimum` minus the protocol fee and dust
+threshold. With defaults: `30,000 - 546 - 546 = 28,908 sats`.
