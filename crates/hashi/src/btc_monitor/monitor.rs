@@ -61,6 +61,7 @@ pub struct Monitor {
     tip: Option<HeaderCheckpoint>,
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
+    rpc_workers: JoinSet<()>,
 }
 
 /// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
@@ -130,6 +131,7 @@ impl Monitor {
                     tip: None,
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
+                    rpc_workers: JoinSet::new(),
                 };
 
                 monitor
@@ -229,7 +231,7 @@ impl Monitor {
                     self.process_kyoto_event(event);
                 }
                 Some(msg) = client_rx.recv() => {
-                    self.process_client_message(msg).await;
+                    self.process_client_message(msg);
                 }
                 Some(msg) = kyoto_client.info_rx.recv() => {
                     info!("Kyoto: {msg}");
@@ -268,6 +270,11 @@ impl Monitor {
                 Some(join_result) = self.pending_deposit_workers.join_next(), if !self.pending_deposit_workers.is_empty() => {
                     if let Err(e) = join_result {
                         error!("Pending deposit worker task failed: {e}");
+                    }
+                }
+                Some(join_result) = self.rpc_workers.join_next(), if !self.rpc_workers.is_empty() => {
+                    if let Err(e) = join_result {
+                        error!("RPC worker task failed: {e}");
                     }
                 }
                 else => {
@@ -370,19 +377,33 @@ impl Monitor {
         self.process_pending_deposits();
     }
 
-    async fn process_client_message(&mut self, msg: MonitorMessage) {
+    fn process_client_message(&mut self, msg: MonitorMessage) {
         match msg {
             MonitorMessage::ConfirmDeposit(pending_deposit) => {
                 self.confirm_deposit(pending_deposit);
             }
             MonitorMessage::GetRecentFeeRate(conf_target, result_tx) => {
-                self.get_recent_fee_rate(conf_target, result_tx).await;
+                self.rpc_workers.spawn(Self::get_recent_fee_rate(
+                    self.bitcoind_rpc.clone(),
+                    self.metrics.clone(),
+                    conf_target,
+                    result_tx,
+                ));
             }
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
-                self.broadcast_transaction(tx, result_tx).await;
+                self.rpc_workers.spawn(Self::broadcast_transaction(
+                    self.bitcoind_rpc.clone(),
+                    self.requester.clone(),
+                    tx,
+                    result_tx,
+                ));
             }
             MonitorMessage::GetTransactionStatus(txid, result_tx) => {
-                self.get_transaction_status(txid, result_tx).await;
+                self.rpc_workers.spawn(Self::get_transaction_status(
+                    self.bitcoind_rpc.clone(),
+                    txid,
+                    result_tx,
+                ));
             }
         }
     }
@@ -423,11 +444,12 @@ impl Monitor {
     }
 
     async fn get_recent_fee_rate(
-        &mut self,
+        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+        metrics: Arc<Metrics>,
         conf_target: u16,
         result_tx: oneshot::Sender<Result<FeeRate>>,
     ) {
-        let result = btc_rpc_call(&self.bitcoind_rpc, move |rpc| {
+        let result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
             rpc.estimate_smart_fee(conf_target as u32)
         })
         .await
@@ -445,7 +467,7 @@ impl Monitor {
                     FALLBACK_FEE_RATE_SAT_PER_KWU
                 }
             };
-            self.metrics
+            metrics
                 .btc_fee_rate_sat_per_kvb
                 .set((sat_per_kwu * 4) as i64);
             FeeRate::from_sat_per_kwu(sat_per_kwu)
@@ -454,14 +476,15 @@ impl Monitor {
     }
 
     async fn broadcast_transaction(
-        &mut self,
+        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+        requester: kyoto::Requester,
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
         // Temp hack to get warning messages when a transaction would be rejected
         // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
         let txid = tx.compute_txid();
-        let accept_result = btc_rpc_call(&self.bitcoind_rpc, {
+        let accept_result = btc_rpc_call(&bitcoind_rpc, {
             let tx = tx.clone();
             move |rpc| rpc.test_mempool_accept(std::slice::from_ref(&tx))
         })
@@ -486,7 +509,7 @@ impl Monitor {
             }
         }
 
-        match self.requester.broadcast_tx(tx).await {
+        match requester.broadcast_tx(tx).await {
             Ok(wtxid) => {
                 info!("Transaction {txid} broadcast acknowledged (wtxid: {wtxid})");
                 let _ = result_tx.send(Ok(()));
@@ -499,11 +522,11 @@ impl Monitor {
     }
 
     async fn get_transaction_status(
-        &self,
+        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         txid: bitcoin::Txid,
         result_tx: oneshot::Sender<Result<TxStatus>>,
     ) {
-        let rpc_result = btc_rpc_call(&self.bitcoind_rpc, move |rpc| {
+        let rpc_result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
             rpc.get_raw_transaction_verbose(txid)
         })
         .await;
