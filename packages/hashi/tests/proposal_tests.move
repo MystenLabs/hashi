@@ -29,7 +29,7 @@ fun test_create_proposal() {
     let clock = clock::create_for_testing(ctx);
 
     // Create a proposal - should succeed since VOTER1 is a member
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -60,7 +60,7 @@ fun test_create_proposal_fails_for_non_member() {
     let clock = clock::create_for_testing(ctx);
 
     // Try to create a proposal as non-member - should fail
-    let _proposal_id = test_utils::create_deposit_fee_proposal(
+    let _proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -84,7 +84,7 @@ fun test_vote_on_proposal() {
     let clock = clock::create_for_testing(ctx1);
 
     // VOTER1 creates proposal
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -117,7 +117,7 @@ fun test_double_vote_fails() {
     let clock = clock::create_for_testing(ctx);
 
     // VOTER1 creates proposal (auto-votes)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -143,7 +143,7 @@ fun test_vote_by_non_member_fails() {
     let clock = clock::create_for_testing(ctx1);
 
     // VOTER1 creates proposal
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -171,7 +171,7 @@ fun test_remove_vote() {
     let clock = clock::create_for_testing(ctx);
 
     // VOTER1 creates proposal (auto-votes)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -207,7 +207,7 @@ fun test_remove_nonexistent_vote_fails() {
     let clock = clock::create_for_testing(ctx1);
 
     // VOTER1 creates proposal
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -235,11 +235,11 @@ fun test_execute_proposal_with_quorum() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Verify initial deposit fee is 0
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 0);
+    // Verify initial deposit minimum is 30,000.
+    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 30_000);
 
     // VOTER1 creates proposal (auto-votes = 100% weight)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -249,8 +249,8 @@ fun test_execute_proposal_with_quorum() {
     // Execute the proposal
     hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
-    // Verify the deposit fee was updated
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
+    // Verify the deposit minimum was updated
+    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 1000);
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -269,7 +269,7 @@ fun test_execute_without_quorum_fails() {
     let clock = clock::create_for_testing(ctx);
 
     // VOTER1 creates proposal (auto-votes = 33% weight)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -294,7 +294,7 @@ fun test_execute_after_gathering_votes() {
     let clock = clock::create_for_testing(ctx1);
 
     // VOTER1 creates proposal (33% weight)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -312,8 +312,8 @@ fun test_execute_after_gathering_votes() {
     // Now execute with 100% quorum
     hashi::update_config::execute(&mut hashi, proposal_id, &clock);
 
-    // Verify the deposit fee was updated
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
+    // Verify the deposit minimum was updated
+    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 1000);
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -333,7 +333,7 @@ fun test_vote_on_expired_proposal_fails() {
     let mut clock = clock::create_for_testing(ctx1);
 
     // VOTER1 creates proposal
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -363,7 +363,7 @@ fun test_execute_expired_proposal_fails() {
     let mut clock = clock::create_for_testing(ctx);
 
     // VOTER1 creates proposal (100% weight)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -391,7 +391,7 @@ fun test_delete_expired_proposal() {
     let mut clock = clock::create_for_testing(ctx);
 
     // Create proposal
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -424,7 +424,7 @@ fun test_delete_non_expired_proposal_fails() {
     let clock = clock::create_for_testing(ctx);
 
     // Create proposal
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -454,7 +454,7 @@ fun test_weighted_quorum() {
     let clock = clock::create_for_testing(ctx1);
 
     // VOTER1 creates proposal (3/6 = 50% weight)
-    let proposal_id = test_utils::create_deposit_fee_proposal(
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -475,7 +475,7 @@ fun test_weighted_quorum() {
 
     // Execute should succeed
     hashi::update_config::execute(&mut hashi, proposal_id, &clock);
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
+    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 1000);
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -494,7 +494,7 @@ fun test_multiple_concurrent_proposals() {
     let clock = clock::create_for_testing(ctx);
 
     // Create first proposal
-    let proposal_id_1 = test_utils::create_deposit_fee_proposal(
+    let proposal_id_1 = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         1000,
         &clock,
@@ -502,7 +502,7 @@ fun test_multiple_concurrent_proposals() {
     );
 
     // Create second proposal
-    let proposal_id_2 = test_utils::create_deposit_fee_proposal(
+    let proposal_id_2 = test_utils::create_deposit_minimum_proposal(
         &mut hashi,
         2000,
         &clock,
@@ -515,11 +515,11 @@ fun test_multiple_concurrent_proposals() {
 
     // Execute first proposal
     hashi::update_config::execute(&mut hashi, proposal_id_1, &clock);
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 1000);
+    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 1000);
 
     // Execute second proposal (overwrites first)
     hashi::update_config::execute(&mut hashi, proposal_id_2, &clock);
-    assert!(hashi::btc_config::deposit_fee(hashi.config()) == 2000);
+    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 2000);
 
     // Clean up
     clock::destroy_for_testing(clock);

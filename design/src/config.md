@@ -11,16 +11,6 @@ its expected type on update.
 
 ## Parameters
 
-### `deposit_fee`
-
-| | |
-|---|---|
-| **Type** | `u64` |
-| **Default** | `0` |
-| **Unit** | SUI (MIST) |
-
-Flat fee in SUI charged to the user when submitting a deposit request.
-
 ### `bitcoin_deposit_minimum`
 
 | | |

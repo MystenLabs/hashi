@@ -337,20 +337,14 @@ impl SuiTxExecutor {
             vec![utxo_id_arg, amount_arg, derivation_path_arg],
         );
 
-        // 3. Split zero SUI for fee coin
-        let zero_arg = builder.pure(&0u64);
-        let gas_arg = builder.gas();
-        let fee_coins = builder.split_coins(gas_arg, vec![zero_arg]);
-        let fee_coin_arg = fee_coins.into_iter().next().unwrap();
-
-        // 4. Call deposit(hashi, utxo, fee, clock)
+        // 3. Call deposit(hashi, utxo, clock)
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("deposit"),
             ),
-            vec![hashi_arg, utxo_arg, fee_coin_arg, clock_arg],
+            vec![hashi_arg, utxo_arg, clock_arg],
         );
 
         let response = self.execute(builder).await?;
@@ -381,8 +375,7 @@ impl SuiTxExecutor {
     /// Creates multiple deposit requests on-chain in a single PTB by repeating
     /// the deposit sequence for each UTXO output:
     /// 1. Creating a UTXO object (txid, vout, amount, derivation_path)
-    /// 2. Splitting SUI for the deposit fee
-    /// 3. Calling deposit(hashi, utxo, fee, clock) which creates the DepositRequest on-chain
+    /// 2. Calling deposit(hashi, utxo, clock) which creates the DepositRequest on-chain
     ///
     /// Returns the deposit request IDs on success.
     pub async fn execute_create_deposit_requests_batch(
@@ -405,8 +398,6 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(false),
         );
-
-        let gas_arg = builder.gas();
 
         for &(vout, amount_sats) in utxos {
             let txid_arg = builder.pure(&txid);
@@ -434,19 +425,14 @@ impl SuiTxExecutor {
                 vec![utxo_id_arg, amount_arg, derivation_path_arg],
             );
 
-            // 3. Split SUI for fee coin
-            let zero_arg = builder.pure(&0u64);
-            let fee_coins = builder.split_coins(gas_arg, vec![zero_arg]);
-            let fee_coin_arg = fee_coins.into_iter().next().unwrap();
-
-            // 4. Call deposit(hashi, utxo, fee, clock)
+            // 3. Call deposit(hashi, utxo, clock)
             builder.move_call(
                 Function::new(
                     self.hashi_ids.package_id,
                     Identifier::from_static("deposit"),
                     Identifier::from_static("deposit"),
                 ),
-                vec![hashi_arg, utxo_arg, fee_coin_arg, clock_arg],
+                vec![hashi_arg, utxo_arg, clock_arg],
             );
         }
 

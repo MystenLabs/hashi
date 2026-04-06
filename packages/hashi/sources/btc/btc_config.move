@@ -23,9 +23,7 @@ public(package) fun is_valid_config_entry(
     value: &config_value::Value,
 ): bool {
     let k = key.as_bytes();
-    if (k == &b"deposit_fee") {
-        value.is_u64()
-    } else if (k == &b"bitcoin_deposit_minimum") {
+    if (k == &b"bitcoin_deposit_minimum") {
         value.is_u64()
     } else if (k == &b"bitcoin_withdrawal_minimum") {
         value.is_u64()
@@ -46,14 +44,6 @@ public(package) fun bitcoin_chain_id(self: &Config): address {
 
 public(package) fun set_bitcoin_chain_id(self: &mut Config, bitcoin_chain_id: address) {
     self.upsert(b"bitcoin_chain_id", config_value::new_address(bitcoin_chain_id))
-}
-
-public(package) fun deposit_fee(self: &Config): u64 {
-    self.get(b"deposit_fee").as_u64()
-}
-
-public(package) fun set_deposit_fee(self: &mut Config, fee: u64) {
-    self.upsert(b"deposit_fee", config_value::new_u64(fee))
 }
 
 /// Minimum total withdrawal amount (satoshis). The worst-case network
@@ -114,7 +104,6 @@ public(package) fun set_withdrawal_cancellation_cooldown_ms(self: &mut Config, c
 
 /// Initialize BTC-specific config defaults. Called after config::create().
 public(package) fun init_defaults(config: &mut Config) {
-    config.upsert(b"deposit_fee", config_value::new_u64(0));
     config.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(1)); // TODO: set to 6 before mainnet

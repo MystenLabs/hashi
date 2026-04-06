@@ -1267,8 +1267,8 @@ mod tests {
         let builder = build_create_proposal_transaction(
             hashi_ids,
             CreateProposalParams::UpdateConfig {
-                key: "deposit_fee".to_string(),
-                value: hashi_types::move_types::ConfigValue::U64(42),
+                key: "bitcoin_deposit_minimum".to_string(),
+                value: hashi_types::move_types::ConfigValue::U64(25_000),
                 metadata: vec![],
             },
         );

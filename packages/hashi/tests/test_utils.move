@@ -206,17 +206,17 @@ public fun sign_certificate(
 
 // ======== Proposal Creation Helpers ========
 
-/// Creates a deposit fee update proposal and returns its ID
-public fun create_deposit_fee_proposal(
+/// Creates a deposit minimum update proposal and returns its ID.
+public fun create_deposit_minimum_proposal(
     hashi: &mut Hashi,
-    fee: u64,
+    minimum: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
     update_config::propose(
         hashi,
-        b"deposit_fee".to_string(),
-        config_value::new_u64(fee),
+        b"bitcoin_deposit_minimum".to_string(),
+        config_value::new_u64(minimum),
         vec_map::empty(),
         clock,
         ctx,

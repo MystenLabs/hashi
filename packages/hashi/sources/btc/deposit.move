@@ -12,15 +12,12 @@ use hashi::{
     hashi::Hashi,
     utxo::{Utxo, UtxoId}
 };
-use sui::{coin::Coin, sui::SUI};
+use sui::coin::Coin;
 
-use fun btc_config::deposit_fee as Config.deposit_fee;
 use fun btc_config::deposit_minimum as Config.deposit_minimum;
 
 #[error]
-const EIncorrectFee: vector<u8> = b"Deposit fee does not match the required protocol fee";
-#[error]
-const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum (dust threshold)";
+const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum";
 #[error]
 const EUtxoAlreadyUsed: vector<u8> = b"UTXO has already been deposited or is currently active";
 
@@ -41,20 +38,15 @@ public fun new_deposit_confirmation_message(
 public fun deposit(
     hashi: &mut Hashi,
     utxo: hashi::utxo::Utxo,
-    fee: Coin<SUI>,
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
     // Check that the system isn't paused, but still allow users to request
-    // deposits even when the system is reconfiguring
+    // deposits even when the system is reconfiguring.
     hashi.assert_unpaused();
 
-    // Check that the fee is sufficient
-    assert!(hashi.config().deposit_fee() == fee.value(), EIncorrectFee);
-    sui::coin::send_funds(fee, hashi.id().to_address());
-
-    // Check that the deposit amount meets the dust minimum
+    // Check that the deposit amount meets the minimum.
     assert!(utxo.amount() >= hashi.config().deposit_minimum(), EBelowMinimumDeposit);
 
     // Check that the UTXO isn't already active or previously spent (replay protection)

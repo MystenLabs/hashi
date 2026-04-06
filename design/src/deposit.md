@@ -56,22 +56,20 @@ public fun utxo_id(
 - `amount` -- the deposit amount in satoshis
 - `derivation_path` -- the Sui address used to derive the deposit address
 
-The user then submits the request along with the required [deposit
-fee](./config.md#deposit_fee):
+The user then submits the request:
 
 ```move
 public fun deposit(
     hashi: &mut Hashi,
-    request: DepositRequest,
-    fee: Coin<SUI>,
+    utxo: Utxo,
+    clock: &Clock,
     ctx: &mut TxContext,
 )
 ```
 
-The function validates that the fee is exact, the deposit meets the dust
-minimum, and the UTXO has not been previously deposited. The request is then
-placed in the deposit queue for committee members to begin monitoring for
-confirmation on Bitcoin.
+The function validates that the deposit meets the minimum amount and the UTXO
+has not been previously deposited. The request is then placed in the deposit
+queue for committee members to begin monitoring for confirmation on Bitcoin.
 
 
 ## Confirm

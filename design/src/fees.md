@@ -5,11 +5,9 @@ a **withdrawal fee** paid in `BTC`. Both are governance-configurable. In
 addition to the protocol fee, every withdrawal absorbs the Bitcoin
 **miner fee** required to get the transaction confirmed on-chain.
 
-## Deposit fee
+## Deposits
 
-Deposits pay a flat `SUI` fee at request time (`deposit_fee` config key,
-initially `0 SUI`). The fee must match exactly; it is transferred to
-the Hashi balance on Sui. Deposits must also meet the configurable
+Deposits are free. They must meet the configurable
 `bitcoin_deposit_minimum` (initially `30,000 sats`).
 
 ## Withdrawal fees

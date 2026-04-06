@@ -33,9 +33,8 @@ fun test_deposit_at_minimum() {
     // Default bitcoin_deposit_minimum is 30,000 sats.
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 30_000, option::none());
-    let fee = sui::coin::zero(ctx);
 
-    deposit::deposit(&mut hashi, utxo, fee, &clock, ctx);
+    deposit::deposit(&mut hashi, utxo, &clock, ctx);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -51,9 +50,8 @@ fun test_deposit_below_minimum() {
 
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 29_999, option::none());
-    let fee = sui::coin::zero(ctx);
 
-    deposit::deposit(&mut hashi, utxo, fee, &clock, ctx);
+    deposit::deposit(&mut hashi, utxo, &clock, ctx);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -80,8 +78,7 @@ fun test_spent_utxo_cannot_be_redeposited() {
     // Attempt to deposit the same UTXO again — should abort because
     // is_spent_or_active() returns true.
     let utxo2 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
-    let fee = sui::coin::zero(ctx);
-    deposit::deposit(&mut hashi, utxo2, fee, &clock, ctx);
+    deposit::deposit(&mut hashi, utxo2, &clock, ctx);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -97,15 +94,13 @@ fun test_multiple_deposit_requests_same_utxo_allowed() {
 
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
 
-    // First deposit request succeeds
+    // First deposit request succeeds.
     let utxo1 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
-    let fee1 = sui::coin::zero(ctx);
-    deposit::deposit(&mut hashi, utxo1, fee1, &clock, ctx);
+    deposit::deposit(&mut hashi, utxo1, &clock, ctx);
 
-    // Second deposit request with the same UTXO also succeeds (anti-griefing)
+    // Second deposit request with the same UTXO also succeeds (anti-griefing).
     let utxo2 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
-    let fee2 = sui::coin::zero(ctx);
-    deposit::deposit(&mut hashi, utxo2, fee2, &clock, ctx);
+    deposit::deposit(&mut hashi, utxo2, &clock, ctx);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
