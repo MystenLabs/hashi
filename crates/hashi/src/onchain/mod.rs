@@ -1007,12 +1007,16 @@ async fn scrape_deposit_requests(
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder()
+                        .child_object()
+                        .contents()
+                        .finish(),
                 ])),
         )
         .and_then(|field| async move {
             let deposit_request: move_types::DepositRequest = field
-                .value()
+                .child_object()
+                .contents()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(deposit_request)
@@ -1078,12 +1082,16 @@ async fn scrape_withdrawal_requests(
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder()
+                        .child_object()
+                        .contents()
+                        .finish(),
                 ])),
         )
         .and_then(|field| async move {
             let withdrawal_request: move_types::WithdrawalRequest = field
-                .value()
+                .child_object()
+                .contents()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok(withdrawal_request)
