@@ -14,13 +14,15 @@ use hashi::onchain::OnchainState;
 
 mod dump_utxos;
 mod key_recovery;
+pub mod sweep_utxos;
 
 #[derive(Parser)]
 #[command(name = "internal-tools", about = "Internal operator tools for Hashi")]
 struct Cli {
     /// Path to a node config TOML file (provides sui-rpc, chain-id, hashi-ids).
+    /// Required for key-recovery and dump-utxos; not needed for sweep-utxos.
     #[arg(long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -30,6 +32,7 @@ struct Cli {
 enum Commands {
     KeyRecovery(key_recovery::Args),
     DumpUtxos,
+    SweepUtxos(sweep_utxos::Args),
 }
 
 #[tokio::main]
@@ -37,8 +40,17 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    let config_str = std::fs::read_to_string(&cli.config)
-        .with_context(|| format!("failed to read config: {}", cli.config.display()))?;
+    if let Commands::SweepUtxos(args) = cli.command {
+        return sweep_utxos::run(args).await;
+    }
+
+    let config_path = cli
+        .config
+        .as_ref()
+        .ok_or_else(|| anyhow!("--config is required for this command"))?;
+
+    let config_str = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read config: {}", config_path.display()))?;
     let config: Config =
         toml::from_str(&config_str).with_context(|| "failed to parse config TOML")?;
 
@@ -62,5 +74,6 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::KeyRecovery(args) => key_recovery::run(args, &onchain_state, chain_id).await,
         Commands::DumpUtxos => dump_utxos::run(&onchain_state),
+        Commands::SweepUtxos(_) => unreachable!(),
     }
 }
