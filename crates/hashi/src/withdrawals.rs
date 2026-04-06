@@ -260,7 +260,7 @@ impl Hashi {
         );
 
         // Verify each positional withdrawal output matches the expected amount and address.
-        // request.btc_amount is already net of the protocol fee (deducted at request time).
+        // request.btc_amount is the full withdrawal amount.
         for (i, request) in requests.iter().enumerate() {
             let output = &approval.outputs[i];
             let expected_amount = request.btc_amount - per_user_miner_fee;
@@ -778,7 +778,7 @@ impl Hashi {
             .collect();
 
         // Map on-chain WithdrawalRequests to the coin-selector view.
-        // btc_amount is already net of the protocol fee.
+        // btc_amount is the full withdrawal amount.
         let mapped_requests: Vec<utxo_pool::WithdrawalRequest> = requests
             .iter()
             .map(|r| utxo_pool::WithdrawalRequest {

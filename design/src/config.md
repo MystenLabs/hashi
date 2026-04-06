@@ -21,19 +21,6 @@ its expected type on update.
 
 Flat fee in SUI charged to the user when submitting a deposit request.
 
-### `withdrawal_fee_btc`
-
-| | |
-|---|---|
-| **Type** | `u64` |
-| **Default** | `546` |
-| **Unit** | satoshis |
-| **Floor** | `546` (dust relay minimum) |
-
-Flat protocol fee in BTC deducted from the user's withdrawal amount upfront.
-The effective value is always at least `546 sats` regardless of what is
-configured, preventing misconfiguration from producing unspendable outputs.
-
 ### `bitcoin_deposit_minimum`
 
 | | |
@@ -54,13 +41,12 @@ unspendable UTXOs.
 | **Type** | `u64` |
 | **Default** | `30000` |
 | **Unit** | satoshis |
-| **Floor** | `withdrawal_fee_btc + 546 + 1` (1093 at default fee) |
+| **Floor** | `547` (dust relay minimum + 1) |
 
-The minimum total withdrawal amount in satoshis, including the protocol fee.
-The `worst_case_network_fee` is derived as
-`bitcoin_withdrawal_minimum - withdrawal_fee_btc - 546`, which caps the
-per-user miner fee deduction. The floor ensures the worst-case network fee is
-always at least `1 sat`.
+The minimum total withdrawal amount in satoshis. The `worst_case_network_fee`
+is derived as `bitcoin_withdrawal_minimum - 546`, which caps the per-user miner
+fee deduction. The floor ensures the worst-case network fee is always at least
+`1 sat`.
 
 ### `bitcoin_confirmation_threshold`
 
@@ -125,9 +111,9 @@ The minimum deposit amount. With defaults: `30,000 sats`.
 ### `worst_case_network_fee`
 
 ```
-worst_case_network_fee = bitcoin_withdrawal_minimum - withdrawal_fee_btc - 546
+worst_case_network_fee = bitcoin_withdrawal_minimum - 546
 ```
 
 The maximum miner fee the contract will accept for a withdrawal transaction,
-derived from `bitcoin_withdrawal_minimum` minus the protocol fee and dust
-threshold. With defaults: `30,000 - 546 - 546 = 28,908 sats`.
+derived from `bitcoin_withdrawal_minimum` minus the dust threshold. With
+defaults: `30,000 - 546 = 29,454 sats`.
