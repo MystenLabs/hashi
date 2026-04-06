@@ -150,13 +150,15 @@ mod tests {
             "expected unknown tx lookup to return none"
         );
 
-        let destination = node.get_new_address()?;
-        let txid = node.send_to_address(&destination, Amount::from_sat(50_000))?;
+        let destination = node.get_new_address().await?;
+        let txid = node
+            .send_to_address(&destination, Amount::from_sat(50_000))
+            .await?;
 
         let unconfirmed = btc_rpc_client.lookup_confirmation(txid)?;
         assert!(unconfirmed.is_none(), "expected unconfirmed transaction");
 
-        node.generate_blocks(1)?;
+        node.generate_blocks(1).await?;
 
         let confirmed = btc_rpc_client.lookup_confirmation(txid)?;
         assert!(confirmed.is_some(), "expected confirmed transaction");

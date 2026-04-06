@@ -277,12 +277,16 @@ mod tests {
         info!("Sending Bitcoin to deposit address...");
         let txid = networks
             .bitcoin_node
-            .send_to_address(&deposit_address, Amount::from_sat(amount_sats))?;
+            .send_to_address(&deposit_address, Amount::from_sat(amount_sats))
+            .await?;
         info!("Transaction sent: {}", txid);
 
         info!("Mining blocks for confirmation...");
         let blocks_to_mine = 10;
-        networks.bitcoin_node.generate_blocks(blocks_to_mine)?;
+        networks
+            .bitcoin_node
+            .generate_blocks(blocks_to_mine)
+            .await?;
         info!("{blocks_to_mine} blocks mined");
 
         info!("Creating deposit request on Sui...");
@@ -424,7 +428,7 @@ mod tests {
         }
 
         loop {
-            let mined_blocks = bitcoin_node.generate_blocks(1)?;
+            let mined_blocks = bitcoin_node.generate_blocks(1).await?;
             let block_hash = mined_blocks
                 .last()
                 .copied()
@@ -511,7 +515,7 @@ mod tests {
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap();
         let withdrawal_amount_sats = 30_000u64;
-        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let btc_destination = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes = extract_witness_program(&btc_destination)?;
         info!(
             "Requesting withdrawal of {} sats to {}",
@@ -580,7 +584,7 @@ mod tests {
         signer: sui_crypto::ed25519::Ed25519PrivateKey,
         withdrawal_amount_sats: u64,
     ) -> Result<()> {
-        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let btc_destination = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes = extract_witness_program(&btc_destination)?;
         let mut executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(signer);
@@ -891,7 +895,7 @@ mod tests {
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
 
         // Submit withdrawal 1. Do NOT mine any Bitcoin blocks yet.
-        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination1 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes1 = extract_witness_program(&btc_destination1)?;
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
             .with_signer(user_key.clone());
@@ -926,7 +930,7 @@ mod tests {
 
         // Submit withdrawal 2 immediately — the deposit UTXO is now locked, so
         // the only available UTXO is the unconfirmed change from withdrawal 1.
-        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination2 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes2 = extract_witness_program(&btc_destination2)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
@@ -1095,14 +1099,14 @@ mod tests {
         // Submit two withdrawal requests back-to-back without waiting for either
         // to be committed. The leader should approve both and then batch them
         // together into a single Bitcoin transaction.
-        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination1 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes1 = extract_witness_program(&btc_destination1)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
             .await?;
         info!("Withdrawal request 1 submitted");
 
-        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination2 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes2 = extract_witness_program(&btc_destination2)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
@@ -1193,14 +1197,14 @@ mod tests {
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
             .with_signer(user_key.clone());
 
-        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination1 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes1 = extract_witness_program(&btc_destination1)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
             .await?;
         info!("Withdrawal request 1 submitted");
 
-        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination2 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes2 = extract_witness_program(&btc_destination2)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
@@ -1367,7 +1371,7 @@ mod tests {
             .with_signer(user_key.clone());
 
         // --- Withdrawal 1 ---
-        let btc_destination1 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination1 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes1 = extract_witness_program(&btc_destination1)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
@@ -1393,14 +1397,14 @@ mod tests {
         // PendingWithdrawal and its change UTXO remains Pending { chain }.
         // The AncestorTx for withdrawal 1 will have confirmations=2, so
         // mempool_chain_depth() returns 0 — the change UTXO is eligible.
-        networks.bitcoin_node.generate_blocks(2)?;
+        networks.bitcoin_node.generate_blocks(2).await?;
         info!("Mined 2 blocks; withdrawal 1 now has 2 Bitcoin confirmations (below threshold 6)");
 
         // --- Withdrawal 2 ---
         // The only available UTXO is the change from withdrawal 1. Its ancestor
         // is mined (confirmations=2 ≥ 1) so mempool_chain_depth()=0, making it
         // eligible even though withdrawal 1 is not yet confirmed on Sui.
-        let btc_destination2 = networks.bitcoin_node.get_new_address()?;
+        let btc_destination2 = networks.bitcoin_node.get_new_address().await?;
         let destination_bytes2 = extract_witness_program(&btc_destination2)?;
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes2)
@@ -1464,7 +1468,7 @@ mod tests {
             .with_signer(user_key.clone());
 
         // --- Withdrawal A ---
-        let btc_destination_a = networks.bitcoin_node.get_new_address()?;
+        let btc_destination_a = networks.bitcoin_node.get_new_address().await?;
         executor
             .execute_create_withdrawal_request(
                 withdrawal_amount_sats,
@@ -1488,7 +1492,7 @@ mod tests {
 
         // --- Withdrawal B ---
         // UTXO_A has mempool depth 1 ≤ 3 → eligible.
-        let btc_destination_b = networks.bitcoin_node.get_new_address()?;
+        let btc_destination_b = networks.bitcoin_node.get_new_address().await?;
         executor
             .execute_create_withdrawal_request(
                 withdrawal_amount_sats,
@@ -1512,7 +1516,7 @@ mod tests {
 
         // --- Withdrawal C ---
         // UTXO_B has full ancestor chain [B, A] at mempool depth 2 ≤ 3 → eligible.
-        let btc_destination_c = networks.bitcoin_node.get_new_address()?;
+        let btc_destination_c = networks.bitcoin_node.get_new_address().await?;
         executor
             .execute_create_withdrawal_request(
                 withdrawal_amount_sats,

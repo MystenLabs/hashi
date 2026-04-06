@@ -15,8 +15,10 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::Result;
+use corepc_client::client_sync::v29::Client;
 
 pub mod bitcoin_node;
 pub mod e2e_flow;
@@ -24,6 +26,20 @@ pub mod external_bitcoin_node;
 pub mod hashi_network;
 pub mod publish;
 pub mod sui_network;
+
+/// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
+///
+/// Same pattern as `btc_rpc_call` in `hashi::btc_monitor::monitor`.
+pub async fn btc_rpc_call<F, T>(client: &Arc<Client>, f: F) -> T
+where
+    F: FnOnce(&Client) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let client = Arc::clone(client);
+    tokio::task::spawn_blocking(move || f(&client))
+        .await
+        .expect("btc_rpc_call: spawn_blocking task panicked")
+}
 
 pub use bitcoin_node::BitcoinNodeBuilder;
 pub use bitcoin_node::BitcoinNodeHandle;

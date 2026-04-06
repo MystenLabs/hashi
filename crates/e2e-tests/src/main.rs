@@ -209,6 +209,9 @@ struct LocalnetState {
     /// Bitcoin network: "regtest", "signet", "testnet4", or "mainnet"
     #[serde(default = "default_bitcoin_network")]
     bitcoin_network: String,
+    /// Bitcoin wallet name for RPC calls (e.g. "mining", "test")
+    #[serde(default)]
+    btc_wallet: Option<String>,
 }
 
 fn default_bitcoin_network() -> String {
@@ -485,6 +488,11 @@ fn persist_localnet_state(
         data_dir: data_dir.to_path_buf(),
         funded_sui_keypair_path: Some(funded_key_path.to_string_lossy().into_owned()),
         bitcoin_network: cfg.bitcoin_network.clone(),
+        btc_wallet: if cfg.is_regtest() {
+            Some("test".to_string())
+        } else {
+            cfg.btc_opts.btc_wallet.clone()
+        },
     };
     state.save(data_dir)?;
     write_cli_config(data_dir, &state)?;
@@ -943,24 +951,33 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
         amount, deposit_address
     ));
 
-    // Use /wallet/test for Bitcoin Core v28+ regtest
-    let wallet_url = format!("{}/wallet/test", state.btc_rpc_url);
-    let btc_rpc = corepc_client::client_sync::v29::Client::new_with_auth(
+    let wallet_url = match &state.btc_wallet {
+        Some(wallet) => format!("{}/wallet/{}", state.btc_rpc_url, wallet),
+        None => state.btc_rpc_url.clone(),
+    };
+    let btc_rpc = std::sync::Arc::new(corepc_client::client_sync::v29::Client::new_with_auth(
         &wallet_url,
         corepc_client::client_sync::Auth::UserPass(state.btc_rpc_user, state.btc_rpc_password),
-    )?;
+    )?);
 
-    let txid = btc_rpc
-        .send_to_address(&deposit_address, bitcoin::Amount::from_sat(amount))?
+    let txid = {
+        let addr = deposit_address.clone();
+        e2e_tests::btc_rpc_call(&btc_rpc, move |rpc| {
+            rpc.send_to_address(&addr, bitcoin::Amount::from_sat(amount))
+        })
+        .await?
         .into_model()
         .context("Invalid txid from send_to_address")?
-        .txid;
+        .txid
+    };
 
     // Find the vout
-    let tx = btc_rpc
-        .get_raw_transaction(txid)
-        .and_then(|r| r.transaction().map_err(Into::into))
-        .context("Failed to fetch raw transaction")?;
+    let tx = e2e_tests::btc_rpc_call(&btc_rpc, move |rpc| {
+        rpc.get_raw_transaction(txid)
+            .and_then(|r| r.transaction().map_err(Into::into))
+    })
+    .await
+    .context("Failed to fetch raw transaction")?;
     let vout = tx
         .output
         .iter()
@@ -975,8 +992,9 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
     // Step 2: Confirm the transaction
     if state.bitcoin_network == "regtest" {
         print_info("Mining 10 blocks...");
-        let mine_addr = btc_rpc.new_address()?;
-        btc_rpc.generate_to_address(10, &mine_addr)?;
+        let mine_addr = e2e_tests::btc_rpc_call(&btc_rpc, |rpc| rpc.new_address()).await?;
+        e2e_tests::btc_rpc_call(&btc_rpc, move |rpc| rpc.generate_to_address(10, &mine_addr))
+            .await?;
         print_success("Mined 10 blocks");
     } else {
         print_info(&format!(
@@ -990,7 +1008,7 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
             if start.elapsed() > timeout {
                 anyhow::bail!("Timeout waiting for transaction confirmation");
             }
-            match btc_rpc.get_transaction(txid) {
+            match e2e_tests::btc_rpc_call(&btc_rpc, move |rpc| rpc.get_transaction(txid)).await {
                 Ok(info) => {
                     let confirmations = info.confirmations;
                     if confirmations >= 1 {

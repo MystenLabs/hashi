@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 use tracing::warn;
@@ -25,7 +26,7 @@ pub const RPC_USER: &str = "test";
 pub const RPC_PASSWORD: &str = "test";
 
 pub struct BitcoinNodeHandle {
-    rpc_client: Client,
+    rpc_client: Arc<Client>,
     #[allow(unused)]
     data_dir: PathBuf,
     process: Child,
@@ -98,10 +99,10 @@ impl BitcoinNodeHandle {
             }
         }
 
-        let rpc_client = Client::new_with_auth(
+        let rpc_client = Arc::new(Client::new_with_auth(
             &rpc_url,
             Auth::UserPass(RPC_USER.to_string(), RPC_PASSWORD.to_string()),
-        )?;
+        )?);
         Ok(Self {
             rpc_client,
             data_dir,
@@ -124,10 +125,12 @@ impl BitcoinNodeHandle {
                     self.startup_diagnostics()
                 ));
             }
-            match self.rpc_client.get_blockchain_info() {
+            match crate::btc_rpc_call(&self.rpc_client, |rpc| rpc.get_blockchain_info()).await {
                 Ok(_) => {
                     info!("Bitcoin node is ready");
-                    match self.rpc_client.create_wallet("test") {
+                    match crate::btc_rpc_call(&self.rpc_client, |rpc| rpc.create_wallet("test"))
+                        .await
+                    {
                         Ok(_) => info!("Created test wallet"),
                         Err(e) => info!("Wallet creation: {}", e),
                     }
@@ -169,53 +172,62 @@ impl BitcoinNodeHandle {
         diagnostics.join("; ")
     }
 
-    pub fn generate_blocks(&self, count: u64) -> Result<Vec<BlockHash>> {
-        let blocks = self
-            .rpc_client
-            .generate_to_address(count as usize, &self.get_new_address()?)?
-            .into_model()
-            .map_err(|e| anyhow!("invalid block hash: {e}"))?
-            .0;
-        info!("Generated {} blocks", count);
-        Ok(blocks)
+    pub async fn generate_blocks(&self, count: u64) -> Result<Vec<BlockHash>> {
+        let address = self.get_new_address().await?;
+        crate::btc_rpc_call(&self.rpc_client, move |rpc| {
+            let blocks = rpc
+                .generate_to_address(count as usize, &address)?
+                .into_model()
+                .map_err(|e| anyhow!("invalid block hash: {e}"))?
+                .0;
+            info!("Generated {} blocks", count);
+            Ok(blocks)
+        })
+        .await
     }
 
-    pub fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
-        let txid = self
-            .rpc_client
-            .send_to_address(address, amount)?
-            .into_model()
-            .map_err(|e| anyhow!("invalid txid: {e}"))?
-            .txid;
-        info!("Sent {} to {}: {}", amount, address, txid);
-        Ok(txid)
+    pub async fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
+        let address = address.clone();
+        crate::btc_rpc_call(&self.rpc_client, move |rpc| {
+            let txid = rpc
+                .send_to_address(&address, amount)?
+                .into_model()
+                .map_err(|e| anyhow!("invalid txid: {e}"))?
+                .txid;
+            info!("Sent {} to {}: {}", amount, address, txid);
+            Ok(txid)
+        })
+        .await
     }
 
-    pub fn get_balance(&self) -> Result<Amount> {
-        Ok(self
-            .rpc_client
-            .get_balance()?
-            .into_model()
-            .map_err(|e| anyhow!("invalid balance: {e}"))?
-            .0)
+    pub async fn get_balance(&self) -> Result<Amount> {
+        crate::btc_rpc_call(&self.rpc_client, |rpc| {
+            Ok(rpc
+                .get_balance()?
+                .into_model()
+                .map_err(|e| anyhow!("invalid balance: {e}"))?
+                .0)
+        })
+        .await
     }
 
-    pub fn get_new_address(&self) -> Result<Address> {
-        let address = self.rpc_client.new_address()?;
-        Ok(address)
+    pub async fn get_new_address(&self) -> Result<Address> {
+        crate::btc_rpc_call(&self.rpc_client, |rpc| Ok(rpc.new_address()?)).await
     }
 
-    pub fn get_block_count(&self) -> Result<u64> {
-        Ok(self.rpc_client.get_block_count()?.0)
+    pub async fn get_block_count(&self) -> Result<u64> {
+        crate::btc_rpc_call(&self.rpc_client, |rpc| Ok(rpc.get_block_count()?.0)).await
     }
 
     pub async fn wait_for_transaction(&self, txid: &Txid, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
+        let txid = *txid;
         loop {
             if start.elapsed() > timeout {
                 return Err(anyhow!("Transaction {} not found within timeout", txid));
             }
-            match self.rpc_client.get_transaction(*txid) {
+            match crate::btc_rpc_call(&self.rpc_client, move |rpc| rpc.get_transaction(txid)).await
+            {
                 Ok(_) => {
                     info!("Transaction {} confirmed", txid);
                     return Ok(());
@@ -313,7 +325,7 @@ impl BitcoinNodeBuilder {
         let node_handle = BitcoinNodeHandle::new(rpc_port, data_dir, bitcoin_core_path)?;
         node_handle.wait_until_ready().await?;
         if self.initial_blocks > 0 {
-            node_handle.generate_blocks(self.initial_blocks)?;
+            node_handle.generate_blocks(self.initial_blocks).await?;
         }
         info!(
             "Created Bitcoin node at RPC port {} with {} initial blocks",

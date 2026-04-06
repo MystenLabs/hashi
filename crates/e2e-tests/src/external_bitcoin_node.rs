@@ -12,13 +12,14 @@ use bitcoin::Amount;
 use bitcoin::Txid;
 use corepc_client::client_sync::Auth;
 use corepc_client::client_sync::v29::Client;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
 use crate::hashi_network::BitcoinNodeInfo;
 
 pub struct ExternalBitcoinNode {
-    rpc_client: Client,
+    rpc_client: Arc<Client>,
     rpc_url: String,
     p2p_address: String,
     rpc_user: String,
@@ -71,7 +72,7 @@ impl ExternalBitcoinNode {
         );
 
         Ok(Self {
-            rpc_client,
+            rpc_client: Arc::new(rpc_client),
             rpc_url: rpc_url.to_string(),
             p2p_address: p2p_address.to_string(),
             rpc_user: rpc_user.to_string(),
@@ -91,19 +92,22 @@ impl ExternalBitcoinNode {
         &self.rpc_pass
     }
 
-    pub fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
-        let txid = self
-            .rpc_client
-            .send_to_address(address, amount)?
-            .into_model()
-            .map_err(|e| anyhow!("invalid txid: {e}"))?
-            .txid;
-        info!("Sent {} to {}: {}", amount, address, txid);
-        Ok(txid)
+    pub async fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
+        let address = address.clone();
+        crate::btc_rpc_call(&self.rpc_client, move |rpc| {
+            let txid = rpc
+                .send_to_address(&address, amount)?
+                .into_model()
+                .map_err(|e| anyhow!("invalid txid: {e}"))?
+                .txid;
+            info!("Sent {} to {}: {}", amount, address, txid);
+            Ok(txid)
+        })
+        .await
     }
 
-    pub fn get_block_count(&self) -> Result<u64> {
-        Ok(self.rpc_client.get_block_count()?.0)
+    pub async fn get_block_count(&self) -> Result<u64> {
+        crate::btc_rpc_call(&self.rpc_client, |rpc| Ok(rpc.get_block_count()?.0)).await
     }
 
     /// Wait until `txid` has at least `min_confirmations` confirmations.
@@ -114,6 +118,7 @@ impl ExternalBitcoinNode {
         timeout: Duration,
     ) -> Result<()> {
         let start = std::time::Instant::now();
+        let txid = *txid;
         loop {
             if start.elapsed() > timeout {
                 return Err(anyhow!(
@@ -124,7 +129,8 @@ impl ExternalBitcoinNode {
                 ));
             }
 
-            match self.rpc_client.get_transaction(*txid) {
+            match crate::btc_rpc_call(&self.rpc_client, move |rpc| rpc.get_transaction(txid)).await
+            {
                 Ok(info) => {
                     let confirmations = info.confirmations;
                     if confirmations >= min_confirmations as i64 {
@@ -147,18 +153,19 @@ impl ExternalBitcoinNode {
         }
     }
 
-    pub fn get_balance(&self) -> Result<Amount> {
-        Ok(self
-            .rpc_client
-            .get_balance()?
-            .into_model()
-            .map_err(|e| anyhow!("invalid balance: {e}"))?
-            .0)
+    pub async fn get_balance(&self) -> Result<Amount> {
+        crate::btc_rpc_call(&self.rpc_client, |rpc| {
+            Ok(rpc
+                .get_balance()?
+                .into_model()
+                .map_err(|e| anyhow!("invalid balance: {e}"))?
+                .0)
+        })
+        .await
     }
 
-    pub fn get_new_address(&self) -> Result<Address> {
-        let address = self.rpc_client.new_address()?;
-        Ok(address)
+    pub async fn get_new_address(&self) -> Result<Address> {
+        crate::btc_rpc_call(&self.rpc_client, |rpc| Ok(rpc.new_address()?)).await
     }
 }
 
