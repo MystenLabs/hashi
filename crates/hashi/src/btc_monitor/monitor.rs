@@ -267,12 +267,12 @@ impl Monitor {
                         }
                     }
                 }
-                Some(join_result) = self.pending_deposit_workers.join_next(), if !self.pending_deposit_workers.is_empty() => {
+                Some(join_result) = self.pending_deposit_workers.join_next() => {
                     if let Err(e) = join_result {
                         error!("Pending deposit worker task failed: {e}");
                     }
                 }
-                Some(join_result) = self.rpc_workers.join_next(), if !self.rpc_workers.is_empty() => {
+                Some(join_result) = self.rpc_workers.join_next() => {
                     if let Err(e) = join_result {
                         error!("RPC worker task failed: {e}");
                     }
