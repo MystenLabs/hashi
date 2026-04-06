@@ -13,7 +13,7 @@ use hashi::{
     utxo::UtxoId,
     withdrawal_queue::OutputUtxo
 };
-use sui::{clock::Clock, coin::{Self, Coin}, random::Random};
+use sui::{balance::Balance, clock::Clock, random::Random};
 
 use fun btc_config::bitcoin_withdrawal_minimum as Config.bitcoin_withdrawal_minimum;
 use fun btc_config::withdrawal_cancellation_cooldown_ms as
@@ -95,7 +95,7 @@ public(package) fun new_withdrawal_confirmation_message(
 public fun request_withdrawal(
     hashi: &mut Hashi,
     clock: &Clock,
-    btc: Coin<BTC>,
+    btc: Balance<BTC>,
     bitcoin_address: vector<u8>,
     ctx: &mut TxContext,
 ) {
@@ -110,7 +110,7 @@ public fun request_withdrawal(
 
     // Create the withdrawal request.
     let request = hashi::withdrawal_queue::create_withdrawal(
-        btc.into_balance(),
+        btc,
         bitcoin_address,
         clock,
         ctx,
@@ -295,7 +295,7 @@ public fun cancel_withdrawal(
     request_id: address,
     clock: &Clock,
     ctx: &mut TxContext,
-): Coin<BTC> {
+): Balance<BTC> {
     hashi.config().assert_version_enabled();
 
     let request = hashi.bitcoin().withdrawal_queue().borrow_request(request_id);
@@ -305,16 +305,15 @@ public fun cancel_withdrawal(
         ECannotCancelAfterApproval,
     );
 
-    // Only the original requester can cancel
+    // Only the original requester can cancel.
     assert!(request.request_sender() == ctx.sender(), EUnauthorizedCancellation);
 
-    // Enforce cooldown
+    // Enforce cooldown.
     let cooldown = hashi.config().withdrawal_cancellation_cooldown_ms();
     assert!(clock.timestamp_ms() >= request.request_timestamp_ms() + cooldown, ECooldownNotElapsed);
 
     hashi::withdrawal_queue::emit_withdrawal_cancelled(request);
 
-    // Return BTC to the requester
-    let btc = hashi.bitcoin_mut().withdrawal_queue_mut().cancel_withdrawal(request_id);
-    coin::from_balance(btc, ctx)
+    // Return BTC to the requester.
+    hashi.bitcoin_mut().withdrawal_queue_mut().cancel_withdrawal(request_id)
 }

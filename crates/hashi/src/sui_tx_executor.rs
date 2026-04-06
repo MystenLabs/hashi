@@ -77,6 +77,7 @@ use sui_sdk_types::bcs::FromBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
+use sui_transaction_builder::intent::Balance as BalanceIntent;
 use sui_transaction_builder::intent::CoinWithBalance;
 
 use crate::Hashi;
@@ -469,9 +470,8 @@ impl SuiTxExecutor {
     /// Execute a withdrawal request transaction.
     ///
     /// Creates a withdrawal request on-chain by:
-    /// 1. Using CoinWithBalance intent to select/merge BTC coins
-    /// 2. Using CoinWithBalance intent for the SUI fee coin
-    /// 3. Calling `withdraw::request_withdrawal`
+    /// 1. Using Balance intent to select/merge BTC into a `Balance<BTC>`
+    /// 2. Calling `withdraw::request_withdrawal`
     ///
     /// Returns the withdrawal request ID on success.
     pub async fn execute_create_withdrawal_request(
@@ -493,14 +493,14 @@ impl SuiTxExecutor {
                 .with_mutable(false),
         );
 
-        // BTC coin via CoinWithBalance intent (replaces FundsWithdrawal)
+        // BTC balance via Balance intent.
         let btc_type = StructTag::new(
             self.hashi_ids.package_id,
             Identifier::from_static("btc"),
             Identifier::from_static("BTC"),
             vec![],
         );
-        let btc_arg = builder.intent(CoinWithBalance::new(btc_type, withdrawal_amount_sats));
+        let btc_arg = builder.intent(BalanceIntent::new(btc_type, withdrawal_amount_sats));
 
         // Pure inputs
         let destination_arg = builder.pure(&destination_bytes);
@@ -922,7 +922,8 @@ impl SuiTxExecutor {
 
     /// Execute `withdraw::cancel_withdrawal` to cancel a pending withdrawal request.
     ///
-    /// The Move function returns a `Coin<BTC>` which is transferred back to the sender.
+    /// The Move function returns a `Balance<BTC>` which is sent back to the
+    /// sender's address balance.
     pub async fn execute_cancel_withdrawal(
         &mut self,
         withdrawal_id: &Address,
@@ -941,7 +942,7 @@ impl SuiTxExecutor {
                 .with_mutable(false),
         );
 
-        let refunded_coin = builder.move_call(
+        let refunded_balance = builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
@@ -950,10 +951,24 @@ impl SuiTxExecutor {
             vec![hashi_arg, request_id_arg, clock_arg],
         );
 
-        // Transfer the refunded Coin<BTC> back to the sender
+        // Send the refunded Balance<BTC> back to the sender's address balance.
+        let btc_type = StructTag::new(
+            self.hashi_ids.package_id,
+            Identifier::from_static("btc"),
+            Identifier::from_static("BTC"),
+            vec![],
+        );
         let sender = self.signer.public_key().derive_address();
         let sender_arg = builder.pure(&sender);
-        builder.transfer_objects(vec![refunded_coin], sender_arg);
+        builder.move_call(
+            Function::new(
+                Address::TWO,
+                Identifier::from_static("balance"),
+                Identifier::from_static("send_funds"),
+            )
+            .with_type_args(vec![btc_type.into()]),
+            vec![refunded_balance, sender_arg],
+        );
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
