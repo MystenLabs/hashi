@@ -554,11 +554,10 @@ mod tests {
             "Observed withdrawal Bitcoin txid in event: {}",
             withdrawal_txid
         );
-        // The on-chain btc_amount is net of the protocol fee (deducted at request time).
-        let net_amount = withdrawal_amount_sats - hashi.onchain_state().withdrawal_fee_btc();
-        let max_output = Amount::from_sat(net_amount);
+        // The full withdrawal amount is stored in the request (no protocol fee).
+        let max_output = Amount::from_sat(withdrawal_amount_sats);
         let min_output = Amount::from_sat(
-            net_amount.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
+            withdrawal_amount_sats.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
         );
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,
@@ -599,10 +598,9 @@ mod tests {
         drop(miner);
 
         let withdrawal_txid = address_to_txid(&confirmed.txid);
-        let net_amount = withdrawal_amount_sats - hashi.onchain_state().withdrawal_fee_btc();
-        let max_output = Amount::from_sat(net_amount);
+        let max_output = Amount::from_sat(withdrawal_amount_sats);
         let min_output = Amount::from_sat(
-            net_amount.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
+            withdrawal_amount_sats.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
         );
         wait_for_withdrawal_tx_success(
             &networks.bitcoin_node,

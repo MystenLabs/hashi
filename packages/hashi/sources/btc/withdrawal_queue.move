@@ -319,8 +319,7 @@ public(package) fun new_pending_withdrawal(
     assert!(per_user_miner_fee <= max_network_fee, EMinerFeeExceedsMax);
 
     // Each withdrawal output must match the expected amount after deducting
-    // the per-user miner fee. The protocol fee was already deducted at request
-    // time, so request.btc_amount is net of the protocol fee.
+    // the per-user miner fee.
     request_count.do!(|i| {
         let info = request_infos.borrow(i);
         let output = outputs.borrow(i);

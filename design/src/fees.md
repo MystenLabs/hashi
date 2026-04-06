@@ -14,19 +14,11 @@ the Hashi balance on Sui. Deposits must also meet the configurable
 
 ## Withdrawal fees
 
-Withdrawal fees have two components that serve different purposes:
-
-1. **Protocol fee** (`withdrawal_fee_btc`, initially `546 sats`) -- a
-   flat `BTC` amount deducted upfront when the user submits a withdrawal
-   request. This fee is non-refundable and goes to the Hashi treasury.
-   It covers protocol operating costs and deters spam. The floor is
-   the dust relay minimum (`546 sats`) to prevent misconfiguration.
-
-2. **Miner fee** -- the actual Bitcoin transaction fee required for
-   on-chain confirmation. This is not a fixed value; it depends on the
-   current network fee rate and the transaction's weight. The user
-   pays this fee through a reduction in their withdrawal output
-   amount.
+The only fee a user pays on withdrawal is the **miner fee** -- the
+actual Bitcoin transaction fee required for on-chain confirmation. This
+is not a fixed value; it depends on the current network fee rate and
+the transaction's weight. The user pays this fee through a reduction in
+their withdrawal output amount. There is no protocol fee.
 
 ### Why the user pays the miner fee
 
@@ -44,16 +36,13 @@ that every request can produce a valid Bitcoin transaction even under
 worst-case fee conditions:
 
 ```
-withdrawal_minimum = withdrawal_fee_btc
-                   + worst_case_network_fee
-                   + DUST_RELAY_MIN_VALUE
+bitcoin_withdrawal_minimum = worst_case_network_fee + DUST_RELAY_MIN_VALUE
 ```
 
-- `withdrawal_fee_btc` is the protocol fee deducted upfront.
 - `worst_case_network_fee` is the maximum miner fee the protocol would
   ever charge (see below).
 - `DUST_RELAY_MIN_VALUE` (`546 sats`) ensures the user's output remains
-  above Bitcoin's dust threshold after all deductions.
+  above Bitcoin's dust threshold after the miner fee deduction.
 
 This means a user who withdraws exactly the minimum will, in the worst
 case, receive a `546 sats` output. In practice, actual miner fees are
@@ -85,10 +74,10 @@ The worst-case miner fee per withdrawal is derived from the
 governance-configured `bitcoin_withdrawal_minimum` parameter:
 
 ```
-worst_case_network_fee = bitcoin_withdrawal_minimum - withdrawal_fee_btc - DUST_RELAY_MIN_VALUE
+worst_case_network_fee = bitcoin_withdrawal_minimum - DUST_RELAY_MIN_VALUE
 ```
 
-With defaults: `30,000 - 546 - 546 = 28,908` sats.
+With defaults: `30,000 - 546 = 29,454` sats.
 
 The actual miner fee is usually well below the worst case. Users are
 only charged for the real transaction weight, not the worst-case

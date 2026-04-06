@@ -25,8 +25,6 @@ public(package) fun is_valid_config_entry(
     let k = key.as_bytes();
     if (k == &b"deposit_fee") {
         value.is_u64()
-    } else if (k == &b"withdrawal_fee_btc") {
-        value.is_u64()
     } else if (k == &b"bitcoin_deposit_minimum") {
         value.is_u64()
     } else if (k == &b"bitcoin_withdrawal_minimum") {
@@ -58,23 +56,11 @@ public(package) fun set_deposit_fee(self: &mut Config, fee: u64) {
     self.upsert(b"deposit_fee", config_value::new_u64(fee))
 }
 
-/// Protocol fee (satoshis) deducted from the user's withdrawal amount.
-/// Returns the greater of configured value or DUST_RELAY_MIN_VALUE.
-public(package) fun withdrawal_fee_btc(self: &Config): u64 {
-    self.get(b"withdrawal_fee_btc").as_u64().max(DUST_RELAY_MIN_VALUE)
-}
-
-public(package) fun set_withdrawal_fee_btc(self: &mut Config, fee: u64) {
-    self.upsert(b"withdrawal_fee_btc", config_value::new_u64(fee))
-}
-
-/// Minimum total withdrawal amount (satoshis) including the protocol
-/// fee. The worst-case network fee is derived from this value minus
-/// the protocol fee and dust threshold. The floor ensures the
-/// worst-case network fee is always at least 1 sat.
+/// Minimum total withdrawal amount (satoshis). The worst-case network
+/// fee is derived from this value minus the dust threshold. The floor
+/// ensures the worst-case network fee is always at least 1 sat.
 public(package) fun bitcoin_withdrawal_minimum(self: &Config): u64 {
-    let floor = withdrawal_fee_btc(self) + DUST_RELAY_MIN_VALUE + 1;
-    self.get(b"bitcoin_withdrawal_minimum").as_u64().max(floor)
+    self.get(b"bitcoin_withdrawal_minimum").as_u64().max(DUST_RELAY_MIN_VALUE + 1)
 }
 
 public(package) fun set_bitcoin_withdrawal_minimum(self: &mut Config, min_withdrawal: u64) {
@@ -102,10 +88,10 @@ public(package) fun deposit_minimum(self: &Config): u64 {
 }
 
 /// Worst-case Bitcoin miner fee for a withdrawal transaction, derived
-/// from `bitcoin_withdrawal_minimum` minus the protocol fee and dust
-/// threshold. This caps the per-user miner fee deduction.
+/// from `bitcoin_withdrawal_minimum` minus the dust threshold. This
+/// caps the per-user miner fee deduction.
 public(package) fun worst_case_network_fee(self: &Config): u64 {
-    bitcoin_withdrawal_minimum(self) - withdrawal_fee_btc(self) - DUST_RELAY_MIN_VALUE
+    bitcoin_withdrawal_minimum(self) - DUST_RELAY_MIN_VALUE
 }
 
 public(package) fun bitcoin_confirmation_threshold(self: &Config): u64 {
@@ -129,7 +115,6 @@ public(package) fun set_withdrawal_cancellation_cooldown_ms(self: &mut Config, c
 /// Initialize BTC-specific config defaults. Called after config::create().
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(b"deposit_fee", config_value::new_u64(0));
-    config.upsert(b"withdrawal_fee_btc", config_value::new_u64(DUST_RELAY_MIN_VALUE));
     config.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(1)); // TODO: set to 6 before mainnet

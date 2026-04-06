@@ -41,11 +41,9 @@ fee (which pays for both the user's transaction weight and opportunistic UTXO
 pool consolidation), and the dust threshold for the user's output. See
 [fees](./fees.md) for the full breakdown.
 
-The flat protocol fee
-([`withdrawal_fee_btc`](./config.md#withdrawal_fee_btc)) is deducted upfront
-from the provided `hBTC` and the remainder is stored with the request. The
-request is placed in a queue with a timestamp. The user can cancel their
-request at any point before it has been approved, subject to a cooldown period
+The full `hBTC` amount is stored with the request and placed in a queue with a
+timestamp. The user can cancel their request at any point before it has been
+approved, subject to a cooldown period
 ([`withdrawal_cancellation_cooldown_ms`](./config.md#withdrawal_cancellation_cooldown_ms)).
 
 ## Approve

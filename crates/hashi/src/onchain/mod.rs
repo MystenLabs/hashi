@@ -378,10 +378,6 @@ impl OnchainState {
         self.state().hashi().utxo_pool.utxo_records().clone()
     }
 
-    pub fn withdrawal_fee_btc(&self) -> u64 {
-        self.state().hashi().config.withdrawal_fee_btc()
-    }
-
     pub fn bitcoin_deposit_minimum(&self) -> u64 {
         self.state().hashi().config.bitcoin_deposit_minimum()
     }

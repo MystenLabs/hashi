@@ -15,10 +15,10 @@ fun test_withdrawal_minimum_with_defaults() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
-    // Default config: bitcoin_withdrawal_minimum=30_000, withdrawal_fee_btc=546
-    // worst_case_network_fee = 30_000 - 546 - 546 = 28_908
+    // Default config: bitcoin_withdrawal_minimum=30_000
+    // worst_case_network_fee = 30_000 - 546 = 29_454
     assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) == 30_000);
-    assert!(btc_config::worst_case_network_fee(hashi.config()) == 28_908);
+    assert!(btc_config::worst_case_network_fee(hashi.config()) == 29_454);
 
     std::unit_test::destroy(hashi);
 }
@@ -30,23 +30,6 @@ fun test_deposit_minimum_with_defaults() {
 
     // Default config: bitcoin_deposit_minimum=30_000
     assert!(btc_config::deposit_minimum(hashi.config()) == 30_000);
-
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_withdrawal_fee_btc_floors_at_dust_minimum() {
-    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
-    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
-
-    // Set fee below dust minimum.
-    btc_config::set_withdrawal_fee_btc(hashi.config_mut(), 100);
-    // Should return the dust floor (546), not the configured value (100).
-    assert!(btc_config::withdrawal_fee_btc(hashi.config()) == 546);
-
-    // Set fee above dust minimum.
-    btc_config::set_withdrawal_fee_btc(hashi.config_mut(), 1000);
-    assert!(btc_config::withdrawal_fee_btc(hashi.config()) == 1000);
 
     std::unit_test::destroy(hashi);
 }
@@ -72,10 +55,9 @@ fun test_bitcoin_withdrawal_minimum_floors() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
-    // Floor is withdrawal_fee_btc + DUST_RELAY_MIN_VALUE + 1.
-    // With default withdrawal_fee_btc=546: floor = 546 + 546 + 1 = 1093.
+    // Floor is DUST_RELAY_MIN_VALUE + 1 = 547.
     btc_config::set_bitcoin_withdrawal_minimum(hashi.config_mut(), 100);
-    assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) == 1093);
+    assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) == 547);
 
     // Set above the floor.
     btc_config::set_bitcoin_withdrawal_minimum(hashi.config_mut(), 10_000);
