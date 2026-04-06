@@ -825,6 +825,55 @@ mod tests {
         Ok(())
     }
 
+    /// Verify that rescraping on-chain state correctly deserializes deposit
+    /// requests from ObjectBag dynamic fields.
+    ///
+    /// This catches BCS mismatches between the subscription path (which builds
+    /// objects from events) and the scrape path (which reads from ObjectBag
+    /// child objects). The subscription path may work while the scrape path
+    /// fails if the deserialization code uses the wrong field access method.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rescrape_with_existing_requests() -> Result<()> {
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_full_voting_power()
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        nodes[0].wait_for_mpc_key(DKG_TIMEOUT).await?;
+
+        // Submit a deposit request using a dummy UTXO so the ObjectBag has an entry.
+        let user_key = test_networks.sui_network.user_keys.first().unwrap();
+        let hbtc_recipient = user_key.public_key().derive_address();
+        let hashi = nodes[0].hashi().clone();
+        let mut executor = hashi::sui_tx_executor::SuiTxExecutor::from_config(
+            &hashi.config,
+            hashi.onchain_state(),
+        )?
+        .with_signer(user_key.clone());
+        let dummy_txid = sui_sdk_types::Address::new([0xCA; 32]);
+        let _request_id = executor
+            .execute_create_deposit_request(dummy_txid, 0, 50_000, Some(hbtc_recipient))
+            .await?;
+
+        // Wait briefly for the subscription path to pick up the event
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Now rescrape from chain — this exercises the ObjectBag deserialization
+        // path that reads child objects, not the subscription/event path.
+        hashi.onchain_state().rescrape().await?;
+
+        // Verify the deposit request survived the rescrape.
+        let deposit_requests = hashi.onchain_state().deposit_requests();
+        assert!(
+            !deposit_requests.is_empty(),
+            "Rescrape should find the deposit request in the ObjectBag"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dkg() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
