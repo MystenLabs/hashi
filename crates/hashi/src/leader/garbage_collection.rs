@@ -14,8 +14,10 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
-const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
+// const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
+// const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
+const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
+const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60; // 1 minute
 const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
 
 const MAX_PROPOSAL_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days

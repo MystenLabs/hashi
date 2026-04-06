@@ -6,7 +6,8 @@ module hashi::deposit_queue;
 use hashi::utxo::Utxo;
 use sui::{bag::Bag, clock::Clock, object_bag::ObjectBag, table::Table};
 
-const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
+// const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
+const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
 
 #[error(code = 0)]
 const EDepositRequestNotExpired: vector<u8> = b"Deposit request not expired";
