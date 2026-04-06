@@ -109,7 +109,7 @@ The leader then constructs an unsigned Bitcoin transaction:
 2. **Outputs** -- one output per withdrawal request to each user's destination
    address, plus one change output back to a Hashi-controlled address.
 3. **Fee calculation** -- the miner fee is estimated via `estimatesmartfee`,
-   capped at `max_fee_rate`. Each user's share of the miner fee is deducted
+   capped at a high fee rate threshold. Each user's share of the miner fee is deducted
    from their output. Validators independently verify that the fee is within
    acceptable bounds (at least `1 sat/vB`, at most 3x their own estimate).
 

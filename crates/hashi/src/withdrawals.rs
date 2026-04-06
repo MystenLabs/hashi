@@ -711,16 +711,15 @@ impl Hashi {
         &self,
         requests: &[WithdrawalRequest],
     ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
-        // Fetch current fee rate from the Bitcoin node, clamped to the on-chain
-        // max_fee_rate to ensure the miner fee stays within the budget the Move
-        // contract will accept.
+        // Fetch current fee rate from the Bitcoin node, clamped to a high
+        // fee rate threshold to avoid overpaying during fee spikes.
         let kyoto_fee_rate = self
             .btc_monitor()
             .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
-        let min_fee_rate = FeeRate::from_sat_per_vb_unchecked(1);
-        let max_fee_rate = FeeRate::from_sat_per_vb_unchecked(self.onchain_state().max_fee_rate());
+        let min_fee_rate = CoinSelectionParams::DEFAULT_MIN_FEE_RATE;
+        let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
         let hashi_pubkey = self
@@ -731,11 +730,11 @@ impl Hashi {
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
 
         // Build coin selection parameters from on-chain config. Override
-        // max_fee_per_request and input_budget to match the Move contract, and
-        // max_withdrawal_requests to honour the leader's configured batch cap.
+        // max_fee_per_request to match the Move contract's worst-case cap,
+        // and max_withdrawal_requests to honour the leader's configured
+        // batch cap.
         let params = CoinSelectionParams {
             max_fee_per_request: self.onchain_state().worst_case_network_fee(),
-            input_budget: self.onchain_state().input_budget() as usize,
             max_withdrawal_requests: self.config.withdrawal_max_batch_size(),
             max_mempool_chain_depth: self.config.max_mempool_chain_depth(),
             ..CoinSelectionParams::new(change_address.clone())

@@ -451,13 +451,8 @@ pub struct Config {
     pub upgrade_cap: Option<UpgradeCap>,
 }
 
-// These constants mirror the values in btc_config.move and must be kept in sync.
+// This constant mirrors the value in btc_config.move and must be kept in sync.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
-const MIN_RELAY_FEE_RATE: u64 = 1;
-const INPUT_VB: u64 = 100;
-const OUTPUT_VB: u64 = 43;
-const OUTPUT_BUDGET: u64 = 2;
-const TX_FIXED_VB: u64 = 11;
 
 impl Config {
     pub fn withdrawal_fee_btc(&self) -> u64 {
@@ -467,31 +462,25 @@ impl Config {
         }
     }
 
-    pub fn max_fee_rate(&self) -> u64 {
-        match self.config.get("max_fee_rate") {
-            Some(ConfigValue::U64(v)) => (*v).max(MIN_RELAY_FEE_RATE),
-            _ => MIN_RELAY_FEE_RATE,
-        }
-    }
-
-    pub fn input_budget(&self) -> u64 {
-        match self.config.get("input_budget") {
-            Some(ConfigValue::U64(v)) => (*v).max(1),
-            _ => 1,
+    /// Minimum net withdrawal amount (after the protocol fee), mirroring
+    /// the floor logic in btc_config.move.
+    pub fn bitcoin_min_withdrawal(&self) -> u64 {
+        match self.config.get("bitcoin_min_withdrawal") {
+            Some(ConfigValue::U64(v)) => (*v).max(DUST_RELAY_MIN_VALUE * 2),
+            _ => DUST_RELAY_MIN_VALUE * 2,
         }
     }
 
     /// Worst-case network (miner) fee for a withdrawal transaction,
-    /// mirroring the formula in config.move.
+    /// derived from bitcoin_min_withdrawal minus the dust threshold.
     pub fn worst_case_network_fee(&self) -> u64 {
-        let tx_vbytes =
-            TX_FIXED_VB + (self.input_budget() * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB);
-        self.max_fee_rate() * tx_vbytes
+        self.bitcoin_min_withdrawal() - DUST_RELAY_MIN_VALUE
     }
 
-    /// Computed withdrawal minimum, mirroring the formula in config.move.
+    /// Minimum withdrawal amount the user must provide, covering the
+    /// protocol fee plus the net minimum withdrawal.
     pub fn withdrawal_minimum(&self) -> u64 {
-        self.withdrawal_fee_btc() + self.worst_case_network_fee() + DUST_RELAY_MIN_VALUE
+        self.bitcoin_min_withdrawal() + self.withdrawal_fee_btc()
     }
 
     pub fn paused(&self) -> bool {

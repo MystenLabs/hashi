@@ -9,7 +9,7 @@ addition to the protocol fee, every withdrawal absorbs the Bitcoin
 
 Deposits pay a flat `SUI` fee at request time (`deposit_fee` config key,
 initially `0 SUI`). The fee must match exactly; it is transferred to
-the Hashi balance on Sui. Deposits must also meet the dust minimum 
+the Hashi balance on Sui. Deposits must also meet the dust minimum
 (`546 sats`) to avoid creating unspendable UTXOs on Bitcoin.
 
 ## Withdrawal fees
@@ -65,55 +65,34 @@ Hashi obtains the current fee rate from the connected Bitcoin Core
 node via `estimatesmartfee`, targeting confirmation within 3 blocks
 (~30 minutes).
 
-The estimated fee rate is then capped at the governance-configured
-`max_fee_rate` (initially `25 sat/vB`). This cap serves two purposes:
-
-- It bounds the miner fee the user can be charged, ensuring it stays
-  within the worst-case budget the Move contract computed at request
-  time.
-- It prevents a single fee spike from producing unexpectedly expensive
-  withdrawals.
+The estimated fee rate is then capped at a high fee rate threshold
+(30 sat/vB by default). This prevents a single fee spike from
+producing unexpectedly expensive withdrawals. The per-user miner fee
+is additionally bounded by the on-chain `worst_case_network_fee` cap.
 
 ## Worst-case network fee
 
 Every withdrawal is required to cover not just its own on-chain
 footprint but also a share of UTXO pool maintenance. At minimum, a
 withdrawal must pay for the fixed transaction overhead, its own
-recipient output, and a change output back to the pool. On top of
-that, the protocol requires each withdrawal to budget for up to
-`input_budget` input weights. This headroom allows the coin selector to
-consolidate many small UTXOs into fewer large ones during normal
-withdrawal traffic -- a form of opportunistic UTXO smashing that keeps
-the pool healthy without requiring dedicated consolidation
-transactions.
+recipient output, and a change output back to the pool. The
+additional headroom allows the coin selector to consolidate many
+small UTXOs into fewer large ones during normal withdrawal traffic --
+a form of opportunistic UTXO smashing that keeps the pool healthy
+without requiring dedicated consolidation transactions.
 
-The Move contract and the Rust validator both compute this worst-case
-miner fee using conservative transaction size estimates:
+The worst-case miner fee per withdrawal is derived from the
+governance-configured `bitcoin_min_withdrawal` parameter:
 
 ```
-tx_vbytes    = TX_FIXED_VB + (input_budget * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB)
-network_fee  = max_fee_rate * tx_vbytes
+worst_case_network_fee = bitcoin_min_withdrawal - DUST_RELAY_MIN_VALUE
 ```
 
-The constants assume a taproot script-path 2-of-2 spend (the heaviest
-input type Hashi uses):
+With defaults: `27,971 - 546 = 27,425` sats.
 
-| Constant      | Value       | Rationale                                        |
-|---------------|-------------|--------------------------------------------------|
-| `TX_FIXED_VB` | `11 vB`     | nVersion (4) + nLockTime (4) + varint counts (3) |
-| `INPUT_VB`    | `100 vB`    | 2-of-2 taproot script-path input (398 WU / 4)    |
-| `OUTPUT_VB`   | `43 vB`     | P2TR output (172 WU / 4)                          |
-| `OUTPUT_BUDGET` | `2`         | One recipient output + one change output          |
-| `input_budget`  | `10`        | Per-request worst case, governance-configurable   |
-| `max_fee_rate`| `25 sat/vB` | Governance-configurable (initially 25)            |
-
-With defaults: `(11 + 10*100 + 2*43) * 25 = 27,425` sats.
-
-These estimates are intentionally pessimistic. Most transactions use
-fewer inputs and pay a lower fee rate, so the actual miner fee is
-usually a fraction of the worst case. The difference stays in the
-user's output -- users are only charged for the real transaction
-weight, not the worst-case budget.
+The actual miner fee is usually well below the worst case. Users are
+only charged for the real transaction weight, not the worst-case
+budget -- the difference stays in the user's output.
 
 ## Transaction validation fee bounds
 
