@@ -6,9 +6,11 @@ use hashi::Hashi;
 use hashi::ServerVersion;
 use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_futures::service::Service;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_sdk_types::Identifier;
@@ -16,8 +18,6 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::debug;
-
-use crate::SuiNetworkHandle;
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const TEST_WEIGHT_DIVISOR: u16 = 100;
@@ -34,6 +34,29 @@ impl BitcoinNodeInfo for crate::BitcoinNodeHandle {
     }
     fn p2p_address(&self) -> String {
         self.p2p_address()
+    }
+}
+
+/// Trait for Sui network connectivity used by the hashi network builder.
+pub trait SuiNetworkInfo {
+    fn rpc_url(&self) -> &str;
+    fn client(&self) -> sui_rpc::Client;
+    fn validator_keys(&self) -> &BTreeMap<sui_sdk_types::Address, Ed25519PrivateKey>;
+    fn funding_key(&self) -> &Ed25519PrivateKey;
+}
+
+impl SuiNetworkInfo for crate::SuiNetworkHandle {
+    fn rpc_url(&self) -> &str {
+        &self.rpc_url
+    }
+    fn client(&self) -> sui_rpc::Client {
+        self.client.clone()
+    }
+    fn validator_keys(&self) -> &BTreeMap<sui_sdk_types::Address, Ed25519PrivateKey> {
+        &self.validator_keys
+    }
+    fn funding_key(&self) -> &Ed25519PrivateKey {
+        self.user_keys.first().expect("no funded user keys")
     }
 }
 
@@ -253,6 +276,12 @@ pub struct HashiNetworkBuilder {
     pub bitcoin_chain_id: String,
     /// Optional override for bitcoin RPC auth credentials.
     pub bitcoin_rpc_auth: Option<(String, String)>,
+    /// Optional override for bitcoin start height (for compact block filter scanning).
+    pub bitcoin_start_height: Option<u32>,
+    /// Timeout in seconds for the initial committee to form. Default: 120s.
+    pub genesis_timeout_secs: u64,
+    /// Test-only: validator addresses for test_start_reconfig on external networks.
+    pub test_reconfig_addresses: Option<Vec<sui_sdk_types::Address>>,
 }
 
 impl HashiNetworkBuilder {
@@ -268,6 +297,9 @@ impl HashiNetworkBuilder {
             test_corrupt_shares_target: None,
             bitcoin_chain_id: hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string(),
             bitcoin_rpc_auth: None,
+            bitcoin_start_height: None,
+            genesis_timeout_secs: 120,
+            test_reconfig_addresses: None,
         }
     }
 
@@ -278,6 +310,21 @@ impl HashiNetworkBuilder {
 
     pub fn with_bitcoin_rpc_auth(mut self, user: String, pass: String) -> Self {
         self.bitcoin_rpc_auth = Some((user, pass));
+        self
+    }
+
+    pub fn with_bitcoin_start_height(mut self, height: u32) -> Self {
+        self.bitcoin_start_height = Some(height);
+        self
+    }
+
+    pub fn with_genesis_timeout_secs(mut self, secs: u64) -> Self {
+        self.genesis_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_test_reconfig_addresses(mut self, addrs: Vec<sui_sdk_types::Address>) -> Self {
+        self.test_reconfig_addresses = Some(addrs);
         self
     }
 
@@ -324,7 +371,7 @@ impl HashiNetworkBuilder {
     pub async fn build(
         self,
         dir: &Path,
-        sui: &SuiNetworkHandle,
+        sui: &impl SuiNetworkInfo,
         bitcoin: &impl BitcoinNodeInfo,
         hashi_ids: HashiIds,
     ) -> Result<HashiNetwork> {
@@ -334,10 +381,9 @@ impl HashiNetworkBuilder {
         let screener_endpoint = format!("http://{}", screener_addr);
 
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
-        let sui_rpc = sui.rpc_url.clone();
+        let sui_rpc = sui.rpc_url().to_owned();
         let service_info = sui
-            .client
-            .clone()
+            .client()
             .ledger_client()
             .get_service_info(GetServiceInfoRequest::default())
             .await?
@@ -345,7 +391,7 @@ impl HashiNetworkBuilder {
 
         // Resolve the corrupt shares target index to a validator address.
         let corrupt_target_address = self.test_corrupt_shares_target.map(|idx| {
-            *sui.validator_keys
+            *sui.validator_keys()
                 .keys()
                 .nth(idx)
                 .expect("corrupt target index out of range")
@@ -353,7 +399,7 @@ impl HashiNetworkBuilder {
 
         let mut configs = Vec::with_capacity(self.num_nodes);
         for (i, (validator_address, private_key)) in
-            sui.validator_keys.iter().take(self.num_nodes).enumerate()
+            sui.validator_keys().iter().take(self.num_nodes).enumerate()
         {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = self.test_weight_divisor;
@@ -383,6 +429,8 @@ impl HashiNetworkBuilder {
             ));
             config.bitcoin_trusted_peers = Some(vec![bitcoin.p2p_address()]);
             config.bitcoin_chain_id = Some(self.bitcoin_chain_id.clone());
+            config.bitcoin_start_height = self.bitcoin_start_height;
+            config.test_reconfig_addresses = self.test_reconfig_addresses.clone();
             config.sui_chain_id = service_info.chain_id.clone();
             config.screener_endpoint = Some(screener_endpoint.clone());
             config.db = Some(dir.join(validator_address.to_string()));
@@ -426,7 +474,7 @@ impl HashiNetworkBuilder {
         // Wait for the initial committee to appear on-chain, which indicates
         // that the genesis bootstrap (start_reconfig → DKG → end_reconfig)
         // has completed.
-        let genesis_timeout = std::time::Duration::from_secs(120);
+        let genesis_timeout = std::time::Duration::from_secs(self.genesis_timeout_secs);
         tokio::time::timeout(genesis_timeout, async {
             loop {
                 if let Some(onchain) = nodes[0].hashi().onchain_state_opt()

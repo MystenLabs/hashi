@@ -216,10 +216,16 @@ impl MpcService {
             }
             // Attempt to submit start_reconfig. This will fail on-chain if
             // not enough validators have registered (95% stake threshold).
+            // On external networks, use test_start_reconfig with explicit addresses.
+            let test_addrs = self.inner.config.test_reconfig_addresses.clone();
             let result = async {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
-                executor.execute_start_reconfig().await
+                if let Some(ref addrs) = test_addrs {
+                    executor.execute_test_start_reconfig(addrs).await
+                } else {
+                    executor.execute_start_reconfig().await
+                }
             };
             match result.await {
                 Ok(()) => {
@@ -493,11 +499,17 @@ impl MpcService {
         if hashi_epoch >= sui_epoch {
             return;
         }
+        let test_addrs = self.inner.config.test_reconfig_addresses.clone();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
+            let test_addrs = test_addrs.clone();
             let result = async {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
-                executor.execute_start_reconfig().await
+                if let Some(ref addrs) = test_addrs {
+                    executor.execute_test_start_reconfig(addrs).await
+                } else {
+                    executor.execute_start_reconfig().await
+                }
             };
             match result.await {
                 Ok(()) => {

@@ -579,6 +579,42 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Test version of start_reconfig that passes member addresses explicitly.
+    /// Used for external network testing where test keys are not Sui validators.
+    pub async fn execute_test_start_reconfig(
+        &mut self,
+        member_addresses: &Vec<Address>,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let sui_system_arg = builder.object(
+            ObjectInput::new(SUI_SYSTEM_STATE_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+        let addresses_arg = builder.pure(member_addresses);
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("test_start_reconfig"),
+            ),
+            vec![hashi_arg, sui_system_arg, addresses_arg],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "test_start_reconfig transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
     pub async fn execute_end_reconfig(
         &mut self,
         mpc_public_key: &[u8],

@@ -60,7 +60,7 @@ pub fn sui_binary() -> &'static Path {
         .as_path()
 }
 
-async fn wait_for_ready(client: &mut Client) -> Result<()> {
+pub async fn wait_for_ready(client: &mut Client) -> Result<()> {
     // Wait till the network has started up and at least one checkpoint has been produced
     for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
         if let Ok(resp) = client
@@ -238,7 +238,7 @@ impl SuiNetworkBuilder {
     }
 }
 
-fn keypair_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
+pub fn keypair_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
     let bytes = <base64ct::Base64 as base64ct::Encoding>::decode_vec(b64)?;
 
     let keypair =

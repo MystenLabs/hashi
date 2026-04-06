@@ -174,6 +174,11 @@ pub struct Config {
     /// complaint recovery flow. Must not be set on mainnet or testnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_corrupt_shares_for: Option<Address>,
+
+    /// Test-only: validator addresses to pass to test_start_reconfig on
+    /// external networks where test keys are not actual Sui validators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_reconfig_addresses: Option<Vec<Address>>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]

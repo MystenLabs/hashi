@@ -82,18 +82,37 @@ struct ExternalBitcoinOpts {
     btc_p2p_address: String,
 }
 
+/// Options for connecting to an external Sui network (devnet, testnet, etc).
+/// These are only used when `--sui-network` is not `local`.
+#[derive(Args)]
+struct ExternalSuiOpts {
+    /// Sui RPC URL (defaults based on --sui-network)
+    #[clap(long)]
+    sui_rpc_url: Option<String>,
+
+    /// Sui address whose key will be loaded from the keystore as the operator
+    #[clap(long)]
+    sui_address: Option<String>,
+
+    /// Path to Sui keystore file
+    #[clap(long, default_value = "~/.sui/sui_config/sui.keystore")]
+    sui_keystore_path: String,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Start a local development environment (Sui localnet + Hashi validators + Bitcoin)
+    /// Start a development environment (Sui + Hashi validators + Bitcoin)
     ///
     /// With --bitcoin-network regtest (default), a local bitcoind is spawned.
     /// With --bitcoin-network signet, connects to an external node (see --btc-rpc-url).
+    /// With --sui-network local (default), a local Sui network is spawned.
+    /// With --sui-network devnet/testnet, connects to an external Sui node.
     Start {
         /// Number of Hashi validators to run
         #[clap(long, default_value = "4")]
         num_validators: usize,
 
-        /// Sui fullnode RPC port
+        /// Sui fullnode RPC port (only used when --sui-network is local)
         #[clap(long, default_value = "9000")]
         sui_rpc_port: u16,
 
@@ -105,8 +124,15 @@ enum Commands {
         #[clap(long, default_value = "regtest")]
         bitcoin_network: String,
 
+        /// Sui network: "local" spawns a local node, others connect externally
+        #[clap(long, default_value = "local")]
+        sui_network: String,
+
         #[command(flatten)]
-        btc_opts: ExternalBitcoinOpts,
+        btc_opts: Box<ExternalBitcoinOpts>,
+
+        #[command(flatten)]
+        sui_opts: ExternalSuiOpts,
 
         /// Enable verbose tracing output
         #[clap(long, short)]
@@ -212,10 +238,17 @@ struct LocalnetState {
     /// Bitcoin wallet name for RPC calls (e.g. "mining", "test")
     #[serde(default)]
     btc_wallet: Option<String>,
+    /// Sui network: "local", "devnet", "testnet", or custom
+    #[serde(default = "default_sui_network")]
+    sui_network: String,
 }
 
 fn default_bitcoin_network() -> String {
     "regtest".to_string()
+}
+
+fn default_sui_network() -> String {
+    "local".to_string()
 }
 
 impl LocalnetState {
@@ -266,7 +299,9 @@ async fn main() -> Result<()> {
             sui_rpc_port,
             btc_rpc_port,
             bitcoin_network,
+            sui_network,
             btc_opts,
+            sui_opts,
             verbose,
             opts,
         } => {
@@ -275,7 +310,9 @@ async fn main() -> Result<()> {
                 sui_rpc_port,
                 btc_rpc_port,
                 bitcoin_network,
-                btc_opts,
+                sui_network,
+                btc_opts: *btc_opts,
+                sui_opts,
                 verbose,
                 data_dir: opts.data_dir,
             })
@@ -309,7 +346,9 @@ struct StartConfig {
     sui_rpc_port: u16,
     btc_rpc_port: u16,
     bitcoin_network: String,
+    sui_network: String,
     btc_opts: ExternalBitcoinOpts,
+    sui_opts: ExternalSuiOpts,
     verbose: bool,
     data_dir: std::path::PathBuf,
 }
@@ -331,10 +370,153 @@ impl StartConfig {
     fn is_regtest(&self) -> bool {
         self.bitcoin_network == "regtest"
     }
+
+    fn is_local_sui(&self) -> bool {
+        self.sui_network == "local"
+    }
+
+    fn sui_rpc_url(&self) -> Result<String> {
+        if let Some(url) = &self.sui_opts.sui_rpc_url {
+            return Ok(url.clone());
+        }
+        match self.sui_network.as_str() {
+            "devnet" => Ok("https://fullnode.devnet.sui.io:443".to_string()),
+            "testnet" => Ok("https://fullnode.testnet.sui.io:443".to_string()),
+            other => anyhow::bail!(
+                "Unknown sui network '{}'. Use local, devnet, testnet, or provide --sui-rpc-url",
+                other
+            ),
+        }
+    }
+
+    fn load_operator_key(&self) -> Result<sui_crypto::ed25519::Ed25519PrivateKey> {
+        let address_str = self
+            .sui_opts
+            .sui_address
+            .as_ref()
+            .context("--sui-address is required when using an external Sui network")?;
+        let address = sui_sdk_types::Address::from_hex(address_str)
+            .or_else(|_| address_str.parse::<sui_sdk_types::Address>())
+            .with_context(|| format!("Invalid Sui address: {}", address_str))?;
+
+        let keystore_path = expand_tilde(&self.sui_opts.sui_keystore_path);
+        e2e_tests::external_sui_network::ExternalSuiNetwork::load_key_from_keystore(
+            &keystore_path,
+            &address,
+        )
+    }
+}
+
+/// Patch the copied Move source for external Sui network testing.
+///
+/// The hashi contract ties validator registration and committee formation to the
+/// Sui validator set. On external networks our generated keys are NOT validators.
+///
+/// We patch:
+/// 1. `new_member`: remove active-validator assertion
+/// 2. Add `test_start_reconfig` entry function that accepts member addresses
+///    and builds a committee with equal weight (avoids struct layout changes)
+///
+/// We do NOT change the CommitteeSet struct layout to avoid breaking BCS parsing.
+fn patch_validator_check(dir: &Path) -> Result<()> {
+    let cs_path = dir.join("packages/hashi/sources/core/committee/committee_set.move");
+    let cs_source = std::fs::read_to_string(&cs_path)
+        .with_context(|| format!("Failed to read {}", cs_path.display()))?;
+
+    // Patch 1: Remove validator assertion in new_member
+    let cs_patched = cs_source.replacen(
+        "    // Only allow Sui Validators to register as Hashi members\n    assert!(sui_system.active_validator_addresses_ref().contains(&validator_address));",
+        "    // [patched] validator check removed for external network testing",
+        1,
+    );
+
+    // Patch 2: Add test_start_reconfig_from_addresses — builds committee from given addresses
+    let test_fn = r#"
+
+/// [patched] Build a committee from explicit addresses with equal weight.
+/// Used for external network testing where test keys are not Sui validators.
+public(package) fun test_start_reconfig_from_addresses(
+    self: &mut CommitteeSet,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    member_addresses: vector<address>,
+    ctx: &TxContext,
+): u64 {
+    assert!(!self.is_reconfiguring());
+    assert!(!self.has_committee(ctx.epoch()));
+    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
+
+    let epoch = ctx.epoch();
+    let g1_identity = g1_to_uncompressed_g1(&sui::bls12381::g1_identity());
+    let mut committee_members = vector[];
+    let mut i = 0;
+    while (i < member_addresses.length()) {
+        let addr = member_addresses[i];
+        i = i + 1;
+        if (!self.has_member(addr)) { continue };
+        let member = self.member(addr);
+        if (sui::group_ops::equal(&member.next_epoch_public_key, &g1_identity)) { continue };
+        if (member.next_epoch_encryption_public_key.is_empty()) { continue };
+        committee_members.push_back(committee::new_committee_member(
+            addr, member.next_epoch_public_key, member.next_epoch_encryption_public_key, 1000,
+        ));
+    };
+    let committee = committee::new_committee(epoch, committee_members);
+    let epoch = committee.epoch();
+    self.pending_epoch_change = option::some(epoch);
+    self.insert_committee(committee);
+    epoch
+}"#;
+
+    // Append the test function at the end of the module (Move 2024 modules have no closing brace)
+    let cs_patched = format!("{}{}\n", cs_patched, test_fn);
+
+    if cs_source == cs_patched {
+        anyhow::bail!("Failed to patch committee_set.move");
+    }
+    std::fs::write(&cs_path, &cs_patched)?;
+
+    // Patch 3: Add test_start_reconfig entry function in reconfig.move
+    let reconfig_path = dir.join("packages/hashi/sources/core/reconfig.move");
+    let reconfig_source = std::fs::read_to_string(&reconfig_path)?;
+
+    let test_entry = r#"
+
+/// [patched] Test version of start_reconfig that accepts member addresses.
+entry fun test_start_reconfig(
+    self: &mut Hashi,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    member_addresses: vector<address>,
+    ctx: &TxContext,
+) {
+    self.config().assert_version_enabled();
+    let epoch = self
+        .committee_set_mut()
+        .test_start_reconfig_from_addresses(sui_system, member_addresses, ctx);
+    sui::event::emit(StartReconfigEvent { epoch });
+}"#;
+
+    let reconfig_patched = format!("{}{}\n", reconfig_source, test_entry);
+
+    std::fs::write(&reconfig_path, &reconfig_patched)?;
+
+    tracing::info!("Patched Move source for external network testing");
+    Ok(())
+}
+
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    std::path::PathBuf::from(path)
 }
 
 async fn cmd_start(cfg: StartConfig) -> Result<()> {
-    cfg.chain_id()?; // Validate early
+    cfg.chain_id()?; // Validate BTC network early
+    if !cfg.is_local_sui() {
+        cfg.sui_rpc_url()?; // Validate Sui network early
+    }
 
     // Check for existing running instance
     if let Ok(state) = LocalnetState::load(&cfg.data_dir) {
@@ -351,22 +533,23 @@ async fn cmd_start(cfg: StartConfig) -> Result<()> {
 
     use std::io::Write;
     print!(
-        "{} Starting localnet with {} validators (btc: {})...",
+        "{} Starting localnet with {} validators (sui: {}, btc: {})...",
         "ℹ".blue().bold(),
         cfg.num_validators,
+        cfg.sui_network,
         cfg.bitcoin_network,
     );
     std::io::stdout().flush().ok();
 
-    if cfg.is_regtest() {
-        start_regtest(&cfg).await
+    if cfg.is_local_sui() && cfg.is_regtest() {
+        start_all_local(&cfg).await
     } else {
-        start_external(&cfg).await
+        start_custom(&cfg).await
     }
 }
 
-/// Regtest mode: spawn bitcoind, Sui localnet, and Hashi validators.
-async fn start_regtest(cfg: &StartConfig) -> Result<()> {
+/// Fully local mode: spawn bitcoind, Sui localnet, and Hashi validators.
+async fn start_all_local(cfg: &StartConfig) -> Result<()> {
     let test_networks = TestNetworksBuilder::new()
         .with_nodes(cfg.num_validators)
         .with_sui_rpc_port(cfg.sui_rpc_port)
@@ -391,75 +574,157 @@ async fn start_regtest(cfg: &StartConfig) -> Result<()> {
     Ok(())
 }
 
-/// External node mode: connect to an existing Bitcoin node (signet, testnet4, etc).
-async fn start_external(cfg: &StartConfig) -> Result<()> {
-    let btc = &cfg.btc_opts;
-    let external_node = e2e_tests::external_bitcoin_node::ExternalBitcoinNode::new(
-        &btc.btc_rpc_url,
-        &btc.btc_rpc_user,
-        &btc.btc_rpc_pass,
-        btc.btc_wallet.as_deref(),
-        &btc.btc_p2p_address,
-    )?;
+/// Custom mode: at least one of Sui or Bitcoin is external.
+/// Sets up Sui first (local or external), then dispatches to a generic helper.
+async fn start_custom(cfg: &StartConfig) -> Result<()> {
+    if cfg.is_local_sui() {
+        let dir = tempfile::Builder::new()
+            .prefix("hashi-test-env-")
+            .tempdir()?;
+        tracing::info!("test env: {}", dir.path().display());
 
-    let dir = tempfile::Builder::new()
-        .prefix("hashi-test-env-")
-        .tempdir()?;
-    tracing::info!("test env: {}", dir.path().display());
+        let sui_network = e2e_tests::SuiNetworkBuilder::default()
+            .with_num_validators(cfg.num_validators)
+            .with_rpc_port(cfg.sui_rpc_port)
+            .dir(&dir.path().join("sui"))
+            .build()
+            .await?;
 
-    let mut sui_network = e2e_tests::SuiNetworkBuilder::default()
-        .with_num_validators(cfg.num_validators)
-        .with_rpc_port(cfg.sui_rpc_port)
-        .dir(&dir.path().join("sui"))
-        .build()
-        .await?;
+        start_with_sui(cfg, &sui_network, dir).await
+    } else {
+        let dir = tempfile::Builder::new()
+            .prefix("hashi-test-env-")
+            .tempdir()?;
+        tracing::info!("test env: {}", dir.path().display());
 
-    TestNetworksBuilder::cp_packages(dir.as_ref())?;
-    let chain_id = cfg.chain_id()?;
-    let hashi_ids = e2e_tests::publish::publish(
-        dir.as_ref(),
-        &mut sui_network.client,
-        sui_network.user_keys.first().unwrap(),
-        chain_id,
-    )
-    .await?;
-
-    let hashi_network = e2e_tests::HashiNetworkBuilder::new()
-        .with_num_nodes(cfg.num_validators)
-        .with_bitcoin_chain_id(chain_id)
-        .with_bitcoin_rpc_auth(btc.btc_rpc_user.clone(), btc.btc_rpc_pass.clone())
-        .build(
-            &dir.path().join("hashi"),
-            &sui_network,
-            &external_node,
-            hashi_ids,
+        let operator_key = cfg.load_operator_key()?;
+        let ext_sui = e2e_tests::external_sui_network::ExternalSuiNetwork::new(
+            &cfg.sui_rpc_url()?,
+            operator_key,
+            cfg.num_validators,
         )
         .await?;
 
-    let state = persist_localnet_state(
-        &cfg.data_dir,
-        &sui_network,
-        &btc.btc_rpc_url,
-        &btc.btc_rpc_user,
-        &btc.btc_rpc_pass,
-        hashi_ids,
-        cfg,
-    )?;
-    print_ready(&state);
+        // Write a minimal sui config so `sui move build` can resolve dependencies
+        ext_sui.write_sui_config(&dir.path().join("sui"))?;
 
-    tokio::signal::ctrl_c().await?;
-    cleanup_state_files(&cfg.data_dir);
-    drop(hashi_network);
-    drop(external_node);
-    drop(sui_network);
-    drop(dir);
+        start_with_sui(cfg, &ext_sui, dir).await
+    }
+}
+
+/// Given a Sui network (local or external), set up Bitcoin and Hashi.
+async fn start_with_sui(
+    cfg: &StartConfig,
+    sui: &impl e2e_tests::SuiNetworkInfo,
+    dir: tempfile::TempDir,
+) -> Result<()> {
+    TestNetworksBuilder::cp_packages(dir.as_ref())?;
+
+    // When deploying to an external Sui network, the generated hashi validator
+    // keys are NOT actual Sui validators. Patch the copied Move source to skip
+    // the active-validator-set assertion so non-validators can register.
+    if !cfg.is_local_sui() {
+        patch_validator_check(dir.as_ref())?;
+    }
+
+    let chain_id = cfg.chain_id()?;
+    let mut client = sui.client();
+    let hashi_ids =
+        e2e_tests::publish::publish(dir.as_ref(), &mut client, sui.funding_key(), chain_id).await?;
+
+    // On external Sui, pass validator addresses for test_start_reconfig
+    let test_reconfig_addrs: Option<Vec<sui_sdk_types::Address>> = if !cfg.is_local_sui() {
+        Some(sui.validator_keys().keys().copied().collect())
+    } else {
+        None
+    };
+
+    if cfg.is_regtest() {
+        let btc_node = e2e_tests::BitcoinNodeBuilder::new()
+            .with_rpc_port(cfg.btc_rpc_port)
+            .dir(dir.as_ref())
+            .build()
+            .await?;
+
+        let mut builder = e2e_tests::HashiNetworkBuilder::new()
+            .with_num_nodes(cfg.num_validators)
+            .with_bitcoin_chain_id(chain_id);
+        if let Some(addrs) = test_reconfig_addrs.clone() {
+            builder = builder.with_test_reconfig_addresses(addrs);
+        }
+        let hashi_network = builder
+            .build(&dir.path().join("hashi"), sui, &btc_node, hashi_ids)
+            .await?;
+
+        let state = persist_localnet_state(
+            &cfg.data_dir,
+            sui,
+            btc_node.rpc_url(),
+            e2e_tests::bitcoin_node::RPC_USER,
+            e2e_tests::bitcoin_node::RPC_PASSWORD,
+            hashi_ids,
+            cfg,
+        )?;
+        print_ready(&state);
+
+        tokio::signal::ctrl_c().await?;
+        cleanup_state_files(&cfg.data_dir);
+        drop(hashi_network);
+        drop(btc_node);
+        drop(dir);
+    } else {
+        let btc = &cfg.btc_opts;
+        let external_node = e2e_tests::external_bitcoin_node::ExternalBitcoinNode::new(
+            &btc.btc_rpc_url,
+            &btc.btc_rpc_user,
+            &btc.btc_rpc_pass,
+            btc.btc_wallet.as_deref(),
+            &btc.btc_p2p_address,
+        )?;
+
+        // Set start height near the current tip so Kyoto only scans recent blocks
+        let current_height = external_node.get_block_count().await? as u32;
+        let start_height = current_height.saturating_sub(10);
+
+        // External BTC networks need longer genesis timeout for Kyoto header sync
+        let mut builder = e2e_tests::HashiNetworkBuilder::new()
+            .with_num_nodes(cfg.num_validators)
+            .with_bitcoin_chain_id(chain_id)
+            .with_bitcoin_rpc_auth(btc.btc_rpc_user.clone(), btc.btc_rpc_pass.clone())
+            .with_bitcoin_start_height(start_height)
+            .with_genesis_timeout_secs(600);
+        if let Some(addrs) = test_reconfig_addrs {
+            builder = builder.with_test_reconfig_addresses(addrs);
+        }
+        let hashi_network = builder
+            .build(&dir.path().join("hashi"), sui, &external_node, hashi_ids)
+            .await?;
+
+        let state = persist_localnet_state(
+            &cfg.data_dir,
+            sui,
+            &btc.btc_rpc_url,
+            &btc.btc_rpc_user,
+            &btc.btc_rpc_pass,
+            hashi_ids,
+            cfg,
+        )?;
+        print_ready(&state);
+
+        tokio::signal::ctrl_c().await?;
+        cleanup_state_files(&cfg.data_dir);
+        drop(hashi_network);
+        drop(external_node);
+        drop(dir);
+    }
+
     Ok(())
 }
 
-/// Write the funded genesis key and localnet state to disk.
+/// Write the funded key and localnet state to disk.
 fn persist_localnet_state(
     data_dir: &Path,
-    sui_network: &e2e_tests::SuiNetworkHandle,
+    sui: &impl e2e_tests::SuiNetworkInfo,
     btc_rpc_url: &str,
     btc_rpc_user: &str,
     btc_rpc_pass: &str,
@@ -468,17 +733,14 @@ fn persist_localnet_state(
 ) -> Result<LocalnetState> {
     std::fs::create_dir_all(data_dir)?;
 
-    // Write the funded genesis key to disk so deposit/faucet commands can use it
+    // Write the funded key to disk so deposit/faucet commands can use it
     let funded_key_path = data_dir.join("funded_keypair.pem");
-    let funded_key = sui_network
-        .user_keys
-        .first()
-        .context("No funded user keys in localnet genesis")?;
+    let funded_key = sui.funding_key();
     write_pem_key(&funded_key_path, &funded_key.to_pem()?)?;
 
     let state = LocalnetState {
         pid: std::process::id(),
-        sui_rpc_url: sui_network.rpc_url.clone(),
+        sui_rpc_url: sui.rpc_url().to_string(),
         btc_rpc_url: btc_rpc_url.to_string(),
         btc_rpc_user: btc_rpc_user.to_string(),
         btc_rpc_password: btc_rpc_pass.to_string(),
@@ -493,6 +755,7 @@ fn persist_localnet_state(
         } else {
             cfg.btc_opts.btc_wallet.clone()
         },
+        sui_network: cfg.sui_network.clone(),
     };
     state.save(data_dir)?;
     write_cli_config(data_dir, &state)?;
@@ -532,9 +795,10 @@ fn init_tracing(verbose: bool) {
 fn print_ready(state: &LocalnetState) {
     print!("\r{}", " ".repeat(80));
     println!(
-        "\r{} Localnet started with {} validators (btc: {})",
+        "\r{} Localnet started with {} validators (sui: {}, btc: {})",
         "✓".green().bold(),
         state.num_validators,
+        state.sui_network,
         state.bitcoin_network,
     );
     println!();
@@ -1081,14 +1345,10 @@ fn print_connection_details(state: &LocalnetState) {
     println!("{}", "━".repeat(50));
     println!("{}", "  Localnet Connection Details".bold());
     println!("{}", "━".repeat(50));
+    println!("  {} {}", "Sui Network:".bold(), state.sui_network);
     println!("  {} {}", "Sui RPC:".bold(), state.sui_rpc_url);
+    println!("  {} {}", "BTC Network:".bold(), state.bitcoin_network);
     println!("  {} {}", "BTC RPC:".bold(), state.btc_rpc_url);
-    println!(
-        "  {} {}:{}",
-        "BTC RPC Auth:".bold(),
-        state.btc_rpc_user,
-        state.btc_rpc_password
-    );
     println!("  {} {}", "Package ID:".bold(), state.package_id);
     println!("  {} {}", "Hashi Object:".bold(), state.hashi_object_id);
     println!("  {} {}", "Validators:".bold(), state.num_validators);
