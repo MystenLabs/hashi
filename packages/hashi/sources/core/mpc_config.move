@@ -26,6 +26,20 @@ public(package) fun is_valid_config_entry(
     }
 }
 
+public(package) fun threshold_in_basis_points(config: &Config): u64 {
+    config
+        .try_get(b"mpc_threshold_in_basis_points")
+        .map!(|v| v.as_u64())
+        .destroy_or!(DEFAULT_THRESHOLD_IN_BASIS_POINTS)
+}
+
+public(package) fun weight_reduction_allowed_delta(config: &Config): u64 {
+    config
+        .try_get(b"mpc_weight_reduction_allowed_delta")
+        .map!(|v| v.as_u64())
+        .destroy_or!(DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA)
+}
+
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(
         b"mpc_threshold_in_basis_points",

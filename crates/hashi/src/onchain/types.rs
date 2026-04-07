@@ -485,9 +485,8 @@ pub struct Config {
 // This constant mirrors the value in btc_config.move and must be kept in sync.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 
-// These mirror the defaults in mpc_config.move and must be kept in sync.
-pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
-pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
+pub use hashi_types::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+pub use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
 impl Config {
     /// Minimum deposit amount, mirroring the floor logic in btc_config.move.

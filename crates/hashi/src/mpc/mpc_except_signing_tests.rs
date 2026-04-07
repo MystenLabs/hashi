@@ -179,9 +179,19 @@ impl TestSetup {
                 )
             })
             .collect();
-        let committee = Committee::new(members.clone(), epoch);
+        let committee = Committee::new(
+            members.clone(),
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
         // Also create a previous committee for key rotation tests
-        let previous_committee = Committee::new(members, epoch - 1);
+        let previous_committee = Committee::new(
+            members,
+            epoch - 1,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
 
         let mut committees = BTreeMap::new();
         committees.insert(epoch - 1, previous_committee);
@@ -245,9 +255,19 @@ impl TestSetup {
                 )
             })
             .collect();
-        let committee = Committee::new(members.clone(), epoch);
+        let committee = Committee::new(
+            members.clone(),
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
         // Also create a previous committee for key rotation tests
-        let previous_committee = Committee::new(members, epoch - 1);
+        let previous_committee = Committee::new(
+            members,
+            epoch - 1,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
 
         let mut committees = BTreeMap::new();
         committees.insert(epoch - 1, previous_committee);
@@ -288,8 +308,6 @@ impl TestSetup {
             self.encryption_keys[validator_index].clone(),
             self.signing_keys[validator_index].clone(),
             store,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
-            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -902,8 +920,6 @@ fn test_mpc_manager_new_from_committee_set() {
         encryption_key,
         signing_key,
         Box::new(MockPublicMessagesStore),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
-        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -966,8 +982,6 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         encryption_keys[0].clone(),
         signing_keys[0].clone(),
         Box::new(MockPublicMessagesStore),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
-        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -6106,7 +6120,12 @@ async fn test_prepare_previous_output_for_new_member() {
             2,
         )))
         .collect();
-    let new_current_committee = Committee::new(current_members, epoch);
+    let new_current_committee = Committee::new(
+        current_members,
+        epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
     let previous_committee = rotation_setup
         .setup
         .committee_set
@@ -6133,8 +6152,6 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_encryption_key,
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
-        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7227,8 +7244,18 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
     );
 
     let target_epoch = epoch + 1;
-    let previous_committee = Committee::new(previous_members, epoch);
-    let target_committee = Committee::new(target_members, target_epoch);
+    let previous_committee = Committee::new(
+        previous_members,
+        epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
+    let target_committee = Committee::new(
+        target_members,
+        target_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
 
     // Build CommitteeSet simulating a live reconfig:
     // epoch = 100 (current), pending_epoch_change = 101 (target)
@@ -7274,8 +7301,6 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
-        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7406,8 +7431,18 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
     // pending_epoch_change=101 is "target".
     let target_epoch = epoch + 1;
     let members: Vec<_> = committee.members().to_vec();
-    let previous_committee = Committee::new(members.clone(), epoch);
-    let target_committee = Committee::new(members, target_epoch);
+    let previous_committee = Committee::new(
+        members.clone(),
+        epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
+    let target_committee = Committee::new(
+        members,
+        target_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
 
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
     let mut committees = BTreeMap::new();
@@ -7437,8 +7472,6 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         setup.encryption_keys[target_index].clone(),
         setup.signing_keys[target_index].clone(),
         Box::new(store),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
-        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7489,8 +7522,18 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     //   committees: {100: 5-member, 101: 5-member (same)}, epoch=100, pending=101
     let rotation_epoch = dkg_epoch + 1;
     let members: Vec<_> = rotation_setup.setup.committee().members().to_vec();
-    let committee_at_100 = Committee::new(members.clone(), dkg_epoch);
-    let committee_at_101 = Committee::new(members.clone(), rotation_epoch);
+    let committee_at_100 = Committee::new(
+        members.clone(),
+        dkg_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
+    let committee_at_101 = Committee::new(
+        members.clone(),
+        rotation_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
 
     let mut rotation_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
     let mut rotation_committees = BTreeMap::new();
@@ -7518,8 +7561,6 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
-            TEST_THRESHOLD_IN_BASIS_POINTS,
-            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7550,8 +7591,6 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
-            TEST_THRESHOLD_IN_BASIS_POINTS,
-            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7601,8 +7640,18 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     );
 
     let target_epoch = dkg_epoch + 2;
-    let previous_committee = Committee::new(members, rotation_epoch);
-    let target_committee = Committee::new(target_members, target_epoch);
+    let previous_committee = Committee::new(
+        members,
+        rotation_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
+    let target_committee = Committee::new(
+        target_members,
+        target_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
 
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
     let mut committees = BTreeMap::new();
@@ -7638,8 +7687,6 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
-        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,

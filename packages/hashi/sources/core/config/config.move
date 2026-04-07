@@ -35,6 +35,15 @@ public(package) fun get(self: &Config, key: vector<u8>): Value {
     *self.config.get(&key.to_string())
 }
 
+public(package) fun try_get(self: &Config, key: vector<u8>): Option<Value> {
+    let key = key.to_string();
+    if (self.config.contains(&key)) {
+        option::some(*self.config.get(&key))
+    } else {
+        option::none()
+    }
+}
+
 /// Insert or update a config value. Exposed to other modules in the package
 /// (e.g. btc_config) so they can define domain-specific setters.
 public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {

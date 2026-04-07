@@ -925,13 +925,9 @@ async fn scrape_committees(
             Ok(committee)
         })
         .map_ok(|move_committee| {
-            let members = move_committee
-                .members
-                .into_iter()
-                .map(convert_move_committee_member)
-                .collect();
-            let committee = Committee::new(members, move_committee.epoch);
-            (move_committee.epoch, committee)
+            let epoch = move_committee.epoch;
+            let committee = convert_move_committee(move_committee);
+            (epoch, committee)
         })
         .try_collect()
         .await?;
@@ -965,14 +961,7 @@ async fn scrape_committee(
         .deserialize()
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
-    let members = field
-        .value
-        .members
-        .into_iter()
-        .map(convert_move_committee_member)
-        .collect();
-    let committee = Committee::new(members, field.value.epoch);
-    Ok(committee)
+    Ok(convert_move_committee(field.value))
 }
 
 fn convert_move_committee_member(
@@ -992,6 +981,24 @@ fn convert_move_committee_member(
             .map(Into::into)
             .unwrap_or_else(fallback_encryption_public_key),
         weight,
+    )
+}
+
+fn convert_move_committee(c: move_types::Committee) -> Committee {
+    let members = c
+        .members
+        .into_iter()
+        .map(convert_move_committee_member)
+        .collect();
+    let threshold_in_basis_points = u16::try_from(c.mpc_threshold_in_basis_points)
+        .expect("mpc_threshold_in_basis_points exceeds u16::MAX");
+    let weight_reduction_allowed_delta = u16::try_from(c.mpc_weight_reduction_allowed_delta)
+        .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
+    Committee::new(
+        members,
+        c.epoch,
+        threshold_in_basis_points,
+        weight_reduction_allowed_delta,
     )
 }
 
