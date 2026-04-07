@@ -1453,10 +1453,11 @@ mod tests {
 
         // The last batch is always retained (as an anchor for computing the
         // next batch's start index), but all its presigs should be consumed.
-        let mgr = setup.managers[0].read().unwrap();
-        assert_eq!(mgr.batches.len(), 1, "last batch should be retained");
-        assert_eq!(mgr.presignatures_remaining(), 0);
-        drop(mgr);
+        {
+            let mgr = setup.managers[0].read().unwrap();
+            assert_eq!(mgr.batches.len(), 1, "last batch should be retained");
+            assert_eq!(mgr.presignatures_remaining(), 0);
+        }
 
         // The next sign should return PoolExhausted, not panic.
         let result = SigningManager::sign(
