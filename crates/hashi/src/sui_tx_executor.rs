@@ -59,6 +59,97 @@ fn build_committee_signature_arg(
         vec![epoch_arg, signature_arg, bitmap_arg],
     )
 }
+
+/// Maximum size in bytes for a single pure argument in a Sui PTB.
+///
+/// Sui enforces a 16 KiB (16384 byte) limit per pure argument. We use a 4 KiB
+/// budget per chunk to stay well within the limit and leave headroom for BCS
+/// framing overhead (ULEB128 length prefixes).
+const MAX_PURE_ARG_CHUNK_SIZE: usize = 4096;
+
+/// Build a `vector<vector<u8>>` PTB argument from a slice of byte vectors,
+/// chunking into multiple pure arguments if the BCS-encoded size would exceed
+/// the per-argument limit.
+///
+/// When the data fits in a single chunk, this is equivalent to
+/// `builder.pure(&data)`. Otherwise, the first chunk becomes the base vector
+/// and subsequent chunks are appended via `0x1::vector::append<vector<u8>>`.
+fn build_chunked_vec_vec_u8_arg(
+    builder: &mut TransactionBuilder,
+    data: &[Vec<u8>],
+) -> sui_transaction_builder::Argument {
+    let chunks = chunk_vec_vec_u8(data, MAX_PURE_ARG_CHUNK_SIZE);
+
+    let mut iter = chunks.into_iter();
+    let first_chunk = iter.next().unwrap_or_default();
+    let combined = builder.pure(&first_chunk);
+
+    let vec_u8_type = TypeTag::Vector(Box::new(TypeTag::U8));
+    for chunk in iter {
+        let chunk_arg = builder.pure(&chunk);
+        builder.move_call(
+            Function::new(
+                Address::new([
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 1,
+                ]),
+                Identifier::from_static("vector"),
+                Identifier::from_static("append"),
+            )
+            .with_type_args(vec![vec_u8_type.clone()]),
+            vec![combined, chunk_arg],
+        );
+    }
+
+    combined
+}
+
+/// Split a `Vec<Vec<u8>>` into chunks whose BCS-serialized size each stays
+/// within `max_bytes`.
+///
+/// BCS encodes `Vec<Vec<u8>>` as: ULEB128(outer_len) followed by each inner
+/// vec as ULEB128(inner_len) + raw bytes. This function accumulates entries
+/// until adding the next one would push the chunk over the budget.
+fn chunk_vec_vec_u8(data: &[Vec<u8>], max_bytes: usize) -> Vec<Vec<Vec<u8>>> {
+    if data.is_empty() {
+        return vec![vec![]];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current_chunk: Vec<Vec<u8>> = Vec::new();
+    // Start with the ULEB128 length prefix for the outer vector (1 byte for
+    // lengths < 128, 2 bytes for < 16384, etc.). We conservatively reserve 3
+    // bytes for the outer length prefix.
+    let mut current_size: usize = 3;
+
+    for entry in data {
+        // BCS size of one inner entry: ULEB128(len) + raw bytes.
+        let entry_bcs_size = uleb128_len(entry.len()) + entry.len();
+
+        if !current_chunk.is_empty() && current_size + entry_bcs_size > max_bytes {
+            chunks.push(current_chunk);
+            current_chunk = Vec::new();
+            current_size = 3;
+        }
+
+        current_size += entry_bcs_size;
+        current_chunk.push(entry.clone());
+    }
+
+    chunks.push(current_chunk);
+    chunks
+}
+
+/// Return the number of bytes needed to encode `value` as a ULEB128 integer.
+fn uleb128_len(value: usize) -> usize {
+    match value {
+        0..=0x7f => 1,
+        0x80..=0x3fff => 2,
+        0x4000..=0x1f_ffff => 3,
+        _ => 4,
+    }
+}
+
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
@@ -73,6 +164,7 @@ use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::Transaction;
+use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::FromBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
@@ -461,6 +553,96 @@ impl SuiTxExecutor {
             request_ids.len() == utxos.len(),
             "Expected {} DepositRequestedEvents but found {}",
             utxos.len(),
+            request_ids.len(),
+        );
+
+        Ok(request_ids)
+    }
+
+    /// Execute a batch deposit request transaction from multiple Bitcoin txids.
+    ///
+    /// Each entry is `(txid, vout, amount)`. All deposits share the same
+    /// optional `derivation_path`. This packs multiple deposits into a single
+    /// PTB, reducing round-trips compared to individual calls.
+    ///
+    /// Callers must ensure the batch size stays within the PTB command limit
+    /// (roughly 300 deposits per PTB due to the 1024-command cap).
+    pub async fn execute_create_deposit_requests_multi(
+        &mut self,
+        deposits: &[(Address, u32, u64)],
+        derivation_path: Option<Address>,
+    ) -> anyhow::Result<Vec<Address>> {
+        anyhow::ensure!(!deposits.is_empty(), "No deposits to create");
+
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        for &(txid, vout, amount_sats) in deposits {
+            let txid_arg = builder.pure(&txid);
+            let vout_arg = builder.pure(&vout);
+            let amount_arg = builder.pure(&amount_sats);
+            let derivation_path_arg = builder.pure(&derivation_path);
+
+            let utxo_id_arg = builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("utxo"),
+                    Identifier::from_static("utxo_id"),
+                ),
+                vec![txid_arg, vout_arg],
+            );
+
+            let utxo_arg = builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("utxo"),
+                    Identifier::from_static("utxo"),
+                ),
+                vec![utxo_id_arg, amount_arg, derivation_path_arg],
+            );
+
+            builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("deposit"),
+                    Identifier::from_static("deposit"),
+                ),
+                vec![hashi_arg, utxo_arg, clock_arg],
+            );
+        }
+
+        let response = self.execute(builder).await?;
+
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "Multi-txid batch deposit failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+
+        let events = response.transaction().events();
+        let mut request_ids = Vec::new();
+        for event in events.events() {
+            if event.contents().name().contains("DepositRequestedEvent") {
+                let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
+                request_ids.push(event_data.request_id);
+            }
+        }
+
+        anyhow::ensure!(
+            request_ids.len() == deposits.len(),
+            "Expected {} DepositRequestedEvents but found {}",
+            deposits.len(),
             request_ids.len(),
         );
 
@@ -874,6 +1056,12 @@ impl SuiTxExecutor {
     }
 
     /// Execute `withdraw::sign_withdrawal` to store witness signatures on-chain.
+    ///
+    /// Sui limits each pure argument to 16 KiB. With many inputs (up to 500),
+    /// the BCS-encoded `Vec<Vec<u8>>` of signatures can exceed that limit. To
+    /// handle this, the signatures are split into chunks that each fit within
+    /// the pure-arg budget and stitched back together via
+    /// `0x1::vector::append` calls in the PTB.
     pub async fn execute_sign_withdrawal(
         &mut self,
         withdrawal_id: &Address,
@@ -891,8 +1079,7 @@ impl SuiTxExecutor {
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         let request_ids_vec = request_ids.to_vec();
         let request_ids_arg = builder.pure(&request_ids_vec);
-        let signatures_vec = signatures.to_vec();
-        let signatures_arg = builder.pure(&signatures_vec);
+        let signatures_arg = build_chunked_vec_vec_u8_arg(&mut builder, signatures);
         let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
 
         builder.move_call(
@@ -1370,4 +1557,77 @@ pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> a
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_empty_input() {
+        let chunks = chunk_vec_vec_u8(&[], 4096);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_empty());
+    }
+
+    #[test]
+    fn chunk_single_entry_fits() {
+        let data = vec![vec![0u8; 64]];
+        let chunks = chunk_vec_vec_u8(&data, 4096);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1);
+    }
+
+    #[test]
+    fn chunk_splits_at_budget() {
+        // 64-byte signatures: each entry is 1 (ULEB128) + 64 = 65 bytes BCS.
+        // With 3 bytes for the outer length prefix, a 4096-byte budget fits
+        // (4096 - 3) / 65 = 62.9 -> 62 entries per chunk.
+        let sig_count = 500;
+        let data: Vec<Vec<u8>> = (0..sig_count).map(|_| vec![0xAB; 64]).collect();
+        let chunks = chunk_vec_vec_u8(&data, 4096);
+
+        // Each chunk should have at most 62 entries.
+        let max_per_chunk = (4096 - 3) / 65;
+        for chunk in &chunks {
+            assert!(chunk.len() <= max_per_chunk);
+        }
+
+        // All entries are accounted for.
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, sig_count);
+
+        // With 500 entries and 62 per chunk, we need ceil(500/62) = 9 chunks.
+        assert_eq!(chunks.len(), 500usize.div_ceil(max_per_chunk));
+    }
+
+    #[test]
+    fn chunk_large_entries() {
+        // Entries larger than what fits many-per-chunk: 2000-byte entries.
+        // BCS: 2 (ULEB128 for 2000) + 2000 = 2002 bytes per entry.
+        // Budget 4096: only 1 entry per chunk (3 + 2002 = 2005 < 4096, but
+        // 3 + 2002 + 2002 = 4007 < 4096... actually 2 fit).
+        let data: Vec<Vec<u8>> = (0..10).map(|_| vec![0xFF; 2000]).collect();
+        let chunks = chunk_vec_vec_u8(&data, 4096);
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 10);
+        // Each chunk's BCS size should be within budget.
+        for chunk in &chunks {
+            let bcs_size: usize = 3 + chunk
+                .iter()
+                .map(|e| uleb128_len(e.len()) + e.len())
+                .sum::<usize>();
+            assert!(bcs_size <= 4096, "chunk BCS size {bcs_size} > 4096");
+        }
+    }
+
+    #[test]
+    fn uleb128_len_values() {
+        assert_eq!(uleb128_len(0), 1);
+        assert_eq!(uleb128_len(64), 1);
+        assert_eq!(uleb128_len(127), 1);
+        assert_eq!(uleb128_len(128), 2);
+        assert_eq!(uleb128_len(16383), 2);
+        assert_eq!(uleb128_len(16384), 3);
+    }
 }
