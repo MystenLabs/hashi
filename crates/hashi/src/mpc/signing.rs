@@ -272,8 +272,12 @@ impl SigningManager {
                     }
                 }
 
-                // Prune fully-consumed older batches.
-                mgr.batches.retain(|b| !b.is_fully_consumed());
+                // Prune fully-consumed batches, but always keep the last
+                // one so its `end_index()` can anchor the next batch's
+                // start.
+                while mgr.batches.len() > 1 && mgr.batches[0].is_fully_consumed() {
+                    mgr.batches.remove(0);
+                }
 
                 mgr.partial_signing_outputs.insert(
                     sui_request_id,
@@ -1411,6 +1415,57 @@ mod tests {
             b"fail",
             0,
             &S::zero(),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+    }
+
+    /// Consume every presig through `sign()` so that the natural prune
+    /// path fires, then verify the next call returns `PoolExhausted`
+    /// instead of panicking.
+    #[tokio::test]
+    async fn test_sign_prunes_batch_then_pool_exhausted() {
+        let setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
+        let beacon = S::zero();
+        let p2p = setup.mock_p2p_for(0);
+
+        // Sign every presig in the batch through the normal sign() path.
+        for i in 0..pool_size {
+            let req = Address::new([i as u8; 32]);
+            setup.prepare_all(b"drain", &beacon, req, i as u64, Some(0));
+            let result = SigningManager::sign(
+                &setup.managers[0],
+                &p2p,
+                req,
+                b"drain",
+                i as u64,
+                &beacon,
+                None,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert!(result.is_ok(), "sign {i} should succeed");
+        }
+
+        // The last batch is always retained (as an anchor for computing the
+        // next batch's start index), but all its presigs should be consumed.
+        let mgr = setup.managers[0].read().unwrap();
+        assert_eq!(mgr.batches.len(), 1, "last batch should be retained");
+        assert_eq!(mgr.presignatures_remaining(), 0);
+        drop(mgr);
+
+        // The next sign should return PoolExhausted, not panic.
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"one-more",
+            pool_size as u64,
+            &beacon,
             None,
             Duration::from_secs(30),
         )
