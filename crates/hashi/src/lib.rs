@@ -219,8 +219,6 @@ impl Hashi {
         let state = self.onchain_state().state();
         let hashi = state.hashi();
         let committee_set = &hashi.committees;
-        let threshold_in_basis_points = hashi.config.mpc_threshold_in_basis_points();
-        let weight_reduction_allowed_delta = hashi.config.mpc_weight_reduction_allowed_delta();
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let encryption_key = self.config.encryption_private_key()?;
         self.db
@@ -261,8 +259,6 @@ impl Hashi {
             encryption_key,
             signing_key,
             store,
-            threshold_in_basis_points,
-            weight_reduction_allowed_delta,
             chain_id,
             self.config.test_weight_divisor,
             batch_size_per_weight,

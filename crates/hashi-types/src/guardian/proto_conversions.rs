@@ -54,6 +54,9 @@ use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
+use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
@@ -666,7 +669,20 @@ fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
 
     let total_weight = c.total_weight.ok_or_else(|| missing("total_weight"))?;
 
-    let committee = HashiCommittee::new(members, epoch);
+    let mpc_threshold_in_basis_points = c
+        .mpc_threshold_in_basis_points
+        .map(|v| v as u16)
+        .unwrap_or(DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS);
+    let mpc_weight_reduction_allowed_delta = c
+        .mpc_weight_reduction_allowed_delta
+        .map(|v| v as u16)
+        .unwrap_or(DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA);
+    let committee = HashiCommittee::new(
+        members,
+        epoch,
+        mpc_threshold_in_basis_points,
+        mpc_weight_reduction_allowed_delta,
+    );
 
     if committee.total_weight() != total_weight {
         return Err(InvalidInputs(format!(
@@ -687,6 +703,8 @@ fn hashi_committee_to_pb(c: HashiCommittee) -> pb::Committee {
             .map(|m| hashi_committee_member_to_pb(m.clone()))
             .collect(),
         total_weight: Some(c.total_weight()),
+        mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points() as u64),
+        mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta() as u64),
     }
 }
 

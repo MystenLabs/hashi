@@ -159,6 +159,10 @@ pub struct Committee {
     pub members: Vec<CommitteeMember>,
     /// Total voting weight of the committee.
     pub total_weight: u64,
+    /// MPC threshold in basis points
+    pub mpc_threshold_in_basis_points: u64,
+    /// Allowed delta for weight reduction
+    pub mpc_weight_reduction_allowed_delta: u64,
 }
 
 /// Rust version of the Move hashi::config::Config type.
@@ -1144,6 +1148,8 @@ impl From<&crate::committee::Committee> for Committee {
             epoch: c.epoch(),
             members: c.members().iter().map(Into::into).collect(),
             total_weight: c.total_weight(),
+            mpc_threshold_in_basis_points: c.mpc_threshold_in_basis_points() as u64,
+            mpc_weight_reduction_allowed_delta: c.mpc_weight_reduction_allowed_delta() as u64,
         }
     }
 }
@@ -1157,6 +1163,13 @@ impl TryFrom<Committee> for crate::committee::Committee {
             .into_iter()
             .map(crate::committee::CommitteeMember::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::committee::Committee::new(members, c.epoch))
+        Ok(crate::committee::Committee::new(
+            members,
+            c.epoch,
+            u16::try_from(c.mpc_threshold_in_basis_points)
+                .expect("mpc_threshold_in_basis_points exceeds u16::MAX"),
+            u16::try_from(c.mpc_weight_reduction_allowed_delta)
+                .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX"),
+        ))
     }
 }

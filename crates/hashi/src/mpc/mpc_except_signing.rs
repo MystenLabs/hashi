@@ -121,8 +121,6 @@ impl MpcManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
-        threshold_in_basis_points: u16,
-        weight_reduction_allowed_delta: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
@@ -145,8 +143,8 @@ impl MpcManager {
             .clone();
         let (nodes, threshold) = build_reduced_nodes(
             &committee,
-            threshold_in_basis_points,
-            weight_reduction_allowed_delta,
+            committee.mpc_threshold_in_basis_points(),
+            committee.mpc_weight_reduction_allowed_delta(),
             weight_divisor,
         )?;
         let total_weight = nodes.total_weight();
@@ -204,8 +202,8 @@ impl MpcManager {
             Some(prev_committee) => {
                 let (nodes, threshold) = build_reduced_nodes(
                     prev_committee,
-                    threshold_in_basis_points,
-                    weight_reduction_allowed_delta,
+                    prev_committee.mpc_threshold_in_basis_points(),
+                    prev_committee.mpc_weight_reduction_allowed_delta(),
                     weight_divisor,
                 )?;
                 (Some(nodes), Some(threshold))

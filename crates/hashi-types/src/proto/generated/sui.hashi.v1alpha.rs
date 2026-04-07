@@ -2822,6 +2822,10 @@ pub struct Committee {
     pub members: ::prost::alloc::vec::Vec<CommitteeMember>,
     #[prost(uint64, optional, tag = "3")]
     pub total_weight: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub mpc_threshold_in_basis_points: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "5")]
+    pub mpc_weight_reduction_allowed_delta: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CommitteeMember {

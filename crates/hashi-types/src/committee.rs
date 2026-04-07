@@ -21,6 +21,14 @@ use serde::Serialize;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
+/// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS` in
+/// `mpc_config.move`.
+pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
+
+/// Default allowed delta for weight reduction. Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in
+/// `mpc_config.move`.
+pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
+
 // TODO: Read threshold from on-chain config once it is made configurable.
 const THRESHOLD_NUMERATOR: u64 = 2;
 const THRESHOLD_DENOMINATOR: u64 = 3;
@@ -85,6 +93,8 @@ pub struct Committee {
     members: Vec<CommitteeMember>,
     address_to_index: HashMap<Address, usize>,
     total_weight: u64,
+    mpc_threshold_in_basis_points: u16,
+    mpc_weight_reduction_allowed_delta: u16,
 }
 
 #[derive(Clone, PartialEq)]
@@ -147,7 +157,12 @@ impl MemberSignature {
 }
 
 impl Committee {
-    pub fn new(members: Vec<CommitteeMember>, epoch: u64) -> Self {
+    pub fn new(
+        members: Vec<CommitteeMember>,
+        epoch: u64,
+        mpc_threshold_in_basis_points: u16,
+        mpc_weight_reduction_allowed_delta: u16,
+    ) -> Self {
         let total_weight = members.iter().map(|member| member.weight).sum();
         let address_to_index = members
             .iter()
@@ -159,6 +174,8 @@ impl Committee {
             members,
             address_to_index,
             total_weight,
+            mpc_threshold_in_basis_points,
+            mpc_weight_reduction_allowed_delta,
         }
     }
 
@@ -173,6 +190,14 @@ impl Committee {
     /// The total weight of the members of this committee.
     pub fn total_weight(&self) -> u64 {
         self.total_weight
+    }
+
+    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
+        self.mpc_threshold_in_basis_points
+    }
+
+    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
+        self.mpc_weight_reduction_allowed_delta
     }
 
     fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {
@@ -662,6 +687,9 @@ mod test {
     use fastcrypto::groups::FiatShamirChallenge;
     use fastcrypto::groups::bls12381::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
+
+    const TEST_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
+    const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
     use test_strategy::proptest;
 
     impl proptest::arbitrary::Arbitrary for Bls12381PrivateKey {
@@ -719,7 +747,12 @@ mod test {
                 weight: 1,
             })
             .collect();
-        let committee = Committee::new(members, epoch);
+        let committee = Committee::new(
+            members,
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
 
@@ -816,7 +849,12 @@ mod test {
                 weight: 1,
             })
             .collect();
-        let committee = Committee::new(members, epoch);
+        let committee = Committee::new(
+            members,
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
 
@@ -858,6 +896,8 @@ mod test {
                 })
                 .collect(),
             999, // Different epoch
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         );
         assert!(
             certificate
@@ -887,7 +927,12 @@ mod test {
                 weight: 2500, // committee weight
             })
             .collect();
-        let committee = Committee::new(members, epoch);
+        let committee = Committee::new(
+            members,
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
 
         // Reduced weights: different from committee weights
         let reduced_weights: HashMap<Address, u16> =
@@ -970,7 +1015,12 @@ mod test {
                 weight: 1,
             })
             .collect();
-        let committee = Committee::new(members, epoch);
+        let committee = Committee::new(
+            members,
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        );
 
         // Create a certificate via aggregator
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());

@@ -1112,6 +1112,131 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_varying_t_and_allowed_delta_across_epochs() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+
+        use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+        use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+
+        // Wait for DKG (epoch 1 committee created with defaults).
+        let nodes = networks.hashi_network.nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(Duration::from_secs(120)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let pk_before = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+
+        // Verify epoch 1 committee has defaults.
+        let epoch1_committee = nodes[0]
+            .hashi()
+            .onchain_state()
+            .current_committee()
+            .unwrap();
+        assert_eq!(
+            epoch1_committee.mpc_threshold_in_basis_points(),
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS
+        );
+        assert_eq!(
+            epoch1_committee.mpc_weight_reduction_allowed_delta(),
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA
+        );
+
+        // Change config between epochs.
+        let new_threshold: u64 = 5000;
+        let new_delta: u64 = 1200;
+        crate::apply_onchain_config_overrides(
+            &mut networks,
+            &[
+                (
+                    "mpc_threshold_in_basis_points".into(),
+                    hashi_types::move_types::ConfigValue::U64(new_threshold),
+                ),
+                (
+                    "mpc_weight_reduction_allowed_delta".into(),
+                    hashi_types::move_types::ConfigValue::U64(new_delta),
+                ),
+            ],
+        )
+        .await?;
+
+        // Force key rotation → epoch 2 committee created with new config.
+        let target_epoch = initial_epoch + 1;
+        networks.sui_network.force_close_epoch().await?;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+
+        // Verify key rotation succeeded: all nodes agree and key is preserved.
+        let nodes = networks.hashi_network().nodes();
+        let pk_after = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+        assert_eq!(
+            pk_before, pk_after,
+            "MPC public key changed during rotation"
+        );
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(
+                pk, pk_after,
+                "Node {i} MPC key differs from node 0 after rotation"
+            );
+        }
+
+        // Epoch 1 committee retains original defaults.
+        let state = networks.hashi_network.nodes()[0].hashi().onchain_state();
+        let committees = {
+            let s = state.state();
+            s.hashi().committees.committees().clone()
+        };
+        let epoch1 = committees.get(&initial_epoch).expect("epoch 1 committee");
+        assert_eq!(
+            epoch1.mpc_threshold_in_basis_points(),
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+            "epoch {initial_epoch} committee should retain original threshold_basis_points"
+        );
+        assert_eq!(
+            epoch1.mpc_weight_reduction_allowed_delta(),
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            "epoch {initial_epoch} committee should retain original allowed_delta"
+        );
+
+        // Epoch 2 committee has new values.
+        let epoch2 = committees.get(&target_epoch).expect("epoch 2 committee");
+        assert_eq!(
+            epoch2.mpc_threshold_in_basis_points(),
+            new_threshold as u16,
+            "epoch {target_epoch} committee should have updated threshold_basis_points"
+        );
+        assert_eq!(
+            epoch2.mpc_weight_reduction_allowed_delta(),
+            new_delta as u16,
+            "epoch {target_epoch} committee should have updated allowed_delta"
+        );
+
+        Ok(())
+    }
+
     /// Verify that a withdrawal can spend a change output whose producing
     /// transaction is mined on Bitcoin but not yet confirmed on Sui. The
     /// actual Bitcoin confirmation count must be queried from the node

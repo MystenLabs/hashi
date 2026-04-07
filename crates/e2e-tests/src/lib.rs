@@ -271,7 +271,7 @@ impl TestNetworksBuilder {
 /// Waits for DKG to complete first so the committee is ready to vote.
 /// All nodes vote on every proposal, ensuring quorum is always reached
 /// regardless of the number of nodes or their weight distribution.
-async fn apply_onchain_config_overrides(
+pub(crate) async fn apply_onchain_config_overrides(
     networks: &mut TestNetworks,
     overrides: &[(String, hashi_types::move_types::ConfigValue)],
 ) -> Result<()> {

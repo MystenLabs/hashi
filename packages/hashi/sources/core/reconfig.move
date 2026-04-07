@@ -25,14 +25,16 @@ entry fun start_reconfig(
     self.config().assert_version_enabled();
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
-
+    let mpc_threshold_in_basis_points = hashi::mpc_config::threshold_in_basis_points(self.config());
+    let mpc_weight_reduction_allowed_delta = hashi::mpc_config::weight_reduction_allowed_delta(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
             sui_system,
+            mpc_threshold_in_basis_points,
+            mpc_weight_reduction_allowed_delta,
             ctx,
         );
-
     sui::event::emit(StartReconfigEvent { epoch });
 }
 
