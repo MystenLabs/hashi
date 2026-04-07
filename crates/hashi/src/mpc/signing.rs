@@ -32,20 +32,48 @@ use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
 
+/// A single contiguous batch of presignatures.
+struct PresigBatch {
+    /// Each presig is wrapped in `Option` so it can be taken exactly once,
+    /// preventing nonce reuse even if the same index is assigned twice.
+    pool: Vec<Option<(Vec<S>, G)>>,
+    /// Global index of the first presig in this batch.
+    start_index: u64,
+    /// Monotonically increasing batch sequence number.
+    batch_index: u32,
+}
+
+impl PresigBatch {
+    fn end_index(&self) -> u64 {
+        self.start_index + self.pool.len() as u64
+    }
+
+    fn contains(&self, global_index: u64) -> bool {
+        global_index >= self.start_index && global_index < self.end_index()
+    }
+
+    fn is_fully_consumed(&self) -> bool {
+        self.pool.iter().all(|s| s.is_none())
+    }
+
+    fn remaining(&self) -> usize {
+        self.pool.iter().filter(|s| s.is_some()).count()
+    }
+}
+
 pub struct SigningManager {
     address: Address,
     committee: Committee,
     threshold: u16,
     key_shares: avss::SharesForNode,
     verifying_key: G,
-    /// Each presig is wrapped in Option so it can be taken exactly once,
-    /// preventing nonce reuse even if the same index is assigned twice.
-    presig_pool: Vec<Option<(Vec<S>, G)>>,
+    /// Active presig batches, ordered by `start_index`. Older batches are
+    /// retained until all their presigs have been consumed so that
+    /// out-of-order signing (e.g., withdrawal A allocated from batch 0 signs
+    /// after withdrawal B advanced to batch 1) still works.
+    batches: Vec<PresigBatch>,
     /// Key: Sui address identifying the signing request
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
-    batch_index: u32,
-    batch_start_index: u64,
-    batch_size: usize,
     refill_divisor: usize,
     refill_tx: Arc<watch::Sender<u32>>,
     next_batch: Option<Presignatures>,
@@ -65,19 +93,20 @@ impl SigningManager {
         refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
     ) -> Self {
-        let presig_pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
-        let batch_size = presig_pool.len();
+        let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
+        let batch = PresigBatch {
+            pool,
+            start_index: batch_start_index,
+            batch_index,
+        };
         Self {
             address,
             committee,
             threshold,
             key_shares,
             verifying_key,
-            presig_pool,
+            batches: vec![batch],
             partial_signing_outputs: HashMap::new(),
-            batch_index,
-            batch_start_index,
-            batch_size,
             refill_divisor,
             refill_tx,
             next_batch: None,
@@ -92,16 +121,19 @@ impl SigningManager {
         self.next_batch.is_some()
     }
 
+    /// Size of the latest (most recent) batch.
     pub fn initial_presig_count(&self) -> usize {
-        self.batch_size
+        self.batches.last().map_or(0, |b| b.pool.len())
     }
 
+    /// Remaining presignatures in the latest batch (used for refill checks).
     pub fn presignatures_remaining(&self) -> usize {
-        self.presig_pool.iter().filter(|s| s.is_some()).count()
+        self.batches.last().map_or(0, |b| b.remaining())
     }
 
+    /// The batch index of the latest (most recent) batch.
     pub fn batch_index(&self) -> u32 {
-        self.batch_index
+        self.batches.last().map_or(0, |b| b.batch_index)
     }
 
     pub fn epoch(&self) -> u64 {
@@ -158,70 +190,69 @@ impl SigningManager {
                 tracing::info!(
                     "Cache hit for {sui_request_id} (global_presig_index={global_presig_index}), \
                      reusing cached partial sigs (batch_index={})",
-                    mgr.batch_index,
+                    mgr.batch_index(),
                 );
                 (existing.public_nonce, existing.partial_sigs.clone())
             } else {
-                if global_presig_index < mgr.batch_start_index {
-                    tracing::error!(
-                        "Presig index {global_presig_index} is behind current batch start {}. \
-                         The presig for this withdrawal is no longer available.",
-                        mgr.batch_start_index,
-                    );
-                    return Err(SigningError::StalePresigBatch {
-                        presig_index: global_presig_index,
-                        current_batch: mgr.batch_index,
-                        batch_start: mgr.batch_start_index,
-                    });
-                }
-                let batch_end = mgr.batch_start_index + mgr.batch_size as u64;
-                if global_presig_index >= batch_end {
+                // Find the batch containing this presig index, advancing
+                // into the next batch if needed.
+                let batch = if let Some(b) = mgr.batches.iter().position(
+                    |b| b.contains(global_presig_index),
+                ) {
+                    &mut mgr.batches[b]
+                } else {
+                    // Index is beyond all current batches; try to swap in
+                    // the prefetched next batch.
+                    let latest = mgr.batches.last()
+                        .expect("batches should never be empty");
+                    let next_start = latest.end_index();
+                    let next_batch_index = latest.batch_index + 1;
                     if let Some(next) = mgr.next_batch.take() {
-                        mgr.batch_start_index += mgr.batch_size as u64;
-                        mgr.presig_pool = next.map(Some).collect();
-                        mgr.batch_index += 1;
-                        mgr.batch_size = mgr.presig_pool.len();
+                        let pool: Vec<Option<(Vec<S>, G)>> =
+                            next.map(Some).collect();
+                        mgr.batches.push(PresigBatch {
+                            pool,
+                            start_index: next_start,
+                            batch_index: next_batch_index,
+                        });
+                    }
+                    // Check if the index is now covered.
+                    if let Some(b) = mgr.batches.iter().position(
+                        |b| b.contains(global_presig_index),
+                    ) {
+                        &mut mgr.batches[b]
                     } else {
+                        let latest = mgr.batches.last().unwrap();
                         tracing::error!(
-                            "Presig index {global_presig_index} is beyond current batch \
-                             (batch {}, range {}..{}) and no next batch available.",
-                            mgr.batch_index,
-                            mgr.batch_start_index,
-                            batch_end,
+                            "Presig index {global_presig_index} is beyond all batches \
+                             (latest batch {}, range {}..{}).",
+                            latest.batch_index,
+                            latest.start_index,
+                            latest.end_index(),
                         );
                         return Err(SigningError::PoolExhausted);
                     }
-                    let new_batch_end = mgr.batch_start_index + mgr.batch_size as u64;
-                    if global_presig_index >= new_batch_end {
-                        tracing::error!(
-                            "Presig index {global_presig_index} is beyond swapped batch \
-                             (batch {}, range {}..{}). Cannot skip batches.",
-                            mgr.batch_index,
-                            mgr.batch_start_index,
-                            new_batch_end,
-                        );
-                        return Err(SigningError::PoolExhausted);
-                    }
-                }
-                let target_position = (global_presig_index - mgr.batch_start_index) as usize;
-                let presig = mgr
-                    .presig_pool
+                };
+                let target_position =
+                    (global_presig_index - batch.start_index) as usize;
+                let presig = batch
+                    .pool
                     .get_mut(target_position)
                     .and_then(|slot| slot.take())
                     .ok_or_else(|| {
                         tracing::error!(
-                            "Presig at position {target_position} unavailable for batch {} \
-                             (already consumed or out of range).",
-                            mgr.batch_index,
+                            "Presig at position {target_position} unavailable for \
+                             batch {} (already consumed or out of range).",
+                            batch.batch_index,
                         );
                         SigningError::PoolExhausted
                     })?;
+                let used_batch_index = batch.batch_index;
                 tracing::info!(
                     "Cache miss for {sui_request_id}, using presig \
-                     (global_presig_index={global_presig_index}, batch_index={}, \
-                     position={target_position}, pool_size={})",
-                    mgr.batch_index,
-                    mgr.presig_pool.len(),
+                     (global_presig_index={global_presig_index}, \
+                     batch_index={used_batch_index}, \
+                     position={target_position})",
                 );
                 let result = generate_partial_signatures(
                     message,
@@ -232,11 +263,19 @@ impl SigningManager {
                     derivation_address,
                 )
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
-                let remaining = mgr.presig_pool.iter().filter(|s| s.is_some()).count();
-                let refill_at = mgr.batch_size / mgr.refill_divisor;
-                if remaining <= refill_at {
-                    let _ = mgr.refill_tx.send(mgr.batch_index + 1);
+
+                // Trigger refill based on the latest batch's consumption.
+                if let Some(latest) = mgr.batches.last() {
+                    let remaining = latest.remaining();
+                    let refill_at = latest.pool.len() / mgr.refill_divisor;
+                    if remaining <= refill_at {
+                        let _ = mgr.refill_tx.send(latest.batch_index + 1);
+                    }
                 }
+
+                // Prune fully-consumed older batches.
+                mgr.batches.retain(|b| !b.is_fully_consumed());
+
                 mgr.partial_signing_outputs.insert(
                     sui_request_id,
                     PartialSigningOutput {
@@ -337,8 +376,8 @@ impl SigningManager {
                 tracing::error!(
                     "Signing failed for {sui_request_id}: {e}, \
                      presigs_remaining={}, batch_index={}",
-                    mgr.presig_pool.iter().filter(|s| s.is_some()).count(),
-                    mgr.batch_index,
+                    mgr.presignatures_remaining(),
+                    mgr.batch_index(),
                 );
             }
         }
@@ -750,15 +789,16 @@ mod tests {
         }
 
         /// Have peers generate + store partial sigs so their RPC handlers work.
-        /// If `skip` is Some(i), that manager is skipped (use for the caller who
-        /// will generate its own sigs inside `sign()`).
+        /// `global_presig_index` is the global index used to locate the presig
+        /// in the batch list. If `skip` is Some(i), that manager is skipped
+        /// (use for the caller who will generate its own sigs inside `sign()`).
         /// Returns (public_nonce, Vec of per-party partial sigs).
         fn prepare_all(
             &self,
             message: &[u8],
             beacon_value: &S,
             request_id: Address,
-            presig_index: usize,
+            global_presig_index: u64,
             skip: Option<usize>,
         ) -> (G, Vec<Vec<Eval<S>>>) {
             let mut public_nonce = None;
@@ -769,7 +809,13 @@ mod tests {
                     continue;
                 }
                 let mgr = mgr_lock.read().unwrap();
-                let presig = mgr.presig_pool[presig_index].clone().unwrap();
+                let presig = mgr.batches.iter()
+                    .find(|b| b.contains(global_presig_index))
+                    .and_then(|b| {
+                        let pos = (global_presig_index - b.start_index) as usize;
+                        b.pool.get(pos).and_then(|s| s.clone())
+                    })
+                    .unwrap();
                 let (pn, sigs) = generate_partial_signatures(
                     message,
                     presig,
@@ -808,10 +854,15 @@ mod tests {
             MockSigningP2PChannel { managers }
         }
 
-        /// Exhaust all presignatures on all managers.
+        /// Exhaust all presignatures on all managers by taking every slot.
         fn exhaust_pool(&self) {
             for mgr_lock in &self.managers {
-                mgr_lock.write().unwrap().presig_pool.clear();
+                let mut mgr = mgr_lock.write().unwrap();
+                for batch in &mut mgr.batches {
+                    for slot in &mut batch.pool {
+                        slot.take();
+                    }
+                }
             }
         }
 
@@ -859,20 +910,26 @@ mod tests {
             }
         }
 
-        /// Manually swap peers (skip manager at `caller_index`) to next_batch.
-        /// Needed because prepare_all calls generate_partial_signatures directly
-        /// (not sign()), so it doesn't have the OutOfPresigs swap logic.
-        fn swap_peers_to_next_batch(&self, caller_index: usize) {
+        /// Manually advance peers (skip manager at `caller_index`) by
+        /// pushing the next_batch onto their batch list. Needed because
+        /// `prepare_all` calls `generate_partial_signatures` directly (not
+        /// `sign()`), so it doesn't trigger the batch-advance logic.
+        fn advance_peers_to_next_batch(&self, caller_index: usize) {
             for (i, mgr_lock) in self.managers.iter().enumerate() {
                 if i == caller_index {
                     continue;
                 }
                 let mut mgr = mgr_lock.write().unwrap();
-                mgr.batch_start_index += mgr.batch_size as u64;
+                let latest = mgr.batches.last().unwrap();
+                let next_start = latest.end_index();
+                let next_batch_index = latest.batch_index + 1;
                 let next = mgr.next_batch.take().unwrap();
-                mgr.presig_pool = next.map(Some).collect();
-                mgr.batch_index += 1;
-                mgr.batch_size = mgr.presig_pool.len();
+                let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
+                mgr.batches.push(PresigBatch {
+                    pool,
+                    start_index: next_start,
+                    batch_index: next_batch_index,
+                });
             }
         }
     }
@@ -1037,7 +1094,7 @@ mod tests {
         // Only peers 1 and 2 prepare partial sigs.
         for i in [1, 2] {
             let mgr = setup.managers[i].read().unwrap();
-            let presig = mgr.presig_pool[0].clone().unwrap();
+            let presig = mgr.batches[0].pool[0].clone().unwrap();
             let (pn, sigs) = generate_partial_signatures(
                 message,
                 presig,
@@ -1253,15 +1310,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_sign_pool_exhausted_with_next_batch() {
-        // Exhaust batch 0, set next_batch, verify sign() swaps to batch 1.
+        // Exhaust batch 0, set next_batch, verify sign() advances to batch 1.
         let setup = SigningTestSetup::new(4);
+        let batch_size = setup.managers[0].read().unwrap().initial_presig_count() as u64;
         setup.exhaust_pool();
         setup.set_next_batch_on_all();
-        setup.swap_peers_to_next_batch(0);
+        setup.advance_peers_to_next_batch(0);
 
         let req_id = Address::new([0xFF; 32]);
-        let batch_size = setup.managers[0].read().unwrap().initial_presig_count() as u64;
-        setup.prepare_all(b"swap", &S::zero(), req_id, 0, Some(0));
+        // Use the first global index of batch 1.
+        setup.prepare_all(b"swap", &S::zero(), req_id, batch_size, Some(0));
         let p2p = setup.mock_p2p_for(0);
         let sig = SigningManager::sign(
             &setup.managers[0],
@@ -1315,7 +1373,8 @@ mod tests {
         // Consume presignatures on manager 0 until we cross the threshold.
         for i in 0..(pool_size - refill_at) {
             let mut mgr = setup.managers[0].write().unwrap();
-            let presig = mgr.presig_pool[i].take().unwrap();
+            let batch = mgr.batches.last_mut().unwrap();
+            let presig = batch.pool[i].take().unwrap();
             let _ = generate_partial_signatures(
                 b"msg",
                 presig,
@@ -1326,10 +1385,11 @@ mod tests {
             )
             .unwrap();
             // Simulate the threshold check that sign() does.
-            let remaining = mgr.presig_pool.iter().filter(|s| s.is_some()).count();
-            let threshold = mgr.batch_size / mgr.refill_divisor;
+            let latest = mgr.batches.last().unwrap();
+            let remaining = latest.remaining();
+            let threshold = latest.pool.len() / mgr.refill_divisor;
             if remaining <= threshold {
-                let _ = mgr.refill_tx.send(mgr.batch_index + 1);
+                let _ = mgr.refill_tx.send(latest.batch_index + 1);
             }
         }
 
@@ -1358,44 +1418,48 @@ mod tests {
         assert!(matches!(result, Err(SigningError::PoolExhausted)));
     }
 
+    /// Signing with an index from a previous batch should succeed as long
+    /// as the batch hasn't been fully consumed and pruned.
     #[tokio::test]
-    async fn test_sign_stale_batch_error() {
+    async fn test_sign_from_previous_batch_succeeds() {
         let setup = SigningTestSetup::new(4);
 
-        // Move all managers to batch 1.
+        // Advance all managers to batch 1 (batch 0 is retained).
         setup.set_next_batch_on_all();
-        setup.swap_peers_to_next_batch(0);
+        setup.advance_peers_to_next_batch(0);
         {
             let mut mgr = setup.managers[0].write().unwrap();
-            mgr.batch_start_index += mgr.batch_size as u64;
+            let latest = mgr.batches.last().unwrap();
+            let next_start = latest.end_index();
+            let next_batch_index = latest.batch_index + 1;
             let next = mgr.next_batch.take().unwrap();
-            mgr.presig_pool = next.map(Some).collect();
-            mgr.batch_index += 1;
-            mgr.batch_size = mgr.presig_pool.len();
+            let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
+            mgr.batches.push(PresigBatch {
+                pool,
+                start_index: next_start,
+                batch_index: next_batch_index,
+            });
         }
 
-        // Try to sign with an index from batch 0.
+        // Sign with an index from batch 0 — should succeed because batch 0
+        // is still retained with unconsumed presigs.
+        let beacon = S::zero();
+        let req = Address::new([0x01; 32]);
+        setup.prepare_all(b"old-batch", &beacon, req, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
         let result = SigningManager::sign(
             &setup.managers[0],
             &p2p,
-            Address::new([0x01; 32]),
-            b"stale",
-            0, // batch 0, but manager is on batch 1
-            &S::zero(),
+            req,
+            b"old-batch",
+            0, // batch 0, manager has both batch 0 and 1
+            &beacon,
             None,
             Duration::from_secs(30),
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(SigningError::StalePresigBatch {
-                presig_index: 0,
-                current_batch: 1,
-                ..
-            })
-        ));
+        assert!(result.is_ok(), "signing from a retained previous batch should succeed");
     }
 
     #[tokio::test]

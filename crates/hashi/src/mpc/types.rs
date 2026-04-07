@@ -513,15 +513,6 @@ pub enum SigningError {
 
     #[error("Presignature pool exhausted, new batch not yet available")]
     PoolExhausted,
-
-    #[error(
-        "Presig index {presig_index} is behind current batch {current_batch} (starts at {batch_start})"
-    )]
-    StalePresigBatch {
-        presig_index: u64,
-        current_batch: u32,
-        batch_start: u64,
-    },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;

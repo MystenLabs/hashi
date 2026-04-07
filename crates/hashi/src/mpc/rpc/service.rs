@@ -218,7 +218,6 @@ fn signing_error_to_status(err: SigningError) -> Status {
             Status::failed_precondition(err.to_string())
         }
         SigningError::PoolExhausted => Status::resource_exhausted(err.to_string()),
-        SigningError::StalePresigBatch { .. } => Status::failed_precondition(err.to_string()),
     }
 }
 
