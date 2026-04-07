@@ -1538,4 +1538,217 @@ mod tests {
         info!("=== Chained Withdrawal Full Depth Test Passed ===");
         Ok(())
     }
+
+    /// Verify that the signature-commit chunking logic works correctly when a
+    /// withdrawal transaction has enough inputs to push the BCS-encoded
+    /// `signatures` vector past the 16 KiB pure-argument limit.
+    ///
+    /// Test outline:
+    /// 1. Create 500 deposits (one UTXO each) so the pool has 500 UTXOs.
+    /// 2. Submit 50 withdrawal requests that together require spending UTXOs;
+    ///    consolidation at low fee rates pulls in all remaining UTXOs up to the
+    ///    500-input cap.
+    /// 3. Wait for a single `WithdrawalPickedForProcessingEvent` with all 50
+    ///    requests batched and a large number of inputs selected.
+    /// 4. Mine blocks and wait for `WithdrawalConfirmedEvent`, which implies the
+    ///    signature-commit transaction succeeded (previously it would fail with
+    ///    "maximum pure argument size is 16384").
+    #[tokio::test]
+    async fn test_large_withdrawal_signature_chunking() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Large Withdrawal Signature Chunking Test ===");
+
+        // 24-hour batching delay: the batch fires only at capacity (50), not
+        // on a timer. This ensures all 50 requests end up in one Bitcoin tx.
+        // With 4 nodes at weight 25 each (total_weight=100), the presig pool
+        // is batch_size_per_weight * total_weight. We need at least 500
+        // presignatures for 500 inputs, so set batch_size_per_weight to 10
+        // which gives 10 * 100 = 1000 presigs. However the pool is consumed
+        // per-batch (20 at a time), so we need a larger pool to avoid
+        // exhaustion during signing of 500 inputs.
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_max_batch_size(50)
+            .with_withdrawal_batching_delay_ms(86_400_000)
+            .with_batch_size_per_weight(100)
+            .build()
+            .await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let hbtc_recipient = user_key.public_key().derive_address();
+
+        let deposit_address =
+            hashi.get_deposit_address(&hashi.get_onchain_mpc_pubkey()?, Some(&hbtc_recipient))?;
+
+        // --- Create 500 Bitcoin deposits ---
+        // Each deposit is 40,000 sats (above the 30,000 on-chain minimum),
+        // totalling 20,000,000 sats. The withdrawals request
+        // 50 x 30,000 = 1,500,000 sats. Coin selection picks enough UTXOs
+        // for value and consolidation at low fee rates pulls in the rest up
+        // to the 500-input cap.
+        let deposit_amount_sats = 40_000u64;
+        let num_deposits: usize = 500;
+        // With 500 inputs and 64-byte Schnorr signatures, the BCS-encoded
+        // signatures vector is ~32.5 KiB -- well above the 16 KiB per-pure-arg
+        // limit that the chunking fix addresses.
+        info!(
+            "Creating {} Bitcoin deposits of {} sats each...",
+            num_deposits, deposit_amount_sats
+        );
+
+        // Mine blocks every 20 transactions to avoid hitting Bitcoin Core's
+        // mempool descendant chain limit (default 25).
+        let mut btc_txids = Vec::with_capacity(num_deposits);
+        for i in 0..num_deposits {
+            let txid = networks
+                .bitcoin_node
+                .send_to_address(&deposit_address, Amount::from_sat(deposit_amount_sats))?;
+            btc_txids.push(txid);
+            if (i + 1) % 20 == 0 {
+                networks.bitcoin_node.generate_blocks(1)?;
+                if (i + 1) % 100 == 0 {
+                    info!("  Bitcoin txns sent: {}/{}", i + 1, num_deposits);
+                }
+            }
+        }
+
+        info!("Mining blocks for confirmation...");
+        networks.bitcoin_node.generate_blocks(10)?;
+
+        // Look up vout for each tx and register deposits on Sui in batches.
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+
+        let deposits_data: Vec<(Address, u32, u64)> = btc_txids
+            .iter()
+            .map(|txid| {
+                let vout = lookup_vout(
+                    &networks,
+                    *txid,
+                    deposit_address.clone(),
+                    deposit_amount_sats,
+                )?;
+                Ok((txid_to_address(txid), vout as u32, deposit_amount_sats))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // PTB command limit is 1024; each deposit uses 3 commands, so batch
+        // at 300 deposits per PTB to stay well within limits.
+        for (batch_idx, chunk) in deposits_data.chunks(300).enumerate() {
+            info!(
+                "Submitting deposit batch {} ({} deposits)...",
+                batch_idx + 1,
+                chunk.len()
+            );
+            executor
+                .execute_create_deposit_requests_multi(chunk, Some(hbtc_recipient))
+                .await?;
+        }
+        info!("All {} deposit requests submitted on Sui", num_deposits);
+
+        // Poll the on-chain deposit queue until all deposits are confirmed.
+        // The hashi node's watcher keeps OnchainState up-to-date; confirmed
+        // deposits leave the queue automatically.
+        info!("Waiting for {} deposit confirmations...", num_deposits);
+        let deposit_timeout = Duration::from_secs(600);
+        let deposit_start = std::time::Instant::now();
+        let mut last_logged = 0usize;
+        loop {
+            if deposit_start.elapsed() > deposit_timeout {
+                let remaining = hashi.onchain_state().deposit_requests().len();
+                return Err(anyhow!(
+                    "Timeout waiting for deposit confirmations: {} still pending after {:?}",
+                    remaining,
+                    deposit_timeout,
+                ));
+            }
+            let remaining = hashi.onchain_state().deposit_requests().len();
+            if remaining == 0 {
+                break;
+            }
+            let confirmed = num_deposits - remaining;
+            if confirmed / 50 > last_logged / 50 {
+                info!("Deposit confirmations: {}/{}", confirmed, num_deposits);
+                last_logged = confirmed;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        info!("All deposits confirmed");
+
+        // --- Submit 50 withdrawal requests ---
+        let withdrawal_amount_sats = 30_000u64;
+        let num_withdrawals: usize = 50;
+        info!(
+            "Submitting {} withdrawal requests of {} sats each...",
+            num_withdrawals, withdrawal_amount_sats
+        );
+
+        for i in 0..num_withdrawals {
+            let btc_destination = networks.bitcoin_node.get_new_address()?;
+            let destination_bytes = extract_witness_program(&btc_destination)?;
+            executor
+                .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+                .await?;
+            if (i + 1) % 10 == 0 {
+                info!(
+                    "  Withdrawal requests submitted: {}/{}",
+                    i + 1,
+                    num_withdrawals
+                );
+            }
+        }
+        info!("All withdrawal requests submitted");
+
+        // Wait for the batched withdrawal to be picked for processing. The
+        // 24-hour delay means it fires only at capacity (50 requests).
+        info!("Waiting for batched withdrawal to be picked...");
+        let picked = wait_for_batched_withdrawal_picked(
+            &mut networks.sui_network.client,
+            num_withdrawals,
+            Duration::from_secs(300),
+        )
+        .await?;
+
+        info!(
+            "Batched withdrawal picked: pending_id={}, requests={}, inputs={}",
+            picked.pending_id,
+            picked.request_ids.len(),
+            picked.inputs.len(),
+        );
+
+        assert_eq!(
+            picked.request_ids.len(),
+            num_withdrawals,
+            "Expected all {} withdrawal requests to be batched",
+            num_withdrawals,
+        );
+
+        // With 500 UTXOs at 4,000 sats and 1,500,000 sats of withdrawals,
+        // coin selection should pick most UTXOs for value and consolidate the
+        // rest. Verify that enough inputs were selected to exceed the old
+        // 16 KiB per-pure-arg limit (~252 signatures at 65 BCS bytes each).
+        assert!(
+            picked.inputs.len() > 252,
+            "Expected more than 252 inputs to exercise signature chunking, \
+             but only got {}",
+            picked.inputs.len(),
+        );
+
+        // Mine blocks and wait for the withdrawal to be confirmed. This
+        // implicitly validates that the signature-commit transaction succeeded
+        // -- previously it would fail with "maximum pure argument size is
+        // 16384".
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_n_withdrawal_confirmations(
+            &mut networks.sui_network.client,
+            1,
+            Duration::from_secs(600),
+        )
+        .await?;
+        drop(miner);
+
+        info!("=== Large Withdrawal Signature Chunking Test Passed ===");
+        Ok(())
+    }
 }
