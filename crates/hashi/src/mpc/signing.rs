@@ -196,45 +196,44 @@ impl SigningManager {
             } else {
                 // Find the batch containing this presig index, advancing
                 // into the next batch if needed.
-                let batch = if let Some(b) = mgr.batches.iter().position(
-                    |b| b.contains(global_presig_index),
-                ) {
+                let batch = if let Some(b) = mgr
+                    .batches
+                    .iter()
+                    .position(|b| b.contains(global_presig_index))
+                {
                     &mut mgr.batches[b]
                 } else {
-                    // Index is beyond all current batches; try to swap in
+                    // Index not found in any current batch; try to swap in
                     // the prefetched next batch.
-                    let latest = mgr.batches.last()
-                        .expect("batches should never be empty");
-                    let next_start = latest.end_index();
-                    let next_batch_index = latest.batch_index + 1;
-                    if let Some(next) = mgr.next_batch.take() {
-                        let pool: Vec<Option<(Vec<S>, G)>> =
-                            next.map(Some).collect();
-                        mgr.batches.push(PresigBatch {
-                            pool,
-                            start_index: next_start,
-                            batch_index: next_batch_index,
-                        });
+                    if let Some(latest) = mgr.batches.last() {
+                        let next_start = latest.end_index();
+                        let next_batch_index = latest.batch_index + 1;
+                        if let Some(next) = mgr.next_batch.take() {
+                            let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
+                            mgr.batches.push(PresigBatch {
+                                pool,
+                                start_index: next_start,
+                                batch_index: next_batch_index,
+                            });
+                        }
                     }
                     // Check if the index is now covered.
-                    if let Some(b) = mgr.batches.iter().position(
-                        |b| b.contains(global_presig_index),
-                    ) {
+                    if let Some(b) = mgr
+                        .batches
+                        .iter()
+                        .position(|b| b.contains(global_presig_index))
+                    {
                         &mut mgr.batches[b]
                     } else {
-                        let latest = mgr.batches.last().unwrap();
                         tracing::error!(
-                            "Presig index {global_presig_index} is beyond all batches \
-                             (latest batch {}, range {}..{}).",
-                            latest.batch_index,
-                            latest.start_index,
-                            latest.end_index(),
+                            "Presig index {global_presig_index} not found in any \
+                             batch ({} batch(es) active).",
+                            mgr.batches.len(),
                         );
                         return Err(SigningError::PoolExhausted);
                     }
                 };
-                let target_position =
-                    (global_presig_index - batch.start_index) as usize;
+                let target_position = (global_presig_index - batch.start_index) as usize;
                 let presig = batch
                     .pool
                     .get_mut(target_position)
@@ -809,7 +808,9 @@ mod tests {
                     continue;
                 }
                 let mgr = mgr_lock.read().unwrap();
-                let presig = mgr.batches.iter()
+                let presig = mgr
+                    .batches
+                    .iter()
                     .find(|b| b.contains(global_presig_index))
                     .and_then(|b| {
                         let pos = (global_presig_index - b.start_index) as usize;
@@ -1459,7 +1460,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "signing from a retained previous batch should succeed");
+        assert!(
+            result.is_ok(),
+            "signing from a retained previous batch should succeed"
+        );
     }
 
     #[tokio::test]
