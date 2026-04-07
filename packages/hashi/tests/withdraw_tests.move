@@ -144,6 +144,7 @@ fun test_approve_request_with_certificate() {
         .commit_requests(
             &vector[id1, id2],
             pending_id,
+            @0xBEEF,
         );
     // Total: 10_000 + 20_000 = 30_000
     assert!(btc_balance.value() == 30_000);

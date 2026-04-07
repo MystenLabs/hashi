@@ -30,8 +30,8 @@ const EOutputCountMismatch: vector<u8> =
 public enum WithdrawalStatus has copy, drop, store {
     Requested,
     Approved,
-    Processing { pending_withdrawal_id: address },
-    Signed { pending_withdrawal_id: address },
+    Processing { pending_withdrawal_id: address, txid: address },
+    Signed { pending_withdrawal_id: address, txid: address },
     Confirmed { txid: address },
 }
 
@@ -169,6 +169,7 @@ public(package) fun commit_requests(
     self: &mut WithdrawalRequestQueue,
     request_ids: &vector<address>,
     pending_withdrawal_id: address,
+    txid: address,
 ): (vector<CommittedRequestInfo>, Balance<BTC>) {
     let mut infos = vector[];
     let mut total_btc = sui::balance::zero<BTC>();
@@ -187,7 +188,7 @@ public(package) fun commit_requests(
         });
 
         // Update status and move to processed
-        request.status = WithdrawalStatus::Processing { pending_withdrawal_id };
+        request.status = WithdrawalStatus::Processing { pending_withdrawal_id, txid };
         request.pending_withdrawal_id = option::some(pending_withdrawal_id);
         self.processed.add(*id, request);
     });
@@ -200,10 +201,11 @@ public(package) fun update_requests_signed(
     self: &mut WithdrawalRequestQueue,
     request_ids: &vector<address>,
     pending_withdrawal_id: address,
+    txid: address,
 ) {
     request_ids.do_ref!(|id| {
         let request: &mut WithdrawalRequest = self.processed.borrow_mut(*id);
-        request.status = WithdrawalStatus::Signed { pending_withdrawal_id };
+        request.status = WithdrawalStatus::Signed { pending_withdrawal_id, txid };
     });
 }
 
@@ -360,6 +362,13 @@ public(package) fun insert_pending_withdrawal(
     pending: PendingWithdrawal,
 ) {
     self.pending_withdrawals.add(pending.id, pending)
+}
+
+public(package) fun borrow_pending_withdrawal(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): &PendingWithdrawal {
+    self.pending_withdrawals.borrow(withdrawal_id)
 }
 
 public(package) fun remove_pending_withdrawal(

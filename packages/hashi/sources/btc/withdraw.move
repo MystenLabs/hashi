@@ -174,7 +174,7 @@ entry fun commit_withdrawal_tx(
     inputs.do_ref!(|utxo| btc.utxo_pool_mut().lock(utxo.id(), pending_id));
     let (request_infos, btc_to_burn) = btc
         .withdrawal_queue_mut()
-        .commit_requests(&request_ids, pending_id);
+        .commit_requests(&request_ids, pending_id, txid);
     // btc borrow released
 
     // Allocate presigs from core counter (must happen after btc borrow is released)
@@ -253,8 +253,9 @@ entry fun sign_withdrawal(
     let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
 
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
+    let txid = queue.borrow_pending_withdrawal(withdrawal_id).txid();
     queue.sign_pending_withdrawal(withdrawal_id, signatures);
-    queue.update_requests_signed(&request_ids, withdrawal_id);
+    queue.update_requests_signed(&request_ids, withdrawal_id, txid);
 }
 
 entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: CommitteeSignature) {

@@ -253,9 +253,17 @@ pub struct WithdrawalRequestQueue {
 pub enum WithdrawalStatus {
     Requested,
     Approved,
-    Processing { pending_withdrawal_id: Address },
-    Signed { pending_withdrawal_id: Address },
-    Confirmed { txid: BitcoinTxid },
+    Processing {
+        pending_withdrawal_id: Address,
+        txid: BitcoinTxid,
+    },
+    Signed {
+        pending_withdrawal_id: Address,
+        txid: BitcoinTxid,
+    },
+    Confirmed {
+        txid: BitcoinTxid,
+    },
 }
 
 impl WithdrawalStatus {

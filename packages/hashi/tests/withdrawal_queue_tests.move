@@ -71,7 +71,7 @@ fun approve_and_commit(
     let id = setup_request(queue, clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
     let info = infos[0];
     (id, info)
@@ -117,7 +117,7 @@ fun test_approve_request() {
 
     // Verify by committing — should not abort (only approved requests can be committed)
     let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = queue.commit_requests(&vector[request_id], pending_id);
+    let (_, btc_balance) = queue.commit_requests(&vector[request_id], pending_id, @0xBEEF);
     let btc = &btc_balance;
     assert!(btc.value() == 10_000);
 
@@ -143,7 +143,7 @@ fun test_approve_multiple_requests() {
 
     // Commit all as approved
     let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = queue.commit_requests(&vector[id1, id2, id3], pending_id);
+    let (_, btc_balance) = queue.commit_requests(&vector[id1, id2, id3], pending_id, @0xBEEF);
 
     // Total: 5_000 + 15_000 + 25_000 = 45_000
     assert!(btc_balance.value() == 45_000);
@@ -166,7 +166,7 @@ fun test_remove_approved_request_fails_when_not_approved() {
 
     // Try to commit without approving first — should abort
     let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = queue.commit_requests(&vector[request_id], pending_id);
+    let (_, btc_balance) = queue.commit_requests(&vector[request_id], pending_id, @0xBEEF);
 
     // Cleanup (won't be reached)
     btc_balance.destroy_for_testing();
@@ -228,7 +228,11 @@ fun test_full_withdrawal_queue_lifecycle() {
 
     // Step 3: Commit — drain BTC and move to processed
     let pending_id_addr = ctx.fresh_object_address();
-    let (_infos, btc_balance) = queue.commit_requests(&vector[request_id], pending_id_addr);
+    let (_infos, btc_balance) = queue.commit_requests(
+        &vector[request_id],
+        pending_id_addr,
+        @0xBEEF,
+    );
     assert!(btc_balance.value() == 30_000);
     btc_balance.destroy_for_testing();
 
@@ -393,7 +397,7 @@ fun test_miner_fee_single_request() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -433,7 +437,7 @@ fun test_miner_fee_single_request_large_fee() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -476,7 +480,7 @@ fun test_miner_fee_batched_even_split() {
     queue.approve_withdrawal(id1);
     queue.approve_withdrawal(id2);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -527,7 +531,7 @@ fun test_miner_fee_batched_with_remainder() {
     queue.approve_withdrawal(id2);
     queue.approve_withdrawal(id3);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2, id3], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2, id3], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -577,7 +581,7 @@ fun test_miner_fee_batched_unequal_amounts() {
     queue.approve_withdrawal(id1);
     queue.approve_withdrawal(id2);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -620,7 +624,7 @@ fun test_miner_fee_zero() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -661,7 +665,7 @@ fun test_miner_fee_output_at_dust_floor() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -703,7 +707,7 @@ fun test_miner_fee_output_below_dust_aborts() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -747,7 +751,7 @@ fun test_miner_fee_wrong_output_amount_aborts() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
@@ -788,7 +792,7 @@ fun test_miner_fee_wrong_address_aborts() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     // Output uses a different address than the request (which uses all-zeros)
@@ -834,7 +838,7 @@ fun test_miner_fee_exceeds_max_aborts() {
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
     let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id);
+    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
     btc_balance.destroy_for_testing();
 
     let pending = withdrawal_queue::new_pending_withdrawal(
