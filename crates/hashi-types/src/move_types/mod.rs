@@ -258,8 +258,20 @@ pub enum WithdrawalStatus {
     Confirmed { txid: BitcoinTxid },
 }
 
+impl WithdrawalStatus {
+    /// Returns true if the status is `Approved`.
+    pub fn is_approved(&self) -> bool {
+        matches!(self, Self::Approved)
+    }
+
+    /// Returns true if the status is `Requested`.
+    pub fn is_requested(&self) -> bool {
+        matches!(self, Self::Requested)
+    }
+}
+
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct WithdrawalRequest {
     pub id: Address,
     pub sender: Address,
@@ -281,7 +293,7 @@ pub struct CommittedRequestInfo {
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct PendingWithdrawal {
     pub id: Address,
     pub txid: BitcoinTxid,
@@ -296,8 +308,18 @@ pub struct PendingWithdrawal {
     pub epoch: u64,
 }
 
+impl PendingWithdrawal {
+    pub fn all_outputs(&self) -> Vec<OutputUtxo> {
+        let mut outputs = self.withdrawal_outputs.clone();
+        if let Some(ref change) = self.change_output {
+            outputs.push(change.clone());
+        }
+        outputs
+    }
+}
+
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct OutputUtxo {
     /// In satoshis
     pub amount: u64,
@@ -305,7 +327,7 @@ pub struct OutputUtxo {
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize)]
 pub struct DepositRequest {
     pub id: Address,
     pub sender: Address,
@@ -314,7 +336,7 @@ pub struct DepositRequest {
     pub utxo: Utxo,
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis
@@ -323,7 +345,7 @@ pub struct Utxo {
 }
 
 /// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, serde_derive::Deserialize)]
 pub struct UtxoRecord {
     pub utxo: Utxo,
     pub produced_by: Option<Address>,
@@ -331,7 +353,18 @@ pub struct UtxoRecord {
 }
 
 /// txid:vout
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde_derive::Deserialize)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Hash,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde_derive::Deserialize,
+    serde_derive::Serialize,
+)]
 pub struct UtxoId {
     // a 32 byte sha256 of the transaction
     pub txid: BitcoinTxid,

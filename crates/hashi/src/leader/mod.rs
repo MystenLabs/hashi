@@ -389,7 +389,7 @@ impl LeaderService {
 
         info!(deposit_request_id = %deposit_request.id, "Deposit request validated successfully");
 
-        let proto_request = deposit_request.to_proto();
+        let proto_request = deposit_request_to_proto(&deposit_request);
         let members = inner
             .onchain_state()
             .current_committee_members()
@@ -1805,21 +1805,19 @@ impl LeaderService {
     }
 }
 
-impl DepositRequest {
-    fn to_proto(&self) -> SignDepositConfirmationRequest {
-        SignDepositConfirmationRequest {
-            id: self.id.as_bytes().to_vec().into(),
-            txid: self.utxo.id.txid.as_bytes().to_vec().into(),
-            vout: self.utxo.id.vout,
-            amount: self.utxo.amount,
-            derivation_path: self
-                .utxo
-                .derivation_path
-                .map(|p| p.as_bytes().to_vec().into()),
-            timestamp_ms: self.timestamp_ms,
-            requester_address: self.sender.as_bytes().to_vec().into(),
-            sui_tx_digest: self.sui_tx_digest.as_bytes().to_vec().into(),
-        }
+fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequest {
+    SignDepositConfirmationRequest {
+        id: req.id.as_bytes().to_vec().into(),
+        txid: req.utxo.id.txid.as_bytes().to_vec().into(),
+        vout: req.utxo.id.vout,
+        amount: req.utxo.amount,
+        derivation_path: req
+            .utxo
+            .derivation_path
+            .map(|p| p.as_bytes().to_vec().into()),
+        timestamp_ms: req.timestamp_ms,
+        requester_address: req.sender.as_bytes().to_vec().into(),
+        sui_tx_digest: req.sui_tx_digest.as_bytes().to_vec().into(),
     }
 }
 

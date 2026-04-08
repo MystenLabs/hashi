@@ -244,7 +244,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     timestamp_ms: deposit_requested_event.timestamp_ms,
                     sui_tx_digest: deposit_requested_event.sui_tx_digest,
                     utxo: super::types::Utxo {
-                        id: deposit_requested_event.utxo_id.into(),
+                        id: deposit_requested_event.utxo_id,
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
@@ -262,7 +262,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 let mut state = state.state_mut();
 
                 let utxo = super::types::Utxo {
-                    id: deposit_confirmed_event.utxo_id.into(),
+                    id: deposit_confirmed_event.utxo_id,
                     amount: deposit_confirmed_event.amount,
                     derivation_path: deposit_confirmed_event.derivation_path,
                 };
@@ -368,8 +368,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 {
                     let mut state = state.state_mut();
                     for input in &event.inputs {
-                        let utxo_id: super::types::UtxoId = input.id.into();
-                        if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&utxo_id) {
+                        if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&input.id)
+                        {
                             record.locked_by = Some(event.pending_id);
                         }
                     }
@@ -414,13 +414,11 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 // Promote the change UTXO from pending to confirmed by
                 // clearing `produced_by`. The UTXO was already inserted at
                 // commit time; input UTXOs are removed via UtxoSpentEvent.
-                if let Some(change_utxo_id) = event.change_utxo_id {
-                    let change_utxo_id: super::types::UtxoId = change_utxo_id.into();
-                    if let Some(record) =
+                if let Some(change_utxo_id) = event.change_utxo_id
+                    && let Some(record) =
                         state.hashi.utxo_pool.utxo_records.get_mut(&change_utxo_id)
-                    {
-                        record.produced_by = None;
-                    }
+                {
+                    record.produced_by = None;
                 }
 
                 state
@@ -431,13 +429,16 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
                 let mut state = state.state_mut();
-                let utxo_id = utxo_spent_event.utxo_id.into();
-                state.hashi.utxo_pool.utxo_records.remove(&utxo_id);
+                state
+                    .hashi
+                    .utxo_pool
+                    .utxo_records
+                    .remove(&utxo_spent_event.utxo_id);
                 state
                     .hashi
                     .utxo_pool
                     .spent_utxos
-                    .insert(utxo_id, utxo_spent_event.spent_epoch);
+                    .insert(utxo_spent_event.utxo_id, utxo_spent_event.spent_epoch);
             }
             HashiEvent::StartReconfigEvent(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;

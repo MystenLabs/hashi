@@ -698,32 +698,9 @@ pub(crate) async fn scrape_hashi_config(
 
 fn convert_move_config(config: move_types::Config) -> types::Config {
     types::Config {
-        config: config
-            .config
-            .into_iter()
-            .map(|(key, value)| (key, convert_move_config_value(value)))
-            .collect(),
+        config: config.config.into_iter().collect(),
         enabled_versions: config.enabled_versions.contents.into_iter().collect(),
-        upgrade_cap: config.upgrade_cap.map(convert_move_upgrade_cap),
-    }
-}
-
-fn convert_move_config_value(value: move_types::ConfigValue) -> types::ConfigValue {
-    match value {
-        move_types::ConfigValue::U64(v) => types::ConfigValue::U64(v),
-        move_types::ConfigValue::Address(address) => types::ConfigValue::Address(address),
-        move_types::ConfigValue::String(s) => types::ConfigValue::String(s),
-        move_types::ConfigValue::Bool(b) => types::ConfigValue::Bool(b),
-        move_types::ConfigValue::Bytes(bytes) => types::ConfigValue::Bytes(bytes),
-    }
-}
-
-fn convert_move_upgrade_cap(cap: move_types::UpgradeCap) -> types::UpgradeCap {
-    types::UpgradeCap {
-        id: cap.id,
-        package: cap.package,
-        version: cap.version,
-        policy: cap.policy,
+        upgrade_cap: config.upgrade_cap,
     }
 }
 
@@ -1014,33 +991,13 @@ async fn scrape_deposit_requests(
                 ])),
         )
         .and_then(|field| async move {
-            let deposit_request: move_types::DepositRequest = field
+            let request: types::DepositRequest = field
                 .child_object()
                 .contents()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok(deposit_request)
+            Ok((request.id, request))
         })
-        .map_ok(
-            |move_types::DepositRequest {
-                 id,
-                 sender,
-                 timestamp_ms,
-                 sui_tx_digest,
-                 utxo,
-             }| {
-                (
-                    id,
-                    types::DepositRequest {
-                        id,
-                        sender,
-                        timestamp_ms,
-                        sui_tx_digest,
-                        utxo: convert_move_utxo(utxo),
-                    },
-                )
-            },
-        )
         .try_collect()
         .await?;
 
@@ -1089,28 +1046,13 @@ async fn scrape_withdrawal_requests(
                 ])),
         )
         .and_then(|field| async move {
-            let withdrawal_request: move_types::WithdrawalRequest = field
-                .child_object()
-                .contents()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok(withdrawal_request)
-        })
-        .map_ok(|req| {
-            (
-                req.id,
-                types::WithdrawalRequest {
-                    id: req.id,
-                    sender: req.sender,
-                    btc_amount: req.btc_amount,
-                    bitcoin_address: req.bitcoin_address,
-                    timestamp_ms: req.timestamp_ms,
-                    status: convert_move_withdrawal_status(req.status),
-                    pending_withdrawal_id: req.pending_withdrawal_id,
-                    sui_tx_digest: req.sui_tx_digest,
-                    btc: req.btc,
-                },
-            )
+            let request: types::WithdrawalRequest =
+                field
+                    .child_object()
+                    .contents()
+                    .deserialize()
+                    .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok((request.id, request))
         })
         .try_collect()
         .await?;
@@ -1133,107 +1075,16 @@ async fn scrape_pending_withdrawals(
                 ])),
         )
         .and_then(|field| async move {
-            let pending: move_types::PendingWithdrawal = field
+            let pending: types::PendingWithdrawal = field
                 .value()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok(pending)
-        })
-        .map_ok(|pending| {
-            let inputs = pending.inputs.into_iter().map(convert_move_utxo).collect();
-            let withdrawal_outputs = pending
-                .withdrawal_outputs
-                .into_iter()
-                .map(|o| types::OutputUtxo {
-                    amount: o.amount,
-                    bitcoin_address: o.bitcoin_address,
-                })
-                .collect();
-            let change_output = pending.change_output.map(|o| types::OutputUtxo {
-                amount: o.amount,
-                bitcoin_address: o.bitcoin_address,
-            });
-            (
-                pending.id,
-                types::PendingWithdrawal {
-                    id: pending.id,
-                    txid: pending.txid,
-                    request_ids: pending.request_ids,
-                    inputs,
-                    withdrawal_outputs,
-                    change_output,
-                    timestamp_ms: pending.timestamp_ms,
-                    randomness: pending.randomness,
-                    signatures: pending.signatures,
-                    presig_start_index: pending.presig_start_index,
-                    epoch: pending.epoch,
-                },
-            )
+            Ok((pending.id, pending))
         })
         .try_collect()
         .await?;
 
     Ok(pending_withdrawals)
-}
-
-fn convert_move_utxo(
-    move_types::Utxo {
-        id: move_types::UtxoId { txid, vout },
-        amount,
-        derivation_path,
-    }: move_types::Utxo,
-) -> types::Utxo {
-    types::Utxo {
-        id: types::UtxoId { txid, vout },
-        amount,
-        derivation_path,
-    }
-}
-
-fn convert_move_withdrawal_status(status: move_types::WithdrawalStatus) -> types::WithdrawalStatus {
-    match status {
-        move_types::WithdrawalStatus::Requested => types::WithdrawalStatus::Requested,
-        move_types::WithdrawalStatus::Approved => types::WithdrawalStatus::Approved,
-        move_types::WithdrawalStatus::Processing {
-            pending_withdrawal_id,
-        } => types::WithdrawalStatus::Processing {
-            pending_withdrawal_id,
-        },
-        move_types::WithdrawalStatus::Signed {
-            pending_withdrawal_id,
-        } => types::WithdrawalStatus::Signed {
-            pending_withdrawal_id,
-        },
-        move_types::WithdrawalStatus::Confirmed { txid } => {
-            types::WithdrawalStatus::Confirmed { txid }
-        }
-    }
-}
-
-fn convert_move_pending_withdrawal(
-    pending: move_types::PendingWithdrawal,
-) -> types::PendingWithdrawal {
-    let convert_output = |o: move_types::OutputUtxo| types::OutputUtxo {
-        amount: o.amount,
-        bitcoin_address: o.bitcoin_address,
-    };
-    types::PendingWithdrawal {
-        id: pending.id,
-        txid: pending.txid,
-        request_ids: pending.request_ids,
-        inputs: pending.inputs.into_iter().map(convert_move_utxo).collect(),
-        withdrawal_outputs: pending
-            .withdrawal_outputs
-            .into_iter()
-            .map(convert_output)
-            .collect(),
-        change_output: pending.change_output.map(convert_output),
-        timestamp_ms: pending.timestamp_ms,
-        randomness: pending.randomness,
-        signatures: pending.signatures,
-        presig_start_index: pending.presig_start_index,
-        epoch: pending.epoch,
-    }
 }
 
 pub(super) async fn fetch_pending_withdrawal(
@@ -1253,14 +1104,14 @@ pub(super) async fn fetch_pending_withdrawal(
         )
         .await?;
 
-    let field: move_types::Field<Address, move_types::PendingWithdrawal> = response
+    let field: move_types::Field<Address, types::PendingWithdrawal> = response
         .into_inner()
         .object()
         .contents()
         .deserialize()
         .map_err(|e| anyhow!("failed to deserialize PendingWithdrawal: {e}"))?;
 
-    Ok(convert_move_pending_withdrawal(field.value))
+    Ok(field.value)
 }
 
 async fn scrape_utxo_pool(
@@ -1295,28 +1146,16 @@ async fn scrape_utxo_records(
                 ])),
         )
         .and_then(|field| async move {
-            let record: move_types::UtxoRecord = field
+            let record: types::UtxoRecord = field
                 .value()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok(record)
-        })
-        .map_ok(|record| {
-            let record = convert_move_utxo_record(record);
-            (record.utxo.id, record)
+            Ok((record.utxo.id, record))
         })
         .try_collect()
         .await?;
 
     Ok(utxo_records)
-}
-
-fn convert_move_utxo_record(record: move_types::UtxoRecord) -> types::UtxoRecord {
-    types::UtxoRecord {
-        utxo: convert_move_utxo(record.utxo),
-        produced_by: record.produced_by,
-        locked_by: record.locked_by,
-    }
 }
 
 async fn scrape_spent_utxos(
@@ -1334,7 +1173,7 @@ async fn scrape_spent_utxos(
                 ])),
         )
         .and_then(|field| async move {
-            let utxo_id: move_types::UtxoId = field
+            let utxo_id: types::UtxoId = field
                 .name()
                 .deserialize()
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
@@ -1344,7 +1183,6 @@ async fn scrape_spent_utxos(
                 .map_err(|e| tonic::Status::from_error(e.into()))?;
             Ok((utxo_id, spent_epoch))
         })
-        .map_ok(|(utxo_id, spent_epoch): (move_types::UtxoId, u64)| (utxo_id.into(), spent_epoch))
         .try_collect()
         .await?;
 
