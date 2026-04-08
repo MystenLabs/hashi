@@ -449,7 +449,8 @@ impl LeaderService {
                 inner.metrics.deposits_confirmed_total.inc();
                 info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
             })
-            .inspect_err(|_| {
+            .inspect_err(|e| {
+                error!(deposit_request_id = %deposit_request.id, "Failed to submit deposit confirmation: {e}");
                 inner
                     .metrics
                     .sui_tx_submissions_total

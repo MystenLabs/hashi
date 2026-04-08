@@ -730,6 +730,10 @@ impl Monitor {
         .await;
         match gettxout_result {
             Ok(Some(_)) => {
+                info!(
+                    "Deposit {}:{} confirmed with {confirmations}/{confirmation_threshold} confirmations",
+                    pending_deposit.outpoint.txid, pending_deposit.outpoint.vout,
+                );
                 let pending_deposit = pending_deposit.take();
                 let _ = pending_deposit.result_tx.send(Ok(txout));
             }
