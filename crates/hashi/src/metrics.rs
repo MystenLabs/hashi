@@ -73,6 +73,30 @@ pub struct Metrics {
 
     pub mpc_sign_duration_seconds: HistogramVec,
     pub mpc_sign_failures_total: IntCounterVec,
+
+    // MPC profiling metrics
+    pub mpc_reconfig_total_duration_seconds: HistogramVec,
+    pub mpc_end_reconfig_duration_seconds: HistogramVec,
+    pub mpc_prepare_signing_duration_seconds: HistogramVec,
+    pub mpc_total_duration_seconds: HistogramVec,
+    pub mpc_dealer_crypto_duration_seconds: HistogramVec,
+    pub mpc_p2p_broadcast_duration_seconds: HistogramVec,
+    pub mpc_cert_publish_duration_seconds: HistogramVec,
+    pub mpc_tob_poll_duration_seconds: HistogramVec,
+    pub mpc_cert_verify_duration_seconds: HistogramVec,
+    pub mpc_message_process_duration_seconds: HistogramVec,
+    pub mpc_message_retrieval_duration_seconds: HistogramVec,
+    pub mpc_complaint_recovery_duration_seconds: HistogramVec,
+    pub mpc_completion_duration_seconds: HistogramVec,
+    pub mpc_presig_conversion_duration_seconds: HistogramVec,
+    pub mpc_rotation_prepare_previous_duration_seconds: HistogramVec,
+    pub mpc_sign_partial_gen_duration_seconds: HistogramVec,
+    pub mpc_sign_collection_duration_seconds: HistogramVec,
+    pub mpc_sign_aggregation_duration_seconds: HistogramVec,
+    pub mpc_rpc_handler_process_duration_seconds: HistogramVec,
+    pub mpc_bytes_sent_total: IntCounterVec,
+    pub mpc_bytes_received_total: IntCounterVec,
+    pub mpc_p2p_message_size_bytes: HistogramVec,
 }
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
@@ -80,6 +104,19 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
 ];
 
 const MPC_SIGN_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 1.5, 2., 2.5, 3., 4., 5., 7.5, 10.];
+
+pub const MPC_LABEL_DKG: &str = "dkg";
+pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
+pub const MPC_LABEL_NONCE_GEN: &str = "nonce_gen";
+pub const MPC_LABEL_SIGNING: &str = "signing";
+
+const MPC_PROTOCOL_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 2., 5., 10., 20., 30., 60.];
+
+const MPC_PHASE_DURATION_BUCKETS: &[f64] =
+    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1., 2., 5., 10.];
+
+const MPC_MESSAGE_SIZE_BUCKETS: &[f64] =
+    &[1024., 4096., 16384., 65536., 262144., 1048576., 4194304.];
 
 impl Metrics {
     pub fn new_default() -> Self {
@@ -340,6 +377,190 @@ impl Metrics {
                 "hashi_mpc_sign_failures_total",
                 "Total MPC signing failures by reason",
                 &["reason"],
+                registry,
+            )
+            .unwrap(),
+
+            // MPC profiling: reconfig-level
+            mpc_reconfig_total_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_reconfig_total_duration_seconds",
+                "Duration of full handle_reconfig",
+                &["protocol"],
+                MPC_PROTOCOL_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_end_reconfig_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_end_reconfig_duration_seconds",
+                "Duration of submit_end_reconfig",
+                &["protocol"],
+                MPC_PROTOCOL_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_prepare_signing_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_prepare_signing_duration_seconds",
+                "Duration of prepare_signing",
+                &["protocol"],
+                MPC_PROTOCOL_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+
+            // MPC profiling: per-phase (labeled by protocol)
+            mpc_total_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_total_duration_seconds",
+                "End-to-end duration of MPC protocol",
+                &["protocol"],
+                MPC_PROTOCOL_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_dealer_crypto_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_dealer_crypto_duration_seconds",
+                "Duration of dealer crypto",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_p2p_broadcast_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_p2p_broadcast_duration_seconds",
+                "Duration of send_to_many",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_cert_publish_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_cert_publish_duration_seconds",
+                "Duration of tob_channel.publish",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_tob_poll_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_tob_poll_duration_seconds",
+                "Duration of tob_channel.receive",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_cert_verify_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_cert_verify_duration_seconds",
+                "Duration of BLS certificate signature verification",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_message_process_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_message_process_duration_seconds",
+                "Duration of AVSS message processing",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_message_retrieval_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_message_retrieval_duration_seconds",
+                "Duration of retrieve_dealer_message",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_complaint_recovery_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_complaint_recovery_duration_seconds",
+                "Duration of complaint recovery",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_completion_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_completion_duration_seconds",
+                "Duration of final aggregation",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_presig_conversion_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_presig_conversion_duration_seconds",
+                "Duration of Presignatures::new",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_rotation_prepare_previous_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_rotation_prepare_previous_duration_seconds",
+                "Duration of prepare_previous_output",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+
+            // MPC profiling: signing phase breakdown
+            mpc_sign_partial_gen_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_sign_partial_gen_duration_seconds",
+                "Duration of generate_partial_signatures",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_sign_collection_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_sign_collection_duration_seconds",
+                "Duration of P2P partial signature collection from peers",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_sign_aggregation_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_sign_aggregation_duration_seconds",
+                "Duration of aggregate_signatures / RS recovery",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+
+            // MPC profiling: RPC handler
+            mpc_rpc_handler_process_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_rpc_handler_process_duration_seconds",
+                "Duration of process_message in RPC handler",
+                &["protocol"],
+                MPC_PHASE_DURATION_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+
+            // MPC profiling: communication volume
+            mpc_bytes_sent_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_bytes_sent_total",
+                "Total bytes sent in MPC P2P messages",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_bytes_received_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_bytes_received_total",
+                "Total bytes received in MPC P2P messages",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_p2p_message_size_bytes: register_histogram_vec_with_registry!(
+                "hashi_mpc_p2p_message_size_bytes",
+                "Size of each MPC P2P message sent (bytes)",
+                &["protocol"],
+                MPC_MESSAGE_SIZE_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),

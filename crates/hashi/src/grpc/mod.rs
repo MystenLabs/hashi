@@ -39,6 +39,10 @@ impl HttpService {
         Self { inner: hashi }
     }
 
+    pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
+        &self.inner.metrics
+    }
+
     pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
             let max_decoding_message_size = self.inner.config.grpc_max_decoding_message_size();

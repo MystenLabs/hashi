@@ -19,6 +19,7 @@ use hashi_types::proto::RetrieveMessagesResponse;
 use hashi_types::proto::SendMessagesRequest;
 use hashi_types::proto::SendMessagesResponse;
 use hashi_types::proto::mpc_service_server::MpcService;
+use std::time::Instant;
 use sui_sdk_types::Address;
 use tonic::Status;
 
@@ -33,7 +34,13 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::SendMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let label = match &internal_request.messages {
+            types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
+            types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
+            types::Messages::NonceGeneration(_) => crate::metrics::MPC_LABEL_NONCE_GEN,
+        };
         let mpc_manager = self.mpc_manager()?;
+        let process_start = Instant::now();
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
             validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
@@ -48,6 +55,10 @@ impl MpcService for HttpService {
                 })
         })
         .await?;
+        self.metrics()
+            .mpc_rpc_handler_process_duration_seconds
+            .with_label_values(&[label])
+            .observe(process_start.elapsed().as_secs_f64());
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
     }
 

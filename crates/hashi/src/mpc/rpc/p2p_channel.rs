@@ -1,10 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
 use crate::grpc::Client;
+use crate::metrics::Metrics;
 use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -22,13 +25,22 @@ use sui_sdk_types::Address;
 pub struct RpcP2PChannel {
     onchain_state: OnchainState,
     epoch: u64,
+    metrics: Arc<Metrics>,
+    protocol_label: &'static str,
 }
 
 impl RpcP2PChannel {
-    pub fn new(onchain_state: OnchainState, epoch: u64) -> Self {
+    pub fn new(
+        onchain_state: OnchainState,
+        epoch: u64,
+        protocol_label: &'static str,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             onchain_state,
             epoch,
+            metrics,
+            protocol_label,
         }
     }
 
@@ -49,10 +61,20 @@ impl P2PChannel for RpcP2PChannel {
         recipient: &Address,
         request: &SendMessagesRequest,
     ) -> ChannelResult<SendMessagesResponse> {
-        self.get_client(recipient)?
+        let (response, request_size) = self
+            .get_client(recipient)?
             .send_messages(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+        self.metrics
+            .mpc_p2p_message_size_bytes
+            .with_label_values(&[self.protocol_label])
+            .observe(request_size as f64);
+        self.metrics
+            .mpc_bytes_sent_total
+            .with_label_values(&[self.protocol_label])
+            .inc_by(request_size as u64);
+        Ok(response)
     }
 
     async fn retrieve_messages(
@@ -60,10 +82,20 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
-        self.get_client(party)?
+        let (response, request_size, response_size) = self
+            .get_client(party)?
             .retrieve_messages(request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+        self.metrics
+            .mpc_bytes_sent_total
+            .with_label_values(&[self.protocol_label])
+            .inc_by(request_size as u64);
+        self.metrics
+            .mpc_bytes_received_total
+            .with_label_values(&[self.protocol_label])
+            .inc_by(response_size as u64);
+        Ok(response)
     }
 
     async fn complain(
@@ -71,10 +103,16 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses> {
-        self.get_client(party)?
+        let (response, request_size) = self
+            .get_client(party)?
             .complain(request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+        self.metrics
+            .mpc_bytes_sent_total
+            .with_label_values(&[self.protocol_label])
+            .inc_by(request_size as u64);
+        Ok(response)
     }
 
     async fn get_public_mpc_output(
@@ -93,9 +131,15 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &GetPartialSignaturesRequest,
     ) -> ChannelResult<GetPartialSignaturesResponse> {
-        self.get_client(party)?
+        let (response, request_size) = self
+            .get_client(party)?
             .get_partial_signatures(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+        self.metrics
+            .mpc_bytes_sent_total
+            .with_label_values(&[self.protocol_label])
+            .inc_by(request_size as u64);
+        Ok(response)
     }
 }

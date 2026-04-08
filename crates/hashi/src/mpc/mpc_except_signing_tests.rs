@@ -3,6 +3,11 @@
 
 use super::*;
 use crate::communication::ChannelResult;
+use crate::metrics::Metrics;
+
+fn test_metrics() -> Metrics {
+    Metrics::new(&prometheus::Registry::new())
+}
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::ProtocolType;
@@ -1396,12 +1401,13 @@ async fn test_run_dkg() {
     let test_manager = Arc::new(RwLock::new(test_manager));
 
     // Call run_as_dealer() and run_as_party() for validator 0
-    MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob)
+    MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
         .await
         .unwrap();
-    let output = MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output =
+        MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await
+            .unwrap();
 
     // Verify validator 0 received the correct number of key shares based on its weight
     assert_eq!(
@@ -1514,12 +1520,13 @@ async fn test_run_dkg_with_complaint_recovery() {
 
     let test_manager = Arc::new(RwLock::new(test_manager));
 
-    MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob)
+    MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
         .await
         .unwrap();
-    let output = MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output =
+        MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await
+            .unwrap();
 
     // Verify output is valid despite cheating dealer
     assert_eq!(
@@ -1615,9 +1622,14 @@ async fn test_run_triggers_dealer_phase() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates)
         .with_override_certified_dealers(vec![]);
 
-    let output = MpcManager::run_dkg(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output = MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify dealer published a certificate
     assert!(
@@ -1637,9 +1649,14 @@ async fn test_run_skips_dealer_phase() {
     // With 4 certificates and threshold = 2, existing_weight = 4 >= 2, dealer skips
     let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates);
 
-    let output = MpcManager::run_dkg(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output = MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify dealer did NOT publish (skipped)
     assert_eq!(
@@ -1663,9 +1680,14 @@ async fn test_run_dealer_failure_party_still_executes() {
         .with_override_certified_dealers(vec![])
         .with_fail_on_publish("simulated publish failure");
 
-    let output = MpcManager::run_dkg(&setup.test_manager, &setup.mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output = MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify DKG completed successfully (party phase executed despite dealer failure)
     assert_eq!(output.key_shares.shares.len(), 1);
@@ -1692,7 +1714,9 @@ async fn test_run_as_dealer_success() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
     // Call run_as_dealer()
-    let result = MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     // Verify success
     assert!(result.is_ok());
@@ -1774,9 +1798,10 @@ async fn test_run_as_party_success() {
         .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
         .collect();
     let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
-    let output = MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output =
+        MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await
+            .unwrap();
 
     // Verify output structure
     assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
@@ -1892,9 +1917,10 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Run as party - should recover shares via complaint
-    let output = MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output =
+        MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await
+            .unwrap();
 
     // Verify complaint was resolved
     // DKG: complaints keyed by dealer address
@@ -2004,9 +2030,10 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
         .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
         .collect();
     let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
-    let output = MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output =
+        MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await
+            .unwrap();
 
     // The critical assertion: test_manager must produce the same vk as other nodes.
     // Without the delete-on-mismatch fix, the stale output from wrong_msg_0 would
@@ -2075,9 +2102,10 @@ async fn test_run_as_party_requires_different_dealers() {
         })
         .collect();
     let mock_p2p = MockP2PChannel::new(other_managers, setup.address(2));
-    let output = MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    let output =
+        MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await
+            .unwrap();
 
     // Verify it correctly waited for 2 different dealers
     assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
@@ -2098,7 +2126,9 @@ async fn test_run_as_dealer_p2p_send_error() {
     };
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
-    let result = MpcManager::run_dkg_as_dealer(&test_manager, &failing_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_dealer(&test_manager, &failing_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     assert!(result.is_ok());
     assert_eq!(mock_tob.published_count(), 0);
@@ -2130,8 +2160,13 @@ async fn test_run_as_dealer_tob_publish_error() {
         fail_on_receive: false,
     };
 
-    let result =
-        MpcManager::run_dkg_as_dealer(&test_manager, &succeeding_p2p, &mut failing_tob).await;
+    let result = MpcManager::run_dkg_as_dealer(
+        &test_manager,
+        &succeeding_p2p,
+        &mut failing_tob,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -2164,8 +2199,13 @@ async fn test_run_as_dealer_partial_failures_still_collects_enough() {
 
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
-    let result =
-        MpcManager::run_dkg_as_dealer(&test_manager, &partially_failing_p2p, &mut mock_tob).await;
+    let result = MpcManager::run_dkg_as_dealer(
+        &test_manager,
+        &partially_failing_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_ok());
     // Verify that a certificate was published
@@ -2193,8 +2233,13 @@ async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
 
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
-    let result =
-        MpcManager::run_dkg_as_dealer(&test_manager, &partially_failing_p2p, &mut mock_tob).await;
+    let result = MpcManager::run_dkg_as_dealer(
+        &test_manager,
+        &partially_failing_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_ok());
     assert_eq!(mock_tob.published_count(), 0);
@@ -2222,7 +2267,9 @@ async fn test_run_as_dealer_includes_own_signature() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
     // Run as dealer
-    let result = MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     assert!(result.is_ok());
 
@@ -2265,7 +2312,9 @@ async fn test_run_as_party_tob_receive_error() {
     };
 
     let mock_p2p = MockP2PChannel::new(HashMap::new(), setup.address(0));
-    let result = MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut failing_tob).await;
+    let result =
+        MpcManager::run_dkg_as_party(&test_manager, &mock_p2p, &mut failing_tob, &test_metrics())
+            .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -2377,7 +2426,9 @@ async fn setup_party_and_run(
     // Run party collection
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
     let party_manager = Arc::new(RwLock::new(party_manager));
-    let result = MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     (result, mock_tob)
 }
@@ -2519,7 +2570,9 @@ async fn test_run_as_party_skips_duplicate_dealers() {
     // Run party collection
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
     let party_manager = Arc::new(RwLock::new(party_manager));
-    let result = MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
     assert!(result.is_ok());
 
     // Verify behavior:
@@ -2605,7 +2658,9 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Run as party - should retrieve missing messages via P2P
-    let result = MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     assert!(result.is_ok());
     let mgr = party_manager.read().unwrap();
@@ -2708,7 +2763,9 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Run as party - should process dealer1 successfully, then ABORT on dealer2 retrieval failure
-    let result = MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     // Should fail with PairwiseCommunicationError (could not retrieve message from any signer)
     assert!(result.is_err());
@@ -2803,7 +2860,9 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
 
     // Run as party - should ABORT on dealer0 recovery failure
     // With retry logic, failed signers are skipped, so we get ProtocolFailed
-    let result = MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob).await;
+    let result =
+        MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
+            .await;
 
     // Should fail with ProtocolFailed (all signers failed, not enough responses)
     assert!(result.is_err(), "Expected error, got: {:?}", result);
@@ -4607,7 +4666,13 @@ async fn test_restart_dealer_reuses_stored_message() {
     let restarted_manager = Arc::new(RwLock::new(restarted_manager));
 
     // Run run_as_dealer - should reuse stored message
-    let result = MpcManager::run_dkg_as_dealer(&restarted_manager, &mock_p2p, &mut mock_tob).await;
+    let result = MpcManager::run_dkg_as_dealer(
+        &restarted_manager,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await;
     assert!(result.is_ok());
 
     // Verify store_dealer_message was NOT called (message already existed)
@@ -4721,7 +4786,13 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Run as party
-    let result = MpcManager::run_dkg_as_party(&party_manager, &tracking_p2p, &mut mock_tob).await;
+    let result = MpcManager::run_dkg_as_party(
+        &party_manager,
+        &tracking_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await;
     assert!(result.is_ok());
 
     // Verify retrieve_message was NOT called (messages were already in memory)
@@ -5257,6 +5328,7 @@ async fn test_run_key_rotation() {
         &rotation_setup.certificates(),
         &mock_p2p,
         &mut mock_tob,
+        &test_metrics(),
     )
     .await
     .unwrap();
@@ -5386,6 +5458,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
         &rotation_setup.certificates(),
         &mock_p2p,
         &mut mock_tob,
+        &test_metrics(),
     )
     .await
     .unwrap();
@@ -5592,6 +5665,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         &rotation_setup.certificates(),
         &mock_p2p,
         &mut mock_tob,
+        &test_metrics(),
     )
     .await
     .unwrap();
@@ -5725,6 +5799,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         &rotation_setup.certificates(),
         &mock_p2p,
         &mut mock_tob,
+        &test_metrics(),
     )
     .await
     .unwrap();
@@ -8215,12 +8290,24 @@ async fn test_run_nonce_generation() {
 
     let test_manager = Arc::new(RwLock::new(test_manager));
 
-    MpcManager::run_as_nonce_dealer(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
-    MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    MpcManager::run_as_nonce_dealer(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+    MpcManager::run_as_nonce_party(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify validator 0 has nonce outputs from enough dealers
     let mgr = test_manager.read().unwrap();
@@ -8359,9 +8446,15 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(all_certs);
     let test_manager = Arc::new(RwLock::new(test_manager));
 
-    MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    MpcManager::run_as_nonce_party(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify the nonce output for dealer 0 matches what a clean node has.
     // Without the delete-on-mismatch fix, the stale output from the wrong
@@ -8431,10 +8524,15 @@ async fn test_run_nonce_generation_skips_dealer_phase() {
     let test_manager = Arc::new(RwLock::new(test_manager));
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
-    let outputs =
-        MpcManager::run_nonce_generation(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-            .await
-            .unwrap();
+    let outputs = MpcManager::run_nonce_generation(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify dealer did NOT publish (skipped)
     assert_eq!(
@@ -8513,10 +8611,15 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
 
     // run_as_nonce_party should succeed by loading messages from the store,
     // not from P2P (which would fail since mock_p2p has no managers).
-    let certified =
-        MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-            .await
-            .unwrap();
+    let certified = MpcManager::run_as_nonce_party(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     let mgr = test_manager.read().unwrap();
     assert!(
@@ -8700,12 +8803,24 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
 
     let test_manager = Arc::new(RwLock::new(test_manager));
 
-    MpcManager::run_as_nonce_dealer(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
-    MpcManager::run_as_nonce_party(&test_manager, batch_index, &mock_p2p, &mut mock_tob)
-        .await
-        .unwrap();
+    MpcManager::run_as_nonce_dealer(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+    MpcManager::run_as_nonce_party(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
 
     // Verify enough nonce outputs collected
     let mgr = test_manager.read().unwrap();

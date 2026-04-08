@@ -655,9 +655,15 @@ mod tests {
             .map(|node| {
                 let signing_manager = node.hashi().signing_manager();
                 let onchain_state = node.hashi().onchain_state().clone();
-                let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
+                let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(
+                    onchain_state,
+                    epoch,
+                    hashi::metrics::MPC_LABEL_SIGNING,
+                    node.hashi().metrics.clone(),
+                );
                 let beacon = beacon_value;
                 let message = message.to_vec();
+                let metrics = node.hashi().metrics.clone();
                 async move {
                     hashi::mpc::SigningManager::sign(
                         &signing_manager,
@@ -668,6 +674,7 @@ mod tests {
                         &beacon,
                         None,
                         SIGNING_TIMEOUT,
+                        &metrics,
                     )
                     .await
                 }

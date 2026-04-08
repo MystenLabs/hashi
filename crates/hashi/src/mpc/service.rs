@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
@@ -20,6 +21,9 @@ use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
+use crate::metrics::MPC_LABEL_DKG;
+use crate::metrics::MPC_LABEL_KEY_ROTATION;
+use crate::metrics::MPC_LABEL_NONCE_GEN;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
@@ -281,7 +285,12 @@ impl MpcService {
             .mpc_manager()
             .expect("MpcManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
+        let p2p_channel = RpcP2PChannel::new(
+            onchain_state.clone(),
+            target_epoch,
+            MPC_LABEL_DKG,
+            self.inner.metrics.clone(),
+        );
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -289,9 +298,14 @@ impl MpcService {
             None,
             signer,
         );
-        let output = MpcManager::run_dkg(&mpc_manager, &p2p_channel, &mut tob_channel)
-            .await
-            .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
+        let output = MpcManager::run_dkg(
+            &mpc_manager,
+            &p2p_channel,
+            &mut tob_channel,
+            &self.inner.metrics,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
         Ok(output)
     }
 
@@ -314,7 +328,12 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch);
+        let p2p_channel = RpcP2PChannel::new(
+            onchain_state.clone(),
+            epoch,
+            MPC_LABEL_NONCE_GEN,
+            self.inner.metrics.clone(),
+        );
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -322,14 +341,22 @@ impl MpcService {
             Some(batch_index),
             signer,
         );
-        let nonce_outputs = MpcManager::run_nonce_generation(
+        let metrics = &self.inner.metrics;
+        let nonce_start = Instant::now();
+        let nonce_result = MpcManager::run_nonce_generation(
             &mpc_manager,
             batch_index,
             &p2p_channel,
             &mut tob_channel,
+            metrics,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
+        .await;
+        metrics
+            .mpc_total_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .observe(nonce_start.elapsed().as_secs_f64());
+        let nonce_outputs =
+            nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
         let (batch_size_per_weight, f) = {
             let mgr = mpc_manager.read().unwrap();
             (
@@ -337,8 +364,13 @@ impl MpcService {
                 mgr.mpc_config.max_faulty as usize,
             )
         };
+        let presig_start = Instant::now();
         let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        metrics
+            .mpc_presig_conversion_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .observe(presig_start.elapsed().as_secs_f64());
         Ok((committee, presignatures))
     }
 
@@ -461,7 +493,12 @@ impl MpcService {
                     "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
                 )
             })?;
-        let p2p_channel = RpcP2PChannel::new(self.inner.onchain_state().clone(), epoch);
+        let p2p_channel = RpcP2PChannel::new(
+            self.inner.onchain_state().clone(),
+            epoch,
+            MPC_LABEL_NONCE_GEN,
+            self.inner.metrics.clone(),
+        );
         let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
             mpc_manager,
             epoch,
@@ -524,6 +561,7 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
+        let reconfig_start = Instant::now();
         // Determine whether this is an initial DKG or a key rotation
         // based on if we already have a committed mpc_public_key.
         let run_dkg = self
@@ -554,15 +592,26 @@ impl MpcService {
             return;
         }
 
+        let protocol_label = if run_dkg {
+            MPC_LABEL_DKG
+        } else {
+            MPC_LABEL_KEY_ROTATION
+        };
+        let metrics = &self.inner.metrics;
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 return;
             }
+            let protocol_start = Instant::now();
             let result = if run_dkg {
                 self.run_dkg(target_epoch).await
             } else {
                 self.run_key_rotation(target_epoch).await
             };
+            metrics
+                .mpc_total_duration_seconds
+                .with_label_values(&[protocol_label])
+                .observe(protocol_start.elapsed().as_secs_f64());
             match result {
                 Ok(output) => break output,
                 Err(e) => {
@@ -576,6 +625,7 @@ impl MpcService {
         };
         let _ = self.key_ready_tx.send(Some(output.public_key));
         info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
+        let end_reconfig_start = Instant::now();
         loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 break;
@@ -591,7 +641,12 @@ impl MpcService {
                 }
             }
         }
+        metrics
+            .mpc_end_reconfig_duration_seconds
+            .with_label_values(&[protocol_label])
+            .observe(end_reconfig_start.elapsed().as_secs_f64());
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
+        let prepare_signing_start = Instant::now();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             match self.prepare_signing(target_epoch, &output).await {
                 Ok(()) => break,
@@ -611,6 +666,14 @@ impl MpcService {
                 }
             }
         }
+        metrics
+            .mpc_prepare_signing_duration_seconds
+            .with_label_values(&[protocol_label])
+            .observe(prepare_signing_start.elapsed().as_secs_f64());
+        metrics
+            .mpc_reconfig_total_duration_seconds
+            .with_label_values(&[protocol_label])
+            .observe(reconfig_start.elapsed().as_secs_f64());
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {
@@ -642,7 +705,12 @@ impl MpcService {
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
+        let p2p_channel = RpcP2PChannel::new(
+            onchain_state.clone(),
+            target_epoch,
+            MPC_LABEL_KEY_ROTATION,
+            self.inner.metrics.clone(),
+        );
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -655,6 +723,7 @@ impl MpcService {
             &previous_certs,
             &p2p_channel,
             &mut tob_channel,
+            &self.inner.metrics,
         )
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;
