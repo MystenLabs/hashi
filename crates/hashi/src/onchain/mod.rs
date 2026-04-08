@@ -398,8 +398,11 @@ impl OnchainState {
         self.state().hashi().config.mpc_threshold_basis_points()
     }
 
-    pub fn mpc_allowed_delta(&self) -> u16 {
-        self.state().hashi().config.mpc_allowed_delta()
+    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
+        self.state()
+            .hashi()
+            .config
+            .mpc_weight_reduction_allowed_delta()
     }
 
     pub fn bridge_service_client(

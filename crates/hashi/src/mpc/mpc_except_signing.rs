@@ -122,7 +122,7 @@ impl MpcManager {
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
         threshold_basis_points: u16,
-        allowed_delta: u16,
+        weight_reduction_allowed_delta: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
@@ -146,7 +146,7 @@ impl MpcManager {
         let (nodes, threshold) = build_reduced_nodes(
             &committee,
             threshold_basis_points,
-            allowed_delta,
+            weight_reduction_allowed_delta,
             weight_divisor,
         )?;
         let total_weight = nodes.total_weight();
@@ -205,7 +205,7 @@ impl MpcManager {
                 let (nodes, threshold) = build_reduced_nodes(
                     prev_committee,
                     threshold_basis_points,
-                    allowed_delta,
+                    weight_reduction_allowed_delta,
                     weight_divisor,
                 )?;
                 (Some(nodes), Some(threshold))
@@ -3592,7 +3592,7 @@ fn compute_messages_hash(messages: &Messages) -> MessageHash {
 fn build_reduced_nodes(
     committee: &Committee,
     threshold_basis_points: u16,
-    allowed_delta: u16,
+    weight_reduction_allowed_delta: u16,
     test_weight_divisor: u16,
 ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
@@ -3608,7 +3608,7 @@ fn build_reduced_nodes(
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
     let threshold =
         (total_weight as u32 * threshold_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
-    Nodes::new_reduced(nodes_vec, threshold, allowed_delta, 1)
+    Nodes::new_reduced(nodes_vec, threshold, weight_reduction_allowed_delta, 1)
         .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 

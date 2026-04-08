@@ -115,7 +115,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             let state = onchain_state.state();
             let hashi = state.hashi();
             let threshold_basis_points = hashi.config.mpc_threshold_basis_points();
-            let allowed_delta = hashi.config.mpc_allowed_delta();
+            let weight_reduction_allowed_delta = hashi.config.mpc_weight_reduction_allowed_delta();
             MpcManager::new(
                 validator_address,
                 &hashi.committees,
@@ -124,7 +124,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
                 dummy_signing_key.clone(),
                 Box::new(store),
                 threshold_basis_points,
-                allowed_delta,
+                weight_reduction_allowed_delta,
                 chain_id,
                 None, // weight_divisor
                 0,    // batch_size_per_weight (unused for reconstruction)

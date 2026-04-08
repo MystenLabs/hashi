@@ -25,8 +25,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 const TEST_THRESHOLD_BASIS_POINTS: u16 = 3333;
-/// Use 0 for allowed_delta in tests to disable weight reduction.
-const TEST_ALLOWED_DELTA: u16 = 0;
+/// Use 0 for weight_reduction_allowed_delta in tests to disable weight reduction.
+const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
 /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
 const TEST_WEIGHT_DIVISOR: u16 = 1;
 const TEST_CHAIN_ID: &str = "testchain";
@@ -289,7 +289,7 @@ impl TestSetup {
             self.signing_keys[validator_index].clone(),
             store,
             TEST_THRESHOLD_BASIS_POINTS,
-            TEST_ALLOWED_DELTA,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -903,7 +903,7 @@ fn test_mpc_manager_new_from_committee_set() {
         signing_key,
         Box::new(MockPublicMessagesStore),
         TEST_THRESHOLD_BASIS_POINTS,
-        TEST_ALLOWED_DELTA,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -967,7 +967,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         signing_keys[0].clone(),
         Box::new(MockPublicMessagesStore),
         TEST_THRESHOLD_BASIS_POINTS,
-        TEST_ALLOWED_DELTA,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -4960,7 +4960,7 @@ impl RotationTestSetup {
         let (nodes, threshold) = build_reduced_nodes(
             committee,
             TEST_THRESHOLD_BASIS_POINTS,
-            TEST_ALLOWED_DELTA,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_WEIGHT_DIVISOR,
         )
         .unwrap();
@@ -4986,7 +4986,7 @@ impl RotationTestSetup {
             let (nodes, threshold) = build_reduced_nodes(
                 prev,
                 TEST_THRESHOLD_BASIS_POINTS,
-                TEST_ALLOWED_DELTA,
+                TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_WEIGHT_DIVISOR,
             )
             .unwrap();
@@ -6134,7 +6134,7 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
         TEST_THRESHOLD_BASIS_POINTS,
-        TEST_ALLOWED_DELTA,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7275,7 +7275,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
         TEST_THRESHOLD_BASIS_POINTS,
-        TEST_ALLOWED_DELTA,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7438,7 +7438,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         setup.signing_keys[target_index].clone(),
         Box::new(store),
         TEST_THRESHOLD_BASIS_POINTS,
-        TEST_ALLOWED_DELTA,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7519,7 +7519,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_THRESHOLD_BASIS_POINTS,
-            TEST_ALLOWED_DELTA,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7551,7 +7551,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_THRESHOLD_BASIS_POINTS,
-            TEST_ALLOWED_DELTA,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7639,7 +7639,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
         TEST_THRESHOLD_BASIS_POINTS,
-        TEST_ALLOWED_DELTA,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,

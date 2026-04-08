@@ -1323,20 +1323,21 @@ mod tests {
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
 
-        use hashi::onchain::types::DEFAULT_MPC_ALLOWED_DELTA;
         use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_BASIS_POINTS;
+        use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
         let hashi = networks.hashi_network.nodes()[0].hashi();
         let threshold_bps = hashi.onchain_state().mpc_threshold_basis_points();
-        let allowed_delta = hashi.onchain_state().mpc_allowed_delta();
+        let weight_reduction_allowed_delta =
+            hashi.onchain_state().mpc_weight_reduction_allowed_delta();
 
         assert_eq!(
             threshold_bps, DEFAULT_MPC_THRESHOLD_BASIS_POINTS,
             "on-chain mpc_threshold_basis_points ({threshold_bps}) != Rust default ({DEFAULT_MPC_THRESHOLD_BASIS_POINTS})"
         );
         assert_eq!(
-            allowed_delta, DEFAULT_MPC_ALLOWED_DELTA,
-            "on-chain mpc_allowed_delta ({allowed_delta}) != Rust default ({DEFAULT_MPC_ALLOWED_DELTA})"
+            weight_reduction_allowed_delta, DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            "on-chain mpc_weight_reduction_allowed_delta ({weight_reduction_allowed_delta}) != Rust default ({DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA})"
         );
         Ok(())
     }

@@ -471,7 +471,7 @@ const DUST_RELAY_MIN_VALUE: u64 = 546;
 
 // These mirror the defaults in mpc_config.move and must be kept in sync.
 pub const DEFAULT_MPC_THRESHOLD_BASIS_POINTS: u16 = 3333;
-pub const DEFAULT_MPC_ALLOWED_DELTA: u16 = 800;
+pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 
 impl Config {
     /// Minimum deposit amount, mirroring the floor logic in btc_config.move.
@@ -524,12 +524,12 @@ impl Config {
         }
     }
 
-    pub fn mpc_allowed_delta(&self) -> u16 {
-        match self.config.get("mpc_allowed_delta") {
+    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
+        match self.config.get("mpc_weight_reduction_allowed_delta") {
             Some(ConfigValue::U64(v)) => {
-                u16::try_from(*v).expect("mpc_allowed_delta exceeds u16::MAX")
+                u16::try_from(*v).expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX")
             }
-            _ => DEFAULT_MPC_ALLOWED_DELTA,
+            _ => DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
         }
     }
 }
