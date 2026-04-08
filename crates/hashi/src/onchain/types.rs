@@ -17,6 +17,7 @@ use sui_sdk_types::Digest;
 use sui_sdk_types::TypeTag;
 
 use crate::grpc::Client;
+use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::utils::Base64;
@@ -580,7 +581,7 @@ pub enum WithdrawalStatus {
     Approved,
     Processing { pending_withdrawal_id: Address },
     Signed { pending_withdrawal_id: Address },
-    Confirmed { txid: Address },
+    Confirmed { txid: BitcoinTxid },
 }
 
 impl WithdrawalStatus {
@@ -612,7 +613,7 @@ pub struct WithdrawalRequest {
 #[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
 pub struct PendingWithdrawal {
     pub id: Address,
-    pub txid: Address,
+    pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
@@ -670,7 +671,7 @@ pub struct Utxo {
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde_derive::Serialize)]
 pub struct UtxoId {
     // a 32 byte sha256 of the transaction
-    pub txid: Address,
+    pub txid: BitcoinTxid,
     // Out position of the UTXO
     pub vout: u32,
 }

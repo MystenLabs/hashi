@@ -21,6 +21,7 @@ use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
+use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::guardian::bitcoin_utils;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -83,7 +84,7 @@ pub struct WithdrawalTxCommitment {
     pub request_ids: Vec<Address>,
     pub selected_utxos: Vec<UtxoId>,
     pub outputs: Vec<OutputUtxo>,
-    pub txid: Address,
+    pub txid: BitcoinTxid,
 }
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
@@ -358,7 +359,7 @@ impl Hashi {
 
         // 7. Rebuild unsigned tx and verify txid matches.
         let tx = self.build_unsigned_withdrawal_tx(&selected_utxos, &approval.outputs)?;
-        let expected_txid = Address::new(tx.compute_txid().to_byte_array());
+        let expected_txid = BitcoinTxid::from(tx.compute_txid());
         anyhow::ensure!(
             approval.txid == expected_txid,
             "Txid mismatch: approval has {:?}, rebuilt tx has {:?}",
@@ -521,7 +522,7 @@ impl Hashi {
 
         // Rebuild the unsigned BTC tx and verify the txid matches
         let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
-        let expected_txid = Address::new(tx.compute_txid().to_byte_array());
+        let expected_txid = BitcoinTxid::from(tx.compute_txid());
         anyhow::ensure!(
             pending.txid == expected_txid,
             "Txid mismatch: PendingWithdrawal has {:?}, rebuilt tx has {:?}",
@@ -679,7 +680,7 @@ impl Hashi {
             .iter()
             .map(|utxo| bitcoin::TxIn {
                 previous_output: bitcoin::OutPoint {
-                    txid: bitcoin::Txid::from_byte_array(utxo.id.txid.into()),
+                    txid: utxo.id.txid.into(),
                     vout: utxo.id.vout,
                 },
                 script_sig: bitcoin::ScriptBuf::default(),
@@ -829,7 +830,7 @@ impl Hashi {
         let tx = self
             .build_unsigned_withdrawal_tx(&selected_input_utxos, &outputs)
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
-        let txid = Address::new(tx.compute_txid().to_byte_array());
+        let txid = BitcoinTxid::from(tx.compute_txid());
 
         Ok(WithdrawalTxCommitment {
             request_ids,
@@ -1030,7 +1031,7 @@ async fn fetch_withdrawal_tx_confirmations(
     let futures: Vec<_> = pending_withdrawals
         .iter()
         .map(|(id, pending)| async {
-            let btc_txid = bitcoin::Txid::from_byte_array(pending.txid.into());
+            let btc_txid = pending.txid.into();
             let confs = match hashi.btc_monitor().get_transaction_status(btc_txid).await {
                 Ok(TxStatus::Confirmed { confirmations }) => confirmations,
                 // Mempool, not found, or RPC error — treat as unconfirmed.

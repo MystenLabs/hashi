@@ -7,7 +7,7 @@ mod tests {
     use anyhow::anyhow;
     use bitcoin::Amount;
     use bitcoin::Txid;
-    use bitcoin::hashes::Hash;
+
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::move_types::DepositConfirmedEvent;
@@ -61,12 +61,7 @@ mod tests {
     }
 
     fn txid_to_address(txid: &Txid) -> Address {
-        let bytes: [u8; 32] = *txid.as_byte_array();
-        Address::new(bytes)
-    }
-
-    fn address_to_txid(addr: &Address) -> Txid {
-        Txid::from_byte_array(addr.as_bytes().try_into().unwrap())
+        hashi_types::bitcoin_txid::BitcoinTxid::from(*txid).into()
     }
 
     async fn wait_for_deposit_confirmation(
@@ -549,7 +544,7 @@ mod tests {
             "Expected remaining hBTC after withdrawal"
         );
 
-        let withdrawal_txid = address_to_txid(&confirmed_event.txid);
+        let withdrawal_txid: Txid = confirmed_event.txid.into();
         info!(
             "Observed withdrawal Bitcoin txid in event: {}",
             withdrawal_txid
@@ -597,7 +592,7 @@ mod tests {
 
         drop(miner);
 
-        let withdrawal_txid = address_to_txid(&confirmed.txid);
+        let withdrawal_txid: Txid = confirmed.txid.into();
         let max_output = Amount::from_sat(withdrawal_amount_sats);
         let min_output = Amount::from_sat(
             withdrawal_amount_sats.saturating_sub(hashi.onchain_state().worst_case_network_fee()),

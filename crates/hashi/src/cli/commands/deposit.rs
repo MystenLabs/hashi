@@ -315,8 +315,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         return Ok(());
     };
 
-    let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
-    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+    let txid = dep.utxo.id.txid;
     println!(
         "  {} {}",
         "Request ID:".bold(),
@@ -335,7 +334,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     if let Ok(Some(btc_rpc)) = config.btc_rpc_client() {
         println!();
         println!("  {}", "BTC Context:".bold());
-        match btc_rpc.get_raw_transaction_verbose(txid) {
+        match btc_rpc.get_raw_transaction_verbose(txid.into()) {
             Ok(info) => {
                 let confirmations = info.confirmations.unwrap_or(0);
                 println!("    {} {}", "Confirmations:".bold(), confirmations);
@@ -363,13 +362,11 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
             let rows: Vec<_> = deposits
                 .iter()
                 .map(|dep| {
-                    let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
-                    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
                     serde_json::json!({
                         "request_id": dep.id.to_string(),
                         "amount_sats": dep.utxo.amount,
                         "utxo": {
-                            "txid": txid.to_string(),
+                            "txid": dep.utxo.id.txid.to_string(),
                             "vout": dep.utxo.id.vout,
                         },
                         "status": "pending",
@@ -404,13 +401,11 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     "Requested".bold()
                 );
                 for dep in &deposits {
-                    let txid_bytes: [u8; 32] = dep.utxo.id.txid.into();
-                    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
                     println!(
                         "  {:<20} {:<14} {}:{:<3} {:<10} {:<20} {}",
                         display::format_address_full(&dep.id),
                         dep.utxo.amount,
-                        txid,
+                        dep.utxo.id.txid,
                         dep.utxo.id.vout,
                         "Pending".yellow(),
                         display::format_address_full(&dep.sender),

@@ -13,6 +13,8 @@ use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::bcs::ToBcs;
 
+use crate::bitcoin_txid::BitcoinTxid;
+
 pub trait MoveType {
     const PACKAGE_VERSION: u64 = 1;
     const MODULE: &'static str;
@@ -253,7 +255,7 @@ pub enum WithdrawalStatus {
     Approved,
     Processing { pending_withdrawal_id: Address },
     Signed { pending_withdrawal_id: Address },
-    Confirmed { txid: Address },
+    Confirmed { txid: BitcoinTxid },
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
@@ -282,7 +284,7 @@ pub struct CommittedRequestInfo {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct PendingWithdrawal {
     pub id: Address,
-    pub txid: Address,
+    pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
@@ -332,7 +334,7 @@ pub struct UtxoRecord {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde_derive::Deserialize)]
 pub struct UtxoId {
     // a 32 byte sha256 of the transaction
-    pub txid: Address,
+    pub txid: BitcoinTxid,
     // Out position of the UTXO
     pub vout: u32,
 }
@@ -940,7 +942,7 @@ impl From<WithdrawalApprovedEvent> for HashiEvent {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalPickedForProcessingEvent {
     pub pending_id: Address,
-    pub txid: Address,
+    pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
@@ -981,7 +983,7 @@ impl From<WithdrawalSignedEvent> for HashiEvent {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalConfirmedEvent {
     pub pending_id: Address,
-    pub txid: Address,
+    pub txid: BitcoinTxid,
     pub change_utxo_id: Option<UtxoId>,
     pub request_ids: Vec<Address>,
     pub change_utxo_amount: Option<u64>,

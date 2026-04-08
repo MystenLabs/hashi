@@ -27,7 +27,7 @@ fn make_p2wpkh_change_address() -> BitcoinAddress {
 
 fn make_utxo_id(n: u8) -> UtxoId {
     UtxoId {
-        txid: Address::new([n; 32]),
+        txid: Address::new([n; 32]).into(),
         vout: 0,
     }
 }
@@ -1115,7 +1115,7 @@ fn test_deterministic_tiebreak_by_id() {
     assert_eq!(result.inputs.len(), 1);
     assert_eq!(
         result.inputs[0].id.txid,
-        Address::new([2; 32]),
+        hashi_types::bitcoin_txid::BitcoinTxid::new([2; 32]),
         "tiebreak should prefer the smaller ID"
     );
     assert_conservation(&result);

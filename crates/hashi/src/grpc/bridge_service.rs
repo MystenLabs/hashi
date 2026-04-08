@@ -14,6 +14,7 @@ use crate::onchain::types::UtxoId;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
+use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
 use hashi_types::proto::SignDepositConfirmationRequest;
@@ -172,7 +173,7 @@ fn parse_deposit_request(
     request: &SignDepositConfirmationRequest,
 ) -> anyhow::Result<DepositRequest> {
     let id = parse_address(&request.id)?;
-    let txid = parse_address(&request.txid)?;
+    let txid = parse_address(&request.txid)?.into();
     let derivation_path = request
         .derivation_path
         .as_ref()
@@ -222,11 +223,12 @@ fn parse_withdrawal_tx_commitment(
         .selected_utxos
         .iter()
         .map(|utxo_id| {
-            let txid = utxo_id
+            let txid: BitcoinTxid = utxo_id
                 .txid
                 .as_ref()
                 .map(|bytes| parse_address(bytes))
-                .context("missing utxo txid")??;
+                .context("missing utxo txid")??
+                .into();
             let vout = utxo_id.vout.context("missing utxo vout")?;
             Ok(UtxoId { txid, vout })
         })
@@ -239,7 +241,7 @@ fn parse_withdrawal_tx_commitment(
             bitcoin_address: output.bitcoin_address.to_vec(),
         })
         .collect();
-    let txid = parse_address(&request.txid)?;
+    let txid = parse_address(&request.txid)?.into();
 
     Ok(WithdrawalTxCommitment {
         request_ids,

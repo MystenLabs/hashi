@@ -9,7 +9,7 @@ use crate::onchain::types::DepositRequest;
 use anyhow::Context;
 use anyhow::anyhow;
 use bitcoin::ScriptBuf;
-use bitcoin::hashes::Hash;
+
 use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::ProjectivePoint;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
@@ -78,9 +78,7 @@ impl Hashi {
         };
 
         // bitcoin
-        let txid_bytes: [u8; 32] = deposit_request.utxo.id.txid.into();
-        let btc_txid = bitcoin::Txid::from_byte_array(txid_bytes);
-        let source_tx_hash = btc_txid.to_string();
+        let source_tx_hash = deposit_request.utxo.id.txid.to_string();
         let bitcoin_chain_id = self.config.bitcoin_chain_id().to_string();
 
         // sui
@@ -151,7 +149,7 @@ impl Hashi {
         deposit_request: &DepositRequest,
     ) -> Result<(), DepositValidationError> {
         let outpoint = bitcoin::OutPoint {
-            txid: bitcoin::Txid::from_byte_array(deposit_request.utxo.id.txid.into()),
+            txid: deposit_request.utxo.id.txid.into(),
             vout: deposit_request.utxo.id.vout,
         };
         let txout = self

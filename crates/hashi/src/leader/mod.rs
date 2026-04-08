@@ -21,7 +21,7 @@ use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
-use bitcoin::hashes::Hash;
+
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
@@ -1269,7 +1269,7 @@ impl LeaderService {
         pending: PendingWithdrawal,
     ) -> anyhow::Result<()> {
         let confirmation_threshold = inner.onchain_state().bitcoin_confirmation_threshold();
-        let txid = bitcoin::Txid::from_byte_array(pending.txid.into());
+        let txid: bitcoin::Txid = pending.txid.into();
 
         match inner.btc_monitor().get_transaction_status(txid).await {
             Ok(TxStatus::Confirmed { confirmations })
