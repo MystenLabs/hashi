@@ -57,6 +57,13 @@ impl BridgeService for HttpService {
             .validate_and_sign_deposit_confirmation(&deposit_request)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(
+            deposit_request_id = %deposit_request.id,
+            utxo_txid = %deposit_request.utxo.id.txid,
+            utxo_vout = deposit_request.utxo.id.vout,
+            amount = deposit_request.utxo.amount,
+            "Signed deposit confirmation",
+        );
         Ok(Response::new(SignDepositConfirmationResponse {
             member_signature: Some(member_signature),
         }))
@@ -75,6 +82,10 @@ impl BridgeService for HttpService {
             .validate_and_sign_withdrawal_request_approval(&approval)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(
+            request_id = %approval.request_id,
+            "Signed withdrawal request approval",
+        );
         Ok(Response::new(SignWithdrawalRequestApprovalResponse {
             member_signature: Some(member_signature),
         }))
@@ -93,6 +104,11 @@ impl BridgeService for HttpService {
             .validate_and_sign_withdrawal_tx_commitment(&approval)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(
+            txid = %approval.txid,
+            requests = approval.request_ids.len(),
+            "Signed withdrawal tx construction",
+        );
         Ok(Response::new(SignWithdrawalTxConstructionResponse {
             member_signature: Some(member_signature),
         }))
@@ -137,6 +153,10 @@ impl BridgeService for HttpService {
             .inner
             .validate_and_sign_withdrawal_tx_signing(&message)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(
+            withdrawal_id = %message.withdrawal_id,
+            "Signed withdrawal tx signing",
+        );
         Ok(Response::new(SignWithdrawalTxSigningResponse {
             member_signature: Some(member_signature),
         }))
@@ -155,6 +175,10 @@ impl BridgeService for HttpService {
             .inner
             .sign_withdrawal_confirmation(&pending_withdrawal_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(
+            pending_withdrawal_id = %pending_withdrawal_id,
+            "Signed withdrawal confirmation",
+        );
         Ok(Response::new(SignWithdrawalConfirmationResponse {
             member_signature: Some(member_signature),
         }))
