@@ -8,6 +8,7 @@ use anyhow::Context;
 use anyhow::anyhow;
 use hashi::onchain::types::Utxo;
 use hashi::onchain::types::UtxoId;
+use hashi_types::bitcoin_txid::BitcoinTxid;
 use sui_sdk_types::Address;
 
 pub fn write_csv(utxos: &[(UtxoId, Utxo)], mut w: impl Write) -> anyhow::Result<()> {
@@ -42,7 +43,7 @@ pub fn parse_csv(path: &Path) -> anyhow::Result<Vec<Utxo>> {
             .get(3)
             .ok_or_else(|| anyhow!("row {row}: missing amount"))?;
 
-        let txid: Address = txid_str
+        let txid: BitcoinTxid = txid_str
             .parse()
             .with_context(|| format!("row {row}: bad txid"))?;
         let vout: u32 = vout_str

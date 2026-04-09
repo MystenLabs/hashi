@@ -52,6 +52,13 @@ use hashi_types::guardian::bitcoin_utils;
 const VERIFY_CONCURRENCY: usize = 64;
 const BROADCAST_CONCURRENCY: usize = 8;
 
+/// Fixed transaction overhead in weight units (version, locktime, segwit marker, varint counts).
+const TX_FIXED_WEIGHT: u64 = 44;
+/// Per-input weight for a taproot script-path spend (outpoint + sequence + witness).
+const TX_PER_INPUT_WEIGHT: u64 = 299;
+/// Per-output weight for a P2TR output (value + scriptPubKey).
+const TX_PER_OUTPUT_WEIGHT: u64 = 172;
+
 #[derive(Parser)]
 pub struct Args {
     #[arg(long)]
@@ -72,19 +79,19 @@ pub struct Args {
     #[arg(long, default_value = "")]
     rpc_password: String,
 
-    #[arg(long, default_value = "signet")]
-    network: String,
+    #[arg(long, default_value = "signet", value_parser = parse_network)]
+    network: Network,
 
-    #[arg(long, default_value_t = 1.0)]
-    fee_rate: f64,
+    #[arg(long, default_value_t = 1)]
+    fee_rate: u64,
 
     #[arg(long, default_value_t = 250)]
     batch_size: usize,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     verify: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     broadcast: bool,
 }
 
@@ -156,21 +163,21 @@ impl BitcoinRpc {
         }
         let addr = result["scriptPubKey"]["address"]
             .as_str()
-            .unwrap_or("")
-            .to_string();
-        Ok(Some(addr))
+            .map(|s| s.to_string());
+        Ok(addr)
     }
 
     async fn send_raw_transaction(&self, tx_hex: &str) -> anyhow::Result<String> {
         let result = self
             .call("sendrawtransaction", serde_json::json!([tx_hex]))
             .await?;
-        Ok(result.as_str().unwrap_or("").to_string())
+        result
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("sendrawtransaction returned non-string result: {result}"))
     }
 }
 
-/// Reimplemented from `fastcrypto_tbls::threshold_schnorr::key_derivation::compute_tweak`
-/// (pub(crate), so not directly accessible).
 fn compute_tweak(vk: &G, address: &[u8; 32]) -> S {
     let mut ikm: Vec<u8> = vk.x_as_be_bytes().expect("non-identity point").to_vec();
     ikm.extend_from_slice(address);
@@ -196,16 +203,15 @@ fn parse_network(s: &str) -> anyhow::Result<Network> {
 }
 
 fn estimate_tx_weight(n_inputs: usize) -> Weight {
-    let fixed_wu: u64 = 44;
-    let per_input_wu: u64 = 299;
-    let per_output_wu: u64 = 172;
-    Weight::from_wu(fixed_wu + (n_inputs as u64) * per_input_wu + per_output_wu)
+    Weight::from_wu(
+        TX_FIXED_WEIGHT + (n_inputs as u64) * TX_PER_INPUT_WEIGHT + TX_PER_OUTPUT_WEIGHT,
+    )
 }
 
-fn estimate_fee(n_inputs: usize, fee_rate: FeeRate) -> Amount {
+fn estimate_fee(n_inputs: usize, fee_rate: FeeRate) -> anyhow::Result<Amount> {
     fee_rate
         .fee_wu(estimate_tx_weight(n_inputs))
-        .unwrap_or(Amount::from_sat(0))
+        .ok_or_else(|| anyhow!("fee calculation overflow for {n_inputs} inputs"))
 }
 
 fn prepare_inputs(
@@ -275,7 +281,7 @@ fn build_and_sign_sweep_tx(
     let secp = Secp256k1::new();
 
     let total_input: Amount = inputs.iter().map(|inp| inp.amount).sum();
-    let fee = estimate_fee(inputs.len(), fee_rate);
+    let fee = estimate_fee(inputs.len(), fee_rate)?;
     if fee >= total_input {
         bail!(
             "fee ({} sat) exceeds total input ({} sat) for {} inputs",
@@ -349,7 +355,6 @@ async fn verify_utxos_against_node(
 ) -> anyhow::Result<Vec<PreparedInput>> {
     let total = inputs.len();
     let checked = Arc::new(AtomicUsize::new(0));
-    let skipped = Arc::new(AtomicUsize::new(0));
 
     println!("  Checking {total} UTXOs with {VERIFY_CONCURRENCY} concurrent requests...");
 
@@ -357,7 +362,6 @@ async fn verify_utxos_against_node(
         .map(|(i, inp)| {
             let rpc = rpc.clone();
             let checked = checked.clone();
-            let skipped = skipped.clone();
             let txid_str = inp.outpoint.txid.to_string();
             let vout = inp.outpoint.vout;
             let expected_addr = inp.address.to_string();
@@ -370,11 +374,11 @@ async fn verify_utxos_against_node(
 
                 match rpc.get_tx_out(&txid_str, vout).await {
                     Ok(Some(addr)) if addr == expected_addr => (i, true),
-                    Ok(Some(_)) | Ok(None) => {
-                        skipped.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(_)) | Ok(None) => (i, false),
+                    Err(e) => {
+                        eprintln!("  WARN: RPC error verifying UTXO {i} ({txid_str}:{vout}): {e}");
                         (i, false)
                     }
-                    Err(_) => (i, true),
                 }
             }
         })
@@ -382,22 +386,21 @@ async fn verify_utxos_against_node(
         .collect()
         .await;
 
-    let keep_set: std::collections::HashSet<usize> = results
-        .into_iter()
-        .filter(|(_, keep)| *keep)
-        .map(|(i, _)| i)
-        .collect();
+    let mut keep = vec![false; total];
+    for (i, should_keep) in results {
+        keep[i] = should_keep;
+    }
 
     let filtered: Vec<PreparedInput> = inputs
         .into_iter()
-        .enumerate()
-        .filter(|(i, _)| keep_set.contains(i))
-        .map(|(_, inp)| inp)
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(inp, _)| inp)
         .collect();
 
-    let skipped_count = skipped.load(Ordering::Relaxed);
+    let skipped = total - filtered.len();
     println!(
-        "Verified: {total} UTXOs checked, {skipped_count} skipped, {} remaining",
+        "Verified: {total} UTXOs checked, {skipped} skipped, {} remaining",
         filtered.len()
     );
     Ok(filtered)
@@ -407,59 +410,45 @@ async fn broadcast_transactions(
     signed_txs: &[(Transaction, Amount, Amount)],
     rpc: &Arc<BitcoinRpc>,
 ) -> (usize, usize) {
-    let success = Arc::new(AtomicUsize::new(0));
-    let failed = Arc::new(AtomicUsize::new(0));
-
-    let results: Vec<(usize, Result<String, anyhow::Error>)> =
+    let mut results: Vec<(usize, Result<String, anyhow::Error>)> =
         stream::iter(signed_txs.iter().enumerate())
             .map(|(i, (tx, _fee, _out))| {
                 let rpc = rpc.clone();
                 let raw_hex = consensus::encode::serialize_hex(tx);
-                let success = success.clone();
-                let failed = failed.clone();
-
-                async move {
-                    match rpc.send_raw_transaction(&raw_hex).await {
-                        Ok(txid) => {
-                            success.fetch_add(1, Ordering::Relaxed);
-                            (i, Ok(txid))
-                        }
-                        Err(e) => {
-                            failed.fetch_add(1, Ordering::Relaxed);
-                            (i, Err(e))
-                        }
-                    }
-                }
+                async move { (i, rpc.send_raw_transaction(&raw_hex).await) }
             })
             .buffer_unordered(BROADCAST_CONCURRENCY)
             .collect()
             .await;
 
-    let mut sorted_results = results;
-    sorted_results.sort_by_key(|(i, _)| *i);
-    for (i, result) in &sorted_results {
+    results.sort_by_key(|(i, _)| *i);
+
+    let mut ok = 0;
+    let mut fail = 0;
+    for (i, result) in &results {
         match result {
-            Ok(txid) => println!("  Tx {} broadcast OK: {txid}", i + 1),
-            Err(e) => eprintln!("  Tx {} broadcast FAILED: {e}", i + 1),
+            Ok(txid) => {
+                ok += 1;
+                println!("  Tx {} broadcast OK: {txid}", i + 1);
+            }
+            Err(e) => {
+                fail += 1;
+                eprintln!("  Tx {} broadcast FAILED: {e}", i + 1);
+            }
         }
     }
 
-    (
-        success.load(Ordering::Relaxed),
-        failed.load(Ordering::Relaxed),
-    )
+    (ok, fail)
 }
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
-    let network = parse_network(&args.network)?;
-
     let destination = Address::from_str(&args.destination)
         .with_context(|| format!("invalid destination address: {}", args.destination))?
-        .require_network(network)
+        .require_network(args.network)
         .with_context(|| {
             format!(
                 "destination address {} is not valid for network {:?}",
-                args.destination, network
+                args.destination, args.network
             )
         })?;
 
@@ -477,10 +466,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     let master_xonly = XOnlyPublicKey::from_slice(&master_x).context("invalid master xonly key")?;
     let master_address =
-        bitcoin_utils::single_key_taproot_script_path_address(&master_xonly, network);
+        bitcoin_utils::single_key_taproot_script_path_address(&master_xonly, args.network);
     println!("Master deposit address: {}", master_address);
 
-    println!("\nParsing CSV: {}", args.csv.display());
+    println!("Parsing CSV: {}", args.csv.display());
     let utxos = crate::utxo_csv::parse_csv(&args.csv)?;
     let total_amount: u64 = utxos.iter().map(|u| u.amount).sum();
     println!(
@@ -490,8 +479,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         total_amount as f64 / 1e8
     );
 
-    println!("\nDeriving keys and computing addresses...");
-    let mut inputs = prepare_inputs(&utxos, &parent_sk, &parent_pk, network)?;
+    println!("Deriving keys and computing addresses...");
+    let mut inputs = prepare_inputs(&utxos, &parent_sk, &parent_pk, args.network)?;
     println!("Prepared {} inputs successfully", inputs.len());
 
     let rpc = Arc::new(BitcoinRpc::new(
@@ -509,18 +498,18 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     if inputs.is_empty() {
-        println!("\nNo spendable UTXOs found. Nothing to do.");
+        println!("No spendable UTXOs found. Nothing to do.");
         return Ok(());
     }
 
-    let fee_rate = FeeRate::from_sat_per_vb(args.fee_rate as u64)
-        .ok_or_else(|| anyhow!("invalid fee rate"))?;
-    println!("\nFee rate: {} sat/vB", args.fee_rate);
+    let fee_rate =
+        FeeRate::from_sat_per_vb(args.fee_rate).ok_or_else(|| anyhow!("invalid fee rate"))?;
+    println!("Fee rate: {} sat/vB", args.fee_rate);
     println!("Destination: {destination}");
     println!("Batch size: {} inputs per tx", args.batch_size);
 
     let batches: Vec<&[PreparedInput]> = inputs.chunks(args.batch_size).collect();
-    println!("\nBuilding {} transactions...", batches.len());
+    println!("Building {} transactions...", batches.len());
 
     let mut total_fees = Amount::from_sat(0);
     let mut total_output = Amount::from_sat(0);
@@ -548,7 +537,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let spendable_amount: Amount = inputs.iter().map(|inp| inp.amount).sum();
-    println!("\n=== Summary ===");
+    println!("=== Summary ===");
     println!("Total UTXOs: {}", inputs.len());
     println!(
         "Total input: {} sat ({:.8} BTC)",
@@ -569,14 +558,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     println!("Destination: {destination}");
 
     if args.broadcast {
-        println!("\n=== Broadcasting transactions ({BROADCAST_CONCURRENCY} concurrent) ===");
+        println!("=== Broadcasting transactions ({BROADCAST_CONCURRENCY} concurrent) ===");
         let (ok, fail) = broadcast_transactions(&signed_txs, &rpc).await;
-        println!("\nBroadcast complete: {ok} succeeded, {fail} failed");
+        println!("Broadcast complete: {ok} succeeded, {fail} failed");
     } else {
-        println!("\n=== Signed transaction hex (dry run) ===");
+        println!("=== Signed transaction hex (dry run) ===");
         for (i, (tx, _fee, _out)) in signed_txs.iter().enumerate() {
             let raw_hex = consensus::encode::serialize_hex(tx);
-            println!("\n--- Tx {} (txid: {}) ---", i + 1, tx.compute_txid());
+            println!("--- Tx {} (txid: {}) ---", i + 1, tx.compute_txid());
             if i == 0 || i == signed_txs.len() - 1 || signed_txs.len() <= 5 {
                 println!("{raw_hex}");
             } else if i == 1 {
@@ -586,7 +575,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 );
             }
         }
-        println!("\nDry run complete. Use --broadcast to send transactions to the network.");
+        println!("Dry run complete. Use --broadcast to send transactions to the network.");
     }
 
     Ok(())
