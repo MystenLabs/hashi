@@ -3254,7 +3254,8 @@ impl MpcManager {
         for signer in signers {
             match p2p_channel.retrieve_messages(&signer, &request).await {
                 Ok(response) => {
-                    if compute_messages_hash(&response.messages) == message.messages_hash {
+                    let actual_hash = compute_messages_hash(&response.messages);
+                    if actual_hash == message.messages_hash {
                         let mut mgr = mpc_manager.write().unwrap();
                         match &response.messages {
                             Messages::Dkg(msg) => {
@@ -3275,9 +3276,12 @@ impl MpcManager {
                         return Ok(());
                     }
                     tracing::info!(
-                        "Message hash mismatch from signer {:?} for dealer {:?}",
+                        "Message hash mismatch from signer {:?} for dealer {:?}: \
+                         expected={:?}, got={:?}",
                         signer,
-                        message.dealer_address
+                        message.dealer_address,
+                        message.messages_hash,
+                        actual_hash,
                     );
                 }
                 Err(e) => {

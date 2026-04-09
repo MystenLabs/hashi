@@ -649,11 +649,21 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for key rotation"))?;
         let source_epoch = mpc_manager.read().unwrap().source_epoch;
+        let onchain_mpc_key = hex::encode(onchain_state.mpc_public_key());
+        let onchain_epoch = onchain_state.epoch();
+        info!(
+            "run_key_rotation: target_epoch={target_epoch}, source_epoch={source_epoch}, \
+             onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
+        );
         let previous_certs = fetch_certificates(&onchain_state, source_epoch, None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
+        info!(
+            "run_key_rotation: fetched {} certs for source_epoch={source_epoch}",
+            previous_certs.len(),
+        );
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch);
         let mut tob_channel = SuiTobChannel::new(
