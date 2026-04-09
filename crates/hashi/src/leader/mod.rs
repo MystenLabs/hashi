@@ -1029,6 +1029,34 @@ impl LeaderService {
             }
         };
 
+        // Verify that enough presigs are available before committing
+        let num_inputs = approval.selected_utxos.len() as u64;
+        {
+            let num_consumed = inner.onchain_state().state().hashi().num_consumed_presigs;
+            let needed_end = num_consumed + num_inputs;
+            match inner.try_signing_manager() {
+                Some(sm) => {
+                    let mgr = sm.read().unwrap();
+                    let available_end = mgr.available_presig_end_index();
+                    if needed_end > available_end {
+                        warn!(
+                            "Presig pool insufficient: need index {needed_end}, \
+                             pool ends at {available_end}. \
+                             Waiting for refill before committing withdrawal.",
+                        );
+                        return Ok(());
+                    }
+                }
+                None => {
+                    warn!(
+                        "SigningManager not initialized; \
+                         cannot commit withdrawal without presigs.",
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         // Submit commit_withdrawal_tx to Sui
         Self::submit_commit_withdrawal_tx(&inner, &approval, signed_approval.committee_signature())
             .await
