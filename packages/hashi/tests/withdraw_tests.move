@@ -31,7 +31,7 @@ fun setup_withdrawal_request(
         ctx,
     );
     let request_id = request.request_id().to_address();
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request, ctx);
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request);
     request_id
 }
 

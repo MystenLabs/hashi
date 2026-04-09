@@ -108,8 +108,15 @@ public fun confirm_deposit(
     // Insert UTXO into active pool
     hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
 
-    // Move request to processed bag and index by recipient
-    hashi.bitcoin_mut().deposit_queue_mut().insert_processed(request, ctx);
+    // Move request to processed bag.
+    let (req_id, recipient_opt) = hashi.bitcoin_mut().deposit_queue_mut().insert_processed(request);
+
+    // Index by recipient for client discovery.
+    if (recipient_opt.is_some()) {
+        hashi.bitcoin_mut().index_user_request(recipient_opt.destroy_some(), req_id, ctx);
+    } else {
+        recipient_opt.destroy_none();
+    };
 }
 
 public fun delete_expired_deposit(

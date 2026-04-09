@@ -4,7 +4,7 @@
 module hashi::withdrawal_queue;
 
 use hashi::{btc::BTC, btc_config, config::Config, utxo::{Utxo, UtxoId}};
-use sui::{bag::Bag, balance::Balance, clock::Clock, object_bag::ObjectBag, table::Table};
+use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
 
 use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
 
@@ -69,10 +69,6 @@ public struct WithdrawalRequestQueue has store {
     withdrawal_txns: ObjectBag,
     /// Confirmed withdrawal transactions (historical record).
     confirmed_txns: ObjectBag,
-    /// Per-sender index: sender address -> Bag of request IDs.
-    /// Allows clients to discover all withdrawal requests for a given address.
-    /// TODO: consider unifying this with the user_requests index in the deposit_queue
-    user_requests: Table<address, Bag>,
 }
 
 /// A Bitcoin transaction constructed for one or more withdrawal requests.
@@ -117,7 +113,6 @@ public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
         processed: sui::object_bag::new(ctx),
         withdrawal_txns: sui::object_bag::new(ctx),
         confirmed_txns: sui::object_bag::new(ctx),
-        user_requests: sui::table::new(ctx),
     }
 }
 
@@ -151,16 +146,8 @@ public(package) fun create_withdrawal(
 public(package) fun insert_withdrawal(
     self: &mut WithdrawalRequestQueue,
     request: WithdrawalRequest,
-    ctx: &mut TxContext,
 ) {
     let request_id = request.id.to_address();
-    // Index by sender for client discovery
-    let sender = request.sender;
-    if (!self.user_requests.contains(sender)) {
-        self.user_requests.add(sender, sui::bag::new(ctx));
-    };
-    self.user_requests[sender].add(request_id, true);
-
     self.requests.add(request_id, request);
 }
 
@@ -242,15 +229,6 @@ public(package) fun cancel_withdrawal(
     request_id: address,
 ): Balance<BTC> {
     let request: WithdrawalRequest = self.requests.remove(request_id);
-
-    // Clean up the per-sender index
-    let sender = request.sender;
-    if (self.user_requests.contains(sender)) {
-        let sender_bag: &mut Bag = &mut self.user_requests[sender];
-        if (sender_bag.contains(request_id)) {
-            let _: bool = sender_bag.remove(request_id);
-        };
-    };
 
     let WithdrawalRequest {
         id,
@@ -506,20 +484,6 @@ public fun is_approved(self: &WithdrawalStatus): bool {
         WithdrawalStatus::Approved => true,
         _ => false,
     }
-}
-
-/// Check if a user has any requests indexed.
-public(package) fun has_user_requests(self: &WithdrawalRequestQueue, sender: address): bool {
-    self.user_requests.contains(sender)
-}
-
-/// Check if a specific request ID is in a user's index.
-public(package) fun user_has_request(
-    self: &WithdrawalRequestQueue,
-    sender: address,
-    request_id: address,
-): bool {
-    self.user_requests.contains(sender) && self.user_requests[sender].contains(request_id)
 }
 
 // ======== Events ========
