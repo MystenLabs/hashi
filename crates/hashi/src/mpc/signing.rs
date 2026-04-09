@@ -144,6 +144,11 @@ impl SigningManager {
         }
     }
 
+    pub fn trigger_refill(&self) {
+        let next = self.batch_index() + 1;
+        let _ = self.refill_tx.send(next);
+    }
+
     pub fn epoch(&self) -> u64 {
         self.committee.epoch()
     }
@@ -234,8 +239,7 @@ impl SigningManager {
                         &mut mgr.batches[b]
                     } else {
                         if mgr.next_batch.is_none() {
-                            let next = mgr.batch_index() + 1;
-                            let _ = mgr.refill_tx.send(next);
+                            mgr.trigger_refill();
                         }
                         tracing::error!(
                             "Presig index {global_presig_index} not found in any \
