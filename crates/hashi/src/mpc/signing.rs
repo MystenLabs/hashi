@@ -136,6 +136,14 @@ impl SigningManager {
         self.batches.last().map_or(0, |b| b.batch_index)
     }
 
+    pub fn available_presig_end_index(&self) -> u64 {
+        let batch_end = self.batches.last().map_or(0, |b| b.end_index());
+        match &self.next_batch {
+            Some(next) => batch_end + next.len() as u64,
+            None => batch_end,
+        }
+    }
+
     pub fn epoch(&self) -> u64 {
         self.committee.epoch()
     }
