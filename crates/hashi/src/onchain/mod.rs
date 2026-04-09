@@ -327,11 +327,11 @@ impl OnchainState {
             .cloned()
     }
 
-    pub fn pending_withdrawals(&self) -> Vec<types::PendingWithdrawal> {
+    pub fn withdrawal_txns(&self) -> Vec<types::WithdrawalTransaction> {
         self.state()
             .hashi()
             .withdrawal_queue
-            .pending_withdrawals()
+            .withdrawal_txns()
             .values()
             .cloned()
             .collect()
@@ -356,11 +356,11 @@ impl OnchainState {
             .collect()
     }
 
-    pub fn pending_withdrawal(&self, id: &Address) -> Option<types::PendingWithdrawal> {
+    pub fn withdrawal_txn(&self, id: &Address) -> Option<types::WithdrawalTransaction> {
         self.state()
             .hashi()
             .withdrawal_queue
-            .pending_withdrawals()
+            .withdrawal_txns()
             .get(id)
             .cloned()
     }
@@ -1014,17 +1014,18 @@ async fn scrape_withdrawal_queue(
     client: Client,
     withdrawal_queue: move_types::WithdrawalRequestQueue,
 ) -> Result<types::WithdrawalRequestQueue> {
-    let (requests, pending_withdrawals) = tokio::try_join!(
+    let (requests, withdrawal_txns) = tokio::try_join!(
         scrape_withdrawal_requests(client.clone(), withdrawal_queue.requests.id),
-        scrape_pending_withdrawals(client.clone(), withdrawal_queue.pending_withdrawals.id),
+        scrape_withdrawal_txns(client.clone(), withdrawal_queue.withdrawal_txns.id),
     )?;
 
     Ok(types::WithdrawalRequestQueue {
         requests_id: withdrawal_queue.requests.id,
         requests,
         processed_id: withdrawal_queue.processed.id,
-        pending_withdrawals_id: withdrawal_queue.pending_withdrawals.id,
-        pending_withdrawals,
+        withdrawal_txns_id: withdrawal_queue.withdrawal_txns.id,
+        withdrawal_txns,
+        confirmed_txns_id: withdrawal_queue.confirmed_txns.id,
     })
 }
 
@@ -1060,58 +1061,60 @@ async fn scrape_withdrawal_requests(
     Ok(requests)
 }
 
-async fn scrape_pending_withdrawals(
+async fn scrape_withdrawal_txns(
     client: Client,
-    pending_withdrawals_id: Address,
-) -> Result<BTreeMap<Address, types::PendingWithdrawal>> {
-    let pending_withdrawals: BTreeMap<Address, types::PendingWithdrawal> = client
+    withdrawal_txns_id: Address,
+) -> Result<BTreeMap<Address, types::WithdrawalTransaction>> {
+    let withdrawal_txns: BTreeMap<Address, types::WithdrawalTransaction> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
-                .with_parent(pending_withdrawals_id)
+                .with_parent(withdrawal_txns_id)
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder()
+                        .child_object()
+                        .contents()
+                        .finish(),
                 ])),
         )
         .and_then(|field| async move {
-            let pending: types::PendingWithdrawal = field
-                .value()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok((pending.id, pending))
+            let txn: types::WithdrawalTransaction =
+                field
+                    .child_object()
+                    .contents()
+                    .deserialize()
+                    .map_err(|e| tonic::Status::from_error(e.into()))?;
+            Ok((txn.id, txn))
         })
         .try_collect()
         .await?;
 
-    Ok(pending_withdrawals)
+    Ok(withdrawal_txns)
 }
 
-pub(super) async fn fetch_pending_withdrawal(
+/// Fetch a single WithdrawalTransaction by its object ID.
+/// WithdrawalTransaction has `key`, so it's stored as a child object in the
+/// ObjectBag and can be fetched directly by its ID.
+pub(super) async fn fetch_withdrawal_txn(
     client: &mut Client,
-    pending_withdrawals_id: Address,
-    pending_id: Address,
-) -> Result<types::PendingWithdrawal> {
-    let field_id = pending_withdrawals_id
-        .derive_dynamic_child_id(&TypeTag::Address, &pending_id.to_bcs().unwrap());
-
+    withdrawal_txn_id: Address,
+) -> Result<types::WithdrawalTransaction> {
     let response = client
         .ledger_client()
-        .get_object(
-            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
-                Object::path_builder().contents().finish(),
-            ])),
-        )
+        .get_object(GetObjectRequest::new(&withdrawal_txn_id).with_read_mask(
+            FieldMask::from_paths([Object::path_builder().contents().finish()]),
+        ))
         .await?;
 
-    let field: move_types::Field<Address, types::PendingWithdrawal> = response
+    let txn: types::WithdrawalTransaction = response
         .into_inner()
         .object()
         .contents()
         .deserialize()
-        .map_err(|e| anyhow!("failed to deserialize PendingWithdrawal: {e}"))?;
+        .map_err(|e| anyhow!("failed to deserialize WithdrawalTransaction: {e}"))?;
 
-    Ok(field.value)
+    Ok(txn)
 }
 
 async fn scrape_utxo_pool(

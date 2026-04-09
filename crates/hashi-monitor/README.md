@@ -3,7 +3,7 @@ Hashi monitoring library and CLI tool.
 
 ## What it does?
 Audits the cross-system withdrawal flow:
-- **E1**: Hashi approval event on Sui (PendingWithdrawal creation)
+- **E1**: Hashi approval event on Sui (WithdrawalTransaction creation)
 - **E2**: Guardian approval event (logged to S3)
 - **E3**: BTC transaction confirmed on Bitcoin
 

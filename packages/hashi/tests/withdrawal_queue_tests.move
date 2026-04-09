@@ -59,9 +59,28 @@ fun make_test_output_with_address(amount: u64, addr: vector<u8>): withdrawal_que
     withdrawal_queue::output_utxo(amount, addr)
 }
 
-/// Creates a request, approves it, commits it, and returns (request_id, infos).
-/// The BTC balances are destroyed. The request_id is needed for
-/// new_pending_withdrawal_for_testing which now takes vector<address>.
+/// Build a minimal test WithdrawalTransaction for the given request IDs.
+/// Used by tests that just need a txn handle to pass to commit_requests.
+fun make_test_txn(
+    request_ids: vector<address>,
+    txid: address,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+): withdrawal_queue::WithdrawalTransaction {
+    let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), 1_000_000, option::none());
+    withdrawal_queue::new_withdrawal_txn_for_testing(
+        request_ids,
+        vector[test_utxo],
+        vector[make_test_output(1)],
+        option::none(),
+        txid,
+        clock,
+        ctx,
+    )
+}
+
+/// Creates a request, approves it, builds a withdrawal txn, commits the request,
+/// inserts the txn into the queue, and returns (request_id, info).
 fun approve_and_commit(
     queue: &mut withdrawal_queue::WithdrawalRequestQueue,
     clock: &clock::Clock,
@@ -70,26 +89,11 @@ fun approve_and_commit(
 ): (address, withdrawal_queue::CommittedRequestInfo) {
     let id = setup_request(queue, clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
-    let info = infos[0];
-    (id, info)
-}
-
-/// Creates a pending withdrawal in the queue and returns its ID.
-fun setup_pending_withdrawal(
-    queue: &mut withdrawal_queue::WithdrawalRequestQueue,
-    clock: &clock::Clock,
-    btc_amount: u64,
-    txid: address,
-    ctx: &mut TxContext,
-): address {
-    let (request_id, _info) = approve_and_commit(queue, clock, btc_amount, ctx);
+    let infos = queue.extract_request_infos(&vector[id]);
+    let txid = @0xBEEF;
     let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount * 2, option::none());
-
-    let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
-        vector[request_id],
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
         option::none(),
@@ -97,9 +101,39 @@ fun setup_pending_withdrawal(
         clock,
         ctx,
     );
-    let pending_id = pending.pending_withdrawal_id();
-    queue.insert_pending_withdrawal(pending);
-    pending_id
+    let btc_balance = queue.commit_requests(&txn);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    let info = infos[0];
+    (id, info)
+}
+
+/// Creates a request, approves it, builds a withdrawal txn, commits the request,
+/// inserts the txn into the queue, and returns the txn ID.
+fun setup_withdrawal_txn(
+    queue: &mut withdrawal_queue::WithdrawalRequestQueue,
+    clock: &clock::Clock,
+    btc_amount: u64,
+    txid: address,
+    ctx: &mut TxContext,
+): address {
+    let id = setup_request(queue, clock, btc_amount, ctx);
+    queue.approve_withdrawal(id);
+    let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount * 2, option::none());
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id],
+        vector[test_utxo],
+        vector[make_test_output(btc_amount)],
+        option::none(),
+        txid,
+        clock,
+        ctx,
+    );
+    let txn_id = txn.withdrawal_txn_id();
+    let btc_balance = queue.commit_requests(&txn);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    txn_id
 }
 
 // ======== approve_withdrawal tests ========
@@ -116,12 +150,13 @@ fun test_approve_request() {
     queue.approve_withdrawal(request_id);
 
     // Verify by committing — should not abort (only approved requests can be committed)
-    let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = queue.commit_requests(&vector[request_id], pending_id, @0xBEEF);
+    let txn = make_test_txn(vector[request_id], @0xBEEF, &clock, ctx);
+    let btc_balance = queue.commit_requests(&txn);
     let btc = &btc_balance;
     assert!(btc.value() == 10_000);
 
     btc_balance.destroy_for_testing();
+    std::unit_test::destroy(txn);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
 }
@@ -142,13 +177,14 @@ fun test_approve_multiple_requests() {
     queue.approve_withdrawal(id3);
 
     // Commit all as approved
-    let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = queue.commit_requests(&vector[id1, id2, id3], pending_id, @0xBEEF);
+    let txn = make_test_txn(vector[id1, id2, id3], @0xBEEF, &clock, ctx);
+    let btc_balance = queue.commit_requests(&txn);
 
     // Total: 5_000 + 15_000 + 25_000 = 45_000
     assert!(btc_balance.value() == 45_000);
 
     btc_balance.destroy_for_testing();
+    std::unit_test::destroy(txn);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
 }
@@ -165,11 +201,12 @@ fun test_remove_approved_request_fails_when_not_approved() {
     let request_id = setup_request(&mut queue, &clock, 10_000, ctx);
 
     // Try to commit without approving first — should abort
-    let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = queue.commit_requests(&vector[request_id], pending_id, @0xBEEF);
+    let txn = make_test_txn(vector[request_id], @0xBEEF, &clock, ctx);
+    let btc_balance = queue.commit_requests(&txn);
 
     // Cleanup (won't be reached)
     btc_balance.destroy_for_testing();
+    std::unit_test::destroy(txn);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
 }
@@ -177,38 +214,40 @@ fun test_remove_approved_request_fails_when_not_approved() {
 // ======== Pending withdrawal lifecycle tests ========
 
 #[test]
-fun test_pending_withdrawal_insert_and_remove() {
+fun test_withdrawal_txn_insert_and_remove() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    let pending_id = setup_pending_withdrawal(&mut queue, &clock, 50_000, @0xDEAD, ctx);
+    let pending_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xDEAD, ctx);
 
     // Remove and destroy — no change output expected
-    let pending = queue.remove_pending_withdrawal(pending_id);
-    let (_request_ids, _input_utxos, _txid, change_id) = pending.destroy_pending_withdrawal();
+    let pending = queue.remove_withdrawal_txn(pending_id);
+    let change_id = pending.change_utxo_id();
     change_id.destroy_none();
+    std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
 }
 
 #[test]
-fun test_sign_pending_withdrawal() {
+fun test_sign_withdrawal_txn() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    let pending_id = setup_pending_withdrawal(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    let pending_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
 
     // Sign the pending withdrawal via mutable borrow
     let test_signatures = vector[x"DEADBEEF", x"CAFEBABE"];
-    queue.sign_pending_withdrawal(pending_id, test_signatures);
+    queue.sign_withdrawal_txn(pending_id, test_signatures);
 
     // Remove and destroy
-    let pending = queue.remove_pending_withdrawal(pending_id);
-    let (_request_ids, _input_utxos, _txid, change_id) = pending.destroy_pending_withdrawal();
+    let pending = queue.remove_withdrawal_txn(pending_id);
+    let change_id = pending.change_utxo_id();
     change_id.destroy_none();
+    std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -227,18 +266,9 @@ fun test_full_withdrawal_queue_lifecycle() {
     queue.approve_withdrawal(request_id);
 
     // Step 3: Commit — drain BTC and move to processed
-    let pending_id_addr = ctx.fresh_object_address();
-    let (_infos, btc_balance) = queue.commit_requests(
-        &vector[request_id],
-        pending_id_addr,
-        @0xBEEF,
-    );
-    assert!(btc_balance.value() == 30_000);
-    btc_balance.destroy_for_testing();
-
     let test_utxo = utxo::utxo(utxo::utxo_id(@0xAAAA, 1), 50_000, option::none());
 
-    let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
+    let pending = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[request_id],
         vector[test_utxo],
         vector[make_test_output(30_000)],
@@ -247,16 +277,20 @@ fun test_full_withdrawal_queue_lifecycle() {
         &clock,
         ctx,
     );
-    let pending_id = pending.pending_withdrawal_id();
-    queue.insert_pending_withdrawal(pending);
+    let pending_id = pending.withdrawal_txn_id();
+    let btc_balance = queue.commit_requests(&pending);
+    assert!(btc_balance.value() == 30_000);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     // Step 4: Sign — mutate pending withdrawal in place
-    queue.sign_pending_withdrawal(pending_id, vector[x"AA", x"BB"]);
+    queue.sign_withdrawal_txn(pending_id, vector[x"AA", x"BB"]);
 
     // Step 5: Confirm — remove and destroy
-    let pending = queue.remove_pending_withdrawal(pending_id);
-    let (_request_ids, _input_utxos, _txid, change_id) = pending.destroy_pending_withdrawal();
+    let pending = queue.remove_withdrawal_txn(pending_id);
+    let change_id = pending.change_utxo_id();
     change_id.destroy_none();
+    std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -265,7 +299,7 @@ fun test_full_withdrawal_queue_lifecycle() {
 // ======== Change output tests ========
 
 #[test]
-fun test_pending_withdrawal_with_change_output() {
+fun test_withdrawal_txn_with_change_output() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
@@ -280,7 +314,7 @@ fun test_pending_withdrawal_with_change_output() {
 
     let change_output = make_test_output(change_amount);
 
-    let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
+    let pending = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[request_id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
@@ -289,24 +323,25 @@ fun test_pending_withdrawal_with_change_output() {
         &clock,
         ctx,
     );
-    let pending_id = pending.pending_withdrawal_id();
-    queue.insert_pending_withdrawal(pending);
+    let pending_id = pending.withdrawal_txn_id();
+    queue.insert_withdrawal_txn(pending);
 
     // Remove and destroy — should return a change UTXO ID.
-    let pending = queue.remove_pending_withdrawal(pending_id);
-    let (_request_ids, _input_utxos, _txid, change_id) = pending.destroy_pending_withdrawal();
+    let pending = queue.remove_withdrawal_txn(pending_id);
+    let change_id = pending.change_utxo_id();
     assert!(change_id.is_some());
 
     // Change vout = number of user outputs = 1.
     let expected_utxo_id = utxo::utxo_id(txid, 1);
     assert!(change_id.destroy_some() == expected_utxo_id);
 
+    std::unit_test::destroy(pending);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
 }
 
 #[test]
-fun test_pending_withdrawal_without_change_output() {
+fun test_withdrawal_txn_without_change_output() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
@@ -318,7 +353,7 @@ fun test_pending_withdrawal_without_change_output() {
     // Input UTXO exactly matches withdrawal amount (no change)
     let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount, option::none());
 
-    let pending = withdrawal_queue::new_pending_withdrawal_for_testing(
+    let pending = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[request_id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
@@ -327,14 +362,15 @@ fun test_pending_withdrawal_without_change_output() {
         &clock,
         ctx,
     );
-    let pending_id = pending.pending_withdrawal_id();
-    queue.insert_pending_withdrawal(pending);
+    let pending_id = pending.withdrawal_txn_id();
+    queue.insert_withdrawal_txn(pending);
 
     // Remove and destroy — should return None for the change UTXO ID.
-    let pending = queue.remove_pending_withdrawal(pending_id);
-    let (_request_ids, _input_utxos, _txid, change_id) = pending.destroy_pending_withdrawal();
+    let pending = queue.remove_withdrawal_txn(pending_id);
+    let change_id = pending.change_utxo_id();
     assert!(change_id.is_none());
     change_id.destroy_none();
+    std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -396,12 +432,10 @@ fun test_miner_fee_single_request() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xAA01, 0), input_amount, option::none())],
@@ -413,7 +447,9 @@ fun test_miner_fee_single_request() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -436,12 +472,10 @@ fun test_miner_fee_single_request_large_fee() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xAA02, 0), input_amount, option::none())],
@@ -453,7 +487,9 @@ fun test_miner_fee_single_request_large_fee() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -479,12 +515,10 @@ fun test_miner_fee_batched_even_split() {
     let id2 = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id1);
     queue.approve_withdrawal(id2);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id1, id2]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id1, id2],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xBB01, 0), input_amount, option::none())],
@@ -500,7 +534,9 @@ fun test_miner_fee_batched_even_split() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -530,12 +566,10 @@ fun test_miner_fee_batched_with_remainder() {
     queue.approve_withdrawal(id1);
     queue.approve_withdrawal(id2);
     queue.approve_withdrawal(id3);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2, id3], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id1, id2, id3]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id1, id2, id3],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xBB02, 0), input_amount, option::none())],
@@ -552,7 +586,9 @@ fun test_miner_fee_batched_with_remainder() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -580,12 +616,10 @@ fun test_miner_fee_batched_unequal_amounts() {
     let id2 = setup_request(&mut queue, &clock, btc_amount_2, ctx);
     queue.approve_withdrawal(id1);
     queue.approve_withdrawal(id2);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id1, id2], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id1, id2]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id1, id2],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xBB03, 0), input_amount, option::none())],
@@ -601,7 +635,9 @@ fun test_miner_fee_batched_unequal_amounts() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -623,12 +659,10 @@ fun test_miner_fee_zero() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xCC01, 0), input_amount, option::none())],
@@ -640,7 +674,9 @@ fun test_miner_fee_zero() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -664,12 +700,10 @@ fun test_miner_fee_output_at_dust_floor() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xCC02, 0), input_amount, option::none())],
@@ -681,7 +715,9 @@ fun test_miner_fee_output_at_dust_floor() {
         &clock,
         vector[],
     );
-    queue.insert_pending_withdrawal(pending);
+    let btc_balance = queue.commit_requests(&pending);
+    btc_balance.destroy_for_testing();
+    queue.insert_withdrawal_txn(pending);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
@@ -706,12 +742,10 @@ fun test_miner_fee_output_below_dust_aborts() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xDD01, 0), input_amount, option::none())],
@@ -724,7 +758,7 @@ fun test_miner_fee_output_below_dust_aborts() {
         vector[],
     );
 
-    queue.insert_pending_withdrawal(pending);
+    queue.insert_withdrawal_txn(pending);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
     std::unit_test::destroy(config);
@@ -750,12 +784,10 @@ fun test_miner_fee_wrong_output_amount_aborts() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none())],
@@ -768,7 +800,7 @@ fun test_miner_fee_wrong_output_amount_aborts() {
         vector[],
     );
 
-    queue.insert_pending_withdrawal(pending);
+    queue.insert_withdrawal_txn(pending);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
     std::unit_test::destroy(config);
@@ -791,14 +823,12 @@ fun test_miner_fee_wrong_address_aborts() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
     // Output uses a different address than the request (which uses all-zeros)
     let wrong_addr = x"1111111111111111111111111111111111111111";
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xDD03, 0), input_amount, option::none())],
@@ -811,7 +841,7 @@ fun test_miner_fee_wrong_address_aborts() {
         vector[],
     );
 
-    queue.insert_pending_withdrawal(pending);
+    queue.insert_withdrawal_txn(pending);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
     std::unit_test::destroy(config);
@@ -837,12 +867,10 @@ fun test_miner_fee_exceeds_max_aborts() {
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
     queue.approve_withdrawal(id);
-    let pending_id = ctx.fresh_object_address();
-    let (infos, btc_balance) = queue.commit_requests(&vector[id], pending_id, @0xBEEF);
-    btc_balance.destroy_for_testing();
+    let infos = queue.extract_request_infos(&vector[id]);
 
-    let pending = withdrawal_queue::new_pending_withdrawal(
-        pending_id,
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
         vector[id],
         &infos,
         vector[utxo::utxo(utxo::utxo_id(@0xEE01, 0), input_amount, option::none())],
@@ -855,7 +883,7 @@ fun test_miner_fee_exceeds_max_aborts() {
         vector[],
     );
 
-    queue.insert_pending_withdrawal(pending);
+    queue.insert_withdrawal_txn(pending);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
     std::unit_test::destroy(config);

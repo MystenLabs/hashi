@@ -778,8 +778,8 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Reassign presig indices for a pending withdrawal from a previous epoch.
-    pub async fn execute_allocate_presigs_for_pending_withdrawal(
+    /// Reassign presig indices for a withdrawal transaction from a previous epoch.
+    pub async fn execute_allocate_presigs_for_withdrawal_txn(
         &mut self,
         withdrawal_id: Address,
     ) -> anyhow::Result<()> {
@@ -794,14 +794,14 @@ impl SuiTxExecutor {
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("allocate_presigs_for_pending_withdrawal"),
+                Identifier::from_static("allocate_presigs_for_withdrawal_txn"),
             ),
             vec![hashi_arg, withdrawal_id_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "allocate_presigs_for_pending_withdrawal transaction failed: {:?}",
+                "allocate_presigs_for_withdrawal_txn transaction failed: {:?}",
                 response.transaction().effects().status()
             );
         }
