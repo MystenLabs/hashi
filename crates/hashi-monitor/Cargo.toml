@@ -22,6 +22,7 @@ tokio.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+hashi-telemetry = { path = "../hashi-telemetry" }
 
 [dev-dependencies]
 e2e-tests = { path = "../e2e-tests" }

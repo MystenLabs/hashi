@@ -184,6 +184,11 @@ impl SigningManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(sui_request_id = %sui_request_id, global_presig_index),
+    )]
     pub async fn sign(
         signing_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,

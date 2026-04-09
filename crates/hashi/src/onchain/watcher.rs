@@ -27,6 +27,7 @@ use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
 use hashi_types::move_types::HashiEvent;
 
+#[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),

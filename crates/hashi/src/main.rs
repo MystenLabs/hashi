@@ -158,7 +158,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    init_tracing_subscriber();
+    let _guard = hashi_telemetry::TelemetryConfig::new()
+        .with_file_line(true)
+        .with_env()
+        .init();
 
     tracing::info!("welcome to hashi");
 
@@ -192,18 +195,4 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
 
     tracing::info!("hashi shutting down; goodbye");
     Ok(())
-}
-
-fn init_tracing_subscriber() {
-    let subscriber = ::tracing_subscriber::FmtSubscriber::builder()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .with_file(true)
-        .with_line_number(true)
-        .finish();
-    ::tracing::subscriber::set_global_default(subscriber)
-        .expect("unable to initialize tracing subscriber");
 }

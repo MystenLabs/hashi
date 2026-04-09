@@ -33,6 +33,7 @@ colored.workspace = true
 rand.workspace = true
 nix = { version = "0.26.4", features = ["signal"] }
 tracing-subscriber.workspace = true
+hashi-telemetry = { path = "../hashi-telemetry" }
 
 [[bin]]
 name = "hashi-localnet"

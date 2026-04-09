@@ -43,7 +43,7 @@ tabled = "0.16"
 anyhow = "1.0.98"
 toml = "0.9.2"
 futures = "0.3.31"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 # TODO: Switch back to a crates.io release once age 0.12+ is published.
 # We pin to this specific commit because age 0.11.x depends on i18n-embed-fl 0.9.x,
 # which has a non-determinism bug (HashMap iteration in the fl!() proc macro) that

@@ -102,6 +102,7 @@ impl MpcService {
         })
     }
 
+    #[tracing::instrument(name = "mpc_service", skip_all)]
     async fn run(mut self) {
         let pending = self.get_pending_epoch_change();
         let is_in_committee = self.inner.is_in_current_committee();
@@ -282,6 +283,7 @@ impl MpcService {
         Ok(output)
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
@@ -531,6 +533,7 @@ impl MpcService {
         }
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn handle_reconfig(&self, target_epoch: u64) {
         let run_dkg = self
             .inner
@@ -645,6 +648,7 @@ impl MpcService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self

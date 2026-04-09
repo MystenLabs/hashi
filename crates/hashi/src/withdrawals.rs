@@ -104,6 +104,7 @@ pub struct WithdrawalConfirmation {
 impl Hashi {
     // --- Step 1: Request approval (lightweight) ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(request_id = %approval.request_id))]
     pub async fn validate_and_sign_withdrawal_request_approval(
         &self,
         approval: &WithdrawalRequestApproval,
@@ -132,6 +133,7 @@ impl Hashi {
 
     // --- Step 2: Construction approval (with UTXO selection) ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_and_sign_withdrawal_tx_commitment(
         &self,
         approval: &WithdrawalTxCommitment,
@@ -140,6 +142,7 @@ impl Hashi {
         self.sign_withdrawal_tx_commitment(approval)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_withdrawal_tx_commitment(
         &self,
         approval: &WithdrawalTxCommitment,
@@ -396,6 +399,7 @@ impl Hashi {
 
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
     pub fn validate_and_sign_withdrawal_tx_signing(
         &self,
         message: &WithdrawalTxSigning,
@@ -496,6 +500,7 @@ impl Hashi {
 
     // --- MPC BTC tx signing ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
@@ -532,6 +537,11 @@ impl Hashi {
     }
 
     /// Produce MPC Schnorr signatures for an unsigned withdrawal transaction.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(withdrawal_txn_id = %txn.id, input_count = txn.inputs.len()),
+    )]
     async fn mpc_sign_withdrawal_tx(
         &self,
         txn: &crate::onchain::types::WithdrawalTransaction,
@@ -706,6 +716,7 @@ impl Hashi {
     /// UTXOs using the batching-aware coin selection algorithm, build the
     /// unsigned BTC tx, and return a `WithdrawalTxCommitment` covering the
     /// selected requests.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_count = requests.len()))]
     pub async fn build_withdrawal_tx_commitment(
         &self,
         requests: &[WithdrawalRequest],
@@ -835,6 +846,7 @@ impl Hashi {
 
     /// Run AML/Sanctions checks for a withdrawal request.
     /// If no screener client is configured, checks are skipped.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id))]
     pub(crate) async fn screen_withdrawal(
         &self,
         request: &WithdrawalRequest,
