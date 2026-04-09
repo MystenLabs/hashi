@@ -291,10 +291,11 @@ impl MpcManager {
         &self,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
-        if let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer) {
+        if request.epoch == self.mpc_config.epoch
+            && let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer)
+        {
             return Ok(RetrieveMessagesResponse { messages });
         }
-        // Mainly for last-epoch retrieval
         let messages = match request.protocol_type {
             ProtocolTypeIndicator::Dkg => self
                 .public_messages_store
