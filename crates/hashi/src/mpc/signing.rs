@@ -1399,7 +1399,7 @@ mod tests {
             None,
             Duration::from_secs(30),
         )
-            .await;
+        .await;
 
         assert!(matches!(result, Err(SigningError::PoolExhausted)));
         assert!(
