@@ -39,6 +39,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -559,9 +560,21 @@ impl MpcService {
                 return;
             }
             let result = if run_dkg {
-                self.run_dkg(target_epoch).await
+                tokio::time::timeout(MPC_PROTOCOL_TIMEOUT, self.run_dkg(target_epoch))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "DKG timed out after {MPC_PROTOCOL_TIMEOUT:?}"
+                        ))
+                    })
             } else {
-                self.run_key_rotation(target_epoch).await
+                tokio::time::timeout(MPC_PROTOCOL_TIMEOUT, self.run_key_rotation(target_epoch))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "Key rotation timed out after {MPC_PROTOCOL_TIMEOUT:?}"
+                        ))
+                    })
             };
             match result {
                 Ok(output) => break output,
