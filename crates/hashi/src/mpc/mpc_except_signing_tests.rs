@@ -2995,6 +2995,45 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
 }
 
 #[test]
+fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+
+    let dealer_address = rotation_setup.setup.address(0);
+    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+
+    // Store "previous epoch" rotation messages in DB under epoch - 1.
+    let prev_epoch = manager.mpc_config.epoch - 1;
+    let prev_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+    manager
+        .public_messages_store
+        .store_rotation_messages(&dealer_address, &prev_msgs)
+        .unwrap();
+
+    // Put DIFFERENT "current epoch" messages in the in-memory map.
+    let current_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+    manager
+        .rotation_messages
+        .insert(dealer_address, current_msgs.clone());
+
+    // Request previous epoch's messages — should get DB data, not in-memory.
+    let request = RetrieveMessagesRequest {
+        dealer: dealer_address,
+        protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: prev_epoch,
+        batch_index: None,
+    };
+    let response = manager.handle_retrieve_messages_request(&request).unwrap();
+
+    let expected_hash = compute_messages_hash(&Messages::Rotation(prev_msgs));
+    let actual_hash = compute_messages_hash(&response.messages);
+    assert_eq!(
+        expected_hash, actual_hash,
+        "Should return DB messages for previous epoch, not in-memory current epoch messages"
+    );
+}
+
+#[test]
 fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
