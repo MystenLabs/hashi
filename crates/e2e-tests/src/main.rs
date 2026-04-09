@@ -279,13 +279,10 @@ async fn cmd_start(
         tracing::level_filters::LevelFilter::OFF
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(default_level.into())
-                .from_env_lossy(),
-        )
+    let _guard = hashi_telemetry::TelemetryConfig::new()
+        .with_default_level(default_level)
         .with_target(false)
+        .with_env()
         .init();
 
     use std::io::Write;

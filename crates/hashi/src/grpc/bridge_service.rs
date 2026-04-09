@@ -45,20 +45,26 @@ impl BridgeService for HttpService {
     }
 
     /// Validate and sign a confirmation of a bitcoin deposit request.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(deposit_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
     async fn sign_deposit_confirmation(
         &self,
         request: Request<SignDepositConfirmationRequest>,
     ) -> Result<Response<SignDepositConfirmationResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
         let deposit_request = parse_deposit_request(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        tracing::Span::current().record("deposit_id", tracing::field::display(&deposit_request.id));
         let member_signature = self
             .inner
             .validate_and_sign_deposit_confirmation(&deposit_request)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!(
-            deposit_request_id = %deposit_request.id,
             utxo_txid = %deposit_request.utxo.id.txid,
             utxo_vout = deposit_request.utxo.id.vout,
             amount = deposit_request.utxo.amount,
@@ -70,42 +76,53 @@ impl BridgeService for HttpService {
     }
 
     /// Step 1: Validate and sign approval for a batch of unapproved withdrawal requests.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(request_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
     async fn sign_withdrawal_request_approval(
         &self,
         request: Request<SignWithdrawalRequestApprovalRequest>,
     ) -> Result<Response<SignWithdrawalRequestApprovalResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
         let approval = parse_withdrawal_request_approval(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        tracing::Span::current()
+            .record("request_id", tracing::field::display(&approval.request_id));
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_request_approval(&approval)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        tracing::info!(
-            request_id = %approval.request_id,
-            "Signed withdrawal request approval",
-        );
+        tracing::info!("Signed withdrawal request approval");
         Ok(Response::new(SignWithdrawalRequestApprovalResponse {
             member_signature: Some(member_signature),
         }))
     }
 
     /// Step 2: Validate and sign a proposed withdrawal transaction construction.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(bitcoin_txid = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
     async fn sign_withdrawal_tx_construction(
         &self,
         request: Request<SignWithdrawalTxConstructionRequest>,
     ) -> Result<Response<SignWithdrawalTxConstructionResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
         let approval = parse_withdrawal_tx_commitment(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        tracing::Span::current().record("bitcoin_txid", tracing::field::display(&approval.txid));
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_tx_commitment(&approval)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!(
-            txid = %approval.txid,
             requests = approval.request_ids.len(),
             "Signed withdrawal tx construction",
         );
@@ -114,23 +131,33 @@ impl BridgeService for HttpService {
         }))
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_txn_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
     async fn sign_withdrawal_transaction(
         &self,
         request: Request<SignWithdrawalTransactionRequest>,
     ) -> Result<Response<SignWithdrawalTransactionResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
         let withdrawal_txn_id = Address::from_bytes(&request.get_ref().withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
-        tracing::info!(withdrawal_txn_id = %withdrawal_txn_id, "sign_withdrawal_transaction called");
+        tracing::Span::current().record(
+            "withdrawal_txn_id",
+            tracing::field::display(&withdrawal_txn_id),
+        );
+        tracing::info!("sign_withdrawal_transaction called");
         let signatures = self
             .inner
             .validate_and_sign_withdrawal_tx(&withdrawal_txn_id)
             .await
             .map_err(|e| {
-                tracing::error!(withdrawal_txn_id = %withdrawal_txn_id, "sign_withdrawal_transaction failed: {e}");
+                tracing::error!("sign_withdrawal_transaction failed: {e}");
                 Status::failed_precondition(e.to_string())
             })?;
-        tracing::info!(withdrawal_txn_id = %withdrawal_txn_id, "sign_withdrawal_transaction succeeded");
+        tracing::info!("sign_withdrawal_transaction succeeded");
         Ok(Response::new(SignWithdrawalTransactionResponse {
             signatures_by_input: signatures
                 .iter()
@@ -140,41 +167,55 @@ impl BridgeService for HttpService {
     }
 
     /// Step 3: Validate and sign the BLS certificate over witness signatures.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
     async fn sign_withdrawal_tx_signing(
         &self,
         request: Request<SignWithdrawalTxSigningRequest>,
     ) -> Result<Response<SignWithdrawalTxSigningResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
         let message = parse_withdrawal_tx_signing(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        tracing::Span::current().record(
+            "withdrawal_id",
+            tracing::field::display(&message.withdrawal_id),
+        );
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_tx_signing(&message)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        tracing::info!(
-            withdrawal_id = %message.withdrawal_id,
-            "Signed withdrawal tx signing",
-        );
+        tracing::info!("Signed withdrawal tx signing");
         Ok(Response::new(SignWithdrawalTxSigningResponse {
             member_signature: Some(member_signature),
         }))
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_txn_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
     async fn sign_withdrawal_confirmation(
         &self,
         request: Request<SignWithdrawalConfirmationRequest>,
     ) -> Result<Response<SignWithdrawalConfirmationResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
         let withdrawal_txn_id = Address::from_bytes(&request.get_ref().withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
+        tracing::Span::current().record(
+            "withdrawal_txn_id",
+            tracing::field::display(&withdrawal_txn_id),
+        );
         let member_signature = self
             .inner
             .sign_withdrawal_confirmation(&withdrawal_txn_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        tracing::info!(
-            withdrawal_txn_id = %withdrawal_txn_id,
-            "Signed withdrawal confirmation",
-        );
+        tracing::info!("Signed withdrawal confirmation");
         Ok(Response::new(SignWithdrawalConfirmationResponse {
             member_signature: Some(member_signature),
         }))

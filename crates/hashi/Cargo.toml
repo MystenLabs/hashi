@@ -35,6 +35,7 @@ tower.workspace = true
 tokio.workspace = true
 prometheus.workspace = true
 tracing.workspace = true
+hashi-telemetry = { path = "../hashi-telemetry" }
 
 bin-version.workspace = true
 prometheus-closure-metric.workspace = true

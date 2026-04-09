@@ -98,6 +98,7 @@ impl LeaderService {
         })
     }
 
+    #[tracing::instrument(name = "leader", skip_all)]
     async fn run(mut self) {
         info!("Starting leader service");
 
@@ -345,22 +346,23 @@ impl LeaderService {
         self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms);
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn process_deposit_request(
         inner: Arc<Hashi>,
         deposit_request: DepositRequest,
     ) -> anyhow::Result<()> {
-        info!(deposit_request_id = %deposit_request.id, "Processing deposit request");
+        info!("Processing deposit request");
 
         // Validate deposit_request before asking for signatures
         inner
             .validate_deposit_request(&deposit_request)
             .await
             .map_err(|e| {
-                debug!(request_id = ?deposit_request.id, "Deposit validation failed: {e}");
+                debug!("Deposit validation failed: {e}");
                 anyhow::anyhow!(e)
             })?;
 
-        info!(deposit_request_id = %deposit_request.id, "Deposit request validated successfully");
+        info!("Deposit request validated successfully");
 
         let proto_request = deposit_request_to_proto(&deposit_request);
         let members = inner
@@ -394,7 +396,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(deposit_request_id = %deposit_request.id, "Failed to add deposit signature: {e}");
+                error!("Failed to add deposit signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -420,10 +422,10 @@ impl LeaderService {
                     .with_label_values(&["confirm_deposit", "success"])
                     .inc();
                 inner.metrics.deposits_confirmed_total.inc();
-                info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
+                info!("Successfully submitted deposit confirmation");
             })
             .inspect_err(|e| {
-                error!(deposit_request_id = %deposit_request.id, "Failed to submit deposit confirmation: {e}");
+                error!("Failed to submit deposit confirmation: {e}");
                 inner
                     .metrics
                     .sui_tx_submissions_total
@@ -433,16 +435,14 @@ impl LeaderService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_deposit_confirmation_signature(
         inner: &Arc<Hashi>,
         proto_request: SignDepositConfirmationRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting deposit confirmation signature from {}",
-            validator_address
-        );
+        trace!("Requesting deposit confirmation signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -550,6 +550,7 @@ impl LeaderService {
         }));
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(batch_size = to_process.len()))]
     async fn process_unapproved_withdrawal_requests_task(
         inner: Arc<Hashi>,
         retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
@@ -637,10 +638,7 @@ impl LeaderService {
                     retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
                 }
                 if let Err(err) = &result {
-                    error!(
-                        withdrawal_request_id = %request_id,
-                        "Withdrawal approval failed: {err:#}"
-                    );
+                    error!(request_id = %request_id, "Withdrawal approval failed: {err:#}");
                 }
 
                 (request_id, result)
@@ -666,6 +664,7 @@ impl LeaderService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(request_id = %request.id))]
     async fn process_unapproved_withdrawal_request(
         inner: Arc<Hashi>,
         retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
@@ -705,7 +704,7 @@ impl LeaderService {
 
         let mut aggregator = BlsSignatureAggregator::new(committee, approval);
         if let Err(e) = aggregator.add_signature(local_sig) {
-            error!(withdrawal_request_id = %request.id, "Failed to add local approval signature: {e}");
+            error!("Failed to add local approval signature: {e}");
         }
 
         // Fan out signature requests to remote members in parallel.
@@ -726,7 +725,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(withdrawal_request_id = %request.id, "Failed to add approval signature: {e}");
+                error!("Failed to add approval signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -745,14 +744,14 @@ impl LeaderService {
                 request.id,
                 checkpoint_timestamp_ms,
             );
-            error!(withdrawal_request_id = %request.id, "Insufficient approval signatures: weight {weight} < {required_weight}");
+            error!("Insufficient approval signatures: weight {weight} < {required_weight}");
             return Ok(None);
         }
 
         match aggregator.finish() {
             Ok(signed) => Ok(Some((request.id, signed.committee_signature().clone()))),
             Err(e) => {
-                error!(withdrawal_request_id = %request.id, "Failed to build approval certificate: {e}");
+                error!("Failed to build approval certificate: {e}");
                 Ok(None)
             }
         }
@@ -917,6 +916,7 @@ impl LeaderService {
         }));
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(batch_size = requests.len()))]
     async fn process_approved_withdrawal_request_batch(
         inner: Arc<Hashi>,
         retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
@@ -1102,6 +1102,7 @@ impl LeaderService {
         }
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn process_unsigned_withdrawal_txn(
         inner: Arc<Hashi>,
         txn: WithdrawalTransaction,
@@ -1112,7 +1113,6 @@ impl LeaderService {
         let current_epoch = inner.onchain_state().epoch();
         if txn.epoch != current_epoch {
             info!(
-                withdrawal_txn_id = %txn.id,
                 "Withdrawal transaction from epoch {} (current {}), reassigning presig indices",
                 txn.epoch, current_epoch,
             );
@@ -1120,14 +1120,11 @@ impl LeaderService {
             executor
                 .execute_allocate_presigs_for_withdrawal_txn(txn.id)
                 .await?;
-            info!(
-                withdrawal_txn_id = %txn.id,
-                "Presig indices reassigned, will sign on next checkpoint"
-            );
+            info!("Presig indices reassigned, will sign on next checkpoint");
             // Return and let the next checkpoint iteration pick up the updated state.
             return Ok(());
         }
-        info!(withdrawal_txn_id = %txn.id, "MPC signing withdrawal transaction");
+        info!("MPC signing withdrawal transaction");
 
         let members = inner
             .onchain_state()
@@ -1267,25 +1264,33 @@ impl LeaderService {
 
     /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
     /// enough BTC confirmations are reached.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid))]
     async fn handle_signed_withdrawal(
         inner: Arc<Hashi>,
         txn: WithdrawalTransaction,
     ) -> anyhow::Result<()> {
         let confirmation_threshold = inner.onchain_state().bitcoin_confirmation_threshold();
         let txid: bitcoin::Txid = txn.txid.into();
+        tracing::Span::current().record("bitcoin_txid", tracing::field::display(&txid));
 
         match inner.btc_monitor().get_transaction_status(txid).await {
             Ok(TxStatus::Confirmed { confirmations })
                 if confirmations >= confirmation_threshold =>
             {
-                info!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, confirmations, "Withdrawal tx confirmed, proceeding to on-chain confirmation");
+                info!(
+                    confirmations,
+                    "Withdrawal tx confirmed, proceeding to on-chain confirmation"
+                );
                 Self::confirm_withdrawal_on_sui(&inner, &txn).await?;
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
-                debug!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, confirmations, confirmation_threshold, "Withdrawal tx waiting for more confirmations");
+                debug!(
+                    confirmations,
+                    confirmation_threshold, "Withdrawal tx waiting for more confirmations"
+                );
             }
             Ok(TxStatus::InMempool) => {
-                debug!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, "Withdrawal tx in mempool, waiting for confirmations");
+                debug!("Withdrawal tx in mempool, waiting for confirmations");
             }
             Ok(TxStatus::NotFound) => {
                 Self::rebuild_and_broadcast_withdrawal_btc_tx(&inner, &txn, txid).await;
@@ -1302,27 +1307,28 @@ impl LeaderService {
 
     /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
     /// data (stored witness signatures) and broadcast it to the Bitcoin network.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid))]
     async fn rebuild_and_broadcast_withdrawal_btc_tx(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
         txid: bitcoin::Txid,
     ) {
-        warn!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, "Withdrawal tx not found, re-broadcasting from on-chain signatures");
+        warn!("Withdrawal tx not found, re-broadcasting from on-chain signatures");
 
         let tx = match Self::rebuild_signed_tx_from_onchain(inner, txn) {
             Ok(tx) => tx,
             Err(e) => {
-                error!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, "Failed to rebuild signed withdrawal tx: {e}");
+                error!("Failed to rebuild signed withdrawal tx: {e}");
                 return;
             }
         };
 
         match inner.btc_monitor().broadcast_transaction(tx).await {
             Ok(()) => {
-                info!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, "Re-broadcast withdrawal tx");
+                info!("Re-broadcast withdrawal tx");
             }
             Err(e) => {
-                error!(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid, "Failed to re-broadcast withdrawal tx: {e}");
+                error!("Failed to re-broadcast withdrawal tx: {e}");
             }
         }
     }
@@ -1369,6 +1375,7 @@ impl LeaderService {
         Ok(tx)
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn confirm_withdrawal_on_sui(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
@@ -1402,6 +1409,7 @@ impl LeaderService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
     async fn collect_withdrawal_confirmation_signature(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: Address,
@@ -1431,7 +1439,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(withdrawal_txn_id = %withdrawal_txn_id, "Failed to add withdrawal confirmation signature: {e}");
+                error!("Failed to add withdrawal confirmation signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -1449,16 +1457,14 @@ impl LeaderService {
         Ok(aggregator.finish()?.into_parts().0)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_commitment_signature(
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalTxConstructionRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal approval signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal tx commitment signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1501,16 +1507,14 @@ impl LeaderService {
             .ok()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_approval_signature(
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalRequestApprovalRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal request approval signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal request approval signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1553,16 +1557,14 @@ impl LeaderService {
             .ok()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signing_signature(
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalTxSigningRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal tx signing signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal tx signing signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1605,16 +1607,14 @@ impl LeaderService {
             .ok()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal tx signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal tx signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1688,16 +1688,14 @@ impl LeaderService {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_confirmation_signature(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: Address,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal confirmation signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal confirmation signature");
 
         let mut rpc_client = inner
             .onchain_state()

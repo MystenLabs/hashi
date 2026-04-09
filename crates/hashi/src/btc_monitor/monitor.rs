@@ -226,6 +226,7 @@ impl Monitor {
     }
 
     /// Run the main event loop, returning the reason it exited.
+    #[tracing::instrument(name = "btc_monitor", skip_all)]
     async fn run_event_loop(
         &mut self,
         kyoto_client: &mut kyoto::Client,

@@ -226,20 +226,6 @@ impl ScreenerService for ScreenerServiceImpl {
     }
 }
 
-fn init_tracing_subscriber() {
-    let subscriber = tracing_subscriber::FmtSubscriber::builder()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .with_file(true)
-        .with_line_number(true)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("unable to initialize tracing subscriber");
-}
-
 fn start_metrics_server(registry: prometheus::Registry) -> sui_http::ServerHandle {
     let addr: SocketAddr = "0.0.0.0:9184".parse().unwrap();
     info!("Prometheus metrics server listening on {}", addr);
@@ -266,7 +252,11 @@ async fn metrics_handler(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing_subscriber();
+    let _guard = hashi_telemetry::TelemetryConfig::new()
+        .with_file_line(true)
+        .with_service_name("hashi-screener")
+        .with_env()
+        .init();
 
     let api_key = env::var("MERKLE_SCIENCE_API_KEY")
         .map_err(|_| anyhow::anyhow!("MERKLE_SCIENCE_API_KEY environment variable is not set"))?;

@@ -46,6 +46,7 @@ pub fn derive_deposit_address(
 }
 
 impl Hashi {
+    #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]
     pub async fn validate_and_sign_deposit_confirmation(
         &self,
         deposit_request: &DepositRequest,
@@ -54,6 +55,7 @@ impl Hashi {
         self.sign_deposit_confirmation(deposit_request)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     pub async fn validate_deposit_request(
         &self,
         deposit_request: &DepositRequest,
@@ -67,6 +69,7 @@ impl Hashi {
 
     /// Run AML/Sanctions checks for the deposit request.
     /// If no screener client is configured, checks are skipped.
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn screen_deposit(
         &self,
         deposit_request: &DepositRequest,
@@ -104,6 +107,7 @@ impl Hashi {
     }
 
     /// Validate that the deposit request exists on Sui
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     fn validate_deposit_request_on_sui(
         &self,
         deposit_request: &DepositRequest,
@@ -143,6 +147,15 @@ impl Hashi {
     }
 
     /// Validate that there is a txout on Bitcoin that matches the deposit request
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            deposit_id = %deposit_request.id,
+            bitcoin_txid = %deposit_request.utxo.id.txid,
+            vout = deposit_request.utxo.id.vout,
+        ),
+    )]
     async fn validate_deposit_request_on_bitcoin(
         &self,
         deposit_request: &DepositRequest,
