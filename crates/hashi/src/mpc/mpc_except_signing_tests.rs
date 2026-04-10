@@ -5382,7 +5382,16 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 let prev_output = manager.previous_output.clone().unwrap();
                 let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
                 let rotation_messages = Messages::Rotation(msgs.clone());
-                manager.rotation_messages.insert(addr, msgs);
+                manager.rotation_messages.insert(addr, msgs.clone());
+                // Simulate RPC delivery: test_manager (validator 0) needs to
+                // know about this dealer's messages so the dealer skip check
+                // counts them under the robust filter (which excludes
+                // dealers with empty rotation messages).
+                test_manager
+                    .write()
+                    .unwrap()
+                    .rotation_messages
+                    .insert(addr, msgs);
                 let own_sig = manager
                     .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
                     .unwrap();
@@ -5438,6 +5447,149 @@ async fn test_run_key_rotation_skips_dealer_phase() {
 
     // Verify rotation completed successfully via party phase only
     assert_eq!(new_output.key_shares.shares.len(), 3);
+    assert_eq!(new_output.public_key, test_dkg_output.public_key);
+}
+
+#[tokio::test]
+async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    // weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+
+    let (mut test_manager, test_dkg_output, _) =
+        rotation_setup.create_rotation_dealer_with_memory_store(0);
+    let test_addr = rotation_setup.setup.address(0);
+    test_manager.source_epoch = rotation_setup.setup.epoch();
+    test_manager.previous_output = Some(test_dkg_output.clone());
+
+    let mut other_managers_map = HashMap::new();
+    for i in 1..5 {
+        let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+        manager.previous_output = Some(output);
+        other_managers_map.insert(rotation_setup.setup.address(i), manager);
+    }
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let validator_2_addr = rotation_setup.setup.address(2);
+    let validator_1_addr = rotation_setup.setup.address(1);
+
+    let mut rotation_certificates = Vec::new();
+    {
+        let mut other_managers = mock_p2p.managers.lock().unwrap();
+        let (empty_rotation_messages, v2_own_sig, epoch) = {
+            let manager = other_managers.get_mut(&validator_2_addr).unwrap();
+            let empty_msgs = BTreeMap::new();
+            let rotation_messages = Messages::Rotation(empty_msgs.clone());
+            manager
+                .rotation_messages
+                .insert(validator_2_addr, empty_msgs);
+            let prev_output = manager.previous_output.clone().unwrap();
+            let own_sig = manager
+                .try_sign_rotation_messages(&prev_output, validator_2_addr, &rotation_messages)
+                .unwrap();
+            (rotation_messages, own_sig, manager.mpc_config.epoch)
+        };
+        let v2_signer_addr = rotation_setup.setup.address(3);
+        let v2_signer_sig = {
+            let signer = other_managers.get_mut(&v2_signer_addr).unwrap();
+            let signer_prev = signer.previous_output.clone().unwrap();
+            signer
+                .try_sign_rotation_messages(
+                    &signer_prev,
+                    validator_2_addr,
+                    &empty_rotation_messages,
+                )
+                .unwrap()
+        };
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &empty_rotation_messages,
+            validator_2_addr,
+            vec![
+                MemberSignature::new(epoch, validator_2_addr, v2_own_sig),
+                MemberSignature::new(epoch, v2_signer_addr, v2_signer_sig),
+            ],
+        )
+        .unwrap();
+        rotation_certificates.push(CertificateV1::Rotation(cert));
+
+        // Validator 1: valid rotation messages (weight=2).
+        let (v1_rotation_messages, v1_own_sig, epoch) = {
+            let manager = other_managers.get_mut(&validator_1_addr).unwrap();
+            let prev_output = manager.previous_output.clone().unwrap();
+            let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
+            let rotation_messages = Messages::Rotation(msgs.clone());
+            manager
+                .rotation_messages
+                .insert(validator_1_addr, msgs.clone());
+            let own_sig = manager
+                .try_sign_rotation_messages(&prev_output, validator_1_addr, &rotation_messages)
+                .unwrap();
+            (rotation_messages, own_sig, manager.mpc_config.epoch)
+        };
+        let v1_signer_addr = rotation_setup.setup.address(3);
+        let v1_signer_sig = {
+            let signer = other_managers.get_mut(&v1_signer_addr).unwrap();
+            let signer_prev = signer.previous_output.clone().unwrap();
+            if let Messages::Rotation(ref msgs) = v1_rotation_messages {
+                signer
+                    .rotation_messages
+                    .insert(validator_1_addr, msgs.clone());
+            }
+            signer
+                .try_sign_rotation_messages(&signer_prev, validator_1_addr, &v1_rotation_messages)
+                .unwrap()
+        };
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &v1_rotation_messages,
+            validator_1_addr,
+            vec![
+                MemberSignature::new(epoch, validator_1_addr, v1_own_sig),
+                MemberSignature::new(epoch, v1_signer_addr, v1_signer_sig),
+            ],
+        )
+        .unwrap();
+        rotation_certificates.push(CertificateV1::Rotation(cert));
+    }
+
+    // Populate test_manager's rotation_messages so the filter can inspect them.
+    {
+        // Validator 2: empty messages (the key scenario the filter must handle).
+        test_manager
+            .rotation_messages
+            .insert(validator_2_addr, BTreeMap::new());
+        // Validator 1: valid messages.
+        let other_managers = mock_p2p.managers.lock().unwrap();
+        let v1_msgs = other_managers[&validator_1_addr]
+            .rotation_messages
+            .get(&validator_1_addr)
+            .unwrap()
+            .clone();
+        test_manager
+            .rotation_messages
+            .insert(validator_1_addr, v1_msgs);
+    }
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
+
+    let new_output = MpcManager::run_key_rotation(
+        &test_manager,
+        &rotation_setup.certificates(),
+        &mock_p2p,
+        &mut mock_tob,
+    )
+    .await
+    .unwrap();
+
+    // Dealer MUST have published: the filter excluded the empty-messages dealer
+    // (validator 2, weight=4) from the share count, leaving only
+    // validator 1's 2 shares — below threshold 4.
+    assert!(
+        mock_tob.published_count() > 0,
+        "Dealer phase must run when empty-messages dealers are excluded from share count"
+    );
     assert_eq!(new_output.public_key, test_dkg_output.public_key);
 }
 

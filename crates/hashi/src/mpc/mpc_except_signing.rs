@@ -75,10 +75,6 @@ const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
 
-// DKG protocol
-// 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
-// 2) Each party verifies the message and returns a signature. Once sufficient valid signatures are received from the parties, the dealer sends a certificate to Sui (TOB).
-// 3) Once sufficient valid certificates are received, a party completes the protocol locally by aggregating the shares from the dealers.
 pub struct MpcManager {
     // Immutable during the epoch
     pub party_id: PartyId,
@@ -546,7 +542,11 @@ impl MpcManager {
                 }
             }
         }
+        // Optimization: a node that fell back to the new-member path has empty
+        // key shares and cannot generate valid rotation messages.
+        let has_previous_shares = !previous.key_shares.shares.is_empty();
         if is_member_of_previous_committee
+            && has_previous_shares
             && {
                 let certified = ordered_broadcast_channel.certified_dealers().await;
                 let mgr = mpc_manager.read().unwrap();
@@ -559,6 +559,10 @@ impl MpcManager {
                 let certified_share_count: usize = certified
                     .iter()
                     .filter_map(|d| {
+                        let messages = mgr.rotation_messages.get(d)?;
+                        if messages.is_empty() {
+                            return None;
+                        }
                         let party_id = prev_committee.index_of(d)? as u16;
                         prev_nodes.share_ids_of(party_id).ok()
                     })
