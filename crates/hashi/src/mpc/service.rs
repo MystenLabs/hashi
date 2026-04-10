@@ -103,7 +103,14 @@ impl MpcService {
     }
 
     async fn run(mut self) {
-        if let Some(epoch) = self.get_pending_epoch_change() {
+        let pending = self.get_pending_epoch_change();
+        let is_in_committee = self.inner.is_in_current_committee();
+        info!(
+            "MPC service starting: pending_epoch_change={pending:?}, \
+             is_in_current_committee={is_in_committee}",
+        );
+        if let Some(epoch) = pending {
+            info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
             // No committee has been formed yet (epoch 0, no committee for epoch 0).
@@ -536,6 +543,7 @@ impl MpcService {
             .mpc_public_key()
             .is_empty();
 
+        info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}",);
         // Create the MpcManager once before the retry loop so retries reuse
         // the same manager (and its accumulated messages) instead of generating
         // fresh random dealer messages that conflict with previously sent ones.
@@ -555,8 +563,10 @@ impl MpcService {
             return;
         }
 
+        info!("handle_reconfig: setup complete for epoch {target_epoch}, entering retry loop",);
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
+                info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
                 return;
             }
             let result = if run_dkg {

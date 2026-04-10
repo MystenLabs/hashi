@@ -524,8 +524,13 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     ) -> MpcResult<MpcOutput> {
+        tracing::info!("run_key_rotation: starting prepare_previous_output");
         let (previous, is_member_of_previous_committee) =
             Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel).await?;
+        tracing::info!(
+            "run_key_rotation: prepare_previous_output complete, \
+             is_member={is_member_of_previous_committee}",
+        );
         {
             let mut mgr = mpc_manager.write().unwrap();
             mgr.previous_output = Some(previous.clone());
@@ -559,6 +564,12 @@ impl MpcManager {
                     })
                     .map(|ids| ids.len())
                     .sum();
+                tracing::info!(
+                    "run_key_rotation: certified_share_count={certified_share_count}, \
+                     threshold={}, skip_dealer={}",
+                    previous.threshold,
+                    certified_share_count >= previous.threshold as usize,
+                );
                 certified_share_count < previous.threshold as usize
             }
             && let Err(e) = Self::run_key_rotation_as_dealer(
@@ -574,6 +585,7 @@ impl MpcManager {
                 e
             );
         }
+        tracing::info!("run_key_rotation: entering party phase");
         Self::run_key_rotation_as_party(
             mpc_manager,
             &previous,
@@ -972,6 +984,10 @@ impl MpcManager {
     ) -> MpcResult<MpcOutput> {
         let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
         let mut certified_dealers = HashSet::new();
+        tracing::info!(
+            "run_key_rotation_as_party: waiting for certs (threshold={})",
+            previous.threshold,
+        );
         loop {
             if certified_share_indices.len() >= previous.threshold as usize {
                 break;
@@ -1111,7 +1127,14 @@ impl MpcManager {
                 }
             }
             certified_dealers.insert(dealer);
+            tracing::info!(
+                "run_key_rotation_as_party: processed dealer {dealer}, \
+                 certified_dealers={}, certified_shares={}",
+                certified_dealers.len(),
+                certified_share_indices.len(),
+            );
         }
+        tracing::info!("run_key_rotation_as_party: threshold met, calling complete_key_rotation",);
         let output = {
             let mgr = Arc::clone(mpc_manager);
             let previous = previous.clone();
