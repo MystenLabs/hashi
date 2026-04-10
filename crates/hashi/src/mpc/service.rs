@@ -39,7 +39,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(1800);
+const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(1200);
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -532,8 +532,6 @@ impl MpcService {
     }
 
     async fn handle_reconfig(&self, target_epoch: u64) {
-        // Determine whether this is an initial DKG or a key rotation
-        // based on if we already have a committed mpc_public_key.
         let run_dkg = self
             .inner
             .onchain_state()
@@ -542,32 +540,24 @@ impl MpcService {
             .committees
             .mpc_public_key()
             .is_empty();
-
-        info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}",);
-        // Create the MpcManager once before the retry loop so retries reuse
-        // the same manager (and its accumulated messages) instead of generating
-        // fresh random dealer messages that conflict with previously sent ones.
-        if run_dkg {
-            if let Err(e) = self.setup_initial_dkg(target_epoch) {
-                error!(
-                    "Failed to set up initial DKG for epoch {}: {e}",
-                    target_epoch
-                );
-                return;
-            }
-        } else if let Err(e) = self.setup_key_rotation(target_epoch) {
-            error!(
-                "Failed to set up key rotation for epoch {}: {e}",
-                target_epoch
-            );
-            return;
-        }
-
-        info!("handle_reconfig: setup complete for epoch {target_epoch}, entering retry loop",);
+        info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}, entering retry loop",);
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
                 return;
+            }
+            let setup_result = if run_dkg {
+                self.setup_initial_dkg(target_epoch)
+            } else {
+                self.setup_key_rotation(target_epoch)
+            };
+            if let Err(e) = setup_result {
+                error!(
+                    "Failed to set up MPC manager for epoch {}: {e}, retrying...",
+                    target_epoch
+                );
+                self.sleep_if_still_pending(target_epoch).await;
+                continue;
             }
             let result = if run_dkg {
                 tokio::time::timeout(MPC_PROTOCOL_TIMEOUT, self.run_dkg(target_epoch))

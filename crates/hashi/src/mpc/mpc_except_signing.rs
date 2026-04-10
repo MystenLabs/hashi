@@ -1401,6 +1401,8 @@ impl MpcManager {
         Ok(())
     }
 
+    // TODO: Change return type to `MpcResult<()>` and propagate disk errors
+    // (mirroring `store_dkg_message` and `store_rotation_messages`).
     fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) {
         self.nonce_messages.insert(dealer, nonce.clone());
         if let Err(e) = self.public_messages_store.store_nonce_message(
