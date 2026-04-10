@@ -605,6 +605,9 @@ impl MpcService {
             }
         }
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
+        if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
+            error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+        }
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             match self.prepare_signing(target_epoch, &output).await {
                 Ok(()) => break,
