@@ -5244,6 +5244,67 @@ fn test_try_sign_rotation_messages_rejects_already_processed_share_index() {
 }
 
 #[test]
+fn test_try_sign_rotation_messages_self_retry_succeeds() {
+    let rotation_setup = RotationTestSetup::new();
+
+    // create_rotation_dealer returns the dealer's own manager with the
+    // dealer's rotation messages already created and stored in
+    // rotation_messages[self].
+    let dealer_index = 0;
+    let dealer_addr = rotation_setup.setup.address(dealer_index);
+    let (mut dealer_manager, dealer_dkg_output, rotation_messages) =
+        rotation_setup.create_rotation_dealer(dealer_index);
+    assert_eq!(dealer_manager.address, dealer_addr);
+
+    // First attempt: dealer signs its own messages. Should succeed and
+    // populate dealer_outputs[Rotation(...)] for the dealer's own share
+    // indices.
+    let result1 = dealer_manager.try_sign_rotation_messages(
+        &dealer_dkg_output,
+        dealer_addr,
+        &rotation_messages,
+    );
+    let signature1 = result1.expect("first self call should succeed");
+    let outputs_after_first = dealer_manager.dealer_outputs.len();
+    assert!(
+        outputs_after_first > 0,
+        "first call should have populated dealer_outputs"
+    );
+
+    // Second attempt: same dealer, same messages. Without the self-skip
+    // fix, this would fail with "Share index N already processed". With
+    // the fix, it re-derives the same outputs, overwrites in place, and
+    // returns a valid signature.
+    let result2 = dealer_manager.try_sign_rotation_messages(
+        &dealer_dkg_output,
+        dealer_addr,
+        &rotation_messages,
+    );
+    let signature2 = result2.expect(
+        "second self call must succeed — the dealer must be allowed to re-run \
+         its own try_sign on retry, otherwise the dealer phase becomes \
+         permanently dead after a failed first attempt",
+    );
+
+    // The signature is deterministic given the same inputs (the BLS
+    // signature scheme used here is deterministic), so retries should
+    // produce identical signatures.
+    assert_eq!(
+        signature1.as_ref(),
+        signature2.as_ref(),
+        "deterministic BLS signature should match across retries"
+    );
+
+    // dealer_outputs should still have the same number of entries (the
+    // overwrites are idempotent).
+    assert_eq!(
+        dealer_manager.dealer_outputs.len(),
+        outputs_after_first,
+        "retry should overwrite same entries, not add new ones"
+    );
+}
+
+#[test]
 fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
     let rotation_setup = RotationTestSetup::new();
 
