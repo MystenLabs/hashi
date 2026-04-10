@@ -39,7 +39,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(300);
+const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[derive(Clone)]
 pub struct MpcHandle {

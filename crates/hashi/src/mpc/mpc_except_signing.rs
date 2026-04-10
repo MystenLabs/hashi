@@ -2775,6 +2775,11 @@ impl MpcManager {
                     .dealer_outputs
                     .get(&DealerOutputsKey::Rotation(share_index))
                 {
+                    tracing::info!(
+                        "reconstruct_from_rotation_certificates: cache hit for \
+                         dealer {:?} share_index={share_index}",
+                        dealer_address,
+                    );
                     local_outputs.insert(share_index, output.clone());
                     certified_share_indices.push(share_index);
                     continue;
