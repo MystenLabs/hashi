@@ -546,7 +546,13 @@ impl MpcManager {
                 }
             }
         }
+        // A node that fell back to the new-member path has empty key shares
+        // and cannot generate valid rotation messages. It must not act as a
+        // dealer.
+        // TODO: Add unit tests
+        let has_previous_shares = !previous.key_shares.shares.is_empty();
         if is_member_of_previous_committee
+            && has_previous_shares
             && {
                 let certified = ordered_broadcast_channel.certified_dealers().await;
                 let mgr = mpc_manager.read().unwrap();
@@ -559,6 +565,21 @@ impl MpcManager {
                 let certified_share_count: usize = certified
                     .iter()
                     .filter_map(|d| {
+                        // Defensive: the `has_previous_shares` guard above
+                        // prevents this node from emitting empty rotation
+                        // messages, but peers running older binaries (without
+                        // that guard) still might. Filter them out so they
+                        // don't inflate the threshold count.
+                        //
+                        // Note: this also excludes dealers whose cert is in
+                        // TOB but whose rotation messages have not yet been
+                        // delivered via RPC. That's only an optimization
+                        // miss — the dealer-skip is best-effort, so the
+                        // local node simply runs its own dealer phase too.
+                        let messages = mgr.rotation_messages.get(d)?;
+                        if messages.is_empty() {
+                            return None;
+                        }
                         let party_id = prev_committee.index_of(d)? as u16;
                         prev_nodes.share_ids_of(party_id).ok()
                     })

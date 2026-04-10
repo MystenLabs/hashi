@@ -5382,7 +5382,16 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 let prev_output = manager.previous_output.clone().unwrap();
                 let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
                 let rotation_messages = Messages::Rotation(msgs.clone());
-                manager.rotation_messages.insert(addr, msgs);
+                manager.rotation_messages.insert(addr, msgs.clone());
+                // Simulate RPC delivery: test_manager (validator 0) needs to
+                // know about this dealer's messages so the dealer skip check
+                // counts them under the P1 robust filter (which excludes
+                // dealers with empty rotation messages).
+                test_manager
+                    .write()
+                    .unwrap()
+                    .rotation_messages
+                    .insert(addr, msgs);
                 let own_sig = manager
                     .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
                     .unwrap();
