@@ -133,8 +133,11 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         // the on-chain epoch may have advanced past the backup.
         manager.set_source_epoch(source_epoch);
 
+        // Pass an empty complaint cache: the recovery tool runs reconstruction
+        // once without retrying through complaint recovery, so there are no
+        // recovered outputs to reuse across attempts.
         let outcome = manager
-            .reconstruct_previous_output(&certificates)
+            .reconstruct_previous_output(&certificates, &std::collections::HashMap::new())
             .map_err(|e| anyhow!("reconstruction failed: {e}"))?;
 
         match outcome {

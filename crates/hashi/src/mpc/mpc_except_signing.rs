@@ -546,7 +546,13 @@ impl MpcManager {
                 }
             }
         }
+        // A node that fell back to the new-member path has empty key shares
+        // and cannot generate valid rotation messages. It must not act as a
+        // dealer.
+        // TODO: Add unit tests
+        let has_previous_shares = !previous.key_shares.shares.is_empty();
         if is_member_of_previous_committee
+            && has_previous_shares
             && {
                 let certified = ordered_broadcast_channel.certified_dealers().await;
                 let mgr = mpc_manager.read().unwrap();
@@ -559,6 +565,21 @@ impl MpcManager {
                 let certified_share_count: usize = certified
                     .iter()
                     .filter_map(|d| {
+                        // Defensive: the `has_previous_shares` guard above
+                        // prevents this node from emitting empty rotation
+                        // messages, but peers running older binaries (without
+                        // that guard) still might. Filter them out so they
+                        // don't inflate the threshold count.
+                        //
+                        // Note: this also excludes dealers whose cert is in
+                        // TOB but whose rotation messages have not yet been
+                        // delivered via RPC. That's only an optimization
+                        // miss — the dealer-skip is best-effort, so the
+                        // local node simply runs its own dealer phase too.
+                        let messages = mgr.rotation_messages.get(d)?;
+                        if messages.is_empty() {
+                            return None;
+                        }
                         let party_id = prev_committee.index_of(d)? as u16;
                         prev_nodes.share_ids_of(party_id).ok()
                     })
@@ -876,7 +897,7 @@ impl MpcManager {
                         .expect("certificate verified above")
                 };
                 let epoch = mpc_manager.read().unwrap().mpc_config.epoch;
-                Self::recover_shares_via_complaint(
+                let recovered = Self::recover_shares_via_complaint(
                     mpc_manager,
                     &dealer,
                     signers,
@@ -884,6 +905,21 @@ impl MpcManager {
                     epoch,
                 )
                 .await?;
+                // The live party phase owns `dealer_outputs` for the current
+                // epoch, so the recovered output goes into the global map. (In
+                // contrast, reconstruction stores recovered outputs in a local
+                // complaint cache to avoid cross-epoch contamination.)
+                //
+                // Insert the output and clear the complaint under one lock so
+                // there is no observable window where the complaint is gone
+                // but the output is still missing.
+                {
+                    let mut mgr = mpc_manager.write().unwrap();
+                    mgr.dealer_outputs
+                        .insert(DealerOutputsKey::Dkg(dealer), recovered);
+                    mgr.complaints_to_process
+                        .remove(&ComplaintsToProcessKey::Dkg(dealer));
+                }
             }
             let dealer_weight = {
                 let mgr = mpc_manager.read().unwrap();
@@ -1102,7 +1138,7 @@ impl MpcManager {
                     .expect("certificate verified above")
             };
             let epoch = mpc_manager.read().unwrap().mpc_config.epoch;
-            Self::recover_rotation_shares_via_complaints(
+            let recovered = Self::recover_rotation_shares_via_complaints(
                 mpc_manager,
                 &dealer,
                 previous,
@@ -1111,6 +1147,23 @@ impl MpcManager {
                 epoch,
             )
             .await?;
+            // The live party phase owns `dealer_outputs` for the current
+            // epoch, so the recovered outputs go into the global map. (In
+            // contrast, reconstruction stores recovered outputs in a local
+            // complaint cache to avoid cross-epoch contamination.)
+            //
+            // Insert the outputs and clear the complaints under one lock so
+            // there is no observable window where the complaint is gone but
+            // the output is still missing.
+            {
+                let mut mgr = mpc_manager.write().unwrap();
+                for (share_index, output) in recovered {
+                    mgr.dealer_outputs
+                        .insert(DealerOutputsKey::Rotation(share_index), output);
+                    mgr.complaints_to_process
+                        .remove(&ComplaintsToProcessKey::Rotation(dealer, share_index));
+                }
+            }
             // Only add indices that have outputs (avoids adding indices for
             // dealers with empty rotation messages, e.g. a node that rejoined
             // with no shares from the new-member fallback).
@@ -2035,7 +2088,7 @@ impl MpcManager {
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
-    ) -> MpcResult<()> {
+    ) -> MpcResult<avss::PartialOutput> {
         let (complaint_request, receiver, message) = {
             let mgr = mpc_manager.read().unwrap();
             let complaint = mgr
@@ -2098,12 +2151,11 @@ impl MpcManager {
             };
             match result {
                 Ok(partial_output) => {
-                    let mut mgr = mpc_manager.write().unwrap();
-                    mgr.dealer_outputs
-                        .insert(DealerOutputsKey::Dkg(*dealer), partial_output);
-                    mgr.complaints_to_process
-                        .remove(&ComplaintsToProcessKey::Dkg(*dealer));
-                    return Ok(());
+                    // Caller is responsible for clearing the complaint
+                    // atomically with storing the recovered output (in
+                    // `dealer_outputs` for the live party phase, or in the
+                    // local complaint cache for reconstruction).
+                    return Ok(partial_output);
                 }
                 Err(FastCryptoError::InputTooShort(_)) => {
                     continue;
@@ -2225,7 +2277,7 @@ impl MpcManager {
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
-    ) -> MpcResult<()> {
+    ) -> MpcResult<HashMap<ShareIndex, avss::PartialOutput>> {
         let (request, recovery_contexts) = {
             let mgr = mpc_manager.read().unwrap();
             let Some(RotationComplainContext {
@@ -2233,7 +2285,7 @@ impl MpcManager {
                 recovery_contexts,
             }) = mgr.prepare_rotation_complain_request(dealer, previous_dkg_output, epoch)?
             else {
-                return Ok(());
+                return Ok(HashMap::new());
             };
             tracing::info!(
                 "Rotation complaint detected for dealer {:?}, recovering via Complain RPC",
@@ -2252,6 +2304,7 @@ impl MpcManager {
             Vec<complaint::ComplaintResponse<avss::SharesForNode>>,
         > = HashMap::new();
         let mut pending_shares: HashSet<ShareIndex> = HashSet::new();
+        let mut recovered_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
         for &share_index in recovery_contexts.keys() {
             all_responses.insert(share_index, Vec::new());
             pending_shares.insert(share_index);
@@ -2287,15 +2340,12 @@ impl MpcManager {
                         };
                         match result {
                             Ok(partial_output) => {
-                                let mut mgr = mpc_manager.write().unwrap();
-                                mgr.dealer_outputs.insert(
-                                    DealerOutputsKey::Rotation(share_index),
-                                    partial_output,
-                                );
-                                mgr.complaints_to_process.remove(
-                                    &ComplaintsToProcessKey::Rotation(*dealer, share_index),
-                                );
-                                drop(mgr);
+                                // Caller is responsible for clearing the
+                                // complaint atomically with storing the
+                                // recovered output (in `dealer_outputs` for
+                                // the live party phase, or in the local
+                                // complaint cache for reconstruction).
+                                recovered_outputs.insert(share_index, partial_output);
                                 pending_shares.remove(&share_index);
                             }
                             Err(FastCryptoError::InputTooShort(_)) => {
@@ -2327,7 +2377,7 @@ impl MpcManager {
                 dealer, pending_shares
             )));
         }
-        Ok(())
+        Ok(recovered_outputs)
     }
 
     fn load_stored_messages(&mut self) -> MpcResult<()> {
@@ -2594,16 +2644,21 @@ impl MpcManager {
     pub fn reconstruct_previous_output(
         &self,
         certificates: &[CertificateV1],
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         match certificates.first() {
             Some(CertificateV1::Dkg(_)) | None => {
-                self.reconstruct_from_dkg_certificates(certificates)
+                self.reconstruct_from_dkg_certificates(certificates, complaint_cache)
             }
             Some(CertificateV1::Rotation(_)) => {
                 let previous_threshold = self.previous_threshold.ok_or_else(|| {
                     MpcError::InvalidConfig("Key rotation requires previous threshold".into())
                 })?;
-                self.reconstruct_from_rotation_certificates(certificates, previous_threshold)
+                self.reconstruct_from_rotation_certificates(
+                    certificates,
+                    previous_threshold,
+                    complaint_cache,
+                )
             }
             Some(CertificateV1::NonceGeneration { .. }) => {
                 unreachable!(
@@ -2616,6 +2671,7 @@ impl MpcManager {
     fn reconstruct_from_dkg_certificates(
         &self,
         certificates: &[CertificateV1],
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let previous_committee = self.previous_committee.clone().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
@@ -2672,11 +2728,11 @@ impl MpcManager {
             let session_id = source_session_id
                 .dealer_session_id(&dealer_address)
                 .to_vec();
-            // Check for previously recovered output (from complaint recovery on a prior attempt).
-            if let Some(output) = self
-                .dealer_outputs
-                .get(&DealerOutputsKey::Dkg(dealer_address))
-            {
+            // Check the local complaint cache for a previously recovered
+            // output. The cache is owned by `reconstruct_with_complaint_recovery`
+            // and is NOT the global `dealer_outputs` map (which is shared with
+            // the live party phase / RPC handler — using it would race).
+            if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
                 let dealer_weight = previous_nodes
                     .weight_of(dealer_party_id)
@@ -2746,6 +2802,7 @@ impl MpcManager {
         &self,
         certificates: &[CertificateV1],
         previous_threshold: u16,
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
@@ -2793,13 +2850,15 @@ impl MpcManager {
                 )));
             }
             for (share_index, message) in rotation_msgs {
-                // Check for previously recovered output (from complaint recovery on a prior attempt).
-                if let Some(output) = self
-                    .dealer_outputs
-                    .get(&DealerOutputsKey::Rotation(share_index))
+                // Check the local complaint cache for a previously recovered
+                // output. The cache is owned by `reconstruct_with_complaint_recovery`
+                // and is NOT the global `dealer_outputs` map (which is shared
+                // with the live party phase / RPC handler — using it would race
+                // and contaminate the new epoch's party phase).
+                if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
                 {
                     tracing::info!(
-                        "reconstruct_from_rotation_certificates: cache hit for \
+                        "reconstruct_from_rotation_certificates: complaint cache hit for \
                          dealer {:?} share_index={share_index}",
                         dealer_address,
                     );
@@ -3020,12 +3079,14 @@ impl MpcManager {
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<MpcOutput> {
+        let mut complaint_cache: HashMap<DealerOutputsKey, avss::PartialOutput> = HashMap::new();
         loop {
             let mgr = Arc::clone(mpc_manager);
             let certs = previous_certificates.to_vec();
+            let cache_snapshot = complaint_cache.clone();
             match spawn_blocking(move || {
                 let mgr = mgr.read().unwrap();
-                mgr.reconstruct_previous_output(&certs)
+                mgr.reconstruct_previous_output(&certs, &cache_snapshot)
             })
             .await?
             {
@@ -3085,7 +3146,7 @@ impl MpcManager {
                     match protocol_type {
                         ProtocolTypeIndicator::Dkg => {
                             let source_epoch = mpc_manager.read().unwrap().source_epoch;
-                            Self::recover_shares_via_complaint(
+                            let recovered = Self::recover_shares_via_complaint(
                                 mpc_manager,
                                 &dealer_address,
                                 signers,
@@ -3093,6 +3154,16 @@ impl MpcManager {
                                 source_epoch,
                             )
                             .await?;
+                            // Local cache + complaint clear under one lock,
+                            // so no observable window where the complaint is
+                            // gone but the cache entry is missing.
+                            complaint_cache
+                                .insert(DealerOutputsKey::Dkg(dealer_address), recovered);
+                            mpc_manager
+                                .write()
+                                .unwrap()
+                                .complaints_to_process
+                                .remove(&ComplaintsToProcessKey::Dkg(dealer_address));
                         }
                         ProtocolTypeIndicator::KeyRotation => {
                             let (previous_output, source_epoch) = {
@@ -3104,7 +3175,7 @@ impl MpcManager {
                                     mgr.source_epoch,
                                 )
                             };
-                            Self::recover_rotation_shares_via_complaints(
+                            let recovered = Self::recover_rotation_shares_via_complaints(
                                 mpc_manager,
                                 &dealer_address,
                                 &previous_output,
@@ -3113,6 +3184,15 @@ impl MpcManager {
                                 source_epoch,
                             )
                             .await?;
+                            // Local cache + complaint clears under one lock.
+                            let mut mgr = mpc_manager.write().unwrap();
+                            for (share_index, output) in recovered {
+                                complaint_cache
+                                    .insert(DealerOutputsKey::Rotation(share_index), output);
+                                mgr.complaints_to_process.remove(
+                                    &ComplaintsToProcessKey::Rotation(dealer_address, share_index),
+                                );
+                            }
                         }
                         ProtocolTypeIndicator::NonceGeneration => {}
                     }
