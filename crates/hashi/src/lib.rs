@@ -373,6 +373,7 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
+        tracing::info!("Hashi::start() beginning");
         let screener = if let Some(endpoint) = self.config.screener_endpoint() {
             match grpc::screener_client::ScreenerClient::new(endpoint) {
                 Ok(client) => {
@@ -402,19 +403,24 @@ impl Hashi {
             .map_err(|_| anyhow!("Screener client already initialized"))?;
 
         // Verify Sui RPC is on the expected chain before loading any state.
+        tracing::info!("Hashi::start() verifying Sui chain ID");
         self.verify_sui_chain_id().await?;
 
         // Initialize
+        tracing::info!("Hashi::start() initializing on-chain state");
         let onchain_service = self.initialize_onchain_state().await?;
 
         // Verify the local bitcoin_chain_id matches the on-chain value.
+        tracing::info!("Hashi::start() verifying Bitcoin chain ID");
         self.verify_bitcoin_chain_id()?;
 
         // Sweep any SUI in the configured account to AB to enable parallelization of txns
+        tracing::info!("Hashi::start() sweeping SUI to address balance");
         sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)
             .await?;
 
         // Register validator (if not already registered) and update any stale metadata.
+        tracing::info!("Hashi::start() registering/updating validator");
         match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
             .execute_register_or_update_validator(&self.config, None)
             .await
@@ -424,6 +430,7 @@ impl Hashi {
             Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
         }
 
+        tracing::info!("Hashi::start() creating MPC and leader services");
         if self.is_in_current_committee() {
             tracing::info!("Node is in the current committee; MPC service will recover state");
         } else if self.onchain_state().epoch() == 0
@@ -447,9 +454,11 @@ impl Hashi {
         })?;
 
         // Start services
+        tracing::info!("Hashi::start() starting HTTP, leader, and MPC services");
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
+        tracing::info!("Hashi::start() all services started");
 
         let service = Service::new()
             .merge(onchain_service)
