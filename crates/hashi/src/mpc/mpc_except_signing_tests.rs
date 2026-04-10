@@ -3263,16 +3263,22 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         "Recovery should succeed: {:?}",
         result.err()
     );
+    // The recovered output is returned to the caller. The recovery
+    // function itself no longer writes to `dealer_outputs` or clears
+    // `complaints_to_process` — the caller does both atomically under
+    // one lock so there is no observable window where the complaint is
+    // gone but the output is missing.
+    let _recovered_output = result.unwrap();
     let mgr = party_manager.read().unwrap();
-    // DKG: outputs keyed by dealer address
     assert!(
-        mgr.dealer_outputs
-            .contains_key(&DealerOutputsKey::Dkg(dealer_addr))
+        !mgr.dealer_outputs
+            .contains_key(&DealerOutputsKey::Dkg(dealer_addr)),
+        "recover_shares_via_complaint must not touch the global dealer_outputs"
     );
     assert!(
-        !mgr.complaints_to_process
+        mgr.complaints_to_process
             .contains_key(&ComplaintsToProcessKey::Dkg(dealer_addr)),
-        "Complaint should be cleared after successful recovery"
+        "recover_shares_via_complaint must leave the complaint for the caller to clear atomically"
     );
 }
 
@@ -3341,16 +3347,20 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         "Recovery should succeed despite failed signer: {:?}",
         result.err()
     );
+    // The recovered output is returned to the caller. Recovery does not
+    // touch `dealer_outputs` or clear `complaints_to_process` — the
+    // caller does both atomically under one lock.
+    let _recovered_output = result.unwrap();
     let mgr = party_manager.read().unwrap();
-    // DKG: outputs keyed by dealer address
     assert!(
-        mgr.dealer_outputs
-            .contains_key(&DealerOutputsKey::Dkg(dealer_addr))
+        !mgr.dealer_outputs
+            .contains_key(&DealerOutputsKey::Dkg(dealer_addr)),
+        "recover_shares_via_complaint must not touch the global dealer_outputs"
     );
     assert!(
-        !mgr.complaints_to_process
+        mgr.complaints_to_process
             .contains_key(&ComplaintsToProcessKey::Dkg(dealer_addr)),
-        "Complaint should be cleared after successful recovery"
+        "recover_shares_via_complaint must leave the complaint for the caller to clear atomically"
     );
 }
 
@@ -6415,23 +6425,30 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         result.err()
     );
 
-    // Verify complaint was removed
+    // Recovered outputs are returned to the caller. Recovery does not
+    // touch `dealer_outputs` or clear `complaints_to_process` — the
+    // caller does both atomically under one lock so there is no
+    // observable window where the complaint is gone but the output is
+    // missing.
+    let recovered = result.unwrap();
+    assert!(
+        recovered.contains_key(&first_share_index),
+        "Recovered output should be returned for the share index"
+    );
     {
         let mgr = test_manager.read().unwrap();
         assert!(
-            !mgr.complaints_to_process
+            !mgr.dealer_outputs
+                .contains_key(&DealerOutputsKey::Rotation(first_share_index)),
+            "recover_rotation_shares_via_complaints must not touch the global dealer_outputs"
+        );
+        assert!(
+            mgr.complaints_to_process
                 .contains_key(&ComplaintsToProcessKey::Rotation(
                     dealer_addr,
                     first_share_index
                 )),
-            "Complaint should be removed after successful recovery"
-        );
-
-        // Verify output was created (Rotation: outputs keyed by share index)
-        assert!(
-            mgr.dealer_outputs
-                .contains_key(&DealerOutputsKey::Rotation(first_share_index)),
-            "Output should be created for recovered share"
+            "recover_rotation_shares_via_complaints must leave the complaint for the caller to clear atomically"
         );
     }
 }
@@ -7037,7 +7054,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
     // if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_dkg_certificates(&certificates)
+            .reconstruct_from_dkg_certificates(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -7188,7 +7205,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
     // and produces key_threshold.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_dkg_certificates(&certificates)
+            .reconstruct_from_dkg_certificates(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -7398,7 +7415,11 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_rotation_certificates(&rotation_certificates, previous_threshold)
+            .reconstruct_from_rotation_certificates(
+                &rotation_certificates,
+                previous_threshold,
+                &HashMap::new(),
+            )
             .unwrap(),
     );
 
