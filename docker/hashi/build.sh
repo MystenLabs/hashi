@@ -34,7 +34,7 @@ docker build \
     --platform linux/amd64 \
     --build-arg "GIT_REVISION=${GIT_REVISION}" \
     --provenance=false \
-    "${EXTRA_ARGS[@]}" \
+    ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     -t "${IMAGE_NAME}:${IMAGE_TAG}" \
     -t "${IMAGE_NAME}:latest" \
     "${REPO_ROOT}"
