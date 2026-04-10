@@ -135,7 +135,7 @@ fun test_confirm_deposit_with_valid_certificate() {
     std::unit_test::destroy(hashi);
 }
 
-/// Recipient is indexed at confirmation time via index_by_user.
+/// Recipient is indexed at confirmation time via the unified user_requests on BitcoinState.
 /// No indexing happens at request creation time.
 #[test]
 fun test_confirm_deposit_indexes_recipient() {
@@ -153,24 +153,16 @@ fun test_confirm_deposit_indexes_recipient() {
     hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
 
     // Neither sender nor recipient should be indexed at request time
-    assert!(
-        !deposit_queue::user_has_request(hashi.bitcoin().deposit_queue(), REQUESTER, request_id),
-    );
-    assert!(
-        !deposit_queue::user_has_request(hashi.bitcoin().deposit_queue(), recipient, request_id),
-    );
+    assert!(!hashi.bitcoin().user_has_request(REQUESTER, request_id));
+    assert!(!hashi.bitcoin().user_has_request(recipient, request_id));
 
     // Simulate the indexing that confirm_deposit does
-    hashi.bitcoin_mut().deposit_queue_mut().index_by_user(request_id, recipient, ctx);
+    hashi.bitcoin_mut().index_user_request(recipient, request_id, ctx);
 
     // Recipient should now be indexed
-    assert!(
-        deposit_queue::user_has_request(hashi.bitcoin().deposit_queue(), recipient, request_id),
-    );
+    assert!(hashi.bitcoin().user_has_request(recipient, request_id));
     // Sender should NOT be indexed (only recipient is indexed on confirm)
-    assert!(
-        !deposit_queue::user_has_request(hashi.bitcoin().deposit_queue(), REQUESTER, request_id),
-    );
+    assert!(!hashi.bitcoin().user_has_request(REQUESTER, request_id));
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);

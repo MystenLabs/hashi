@@ -4,7 +4,7 @@
 module hashi::deposit_queue;
 
 use hashi::utxo::Utxo;
-use sui::{bag::Bag, clock::Clock, object_bag::ObjectBag, table::Table};
+use sui::{clock::Clock, object_bag::ObjectBag};
 
 // const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
 const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
@@ -31,10 +31,6 @@ public struct DepositRequestQueue has store {
     requests: ObjectBag,
     /// Completed deposits (confirmed or expired).
     processed: ObjectBag,
-    /// Per-sender index: sender address -> Bag of request IDs.
-    /// Allows clients to discover all deposit requests for a given address.
-    /// TODO: consider unifying this with the user_requests index in the withdrawal_queue
-    user_requests: Table<address, Bag>,
 }
 
 // ======== Constructors ========
@@ -43,7 +39,6 @@ public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
     DepositRequestQueue {
         requests: sui::object_bag::new(ctx),
         processed: sui::object_bag::new(ctx),
-        user_requests: sui::table::new(ctx),
     }
 }
 
@@ -84,35 +79,16 @@ public(package) fun utxo(request: &DepositRequest): Utxo {
     request.utxo
 }
 
-/// Index a deposit request by a user address.
-/// Called at confirmation time to index by the recipient (derivation_path).
-public(package) fun index_by_user(
-    self: &mut DepositRequestQueue,
-    request_id: address,
-    user: address,
-    ctx: &mut TxContext,
-) {
-    if (!self.user_requests.contains(user)) {
-        self.user_requests.add(user, sui::bag::new(ctx));
-    };
-    self.user_requests[user].add(request_id, true);
-}
-
-/// Insert a completed deposit into the processed bag and index by recipient.
+/// Insert a completed deposit into the processed bag.
+/// Returns (request_id, recipient) so the caller can index by user.
 public(package) fun insert_processed(
     self: &mut DepositRequestQueue,
     request: DepositRequest,
-    ctx: &mut TxContext,
-) {
+): (address, Option<address>) {
     let request_id = request.id.to_address();
-
-    // Index by recipient so they can discover their deposits.
-    let recipient_opt = request.utxo.derivation_path();
-    if (recipient_opt.is_some()) {
-        self.index_by_user(request_id, *recipient_opt.borrow(), ctx);
-    };
-
+    let recipient = request.utxo.derivation_path();
     self.processed.add(request_id, request);
+    (request_id, recipient)
 }
 
 /// Delete an expired deposit request.
@@ -159,20 +135,6 @@ public(package) fun request_sui_tx_digest(self: &DepositRequest): vector<u8> {
 
 public(package) fun request_utxo(self: &DepositRequest): &Utxo {
     &self.utxo
-}
-
-/// Check if a user has any requests indexed.
-public(package) fun has_user_requests(self: &DepositRequestQueue, sender: address): bool {
-    self.user_requests.contains(sender)
-}
-
-/// Check if a specific request ID is in a user's index.
-public(package) fun user_has_request(
-    self: &DepositRequestQueue,
-    sender: address,
-    request_id: address,
-): bool {
-    self.user_requests.contains(sender) && self.user_requests[sender].contains(request_id)
 }
 
 // ======== Internal ========

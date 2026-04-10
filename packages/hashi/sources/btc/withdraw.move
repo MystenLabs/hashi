@@ -115,10 +115,14 @@ public fun request_withdrawal(
         clock,
         ctx,
     );
+    let request_id = request.request_id().to_address();
     hashi::withdrawal_queue::emit_withdrawal_requested(&request);
 
-    // Insert into the active requests bag and index by sender.
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request, ctx);
+    // Insert into the active requests bag.
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request);
+
+    // Index by sender for client discovery.
+    hashi.bitcoin_mut().index_user_request(ctx.sender(), request_id, ctx);
 }
 
 entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: CommitteeSignature) {
@@ -323,5 +327,10 @@ public fun cancel_withdrawal(
     hashi::withdrawal_queue::emit_withdrawal_cancelled(request);
 
     // Return BTC to the requester.
-    hashi.bitcoin_mut().withdrawal_queue_mut().cancel_withdrawal(request_id)
+    let btc = hashi.bitcoin_mut().withdrawal_queue_mut().cancel_withdrawal(request_id);
+
+    // Clean up the user index.
+    hashi.bitcoin_mut().unindex_user_request(ctx.sender(), request_id);
+
+    btc
 }

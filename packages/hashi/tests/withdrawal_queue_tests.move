@@ -47,7 +47,7 @@ fun setup_request(
         ctx,
     );
     let request_id = request.request_id().to_address();
-    queue.insert_withdrawal(request, ctx);
+    queue.insert_withdrawal(request);
     request_id
 }
 

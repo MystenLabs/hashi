@@ -61,6 +61,7 @@ pub struct BitcoinState {
     pub deposit_queue: DepositRequestQueue,
     pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
+    pub user_requests: Table,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
@@ -224,8 +225,6 @@ pub struct DepositRequestQueue {
     pub requests: Bag,
     /// Completed deposits (confirmed or expired)
     pub processed: Bag,
-    /// Per-sender index: sender address -> Bag of request IDs
-    pub user_requests: Table,
 }
 
 /// Rust version of the Move sui::table::Table type (header only).
@@ -246,8 +245,6 @@ pub struct WithdrawalRequestQueue {
     pub withdrawal_txns: Bag,
     /// Confirmed withdrawal transactions (historical record)
     pub confirmed_txns: Bag,
-    /// Per-sender index: sender address -> Bag of request IDs
-    pub user_requests: Table,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalStatus enum.
