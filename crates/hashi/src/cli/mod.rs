@@ -227,6 +227,38 @@ pub enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
+pub enum BackupCommands {
+    /// Save an encrypted backup of the current config and referenced files
+    Save {
+        /// Age recipient public key used to encrypt the backup
+        #[clap(long)]
+        backup_age_pubkey: Option<String>,
+
+        /// Directory to write the encrypted backup into
+        #[clap(long, default_value = ".")]
+        output_dir: std::path::PathBuf,
+    },
+
+    /// Restore files from an encrypted config backup
+    Restore {
+        /// Path to the encrypted backup tarball
+        backup_tarball: std::path::PathBuf,
+
+        /// Age identity file used to decrypt the backup
+        #[clap(long)]
+        backup_age_identity: std::path::PathBuf,
+
+        /// Directory to extract the restored files into
+        #[clap(long, default_value = ".")]
+        output_dir: std::path::PathBuf,
+
+        /// Copy restored files to their original paths after extraction
+        #[clap(long)]
+        copy_to_original_paths: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DepositCommands {
     /// Generate a Taproot deposit address from the on-chain MPC public key
     GenerateAddress {
@@ -439,6 +471,9 @@ pub enum CliCommand {
     Config {
         action: ConfigCommands,
     },
+    Backup {
+        action: BackupCommands,
+    },
     Deposit {
         action: DepositCommands,
     },
@@ -558,6 +593,27 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             ConfigCommands::OnChain => {
                 commands::config::show_onchain_config(&config).await?;
+            }
+        },
+        CliCommand::Backup { action } => match action {
+            BackupCommands::Save {
+                backup_age_pubkey,
+                output_dir,
+            } => {
+                commands::backup::save(&config, backup_age_pubkey, &output_dir)?;
+            }
+            BackupCommands::Restore {
+                backup_tarball,
+                backup_age_identity,
+                output_dir,
+                copy_to_original_paths,
+            } => {
+                commands::backup::restore(
+                    &backup_tarball,
+                    &backup_age_identity,
+                    &output_dir,
+                    copy_to_original_paths,
+                )?;
             }
         },
         CliCommand::Deposit { action } => {

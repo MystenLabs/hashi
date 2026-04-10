@@ -55,6 +55,15 @@ enum Commands {
         action: hashi::cli::ConfigCommands,
     },
 
+    /// Encrypted backup and restore of CLI config and referenced files
+    Backup {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::BackupCommands,
+    },
+
     /// Build, publish, and initialise the Hashi Move package
     Publish {
         #[clap(flatten)]
@@ -117,6 +126,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Config { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Config { action }).await
+        }
+        Commands::Backup { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Backup { action }).await
         }
         Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
         Commands::Register { register_opts } => hashi::cli::run_register(register_opts).await,
