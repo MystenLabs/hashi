@@ -258,11 +258,19 @@ impl MpcManager {
             if let Some(response) = self.message_responses.get(&sender) {
                 return Ok(response.clone());
             }
-            return Err(MpcError::InvalidMessage {
-                sender,
-                reason: "Message previously received but no valid response was produced"
-                    .to_string(),
-            });
+            // No cached response, but the incoming hash matches what we have
+            // stored. This happens after a process restart: `rotation_messages`
+            // is repopulated from `public_messages_store` by
+            // `load_stored_messages`, but `message_responses` lives only in
+            // memory and starts empty. Re-process the message and produce a
+            // fresh response — falling through to the signing path below
+            // safely overwrites both the storage entry and the in-memory map
+            // with the same content (HashMap::insert is idempotent and
+            // store_rotation_messages writes the full BTreeMap blob).
+            tracing::info!(
+                "handle_send_messages_request: existing message from {sender:?} but no \
+                 cached response (post-restart recovery path), re-processing"
+            );
         }
         let signature = match &request.messages {
             Messages::Dkg(msg) => {

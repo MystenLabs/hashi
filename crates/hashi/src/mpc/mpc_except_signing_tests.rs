@@ -1418,10 +1418,15 @@ async fn test_run_dkg() {
         "Should have commitments equal to total weight"
     );
 
-    // Verify all certificates were consumed from the TOB channel (only threshold needed)
+    // Verify the party phase consumed exactly threshold-many certs from TOB.
+    // run_dkg_as_dealer first publishes test_manager's own cert into the TOB
+    // (peers' handle_send_messages_request re-processes and returns valid
+    // signatures via the post-restart recovery path), so the TOB starts the
+    // party phase with `other_certificates_len + 1` messages. The party phase
+    // then consumes threshold-many to satisfy the dealer-weight check.
     assert_eq!(
         mock_tob.pending_messages(),
-        Some(other_certificates_len - threshold as usize),
+        Some((other_certificates_len + 1) - threshold as usize),
         "TOB should have consumed exactly threshold certificates"
     );
 
@@ -4277,7 +4282,13 @@ async fn test_handle_send_messages_request_equivocation() {
 
 #[tokio::test]
 async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
-    // Second RPC call with invalid shares should not panic.
+    // Second RPC call with invalid shares should not panic. With the
+    // post-restart recovery fix, the second call re-processes the message
+    // (since `message_responses` is empty for it) and returns the same
+    // "Invalid shares" error — instead of short-circuiting with a
+    // "previously received" message. The cryptographic check is bounded
+    // (one process_message per call) and yields the same Complaint each
+    // time, so re-processing is safe and CPU-cost is bounded.
 
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
@@ -4310,16 +4321,20 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
         _ => panic!("Expected InvalidMessage error"),
     }
 
-    // Second call: same message - should return error with "previously rejected" message
+    // Second call: same message — re-processes and returns the same
+    // "Invalid shares" error. The point of this test is that the second
+    // call must NOT panic; the specific error message is allowed to be
+    // either the original Complaint reason or a short-circuit reason.
     let result2 = receiver_manager.handle_send_messages_request(dealer_addr, &request);
     assert!(result2.is_err(), "Second call should also return error");
     match result2.unwrap_err() {
         MpcError::InvalidMessage { sender, reason } => {
             assert_eq!(sender, dealer_addr);
             assert!(
-                reason.contains("previously received but no valid response"),
-                "Second call should indicate message was previously received with no valid response, got: {}",
-                reason
+                reason.contains("Invalid shares")
+                    || reason.contains("previously received but no valid response"),
+                "Second call should return either the original Complaint error or a \
+                 'previously received' short-circuit, got: {reason}"
             );
         }
         _ => panic!("Expected InvalidMessage error"),
@@ -4353,6 +4368,69 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
         compute_messages_hash(&retrieve_response.messages),
         compute_messages_hash(&cheating_message),
         "Stored message should be retrievable"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_send_messages_request_post_restart_reprocesses() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+
+    // Create dealer (party 1) and a valid DKG message.
+    let dealer_addr = setup.address(1);
+    let dealer_manager = setup.create_dealer_with_message(1, &mut rng);
+    let dealer_message = dealer_manager
+        .dkg_messages
+        .get(&dealer_addr)
+        .expect("dealer should have stored its own message")
+        .clone();
+    let messages = Messages::Dkg(dealer_message.clone());
+
+    // Create receiver (party 0) and pre-populate `dkg_messages` to
+    // simulate the post-restart state where `load_stored_messages` has
+    // reloaded the message but `message_responses` is empty.
+    let mut receiver_manager = setup.create_manager(0);
+    receiver_manager
+        .store_dkg_message(dealer_addr, &dealer_message)
+        .unwrap();
+    assert!(
+        receiver_manager.dkg_messages.contains_key(&dealer_addr),
+        "precondition: stored message present"
+    );
+    assert!(
+        !receiver_manager
+            .message_responses
+            .contains_key(&dealer_addr),
+        "precondition: no cached response"
+    );
+
+    // Peer retries send_messages post-restart.
+    let request = SendMessagesRequest { messages };
+    let response = receiver_manager
+        .handle_send_messages_request(dealer_addr, &request)
+        .expect("post-restart re-processing should succeed for a valid message");
+    assert!(
+        !response.signature.as_ref().is_empty(),
+        "should return a non-empty BLS signature"
+    );
+
+    // After re-processing, the response is now cached in memory.
+    assert!(
+        receiver_manager
+            .message_responses
+            .contains_key(&dealer_addr),
+        "response should be cached after successful re-processing"
+    );
+
+    // Subsequent retries return the cached response (no further
+    // re-processing).
+    let response2 = receiver_manager
+        .handle_send_messages_request(dealer_addr, &request)
+        .unwrap();
+    assert_eq!(
+        response.signature.as_ref(),
+        response2.signature.as_ref(),
+        "cached response should be returned on subsequent retries"
     );
 }
 
