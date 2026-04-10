@@ -18,6 +18,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -203,6 +204,7 @@ fn write_manifest_to_extract_dir(extract_dir: &Path, manifest_toml: &str) -> Res
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(&manifest_path)
         .map_err(|e| match e.kind() {
             ErrorKind::AlreadyExists => anyhow::anyhow!(
@@ -263,16 +265,39 @@ fn build_backup_manifest(files: &[PathBuf]) -> Result<BackupManifest> {
     let mut manifest_files = Vec::with_capacity(files.len());
 
     for file in files {
-        let archive_name = PathBuf::from(file.file_name().ok_or_else(|| {
-            anyhow::anyhow!("Backup input does not have a file name: {}", file.display())
-        })?);
+        let base_name = file
+            .file_name()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Backup input does not have a file name: {}", file.display())
+            })?
+            .to_string_lossy();
 
-        if !archive_names.insert(archive_name.clone()) {
-            anyhow::bail!(
-                "Backup input file name collision in archive: {}",
-                archive_name.display()
-            );
-        }
+        let archive_name = if archive_names.contains(base_name.as_ref()) {
+            let stem = Path::new(base_name.as_ref())
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let ext = Path::new(base_name.as_ref())
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+
+            let mut suffix = 2u32;
+            loop {
+                let candidate = format!("{stem}-{suffix}{ext}");
+                if archive_names.insert(candidate.clone()) {
+                    print_info(&format!(
+                        "Archive name collision for {base_name}: renamed to {candidate} (original: {})",
+                        file.display()
+                    ));
+                    break PathBuf::from(candidate);
+                }
+                suffix += 1;
+            }
+        } else {
+            archive_names.insert(base_name.to_string());
+            PathBuf::from(base_name.as_ref())
+        };
 
         manifest_files.push(BackupManifestFile {
             archive_name,
@@ -303,7 +328,13 @@ fn append_backup_manifest<W: std::io::Write>(
 }
 
 fn load_backup_identities(backup_age_identity: &Path) -> Result<Vec<Box<dyn age::Identity>>> {
-    IdentityFile::from_file(backup_age_identity.display().to_string())?
+    let path_str = backup_age_identity.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Age identity path is not valid UTF-8: {}",
+            backup_age_identity.display()
+        )
+    })?;
+    IdentityFile::from_file(path_str.to_string())?
         .with_callbacks(UiCallbacks)
         .into_identities()
         .map_err(Into::into)
@@ -354,6 +385,15 @@ fn restore_backup_entries<R: Read>(
             )
         })?);
 
+        let entry_type = entry.header().entry_type();
+        if entry_type != tar::EntryType::Regular {
+            anyhow::bail!(
+                "Backup entry {} has unexpected type {:?}; only regular files are supported",
+                archive_name.display(),
+                entry_type
+            );
+        }
+
         if archive_path != archive_name {
             anyhow::bail!(
                 "Backup entry must be at the tar root: {}",
@@ -372,6 +412,7 @@ fn restore_backup_entries<R: Read>(
         let mut output_file = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&output_path)
             .map_err(|e| match e.kind() {
                 ErrorKind::AlreadyExists => anyhow::anyhow!(
@@ -429,6 +470,7 @@ fn copy_restored_files_to_original_paths(
         let mut dest = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&file.original_path)
             .map_err(|e| match e.kind() {
                 ErrorKind::AlreadyExists => anyhow::anyhow!(
@@ -559,6 +601,18 @@ mod tests {
         );
     }
 
+    fn assert_mode_0600(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode,
+            0o600,
+            "{} has mode {:o}, expected 600",
+            path.display(),
+            mode
+        );
+    }
+
     /// Compute the nested directory that `restore` will extract into, given the
     /// tarball path and the user-supplied output directory.
     fn expected_extract_dir(tarball: &Path, output_dir: &Path) -> PathBuf {
@@ -578,6 +632,11 @@ mod tests {
         assert_file_eq(&extract_dir.join("keypair.pem"), KEYPAIR_CONTENTS);
         assert_file_eq(&extract_dir.join("btc.wif"), BTC_KEY_CONTENTS);
 
+        // All restored files should be owner-only read/write.
+        assert_mode_0600(&extract_dir.join("hashi-cli.toml"));
+        assert_mode_0600(&extract_dir.join("keypair.pem"));
+        assert_mode_0600(&extract_dir.join("btc.wif"));
+
         // The manifest should also be extracted alongside the restored files.
         let manifest_path = extract_dir.join(BACKUP_MANIFEST_FILE_NAME);
         assert!(
@@ -585,6 +644,7 @@ mod tests {
             "manifest not extracted to {}",
             manifest_path.display()
         );
+        assert_mode_0600(&manifest_path);
         let manifest_toml = fs::read_to_string(&manifest_path).unwrap();
         assert!(
             manifest_toml.contains("hashi-cli.toml"),
@@ -614,6 +674,10 @@ mod tests {
         assert_file_eq(&fixture.config_path, CONFIG_CONTENTS);
         assert_file_eq(&fixture.keypair_path, KEYPAIR_CONTENTS);
         assert_file_eq(&fixture.btc_key_path, BTC_KEY_CONTENTS);
+
+        assert_mode_0600(&fixture.config_path);
+        assert_mode_0600(&fixture.keypair_path);
+        assert_mode_0600(&fixture.btc_key_path);
     }
 
     #[test]
@@ -644,5 +708,55 @@ mod tests {
         assert_file_eq(&fixture.config_path, CONFIG_CONTENTS);
         assert!(!fixture.keypair_path.exists());
         assert!(!fixture.btc_key_path.exists());
+    }
+
+    #[test]
+    fn basename_collision_disambiguates_and_copy_to_original_paths_restores_correctly() {
+        // Set up two key files with the same basename in different directories.
+        let src = tempfile::Builder::new().tempdir().unwrap();
+        let config_path = src.path().join("hashi-cli.toml");
+        let sui_dir = src.path().join("sui");
+        let btc_dir = src.path().join("btc");
+        fs::create_dir_all(&sui_dir).unwrap();
+        fs::create_dir_all(&btc_dir).unwrap();
+
+        let keypair_path = sui_dir.join("key.pem");
+        let btc_key_path = btc_dir.join("key.pem");
+
+        fs::write(&config_path, CONFIG_CONTENTS).unwrap();
+        fs::write(&keypair_path, KEYPAIR_CONTENTS).unwrap();
+        fs::write(&btc_key_path, BTC_KEY_CONTENTS).unwrap();
+
+        let config = CliConfig {
+            loaded_from_path: Some(config_path.clone()),
+            keypair_path: Some(keypair_path.clone()),
+            bitcoin: Some(BitcoinConfig {
+                private_key_path: Some(btc_key_path.clone()),
+                ..BitcoinConfig::default()
+            }),
+            ..CliConfig::default()
+        };
+
+        let backup = save_with_fresh_identity(&config);
+
+        // Verify the archive contains both key.pem and key-2.pem.
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+
+        let extract_dir = expected_extract_dir(&backup.tarball, out.path());
+        assert_file_eq(&extract_dir.join("key.pem"), KEYPAIR_CONTENTS);
+        assert_file_eq(&extract_dir.join("key-2.pem"), BTC_KEY_CONTENTS);
+
+        // Now test that --copy-to-original-paths uses the real paths, not the
+        // disambiguated archive names.
+        fs::remove_file(&config_path).unwrap();
+        fs::remove_file(&keypair_path).unwrap();
+        fs::remove_file(&btc_key_path).unwrap();
+
+        let out2 = tempfile::Builder::new().tempdir().unwrap();
+        restore(&backup.tarball, &backup.identity_file, out2.path(), true).unwrap();
+
+        assert_file_eq(&keypair_path, KEYPAIR_CONTENTS);
+        assert_file_eq(&btc_key_path, BTC_KEY_CONTENTS);
     }
 }
