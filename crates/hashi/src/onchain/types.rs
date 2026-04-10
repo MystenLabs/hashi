@@ -25,13 +25,13 @@ use hashi_types::utils::Base64;
 pub use hashi_types::move_types::ConfigValue;
 pub use hashi_types::move_types::DepositRequest;
 pub use hashi_types::move_types::OutputUtxo;
-pub use hashi_types::move_types::PendingWithdrawal;
 pub use hashi_types::move_types::UpgradeCap;
 pub use hashi_types::move_types::Utxo;
 pub use hashi_types::move_types::UtxoId;
 pub use hashi_types::move_types::UtxoRecord;
 pub use hashi_types::move_types::WithdrawalRequest;
 pub use hashi_types::move_types::WithdrawalStatus;
+pub use hashi_types::move_types::WithdrawalTransaction;
 
 #[derive(Debug)]
 pub struct Hashi {
@@ -542,8 +542,9 @@ pub struct WithdrawalRequestQueue {
     pub(super) requests_id: Address,
     pub(super) requests: BTreeMap<Address, WithdrawalRequest>,
     pub(super) processed_id: Address,
-    pub(super) pending_withdrawals_id: Address,
-    pub(super) pending_withdrawals: BTreeMap<Address, PendingWithdrawal>,
+    pub(super) withdrawal_txns_id: Address,
+    pub(super) withdrawal_txns: BTreeMap<Address, WithdrawalTransaction>,
+    pub(super) confirmed_txns_id: Address,
 }
 
 impl WithdrawalRequestQueue {
@@ -559,12 +560,16 @@ impl WithdrawalRequestQueue {
         &self.processed_id
     }
 
-    pub fn pending_withdrawals_id(&self) -> &Address {
-        &self.pending_withdrawals_id
+    pub fn withdrawal_txns_id(&self) -> &Address {
+        &self.withdrawal_txns_id
     }
 
-    pub fn pending_withdrawals(&self) -> &BTreeMap<Address, PendingWithdrawal> {
-        &self.pending_withdrawals
+    pub fn withdrawal_txns(&self) -> &BTreeMap<Address, WithdrawalTransaction> {
+        &self.withdrawal_txns
+    }
+
+    pub fn confirmed_txns_id(&self) -> &Address {
+        &self.confirmed_txns_id
     }
 }
 

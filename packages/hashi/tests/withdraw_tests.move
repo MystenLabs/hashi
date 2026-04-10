@@ -5,7 +5,7 @@
 #[allow(implicit_const_copy)]
 module hashi::withdraw_tests;
 
-use hashi::{btc::BTC, test_utils, withdrawal_queue};
+use hashi::{btc::BTC, test_utils, utxo, withdrawal_queue};
 use sui::{bcs, clock};
 
 // ======== Test Addresses ========
@@ -137,19 +137,22 @@ fun test_approve_request_with_certificate() {
     hashi::withdraw::approve_request(&mut hashi, id2, cert2);
 
     // Verify both requests are now approved by committing them
-    let pending_id = ctx.fresh_object_address();
-    let (_, btc_balance) = hashi
-        .bitcoin_mut()
-        .withdrawal_queue_mut()
-        .commit_requests(
-            &vector[id1, id2],
-            pending_id,
-            @0xBEEF,
-        );
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id1, id2],
+        vector[test_utxo],
+        vector[withdrawal_queue::output_utxo(1, x"00")],
+        option::none(),
+        @0xBEEF,
+        &clock,
+        ctx,
+    );
+    let btc_balance = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&txn);
     // Total: 10_000 + 20_000 = 30_000
     assert!(btc_balance.value() == 30_000);
 
     btc_balance.destroy_for_testing();
+    std::unit_test::destroy(txn);
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }

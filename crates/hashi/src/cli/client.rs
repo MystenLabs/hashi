@@ -205,9 +205,9 @@ impl HashiClient {
         self.onchain_state.withdrawal_requests()
     }
 
-    /// Fetch committed/signed withdrawals
-    pub fn fetch_pending_withdrawals(&self) -> Vec<crate::onchain::types::PendingWithdrawal> {
-        self.onchain_state.pending_withdrawals()
+    /// Fetch committed/signed withdrawal transactions
+    pub fn fetch_withdrawal_txns(&self) -> Vec<crate::onchain::types::WithdrawalTransaction> {
+        self.onchain_state.withdrawal_txns()
     }
 
     // ========================================================================

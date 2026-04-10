@@ -119,20 +119,18 @@ impl BridgeService for HttpService {
         request: Request<SignWithdrawalTransactionRequest>,
     ) -> Result<Response<SignWithdrawalTransactionResponse>, Status> {
         authenticate_caller(&request)?;
-        let pending_withdrawal_id = Address::from_bytes(&request.get_ref().pending_withdrawal_id)
-            .map_err(|e| {
-            Status::invalid_argument(format!("invalid pending_withdrawal_id: {e}"))
-        })?;
-        tracing::info!(pending_withdrawal_id = %pending_withdrawal_id, "sign_withdrawal_transaction called");
+        let withdrawal_txn_id = Address::from_bytes(&request.get_ref().withdrawal_txn_id)
+            .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
+        tracing::info!(withdrawal_txn_id = %withdrawal_txn_id, "sign_withdrawal_transaction called");
         let signatures = self
             .inner
-            .validate_and_sign_withdrawal_tx(&pending_withdrawal_id)
+            .validate_and_sign_withdrawal_tx(&withdrawal_txn_id)
             .await
             .map_err(|e| {
-                tracing::error!(pending_withdrawal_id = %pending_withdrawal_id, "sign_withdrawal_transaction failed: {e}");
+                tracing::error!(withdrawal_txn_id = %withdrawal_txn_id, "sign_withdrawal_transaction failed: {e}");
                 Status::failed_precondition(e.to_string())
             })?;
-        tracing::info!(pending_withdrawal_id = %pending_withdrawal_id, "sign_withdrawal_transaction succeeded");
+        tracing::info!(withdrawal_txn_id = %withdrawal_txn_id, "sign_withdrawal_transaction succeeded");
         Ok(Response::new(SignWithdrawalTransactionResponse {
             signatures_by_input: signatures
                 .iter()
@@ -167,16 +165,14 @@ impl BridgeService for HttpService {
         request: Request<SignWithdrawalConfirmationRequest>,
     ) -> Result<Response<SignWithdrawalConfirmationResponse>, Status> {
         authenticate_caller(&request)?;
-        let pending_withdrawal_id = Address::from_bytes(&request.get_ref().pending_withdrawal_id)
-            .map_err(|e| {
-            Status::invalid_argument(format!("invalid pending_withdrawal_id: {e}"))
-        })?;
+        let withdrawal_txn_id = Address::from_bytes(&request.get_ref().withdrawal_txn_id)
+            .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
         let member_signature = self
             .inner
-            .sign_withdrawal_confirmation(&pending_withdrawal_id)
+            .sign_withdrawal_confirmation(&withdrawal_txn_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!(
-            pending_withdrawal_id = %pending_withdrawal_id,
+            withdrawal_txn_id = %withdrawal_txn_id,
             "Signed withdrawal confirmation",
         );
         Ok(Response::new(SignWithdrawalConfirmationResponse {

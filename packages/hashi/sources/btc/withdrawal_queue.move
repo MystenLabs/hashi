@@ -30,9 +30,9 @@ const EOutputCountMismatch: vector<u8> =
 public enum WithdrawalStatus has copy, drop, store {
     Requested,
     Approved,
-    Processing { pending_withdrawal_id: address, txid: address },
-    Signed { pending_withdrawal_id: address, txid: address },
-    Confirmed { txid: address },
+    Processing,
+    Signed,
+    Confirmed,
 }
 
 // ======== Core Structs ========
@@ -52,7 +52,7 @@ public struct WithdrawalRequest has key, store {
     bitcoin_address: vector<u8>,
     timestamp_ms: u64,
     status: WithdrawalStatus,
-    pending_withdrawal_id: Option<address>,
+    withdrawal_txn_id: Option<address>,
     sui_tx_digest: vector<u8>,
     btc: Balance<BTC>,
 }
@@ -60,22 +60,28 @@ public struct WithdrawalRequest has key, store {
 public struct WithdrawalRequestQueue has store {
     /// Active requests awaiting action (Requested, Approved).
     /// ObjectBag so WithdrawalRequest UIDs are directly accessible via getObject.
-    // TODO: consider using this for all active requests (Requested, Approved, Processing, Signed)
     requests: ObjectBag,
     /// Processed requests — BTC consumed, lifecycle continuing or complete
     /// (Processing, Signed, Confirmed).
     processed: ObjectBag,
-    /// In-flight withdrawal transactions (PendingWithdrawal)
-    /// TODO: consider persisting PendingWithdrawal data for historical record
-    pending_withdrawals: Bag,
+    /// In-flight withdrawal transactions (unsigned, signed but unconfirmed).
+    /// ObjectBag so WithdrawalTransaction UIDs are directly accessible via getObject.
+    withdrawal_txns: ObjectBag,
+    /// Confirmed withdrawal transactions (historical record).
+    confirmed_txns: ObjectBag,
     /// Per-sender index: sender address -> Bag of request IDs.
     /// Allows clients to discover all withdrawal requests for a given address.
     /// TODO: consider unifying this with the user_requests index in the deposit_queue
     user_requests: Table<address, Bag>,
 }
 
-public struct PendingWithdrawal has store {
-    id: address,
+/// A Bitcoin transaction constructed for one or more withdrawal requests.
+/// Tracks the full lifecycle from construction through signing to confirmation.
+///
+/// Lives in `withdrawal_txns` while in-flight, moves to `confirmed_txns`
+/// after the Bitcoin transaction is confirmed on-chain.
+public struct WithdrawalTransaction has key, store {
+    id: UID,
     txid: address,
     request_ids: vector<address>,
     /// UTXOs consumed by this withdrawal. The UTXOs remain locked in the pool
@@ -109,7 +115,8 @@ public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
     WithdrawalRequestQueue {
         requests: sui::object_bag::new(ctx),
         processed: sui::object_bag::new(ctx),
-        pending_withdrawals: sui::bag::new(ctx),
+        withdrawal_txns: sui::object_bag::new(ctx),
+        confirmed_txns: sui::object_bag::new(ctx),
         user_requests: sui::table::new(ctx),
     }
 }
@@ -132,13 +139,13 @@ public(package) fun create_withdrawal(
         bitcoin_address,
         timestamp_ms: clock.timestamp_ms(),
         status: WithdrawalStatus::Requested,
-        pending_withdrawal_id: option::none(),
+        withdrawal_txn_id: option::none(),
         sui_tx_digest: *ctx.digest(),
         btc,
     }
 }
 
-// ======== Lifecycle Functions ========
+// ======== Request Lifecycle Functions ========
 
 /// Insert a new withdrawal request into the active requests bag and index by sender.
 public(package) fun insert_withdrawal(
@@ -163,49 +170,56 @@ public(package) fun approve_withdrawal(self: &mut WithdrawalRequestQueue, reques
     request.status = WithdrawalStatus::Approved;
 }
 
-/// Commit approved requests: drain BTC, update status, move from requests to processed.
-/// Returns a merged BTC balance for burning and request data for validation.
+/// Read-only extraction of request data for fee validation.
+/// Called before the WithdrawalTransaction is created so its constructor
+/// can validate outputs against the requested amounts.
+public(package) fun extract_request_infos(
+    self: &WithdrawalRequestQueue,
+    request_ids: &vector<address>,
+): vector<CommittedRequestInfo> {
+    request_ids.map_ref!(|id| {
+        let request: &WithdrawalRequest = self.requests.borrow(*id);
+        CommittedRequestInfo {
+            btc_amount: request.btc_amount,
+            bitcoin_address: request.bitcoin_address,
+        }
+    })
+}
+
+/// Commit approved requests for a withdrawal transaction: drain BTC, update
+/// status, move from requests to processed. Returns the merged BTC balance
+/// for burning.
 public(package) fun commit_requests(
     self: &mut WithdrawalRequestQueue,
-    request_ids: &vector<address>,
-    pending_withdrawal_id: address,
-    txid: address,
-): (vector<CommittedRequestInfo>, Balance<BTC>) {
-    let mut infos = vector[];
+    withdrawal_txn: &WithdrawalTransaction,
+): Balance<BTC> {
+    let withdrawal_txn_id = withdrawal_txn.id.to_address();
     let mut total_btc = sui::balance::zero<BTC>();
 
-    request_ids.do_ref!(|id| {
+    withdrawal_txn.request_ids.do_ref!(|id| {
         let mut request: WithdrawalRequest = self.requests.remove(*id);
         assert!(request.status == WithdrawalStatus::Approved, ERequestNotApproved);
 
         // Drain the BTC balance and merge
         total_btc.join(request.btc.withdraw_all());
 
-        // Capture info for validation before moving
-        infos.push_back(CommittedRequestInfo {
-            btc_amount: request.btc_amount,
-            bitcoin_address: request.bitcoin_address,
-        });
-
-        // Update status and move to processed
-        request.status = WithdrawalStatus::Processing { pending_withdrawal_id, txid };
-        request.pending_withdrawal_id = option::some(pending_withdrawal_id);
+        // Update status and link to the withdrawal transaction
+        request.status = WithdrawalStatus::Processing;
+        request.withdrawal_txn_id = option::some(withdrawal_txn_id);
         self.processed.add(*id, request);
     });
 
-    (infos, total_btc)
+    total_btc
 }
 
 /// Update request statuses to Signed after MPC signing completes.
 public(package) fun update_requests_signed(
     self: &mut WithdrawalRequestQueue,
     request_ids: &vector<address>,
-    pending_withdrawal_id: address,
-    txid: address,
 ) {
     request_ids.do_ref!(|id| {
         let request: &mut WithdrawalRequest = self.processed.borrow_mut(*id);
-        request.status = WithdrawalStatus::Signed { pending_withdrawal_id, txid };
+        request.status = WithdrawalStatus::Signed;
     });
 }
 
@@ -213,11 +227,10 @@ public(package) fun update_requests_signed(
 public(package) fun update_requests_confirmed(
     self: &mut WithdrawalRequestQueue,
     request_ids: &vector<address>,
-    txid: address,
 ) {
     request_ids.do_ref!(|id| {
         let request: &mut WithdrawalRequest = self.processed.borrow_mut(*id);
-        request.status = WithdrawalStatus::Confirmed { txid };
+        request.status = WithdrawalStatus::Confirmed;
     });
 }
 
@@ -246,7 +259,7 @@ public(package) fun cancel_withdrawal(
         bitcoin_address: _,
         timestamp_ms: _,
         status: _,
-        pending_withdrawal_id: _,
+        withdrawal_txn_id: _,
         sui_tx_digest: _,
         btc,
     } = request;
@@ -276,10 +289,10 @@ public struct CommittedRequestInfo has copy, drop, store {
     bitcoin_address: vector<u8>,
 }
 
-// ======== PendingWithdrawal Functions ========
+// ======== WithdrawalTransaction Functions ========
 
-public(package) fun new_pending_withdrawal(
-    pending_id: address,
+public(package) fun new_withdrawal_txn(
+    ctx: &mut TxContext,
     request_ids: vector<address>,
     request_infos: &vector<CommittedRequestInfo>,
     inputs: vector<Utxo>,
@@ -290,7 +303,7 @@ public(package) fun new_pending_withdrawal(
     config: &Config,
     clock: &Clock,
     randomness: vector<u8>,
-): PendingWithdrawal {
+): WithdrawalTransaction {
     let max_network_fee = config.worst_case_network_fee();
 
     let mut input_amount = 0;
@@ -342,8 +355,8 @@ public(package) fun new_pending_withdrawal(
         option::none()
     };
 
-    PendingWithdrawal {
-        id: pending_id,
+    WithdrawalTransaction {
+        id: object::new(ctx),
         txid,
         request_ids,
         inputs,
@@ -357,64 +370,72 @@ public(package) fun new_pending_withdrawal(
     }
 }
 
-public(package) fun insert_pending_withdrawal(
+public(package) fun insert_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
-    pending: PendingWithdrawal,
+    txn: WithdrawalTransaction,
 ) {
-    self.pending_withdrawals.add(pending.id, pending)
+    self.withdrawal_txns.add(txn.id.to_address(), txn)
 }
 
-public(package) fun borrow_pending_withdrawal(
+public(package) fun borrow_withdrawal_txn(
     self: &WithdrawalRequestQueue,
     withdrawal_id: address,
-): &PendingWithdrawal {
-    self.pending_withdrawals.borrow(withdrawal_id)
+): &WithdrawalTransaction {
+    self.withdrawal_txns.borrow(withdrawal_id)
 }
 
-public(package) fun remove_pending_withdrawal(
+public(package) fun remove_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
-): PendingWithdrawal {
-    self.pending_withdrawals.remove(withdrawal_id)
+): WithdrawalTransaction {
+    self.withdrawal_txns.remove(withdrawal_id)
 }
 
-public(package) fun sign_pending_withdrawal(
+/// Insert a confirmed withdrawal transaction into the cold (historical) bag.
+public(package) fun insert_confirmed_txn(
+    self: &mut WithdrawalRequestQueue,
+    txn: WithdrawalTransaction,
+) {
+    self.confirmed_txns.add(txn.id.to_address(), txn);
+}
+
+public(package) fun sign_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     signatures: vector<vector<u8>>,
 ) {
-    let pending: &mut PendingWithdrawal = self.pending_withdrawals.borrow_mut(withdrawal_id);
-    pending.signatures = option::some(signatures);
-    emit_withdrawal_signed(pending);
+    let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
+    txn.signatures = option::some(signatures);
+    emit_withdrawal_signed(txn);
 }
 
-/// Reassign presig indices for a pending withdrawal from a previous epoch.
-public(package) fun reassign_presigs_for_pending_withdrawal(
+/// Reassign presig indices for a withdrawal transaction from a previous epoch.
+public(package) fun reassign_presigs_for_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     presig_start_index: u64,
     current_epoch: u64,
 ) {
-    let pending: &mut PendingWithdrawal = self.pending_withdrawals.borrow_mut(withdrawal_id);
-    assert!(pending.epoch != current_epoch);
-    pending.presig_start_index = presig_start_index;
-    pending.epoch = current_epoch;
+    let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
+    assert!(txn.epoch != current_epoch);
+    txn.presig_start_index = presig_start_index;
+    txn.epoch = current_epoch;
 }
 
-public(package) fun pending_withdrawal_num_inputs(
+public(package) fun withdrawal_txn_num_inputs(
     self: &WithdrawalRequestQueue,
     withdrawal_id: address,
 ): u64 {
-    let pending: &PendingWithdrawal = self.pending_withdrawals.borrow(withdrawal_id);
-    pending.inputs.length()
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    txn.inputs.length()
 }
 
-/// Build the change UTXO from a pending withdrawal's data.
+/// Build the change UTXO from a withdrawal transaction's data.
 ///
 /// Returns the Utxo that corresponds to the change output, or None if there
 /// is no change output. Used by `commit_withdrawal_tx()` to insert the change
-/// UTXO into the pool immediately after the pending withdrawal is created.
-public(package) fun build_change_utxo(self: &PendingWithdrawal): Option<hashi::utxo::Utxo> {
+/// UTXO into the pool immediately after the withdrawal transaction is created.
+public(package) fun build_change_utxo(self: &WithdrawalTransaction): Option<hashi::utxo::Utxo> {
     if (self.change_output.is_some()) {
         let change = self.change_output.borrow();
         // Change output is always the last output in the BTC transaction.
@@ -426,51 +447,34 @@ public(package) fun build_change_utxo(self: &PendingWithdrawal): Option<hashi::u
     }
 }
 
-/// Destroy a pending withdrawal, returning the request IDs, input UTXOs, txid,
-/// and the change UTXO ID (if any). The caller is responsible for calling
-/// `confirm_spent()` on each input's ID and `confirm_pending()` on the change ID.
-public(package) fun destroy_pending_withdrawal(
-    self: PendingWithdrawal,
-): (vector<address>, vector<Utxo>, address, Option<UtxoId>) {
-    let PendingWithdrawal {
-        id: _,
-        txid,
-        request_ids,
-        inputs,
-        withdrawal_outputs,
-        change_output,
-        timestamp_ms: _,
-        randomness: _,
-        signatures: _,
-        presig_start_index: _,
-        epoch: _,
-    } = self;
-
-    let change_id = if (change_output.is_some()) {
-        let _change = change_output.destroy_some();
+/// Compute the change UTXO ID for a withdrawal transaction, or None if there
+/// is no change output.
+public(package) fun change_utxo_id(self: &WithdrawalTransaction): Option<UtxoId> {
+    if (self.change_output.is_some()) {
         // Change output is always the last output in the BTC transaction.
-        let change_vout = (withdrawal_outputs.length() as u32);
-        option::some(hashi::utxo::utxo_id(txid, change_vout))
+        let change_vout = (self.withdrawal_outputs.length() as u32);
+        option::some(hashi::utxo::utxo_id(self.txid, change_vout))
     } else {
-        change_output.destroy_none();
         option::none()
-    };
-
-    (request_ids, inputs, txid, change_id)
+    }
 }
 
 // ======== Accessors ========
 
-public(package) fun pending_withdrawal_id(self: &PendingWithdrawal): address {
-    self.id
+public(package) fun withdrawal_txn_id(self: &WithdrawalTransaction): address {
+    self.id.to_address()
 }
 
-public(package) fun pending_withdrawal_request_ids(self: &PendingWithdrawal): &vector<address> {
+public(package) fun withdrawal_txn_request_ids(self: &WithdrawalTransaction): &vector<address> {
     &self.request_ids
 }
 
-public(package) fun txid(self: &PendingWithdrawal): address {
+public(package) fun txid(self: &WithdrawalTransaction): address {
     self.txid
+}
+
+public(package) fun withdrawal_txn_inputs(self: &WithdrawalTransaction): &vector<Utxo> {
+    &self.inputs
 }
 
 public(package) fun request_id(self: &WithdrawalRequest): ID {
@@ -535,9 +539,9 @@ public(package) fun emit_withdrawal_approved(request_id: address) {
     sui::event::emit(WithdrawalApprovedEvent { request_id });
 }
 
-public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdrawal) {
+public(package) fun emit_withdrawal_picked_for_processing(self: &WithdrawalTransaction) {
     sui::event::emit(WithdrawalPickedForProcessingEvent {
-        pending_id: self.id,
+        withdrawal_txn_id: self.id.to_address(),
         txid: self.txid,
         request_ids: self.request_ids,
         inputs: self.inputs,
@@ -548,15 +552,15 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &PendingWithdraw
     });
 }
 
-public(package) fun emit_withdrawal_signed(self: &PendingWithdrawal) {
+public(package) fun emit_withdrawal_signed(self: &WithdrawalTransaction) {
     sui::event::emit(WithdrawalSignedEvent {
-        withdrawal_id: self.id,
+        withdrawal_txn_id: self.id.to_address(),
         request_ids: self.request_ids,
         signatures: *self.signatures.borrow(),
     });
 }
 
-public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
+public(package) fun emit_withdrawal_confirmed(self: &WithdrawalTransaction) {
     let (change_utxo_id, change_utxo_amount) = if (self.change_output.is_some()) {
         let change = self.change_output.borrow();
         let change_vout = (self.withdrawal_outputs.length() as u32);
@@ -566,7 +570,7 @@ public(package) fun emit_withdrawal_confirmed(self: &PendingWithdrawal) {
     };
 
     sui::event::emit(WithdrawalConfirmedEvent {
-        pending_id: self.id,
+        withdrawal_txn_id: self.id.to_address(),
         txid: self.txid,
         change_utxo_id,
         request_ids: self.request_ids,
@@ -598,7 +602,7 @@ public struct WithdrawalApprovedEvent has copy, drop {
 }
 
 public struct WithdrawalPickedForProcessingEvent has copy, drop {
-    pending_id: address,
+    withdrawal_txn_id: address,
     txid: address,
     request_ids: vector<address>,
     inputs: vector<Utxo>,
@@ -609,13 +613,13 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
 }
 
 public struct WithdrawalSignedEvent has copy, drop {
-    withdrawal_id: address,
+    withdrawal_txn_id: address,
     request_ids: vector<address>,
     signatures: vector<vector<u8>>,
 }
 
 public struct WithdrawalConfirmedEvent has copy, drop {
-    pending_id: address,
+    withdrawal_txn_id: address,
     txid: address,
     change_utxo_id: Option<UtxoId>,
     request_ids: vector<address>,
@@ -631,7 +635,7 @@ public struct WithdrawalCancelledEvent has copy, drop {
 // ======== Test Helpers ========
 
 #[test_only]
-public(package) fun new_pending_withdrawal_for_testing(
+public(package) fun new_withdrawal_txn_for_testing(
     request_ids: vector<address>,
     inputs: vector<Utxo>,
     withdrawal_outputs: vector<OutputUtxo>,
@@ -639,9 +643,9 @@ public(package) fun new_pending_withdrawal_for_testing(
     txid: address,
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
-): PendingWithdrawal {
-    PendingWithdrawal {
-        id: ctx.fresh_object_address(),
+): WithdrawalTransaction {
+    WithdrawalTransaction {
+        id: object::new(ctx),
         txid,
         request_ids,
         inputs,

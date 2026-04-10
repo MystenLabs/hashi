@@ -242,8 +242,10 @@ pub struct WithdrawalRequestQueue {
     pub requests: Bag,
     /// Processed requests (Processing, Signed, Confirmed)
     pub processed: Bag,
-    /// In-flight withdrawal transactions (PendingWithdrawal)
-    pub pending_withdrawals: Bag,
+    /// In-flight withdrawal transactions
+    pub withdrawal_txns: Bag,
+    /// Confirmed withdrawal transactions (historical record)
+    pub confirmed_txns: Bag,
     /// Per-sender index: sender address -> Bag of request IDs
     pub user_requests: Table,
 }
@@ -253,17 +255,9 @@ pub struct WithdrawalRequestQueue {
 pub enum WithdrawalStatus {
     Requested,
     Approved,
-    Processing {
-        pending_withdrawal_id: Address,
-        txid: BitcoinTxid,
-    },
-    Signed {
-        pending_withdrawal_id: Address,
-        txid: BitcoinTxid,
-    },
-    Confirmed {
-        txid: BitcoinTxid,
-    },
+    Processing,
+    Signed,
+    Confirmed,
 }
 
 impl WithdrawalStatus {
@@ -287,7 +281,7 @@ pub struct WithdrawalRequest {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub status: WithdrawalStatus,
-    pub pending_withdrawal_id: Option<Address>,
+    pub withdrawal_txn_id: Option<Address>,
     pub sui_tx_digest: Digest,
     /// BTC balance in satoshis.
     pub btc: u64,
@@ -300,9 +294,9 @@ pub struct CommittedRequestInfo {
     pub bitcoin_address: Vec<u8>,
 }
 
-/// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalTransaction type.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct PendingWithdrawal {
+pub struct WithdrawalTransaction {
     pub id: Address,
     pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
@@ -316,7 +310,7 @@ pub struct PendingWithdrawal {
     pub epoch: u64,
 }
 
-impl PendingWithdrawal {
+impl WithdrawalTransaction {
     pub fn all_outputs(&self) -> Vec<OutputUtxo> {
         let mut outputs = self.withdrawal_outputs.clone();
         if let Some(ref change) = self.change_output {
@@ -982,7 +976,7 @@ impl From<WithdrawalApprovedEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalPickedForProcessingEvent {
-    pub pending_id: Address,
+    pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
@@ -1005,7 +999,7 @@ impl From<WithdrawalPickedForProcessingEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalSignedEvent {
-    pub withdrawal_id: Address,
+    pub withdrawal_txn_id: Address,
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
 }
@@ -1023,7 +1017,7 @@ impl From<WithdrawalSignedEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalConfirmedEvent {
-    pub pending_id: Address,
+    pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
     pub change_utxo_id: Option<UtxoId>,
     pub request_ids: Vec<Address>,

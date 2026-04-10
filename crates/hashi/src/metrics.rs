@@ -373,7 +373,7 @@ impl Metrics {
             .partition::<Vec<_>, _>(|r| r.status.is_requested());
         let (signed, pending): (Vec<_>, Vec<_>) = hashi
             .withdrawal_queue
-            .pending_withdrawals()
+            .withdrawal_txns()
             .values()
             .partition(|w| w.signatures.is_some());
         self.withdrawal_queue_size
