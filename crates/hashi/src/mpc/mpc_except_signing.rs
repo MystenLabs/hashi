@@ -2543,9 +2543,18 @@ impl MpcManager {
                     reason: format!("Share index {} does not belong to dealer", share_index),
                 });
             }
-            if self
-                .dealer_outputs
-                .contains_key(&DealerOutputsKey::Rotation(share_index))
+            // Skip the "already processed" guard when the dealer is `self`.
+            // We re-enter `try_sign_rotation_messages(self.address, ...)` on
+            // every dealer-phase retry within a single process lifetime, and
+            // the previous attempt's outputs (whether written by an earlier
+            // `try_sign` call here or by the party phase processing our own
+            // cert from TOB) are bit-identical to what we'd re-derive — the
+            // inputs (encryption_key, nodes, threshold, session_id, message,
+            // commitment) are deterministic. Overwriting on retry is safe.
+            if dealer != self.address
+                && self
+                    .dealer_outputs
+                    .contains_key(&DealerOutputsKey::Rotation(share_index))
             {
                 return Err(MpcError::InvalidMessage {
                     sender: dealer,
