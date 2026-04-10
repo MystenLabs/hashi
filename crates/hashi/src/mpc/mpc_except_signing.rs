@@ -94,7 +94,8 @@ pub struct MpcManager {
     previous_output: Option<MpcOutput>,
     pub batch_size_per_weight: u16,
 
-    // Mutable during the epoch
+    // TODO: Rename these fields so it is clear at the call site which are
+    // backed by persistent store and which live only in memory.
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
     pub dkg_messages: HashMap<Address, avss::Message>,
     pub rotation_messages: HashMap<Address, RotationMessages>,
@@ -254,11 +255,10 @@ impl MpcManager {
             if let Some(response) = self.message_responses.get(&sender) {
                 return Ok(response.clone());
             }
-            return Err(MpcError::InvalidMessage {
-                sender,
-                reason: "Message previously received but no valid response was produced"
-                    .to_string(),
-            });
+            tracing::info!(
+                "handle_send_messages_request: existing message from {sender:?} but no \
+                 cached response (e.g. post-restart), re-processing"
+            );
         }
         let signature = match &request.messages {
             Messages::Dkg(msg) => {
