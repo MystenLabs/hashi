@@ -274,7 +274,7 @@ impl MpcManager {
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
             Messages::NonceGeneration(nonce) => {
-                self.store_nonce_message(sender, nonce);
+                self.store_nonce_message(sender, nonce)?;
                 self.try_sign_nonce_message(sender, &request.messages)?
             }
         };
@@ -1401,17 +1401,12 @@ impl MpcManager {
         Ok(())
     }
 
-    // TODO: Change return type to `MpcResult<()>` and propagate disk errors
-    // (mirroring `store_dkg_message` and `store_rotation_messages`).
-    fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) {
+    fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) -> MpcResult<()> {
         self.nonce_messages.insert(dealer, nonce.clone());
-        if let Err(e) = self.public_messages_store.store_nonce_message(
-            nonce.batch_index,
-            &dealer,
-            &nonce.message,
-        ) {
-            tracing::error!("Failed to persist nonce message for dealer {dealer:?}: {e}");
-        }
+        self.public_messages_store
+            .store_nonce_message(nonce.batch_index, &dealer, &nonce.message)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        Ok(())
     }
 
     fn needs_nonce_retrieval(
@@ -1869,7 +1864,7 @@ impl MpcManager {
                             );
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_nonce_message(message.dealer_address, nonce);
+                        mgr.store_nonce_message(message.dealer_address, nonce)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -1936,7 +1931,7 @@ impl MpcManager {
             None => {
                 let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
                 if let Messages::NonceGeneration(ref nonce) = msgs {
-                    self.store_nonce_message(self.address, nonce);
+                    self.store_nonce_message(self.address, nonce)?;
                 }
                 msgs
             }
