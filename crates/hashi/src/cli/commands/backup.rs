@@ -1,45 +1,27 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Backup command implementations
+//! CLI backup command implementations
+//!
+//! Orchestrates config loading, recipient/identity resolution, and user-facing
+//! output. The core archive logic lives in [`crate::backup`].
 
 use age::Decryptor;
-use age::Encryptor;
 use age::IdentityFile;
 use age::cli_common::UiCallbacks;
 use age::plugin;
 use anyhow::Context;
 use anyhow::Result;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::ErrorKind;
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::backup;
 use crate::cli::config::BackupRecipient;
 use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
-
-const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-config-backup-manifest.toml";
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct BackupManifest {
-    files: Vec<BackupManifestFile>,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct BackupManifestFile {
-    archive_name: PathBuf,
-    original_path: PathBuf,
-}
 
 /// Save an encrypted backup of the current config and referenced files
 pub fn save(
@@ -74,7 +56,7 @@ pub fn save(
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
 
-    let manifest = build_backup_manifest(&files)?;
+    let manifest = backup::build_backup_manifest(&files)?;
 
     print_info(&format!(
         "Backing up {} file(s) using age recipient {}",
@@ -84,8 +66,8 @@ pub fn save(
 
     let encryptor_recipient = build_encryptor_recipient(&recipient)?;
 
-    let output_path = output_dir.join(encrypted_backup_file_name());
-    encrypt_files_to_age_archive(&manifest, encryptor_recipient.as_ref(), &output_path)?;
+    let output_path = output_dir.join(backup::encrypted_backup_file_name());
+    backup::encrypt_files_to_age_archive(&manifest, encryptor_recipient.as_ref(), &output_path)?;
 
     print_success(&format!("Backup completed: {}", output_path.display()));
 
@@ -122,7 +104,7 @@ pub fn restore(
 ) -> Result<()> {
     let identities = load_backup_identities(backup_age_identity)?;
 
-    let extract_dir = output_dir.join(extract_dir_name(backup_tarball)?);
+    let extract_dir = output_dir.join(backup::extract_dir_name(backup_tarball)?);
     fs::create_dir_all(&extract_dir).with_context(|| {
         format!(
             "Failed to create output directory {}",
@@ -149,12 +131,12 @@ pub fn restore(
         .next()
         .transpose()?
         .ok_or_else(|| anyhow::anyhow!("Backup archive is empty"))?;
-    let (manifest, manifest_toml) = read_backup_manifest(manifest_entry)?;
-    write_manifest_to_extract_dir(&extract_dir, &manifest_toml)?;
-    let restored_files = restore_backup_entries(entries, &extract_dir, &manifest)?;
+    let (manifest, manifest_toml) = backup::read_backup_manifest(manifest_entry)?;
+    backup::write_manifest_to_extract_dir(&extract_dir, &manifest_toml)?;
+    let restored_files = backup::restore_backup_entries(entries, &extract_dir, &manifest)?;
 
     if copy_to_original_paths {
-        copy_restored_files_to_original_paths(&restored_files, &manifest)?;
+        backup::copy_restored_files_to_original_paths(&restored_files, &manifest)?;
     }
 
     print_success(&format!(
@@ -163,167 +145,6 @@ pub fn restore(
         extract_dir.display()
     ));
 
-    Ok(())
-}
-
-/// Determine the directory name to extract a backup tarball into.
-///
-/// Uses the tarball's file name with the `.tar.age` suffix stripped, so
-/// `hashi-config-backup-20260409T230419Z.tar.age` becomes
-/// `hashi-config-backup-20260409T230419Z`.
-fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
-    let file_name = backup_tarball
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Backup tarball path has no file name: {}",
-                backup_tarball.display()
-            )
-        })?;
-
-    let stem = file_name
-        .strip_suffix(".tar.age")
-        .or_else(|| file_name.strip_suffix(".age"))
-        .unwrap_or(file_name);
-
-    if stem.is_empty() {
-        anyhow::bail!(
-            "Cannot derive extract directory name from {}",
-            backup_tarball.display()
-        );
-    }
-
-    Ok(PathBuf::from(stem))
-}
-
-/// Write the raw manifest TOML into the extract directory so the user can
-/// inspect it alongside the restored files.
-fn write_manifest_to_extract_dir(extract_dir: &Path, manifest_toml: &str) -> Result<()> {
-    let manifest_path = extract_dir.join(BACKUP_MANIFEST_FILE_NAME);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&manifest_path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::AlreadyExists => anyhow::anyhow!(
-                "Refusing to overwrite existing file: {}",
-                manifest_path.display()
-            ),
-            _ => anyhow::Error::from(e)
-                .context(format!("Failed to create {}", manifest_path.display())),
-        })?;
-    io::Write::write_all(&mut file, manifest_toml.as_bytes())
-        .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
-    print_info(&format!("Restored manifest to {}", manifest_path.display()));
-    Ok(())
-}
-
-fn encrypt_files_to_age_archive(
-    manifest: &BackupManifest,
-    recipient: &dyn age::Recipient,
-    output_path: &Path,
-) -> Result<()> {
-    let output = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let encryptor = Encryptor::with_recipients(std::iter::once(recipient))?;
-    let mut encrypted = encryptor.wrap_output(output)?;
-    {
-        let mut archive = tar::Builder::new(&mut encrypted);
-        append_backup_manifest(&mut archive, manifest)?;
-
-        for file in &manifest.files {
-            archive.append_path_with_name(&file.original_path, &file.archive_name)?;
-            print_info(&format!(
-                "Added {} to {}",
-                file.original_path.display(),
-                file.archive_name.display()
-            ));
-        }
-
-        archive.finish()?;
-    }
-    encrypted.finish()?;
-
-    Ok(())
-}
-
-fn encrypted_backup_file_name() -> PathBuf {
-    // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
-    // lexicographically, and contains no characters that need escaping on any
-    // common filesystem.
-    let timestamp = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
-        .strftime("%Y%m%dT%H%M%SZ")
-        .to_string();
-    PathBuf::from(format!("hashi-config-backup-{timestamp}.tar.age"))
-}
-
-fn build_backup_manifest(files: &[PathBuf]) -> Result<BackupManifest> {
-    let mut archive_names = HashSet::new();
-    let mut manifest_files = Vec::with_capacity(files.len());
-
-    for file in files {
-        let base_name = file
-            .file_name()
-            .ok_or_else(|| {
-                anyhow::anyhow!("Backup input does not have a file name: {}", file.display())
-            })?
-            .to_string_lossy();
-
-        let archive_name = if archive_names.contains(base_name.as_ref()) {
-            let stem = Path::new(base_name.as_ref())
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let ext = Path::new(base_name.as_ref())
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy()))
-                .unwrap_or_default();
-
-            let mut suffix = 2u32;
-            loop {
-                let candidate = format!("{stem}-{suffix}{ext}");
-                if archive_names.insert(candidate.clone()) {
-                    print_info(&format!(
-                        "Archive name collision for {base_name}: renamed to {candidate} (original: {})",
-                        file.display()
-                    ));
-                    break PathBuf::from(candidate);
-                }
-                suffix += 1;
-            }
-        } else {
-            archive_names.insert(base_name.to_string());
-            PathBuf::from(base_name.as_ref())
-        };
-
-        manifest_files.push(BackupManifestFile {
-            archive_name,
-            original_path: file.clone(),
-        });
-    }
-
-    Ok(BackupManifest {
-        files: manifest_files,
-    })
-}
-
-fn append_backup_manifest<W: std::io::Write>(
-    archive: &mut tar::Builder<W>,
-    manifest: &BackupManifest,
-) -> Result<()> {
-    let manifest_bytes = toml::to_string_pretty(manifest)?.into_bytes();
-    let mut header = tar::Header::new_gnu();
-    header.set_size(manifest_bytes.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    archive.append_data(
-        &mut header,
-        BACKUP_MANIFEST_FILE_NAME,
-        manifest_bytes.as_slice(),
-    )?;
     Ok(())
 }
 
@@ -342,169 +163,14 @@ fn load_backup_identities(
         .map_err(Into::into)
 }
 
-fn read_backup_manifest<R: Read>(mut entry: tar::Entry<'_, R>) -> Result<(BackupManifest, String)> {
-    let path = entry.path()?.into_owned();
-    let file_name = path.file_name().ok_or_else(|| {
-        anyhow::anyhow!(
-            "First tar entry does not have a file name: {}",
-            path.display()
-        )
-    })?;
-    if file_name != BACKUP_MANIFEST_FILE_NAME {
-        anyhow::bail!(
-            "Expected backup manifest {} as the first tar entry, found {}",
-            BACKUP_MANIFEST_FILE_NAME,
-            path.display()
-        );
-    }
-
-    let mut manifest_toml = String::new();
-    entry.read_to_string(&mut manifest_toml)?;
-    let manifest: BackupManifest = toml::from_str(&manifest_toml)?;
-
-    Ok((manifest, manifest_toml))
-}
-
-fn restore_backup_entries<R: Read>(
-    entries: tar::Entries<'_, R>,
-    output_dir: &Path,
-    manifest: &BackupManifest,
-) -> Result<HashMap<PathBuf, PathBuf>> {
-    let expected_files: HashMap<_, _> = manifest
-        .files
-        .iter()
-        .map(|file| (file.archive_name.clone(), file))
-        .collect();
-    let mut restored_files = HashMap::new();
-
-    for entry in entries {
-        let mut entry = entry?;
-        let archive_path = entry.path()?.into_owned();
-        let archive_name = PathBuf::from(archive_path.file_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Backup entry does not have a file name: {}",
-                archive_path.display()
-            )
-        })?);
-
-        let entry_type = entry.header().entry_type();
-        if entry_type != tar::EntryType::Regular {
-            anyhow::bail!(
-                "Backup entry {} has unexpected type {:?}; only regular files are supported",
-                archive_name.display(),
-                entry_type
-            );
-        }
-
-        if archive_path != archive_name {
-            anyhow::bail!(
-                "Backup entry must be at the tar root: {}",
-                archive_path.display()
-            );
-        }
-
-        if !expected_files.contains_key(&archive_name) {
-            anyhow::bail!(
-                "Backup archive contains unexpected file: {}",
-                archive_name.display()
-            );
-        }
-
-        let output_path = output_dir.join(&archive_name);
-        let mut output_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&output_path)
-            .map_err(|e| match e.kind() {
-                ErrorKind::AlreadyExists => anyhow::anyhow!(
-                    "Refusing to overwrite existing file: {}",
-                    output_path.display()
-                ),
-                _ => anyhow::Error::from(e)
-                    .context(format!("Failed to create {}", output_path.display())),
-            })?;
-        io::copy(&mut entry, &mut output_file).with_context(|| {
-            format!(
-                "Failed to write restored file contents to {}",
-                output_path.display()
-            )
-        })?;
-        print_info(&format!(
-            "Restored {} to {}",
-            archive_name.display(),
-            output_path.display()
-        ));
-        restored_files.insert(archive_name, output_path);
-    }
-
-    if restored_files.len() != manifest.files.len() {
-        anyhow::bail!(
-            "Backup archive is missing file entries: expected {}, restored {}",
-            manifest.files.len(),
-            restored_files.len()
-        );
-    }
-
-    Ok(restored_files)
-}
-
-fn copy_restored_files_to_original_paths(
-    restored_files: &HashMap<PathBuf, PathBuf>,
-    manifest: &BackupManifest,
-) -> Result<()> {
-    for file in &manifest.files {
-        let restored_path = restored_files.get(&file.archive_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Restored file missing for archive entry {}",
-                file.archive_name.display()
-            )
-        })?;
-
-        if let Some(parent) = file.original_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create parent directory {}", parent.display())
-            })?;
-        }
-
-        let mut source = File::open(restored_path)
-            .with_context(|| format!("Failed to open {}", restored_path.display()))?;
-        let mut dest = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&file.original_path)
-            .map_err(|e| match e.kind() {
-                ErrorKind::AlreadyExists => anyhow::anyhow!(
-                    "Refusing to overwrite existing original path: {}",
-                    file.original_path.display()
-                ),
-                _ => anyhow::Error::from(e)
-                    .context(format!("Failed to create {}", file.original_path.display())),
-            })?;
-        io::copy(&mut source, &mut dest).with_context(|| {
-            format!(
-                "Failed to copy {} to {}",
-                restored_path.display(),
-                file.original_path.display()
-            )
-        })?;
-        print_info(&format!(
-            "Copied {} to {}",
-            restored_path.display(),
-            file.original_path.display()
-        ));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::config::BitcoinConfig;
     use age::secrecy::ExposeSecret;
     use age::x25519;
+    use std::path::Path;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     const CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
@@ -618,7 +284,7 @@ mod tests {
     /// Compute the nested directory that `restore` will extract into, given the
     /// tarball path and the user-supplied output directory.
     fn expected_extract_dir(tarball: &Path, output_dir: &Path) -> PathBuf {
-        output_dir.join(super::extract_dir_name(tarball).unwrap())
+        output_dir.join(backup::extract_dir_name(tarball).unwrap())
     }
 
     #[test]
@@ -640,7 +306,7 @@ mod tests {
         assert_mode_0600(&extract_dir.join("btc.wif"));
 
         // The manifest should also be extracted alongside the restored files.
-        let manifest_path = extract_dir.join(BACKUP_MANIFEST_FILE_NAME);
+        let manifest_path = extract_dir.join(backup::BACKUP_MANIFEST_FILE_NAME);
         assert!(
             manifest_path.exists(),
             "manifest not extracted to {}",
