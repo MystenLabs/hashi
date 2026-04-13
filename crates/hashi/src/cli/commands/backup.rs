@@ -135,7 +135,7 @@ pub fn restore(
     let decryptor = Decryptor::new(input)
         .with_context(|| format!("Failed to parse age header of {}", backup_tarball.display()))?;
     let mut decrypted = decryptor
-        .decrypt(identities.iter().map(|identity| identity.as_ref()))
+        .decrypt(identities.iter().map(|i| i.as_ref() as &dyn age::Identity))
         .with_context(|| {
             format!(
                 "Failed to decrypt {}; is {} the correct age identity?",
@@ -327,7 +327,9 @@ fn append_backup_manifest<W: std::io::Write>(
     Ok(())
 }
 
-fn load_backup_identities(backup_age_identity: &Path) -> Result<Vec<Box<dyn age::Identity>>> {
+fn load_backup_identities(
+    backup_age_identity: &Path,
+) -> Result<Vec<Box<dyn age::Identity + Send + Sync>>> {
     let path_str = backup_age_identity.to_str().ok_or_else(|| {
         anyhow::anyhow!(
             "Age identity path is not valid UTF-8: {}",
