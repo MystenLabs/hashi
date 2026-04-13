@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-default-members = ["crates/hashi"]
 
 [workspace.dependencies]
 # sui sdk crates
