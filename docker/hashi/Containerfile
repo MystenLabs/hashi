@@ -27,7 +27,8 @@ RUN mkdir -p crates/hashi/src \
 ENV TARGET=x86_64-unknown-linux-musl
 ENV OPENSSL_STATIC=true
 ENV CARGO_INCREMENTAL=0
-ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
+ENV SOURCE_DATE_EPOCH=0
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64 -C codegen-units=1"
 
 RUN cargo fetch
 RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
@@ -43,8 +44,8 @@ ENV GIT_REVISION=${GIT_REVISION}
 COPY crates/hashi /src/crates/hashi
 COPY crates/hashi-types /src/crates/hashi-types
 
-# Touch source files to invalidate cargo's fingerprint cache for local crates
-RUN find crates/ -name "*.rs" -exec touch {} +
+# Rebuild local crates without injecting wall-clock mtimes into the source tree.
+RUN cargo clean --target "$TARGET" -p hashi -p hashi-types
 
 RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
 

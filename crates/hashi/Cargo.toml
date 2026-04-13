@@ -46,6 +46,7 @@ toml.workspace = true
 futures.workspace = true
 tracing-subscriber.workspace = true
 age.workspace = true
+rust-embed.workspace = true
 rustls.workspace = true
 ed25519-dalek.workspace = true
 tonic-rustls.workspace = true
