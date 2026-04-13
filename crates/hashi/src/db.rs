@@ -9,6 +9,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
+use fjall::Readable;
 use fjall::Result;
 use sui_sdk_types::Address;
 
@@ -19,7 +20,6 @@ use serde::de::DeserializeOwned;
 use crate::mpc::types::RotationMessages;
 
 pub struct Database {
-    #[allow(unused)]
     db: fjall::Database,
     // keyspaces
 
@@ -72,6 +72,47 @@ impl Database {
             rotation_messages,
             nonce_messages,
         })
+    }
+
+    /// Returns all keyspaces paired with their names. When adding a new
+    /// keyspace, add it here so that it is included in snapshots and backups.
+    fn all_keyspaces(&self) -> [(&str, &Keyspace); 4] {
+        [
+            (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
+            (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
+            (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
+            (NONCE_MESSAGES_CF_NAME, &self.nonce_messages),
+        ]
+    }
+
+    /// Create a consistent snapshot of this database and write it as a new fjall
+    /// database at `dest`.
+    ///
+    /// Uses fjall's MVCC snapshot to get a point-in-time view of all keyspaces
+    /// while the source database remains open for writes. The destination is a
+    /// fully self-contained fjall database that can later be opened with
+    /// [`Database::open`].
+    pub fn snapshot_to_path(&self, dest: &Path) -> anyhow::Result<()> {
+        let snapshot = self.db.snapshot();
+
+        let dest_db = fjall::Database::builder(dest).open().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to open destination database at {}: {e}",
+                dest.display()
+            )
+        })?;
+
+        for (name, source_ks) in self.all_keyspaces() {
+            let dest_ks = dest_db.keyspace(name, KeyspaceCreateOptions::default)?;
+            for guard in snapshot.iter(source_ks) {
+                let (key, value) = guard.into_inner()?;
+                dest_ks.insert(&*key, &*value)?;
+            }
+        }
+
+        dest_db.persist(fjall::PersistMode::SyncAll)?;
+
+        Ok(())
     }
 
     /// Store encryption key for the given epoch.
@@ -999,5 +1040,70 @@ mod tests {
             store.get_rotation_messages(87, &dealer).unwrap().is_none(),
             "rotation messages must not leak to the store's self.epoch=87"
         );
+    }
+
+    #[test]
+    fn test_snapshot_to_path() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let src_dir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(src_dir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let dealer_msg = create_test_message();
+        let nonce_msg = create_test_nonce_message();
+        let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        db.store_encryption_key(10, &enc_key).unwrap();
+        db.store_dealer_message(10, &dealer1, &dealer_msg).unwrap();
+        db.store_rotation_messages(10, &dealer2, &rotation_msgs)
+            .unwrap();
+        db.store_nonce_message(10, 0, &dealer1, &nonce_msg).unwrap();
+
+        let dest_dir = tempfile::Builder::new().tempdir().unwrap();
+        db.snapshot_to_path(dest_dir.path()).unwrap();
+
+        // Drop the source so we know we're reading from the destination
+        drop(db);
+
+        let restored = Database::open(dest_dir.path()).unwrap();
+
+        // Verify encryption key
+        assert_eq!(restored.get_encryption_key(10).unwrap().unwrap(), enc_key);
+
+        // Verify dealer message
+        let restored_dealer = restored.get_dealer_message(10, &dealer1).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&restored_dealer).unwrap(),
+            bcs::to_bytes(&dealer_msg).unwrap()
+        );
+
+        // Verify rotation messages
+        let restored_rotation = restored.list_all_rotation_messages(10).unwrap();
+        assert_eq!(restored_rotation.len(), 1);
+        assert_eq!(restored_rotation[0].0, dealer2);
+
+        // Verify nonce messages
+        let restored_nonces = restored.list_nonce_messages(10, 0).unwrap();
+        assert_eq!(restored_nonces.len(), 1);
+        assert_eq!(restored_nonces[0].0, dealer1);
+    }
+
+    #[test]
+    fn test_snapshot_to_path_empty_db() {
+        let src_dir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(src_dir.path()).unwrap();
+
+        let dest_dir = tempfile::Builder::new().tempdir().unwrap();
+        db.snapshot_to_path(dest_dir.path()).unwrap();
+        drop(db);
+
+        let restored = Database::open(dest_dir.path()).unwrap();
+        assert!(restored.latest_encryption_key_epoch().unwrap().is_none());
+        assert!(restored.list_all_dealer_messages(0).unwrap().is_empty());
     }
 }
