@@ -45,8 +45,8 @@ ENV GIT_REVISION=${GIT_REVISION}
 COPY crates/hashi-screener /src/crates/hashi-screener
 COPY crates/hashi-types /src/crates/hashi-types
 
-# Rebuild local crates without injecting wall-clock mtimes into the source tree.
-RUN cargo clean --target "$TARGET" -p hashi-screener -p hashi-types
+# Touch source files to invalidate cargo's fingerprint cache for local crates
+RUN find crates/ -name "*.rs" -exec touch {} +
 
 RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi-screener
 

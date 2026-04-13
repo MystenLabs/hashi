@@ -4,9 +4,9 @@ on:
   pull_request:
     paths:
       # for now don't run on every change
-      # - 'docker/hashi/**'
-      # - 'docker/hashi-screener/**'
       # - 'crates/**'
+      - 'docker/hashi/**'
+      - 'docker/hashi-screener/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/deterministic-build.yml'
