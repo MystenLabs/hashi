@@ -180,7 +180,8 @@ fun test_approve_request_bad_signature() {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::withdraw::ECannotCancelAfterApproval)]
+/// Cancelling an approved (but not yet processing) request should succeed
+/// and return the full BTC balance to the requester.
 fun test_approve_then_cancel() {
     let epoch = 0u64;
     let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
@@ -196,12 +197,58 @@ fun test_approve_then_cancel() {
     let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
     hashi::withdraw::approve_request(&mut hashi, id1, cert);
 
-    // Cancelling an approved request should fail
+    // Cancelling an approved request should succeed — BTC hasn't been burned yet
     let one_hour_ms = 1000 * 60 * 60;
     clock.set_for_testing(one_hour_ms);
     let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, id1, &clock, ctx);
+    assert!(btc.value() == 10_000);
     btc.destroy_for_testing();
 
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::withdraw::ECannotCancelProcessingWithdrawal)]
+/// Once a request has been committed to a WithdrawalTransaction it is in the
+/// Processing state and its BTC has been burned — cancellation must be rejected.
+fun test_cancel_processing_request() {
+    let epoch = 0u64;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let id1 = setup_withdrawal_request(&mut hashi, &clock, 10_000, ctx);
+
+    // Approve the request.
+    let approval = hashi::withdraw::new_request_approval_message(id1);
+    let message_bytes = build_cert_message(epoch, &approval);
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+    hashi::withdraw::approve_request(&mut hashi, id1, cert);
+
+    // Commit the request into a WithdrawalTransaction — this moves it to Processing.
+    let test_utxo = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id1],
+        vector[test_utxo],
+        vector[withdrawal_queue::output_utxo(1, x"00")],
+        option::none(),
+        @0xBEEF,
+        &clock,
+        ctx,
+    );
+    let btc_balance = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&txn);
+
+    // Advance past cooldown and attempt cancellation — should abort.
+    let one_hour_ms = 1000 * 60 * 60;
+    clock.set_for_testing(one_hour_ms);
+    let btc = hashi::withdraw::cancel_withdrawal(&mut hashi, id1, &clock, ctx);
+
+    // Cleanup — not reached.
+    btc.destroy_for_testing();
+    btc_balance.destroy_for_testing();
+    std::unit_test::destroy(txn);
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
