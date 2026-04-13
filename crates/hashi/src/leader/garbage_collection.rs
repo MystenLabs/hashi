@@ -190,6 +190,12 @@ impl LeaderService {
                     Identifier::from_static("Upgrade"),
                     vec![],
                 ))),
+                ProposalType::EmergencyPause => TypeTag::Struct(Box::new(StructTag::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("emergency_pause"),
+                    Identifier::from_static("EmergencyPause"),
+                    vec![],
+                ))),
                 ProposalType::Unknown(type_name) => {
                     error!(
                         "Cannot delete proposal {:?} with unknown type: {}",

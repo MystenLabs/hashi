@@ -540,6 +540,7 @@ pub fn get_proposal_type_arg(
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
+        ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

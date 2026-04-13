@@ -204,21 +204,24 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .proposals
                     .remove(&proposal_executed_event.proposal_id);
 
-                // When an UpdateConfig proposal executes, the Hashi object's
-                // config field changes on-chain. The event carries no key/value
-                // payload, so re-fetch the config from the Hashi object to
-                // keep the in-memory state current.
-                if parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type)
-                    == ProposalType::UpdateConfig
-                {
+                // When an UpdateConfig or EmergencyPause proposal executes,
+                // the Hashi object's config field changes on-chain. The event
+                // carries no key/value payload, so re-fetch the config from
+                // the Hashi object to keep the in-memory state current.
+                if matches!(
+                    parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
+                    ProposalType::UpdateConfig | ProposalType::EmergencyPause
+                ) {
                     match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
                         Ok(config) => {
                             state.state_mut().hashi.config = config;
-                            tracing::info!("on-chain config refreshed after UpdateConfig proposal");
+                            tracing::info!(
+                                "on-chain config refreshed after config-changing proposal"
+                            );
                         }
                         Err(e) => {
                             tracing::error!(
-                                "failed to refresh config after UpdateConfig proposal: {e}"
+                                "failed to refresh config after config-changing proposal: {e}"
                             );
                         }
                     }
@@ -523,6 +526,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
         ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
+        ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
         _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

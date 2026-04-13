@@ -431,6 +431,12 @@ pub struct Upgrade {
     pub digest: Vec<u8>,
 }
 
+/// Rust version of the Move hashi::emergency_pause::EmergencyPause type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct EmergencyPause {
+    pub pause: bool,
+}
+
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {

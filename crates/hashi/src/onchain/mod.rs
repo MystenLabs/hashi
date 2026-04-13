@@ -1242,6 +1242,11 @@ async fn scrape_proposals(
                     .ok()
                     .map(|p| (p.id, p.timestamp_ms))
             }
+            types::ProposalType::EmergencyPause => {
+                bcs::from_bytes::<move_types::Proposal<move_types::EmergencyPause>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
             types::ProposalType::Unknown(_) => None,
         };
 
@@ -1289,6 +1294,7 @@ fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
+        ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
 }
