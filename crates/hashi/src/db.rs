@@ -969,4 +969,35 @@ mod tests {
         // Should be a no-op, not an error.
         db.prune_messages_below(100).unwrap();
     }
+
+    #[test]
+    fn test_epoch_store_writes_at_explicit_epoch_not_self_epoch() {
+        use crate::storage::EpochPublicMessagesStore;
+        use crate::storage::PublicMessagesStore;
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(tmpdir.path()).unwrap());
+
+        let mut store = EpochPublicMessagesStore::new(db.clone(), 87);
+
+        let dealer = Address::new([1u8; 32]);
+        let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        store
+            .store_rotation_messages(71, &dealer, &rotation_msgs)
+            .unwrap();
+
+        assert!(
+            store.get_rotation_messages(71, &dealer).unwrap().is_some(),
+            "rotation messages written with explicit epoch=71 must be readable at epoch=71"
+        );
+
+        assert!(
+            store.get_rotation_messages(87, &dealer).unwrap().is_none(),
+            "rotation messages must not leak to the store's self.epoch=87"
+        );
+    }
 }

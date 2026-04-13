@@ -45,6 +45,7 @@ struct MockPublicMessagesStore;
 impl PublicMessagesStore for MockPublicMessagesStore {
     fn store_dealer_message(
         &mut self,
+        _epoch: u64,
         _dealer: &Address,
         _message: &avss::Message,
     ) -> anyhow::Result<()> {
@@ -65,6 +66,7 @@ impl PublicMessagesStore for MockPublicMessagesStore {
 
     fn store_rotation_messages(
         &mut self,
+        _epoch: u64,
         _dealer: &Address,
         _messages: &RotationMessages,
     ) -> anyhow::Result<()> {
@@ -85,6 +87,7 @@ impl PublicMessagesStore for MockPublicMessagesStore {
 
     fn store_nonce_message(
         &mut self,
+        _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
         _message: &batch_avss::Message,
@@ -117,7 +120,7 @@ fn receive_dealer_messages(
     let Messages::Dkg(msg) = messages else {
         panic!("receive_dealer_messages called with rotation messages");
     };
-    manager.store_dkg_message(dealer, msg)?;
+    manager.store_dkg_message(manager.mpc_config.epoch, dealer, msg)?;
     let sig = manager.try_sign_dkg_message(dealer, messages)?;
     Ok(MemberSignature::new(
         manager.mpc_config.epoch,
@@ -1032,6 +1035,7 @@ impl InMemoryPublicMessagesStore {
 impl PublicMessagesStore for InMemoryPublicMessagesStore {
     fn store_dealer_message(
         &mut self,
+        _epoch: u64,
         dealer: &Address,
         message: &avss::Message,
     ) -> anyhow::Result<()> {
@@ -1057,6 +1061,7 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
 
     fn store_rotation_messages(
         &mut self,
+        _epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
     ) -> anyhow::Result<()> {
@@ -1082,6 +1087,7 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
 
     fn store_nonce_message(
         &mut self,
+        _epoch: u64,
         batch_index: u32,
         dealer: &Address,
         message: &batch_avss::Message,
@@ -1118,6 +1124,7 @@ struct FailingPublicMessagesStore;
 impl PublicMessagesStore for FailingPublicMessagesStore {
     fn store_dealer_message(
         &mut self,
+        _epoch: u64,
         _dealer: &Address,
         _message: &avss::Message,
     ) -> anyhow::Result<()> {
@@ -1138,6 +1145,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
 
     fn store_rotation_messages(
         &mut self,
+        _epoch: u64,
         _dealer: &Address,
         _messages: &RotationMessages,
     ) -> anyhow::Result<()> {
@@ -1158,6 +1166,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
 
     fn store_nonce_message(
         &mut self,
+        _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
         _message: &batch_avss::Message,
@@ -1491,7 +1500,9 @@ async fn test_run_dkg_with_complaint_recovery() {
                 let Messages::Dkg(msg) = messages else {
                     unreachable!()
                 };
-                manager.store_dkg_message(dealer_addr, msg).unwrap();
+                manager
+                    .store_dkg_message(manager.mpc_config.epoch, dealer_addr, msg)
+                    .unwrap();
                 continue;
             }
             let sig = receive_dealer_messages(manager, messages, dealer_addr).unwrap();
@@ -1831,7 +1842,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
 
     // Party 2 stores dealer 1's cheating message and creates complaint during processing
     party_manager
-        .store_dkg_message(dealer_1_addr, &dealer_1_msg)
+        .store_dkg_message(party_manager.mpc_config.epoch, dealer_1_addr, &dealer_1_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_1_addr)
@@ -2942,7 +2953,7 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
     let dealer_message = manager.create_dealer_message(&mut rng);
     manager
         .public_messages_store
-        .store_dealer_message(&dealer_address, &dealer_message)
+        .store_dealer_message(manager.mpc_config.epoch, &dealer_address, &dealer_message)
         .unwrap();
     // Verify it's NOT in the in-memory map.
     assert!(!manager.dkg_messages.contains_key(&dealer_address));
@@ -2981,7 +2992,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
     let rotation_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
     manager
         .public_messages_store
-        .store_rotation_messages(&dealer_address, &rotation_msgs)
+        .store_rotation_messages(manager.mpc_config.epoch, &dealer_address, &rotation_msgs)
         .unwrap();
     // Verify NOT in in-memory map.
     assert!(!manager.rotation_messages.contains_key(&dealer_address));
@@ -3012,7 +3023,7 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
     let prev_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
     manager
         .public_messages_store
-        .store_rotation_messages(&dealer_address, &prev_msgs)
+        .store_rotation_messages(prev_epoch, &dealer_address, &prev_msgs)
         .unwrap();
 
     // Put DIFFERENT "current epoch" messages in the in-memory map.
@@ -3050,7 +3061,12 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     let nonce_msg = create_nonce_dealer_message(&setup, 0, 0, &mut rng);
     manager
         .public_messages_store
-        .store_nonce_message(0, &dealer_address, &nonce_msg.message)
+        .store_nonce_message(
+            manager.mpc_config.epoch,
+            0,
+            &dealer_address,
+            &nonce_msg.message,
+        )
         .unwrap();
     assert!(!manager.nonce_messages.contains_key(&dealer_address));
 
@@ -3223,7 +3239,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(dealer_addr, inner_msg)
+        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3298,7 +3314,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(dealer_addr, inner_msg)
+        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3478,7 +3494,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(dealer_addr, inner_msg)
+        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3547,7 +3563,7 @@ async fn test_recover_shares_via_complaint_no_dealer_message() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(dealer_addr, inner_msg)
+        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3607,7 +3623,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(dealer_addr, inner_msg)
+        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -4377,7 +4393,11 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
     // reloaded the message but `message_responses` is empty.
     let mut receiver_manager = setup.create_manager(0);
     receiver_manager
-        .store_dkg_message(dealer_addr, &dealer_message)
+        .store_dkg_message(
+            receiver_manager.mpc_config.epoch,
+            dealer_addr,
+            &dealer_message,
+        )
         .unwrap();
     assert!(
         receiver_manager.dkg_messages.contains_key(&dealer_addr),
@@ -4548,6 +4568,7 @@ impl TrackingPublicMessagesStore {
 impl PublicMessagesStore for TrackingPublicMessagesStore {
     fn store_dealer_message(
         &mut self,
+        _epoch: u64,
         dealer: &Address,
         message: &avss::Message,
     ) -> anyhow::Result<()> {
@@ -4574,6 +4595,7 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
 
     fn store_rotation_messages(
         &mut self,
+        _epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
     ) -> anyhow::Result<()> {
@@ -4599,6 +4621,7 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
 
     fn store_nonce_message(
         &mut self,
+        _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
         _message: &batch_avss::Message,
@@ -6805,13 +6828,14 @@ impl SharedMemoryStore {
 impl PublicMessagesStore for SharedMemoryStore {
     fn store_dealer_message(
         &mut self,
+        _epoch: u64,
         dealer: &Address,
         message: &avss::Message,
     ) -> anyhow::Result<()> {
         self.inner
             .lock()
             .unwrap()
-            .store_dealer_message(dealer, message)
+            .store_dealer_message(0, dealer, message)
     }
 
     fn get_dealer_message(
@@ -6828,13 +6852,14 @@ impl PublicMessagesStore for SharedMemoryStore {
 
     fn store_rotation_messages(
         &mut self,
+        _epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
     ) -> anyhow::Result<()> {
         self.inner
             .lock()
             .unwrap()
-            .store_rotation_messages(dealer, messages)
+            .store_rotation_messages(0, dealer, messages)
     }
 
     fn get_rotation_messages(
@@ -6854,6 +6879,7 @@ impl PublicMessagesStore for SharedMemoryStore {
 
     fn store_nonce_message(
         &mut self,
+        _epoch: u64,
         batch_index: u32,
         dealer: &Address,
         message: &batch_avss::Message,
@@ -6861,7 +6887,7 @@ impl PublicMessagesStore for SharedMemoryStore {
         self.inner
             .lock()
             .unwrap()
-            .store_nonce_message(batch_index, dealer, message)
+            .store_nonce_message(0, batch_index, dealer, message)
     }
 
     fn get_nonce_message(
@@ -6919,7 +6945,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         // Create and store rotation messages
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
         dealer_manager
-            .store_rotation_messages(dealer_addr, &msgs)
+            .store_rotation_messages(dealer_manager.mpc_config.epoch, dealer_addr, &msgs)
             .unwrap();
 
         // Return the messages for comparison
@@ -7045,7 +7071,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
             .inner
             .lock()
             .unwrap()
-            .store_rotation_messages(dealer_addr, rotation_msgs)
+            .store_rotation_messages(0, dealer_addr, rotation_msgs)
             .unwrap();
     }
 
@@ -7220,7 +7246,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
             Messages::Dkg(m) => m,
             _ => panic!("Expected DKG message"),
         };
-        store.store_dealer_message(&dealer_addr, msg).unwrap();
+        store.store_dealer_message(0, &dealer_addr, msg).unwrap();
     }
 
     // Create MpcManager for the shifted member with the target committee.
@@ -7382,7 +7408,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         let Messages::Dkg(inner) = msg else {
             unreachable!()
         };
-        store.store_dealer_message(&dealer_addr, inner).unwrap();
+        store.store_dealer_message(0, &dealer_addr, inner).unwrap();
     }
 
     // Create manager for member 4 at target epoch.
@@ -7579,7 +7605,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             _ => panic!("Expected rotation messages"),
         };
         store
-            .store_rotation_messages(dealer_addr, rotation_msgs)
+            .store_rotation_messages(0, dealer_addr, rotation_msgs)
             .unwrap();
     }
 
@@ -8832,7 +8858,13 @@ async fn test_recover_nonce_shares_via_complaint() {
         create_cheating_nonce_message(&setup, dealer_idx, batch_index, &mut rng);
 
     // Store the cheating message in test manager
-    test_manager.store_nonce_message(dealer_addr, &cheating_messages);
+    test_manager
+        .store_nonce_message(
+            test_manager.mpc_config.epoch,
+            dealer_addr,
+            &cheating_messages,
+        )
+        .unwrap();
 
     // Process cheating message → generates complaint
     test_manager
@@ -8937,7 +8969,9 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
         for (mgr_idx, manager) in managers.iter_mut().enumerate() {
             if dealer_idx == cheating_dealer_idx && mgr_idx == test_party_idx {
                 // Validator 0 can't sign — just store the message
-                manager.store_nonce_message(dealer_addr, nonce_msg);
+                manager
+                    .store_nonce_message(manager.mpc_config.epoch, dealer_addr, nonce_msg)
+                    .unwrap();
                 continue;
             }
             let response = send_and_assert_ok(manager, dealer_addr, &messages);

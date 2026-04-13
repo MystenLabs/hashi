@@ -262,7 +262,7 @@ impl MpcManager {
         }
         let signature = match &request.messages {
             Messages::Dkg(msg) => {
-                self.store_dkg_message(sender, msg)?;
+                self.store_dkg_message(self.mpc_config.epoch, sender, msg)?;
                 self.try_sign_dkg_message(sender, &request.messages)?
             }
             Messages::Rotation(msgs) => {
@@ -270,11 +270,11 @@ impl MpcManager {
                     .previous_output
                     .clone()
                     .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
-                self.store_rotation_messages(sender, msgs)?;
+                self.store_rotation_messages(self.mpc_config.epoch, sender, msgs)?;
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
             Messages::NonceGeneration(nonce) => {
-                self.store_nonce_message(sender, nonce)?;
+                self.store_nonce_message(self.mpc_config.epoch, sender, nonce)?;
                 self.try_sign_nonce_message(sender, &request.messages)?
             }
         };
@@ -1381,30 +1381,41 @@ impl MpcManager {
         dealer.create_message(rng)
     }
 
-    fn store_dkg_message(&mut self, dealer: Address, message: &avss::Message) -> MpcResult<()> {
+    fn store_dkg_message(
+        &mut self,
+        epoch: u64,
+        dealer: Address,
+        message: &avss::Message,
+    ) -> MpcResult<()> {
         self.dkg_messages.insert(dealer, message.clone());
         self.public_messages_store
-            .store_dealer_message(&dealer, message)
+            .store_dealer_message(epoch, &dealer, message)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
 
     fn store_rotation_messages(
         &mut self,
+        epoch: u64,
         dealer: Address,
         messages: &RotationMessages,
     ) -> MpcResult<()> {
         self.rotation_messages.insert(dealer, messages.clone());
         self.public_messages_store
-            .store_rotation_messages(&dealer, messages)
+            .store_rotation_messages(epoch, &dealer, messages)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
 
-    fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) -> MpcResult<()> {
+    fn store_nonce_message(
+        &mut self,
+        epoch: u64,
+        dealer: Address,
+        nonce: &NonceMessage,
+    ) -> MpcResult<()> {
         self.nonce_messages.insert(dealer, nonce.clone());
         self.public_messages_store
-            .store_nonce_message(nonce.batch_index, &dealer, &nonce.message)
+            .store_nonce_message(epoch, nonce.batch_index, &dealer, &nonce.message)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
@@ -1803,7 +1814,8 @@ impl MpcManager {
                             );
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_dkg_message(message.dealer_address, msg)?;
+                        let epoch = mgr.mpc_config.epoch;
+                        mgr.store_dkg_message(epoch, message.dealer_address, msg)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -1864,7 +1876,8 @@ impl MpcManager {
                             );
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_nonce_message(message.dealer_address, nonce)?;
+                        let epoch = mgr.mpc_config.epoch;
+                        mgr.store_nonce_message(epoch, message.dealer_address, nonce)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -1896,7 +1909,7 @@ impl MpcManager {
             Some(msg) => Messages::Dkg(msg.clone()),
             None => {
                 let msg = self.create_dealer_message(rng);
-                self.store_dkg_message(self.address, &msg)?;
+                self.store_dkg_message(self.mpc_config.epoch, self.address, &msg)?;
                 Messages::Dkg(msg)
             }
         };
@@ -1913,7 +1926,7 @@ impl MpcManager {
             Some(msgs) => Messages::Rotation(msgs.clone()),
             None => {
                 let msgs = self.create_rotation_messages(previous, rng);
-                self.store_rotation_messages(self.address, &msgs)?;
+                self.store_rotation_messages(self.mpc_config.epoch, self.address, &msgs)?;
                 Messages::Rotation(msgs)
             }
         };
@@ -1931,7 +1944,7 @@ impl MpcManager {
             None => {
                 let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
                 if let Messages::NonceGeneration(ref nonce) = msgs {
-                    self.store_nonce_message(self.address, nonce)?;
+                    self.store_nonce_message(self.mpc_config.epoch, self.address, nonce)?;
                 }
                 msgs
             }
@@ -2023,7 +2036,8 @@ impl MpcManager {
                             continue;
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_rotation_messages(message.dealer_address, msgs)?;
+                        let epoch = mgr.mpc_config.epoch;
+                        mgr.store_rotation_messages(epoch, message.dealer_address, msgs)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -3308,12 +3322,17 @@ impl MpcManager {
                     let actual_hash = compute_messages_hash(&response.messages);
                     if actual_hash == message.messages_hash {
                         let mut mgr = mpc_manager.write().unwrap();
+                        let source_epoch = mgr.source_epoch;
                         match &response.messages {
                             Messages::Dkg(msg) => {
-                                mgr.store_dkg_message(message.dealer_address, msg)?;
+                                mgr.store_dkg_message(source_epoch, message.dealer_address, msg)?;
                             }
                             Messages::Rotation(msgs) => {
-                                mgr.store_rotation_messages(message.dealer_address, msgs)?;
+                                mgr.store_rotation_messages(
+                                    source_epoch,
+                                    message.dealer_address,
+                                    msgs,
+                                )?;
                             }
                             _ => {
                                 tracing::warn!(
