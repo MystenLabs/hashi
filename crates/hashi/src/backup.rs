@@ -10,7 +10,6 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -19,6 +18,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::info;
@@ -26,21 +26,61 @@ use tracing::info;
 use age::Encryptor;
 
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-config-backup-manifest.toml";
+pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
 
-#[derive(serde::Deserialize, serde::Serialize)]
-pub struct BackupManifest {
-    pub files: Vec<BackupManifestFile>,
+/// Open `path` for writing with mode `0o600`, failing if anything already
+/// exists there. The `AlreadyExists` case is mapped to a clear "refusing to
+/// overwrite" error so callers don't have to repeat the same pattern.
+fn create_file_strict(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => {
+                anyhow::anyhow!("Refusing to overwrite existing file: {}", path.display())
+            }
+            _ => anyhow::Error::from(e).context(format!("Failed to create {}", path.display())),
+        })
+}
+
+/// Create directory `path` non-recursively, failing if anything already
+/// exists at that exact location. Caller is responsible for ensuring the
+/// parent exists.
+fn create_dir_strict(path: &Path) -> Result<()> {
+    fs::DirBuilder::new()
+        .recursive(false)
+        .create(path)
+        .map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => {
+                anyhow::anyhow!(
+                    "Refusing to overwrite existing directory: {}",
+                    path.display()
+                )
+            }
+            _ => anyhow::Error::from(e)
+                .context(format!("Failed to create directory {}", path.display())),
+        })
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-pub struct BackupManifestFile {
+pub struct BackupManifest {
+    pub paths: Vec<BackupManifestEntry>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct BackupManifestEntry {
     pub archive_name: PathBuf,
     pub original_path: PathBuf,
 }
 
-pub fn build_backup_manifest(files: &[PathBuf]) -> Result<BackupManifest> {
+pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Result<BackupManifest> {
     let mut archive_names = HashSet::new();
-    let mut manifest_files = Vec::with_capacity(files.len());
+    // Reserve the db snapshot prefix so a user file with the same basename
+    // gets disambiguated instead of silently colliding with the db entry.
+    archive_names.insert(DB_SNAPSHOT_TAR_PREFIX.to_string());
+    let mut manifest_paths = Vec::new();
 
     for file in files {
         let base_name = file
@@ -78,19 +118,25 @@ pub fn build_backup_manifest(files: &[PathBuf]) -> Result<BackupManifest> {
             PathBuf::from(base_name.as_ref())
         };
 
-        manifest_files.push(BackupManifestFile {
+        manifest_paths.push(BackupManifestEntry {
             archive_name,
             original_path: file.clone(),
         });
     }
 
+    manifest_paths.push(BackupManifestEntry {
+        archive_name: PathBuf::from(DB_SNAPSHOT_TAR_PREFIX),
+        original_path: db_original_path.to_path_buf(),
+    });
+
     Ok(BackupManifest {
-        files: manifest_files,
+        paths: manifest_paths,
     })
 }
 
 pub fn encrypt_files_to_age_archive(
     manifest: &BackupManifest,
+    db_snapshot_dir: &Path,
     recipient: &dyn age::Recipient,
     output_path: &Path,
 ) -> Result<()> {
@@ -102,19 +148,71 @@ pub fn encrypt_files_to_age_archive(
         let mut archive = tar::Builder::new(&mut encrypted);
         append_backup_manifest(&mut archive, manifest)?;
 
-        for file in &manifest.files {
-            archive.append_path_with_name(&file.original_path, &file.archive_name)?;
+        for entry in &manifest.paths {
+            if entry.archive_name == Path::new(DB_SNAPSHOT_TAR_PREFIX) {
+                continue;
+            }
+            archive.append_path_with_name(&entry.original_path, &entry.archive_name)?;
             info!(
-                original = %file.original_path.display(),
-                archive_name = %file.archive_name.display(),
+                original = %entry.original_path.display(),
+                archive_name = %entry.archive_name.display(),
                 "Added file to backup archive",
             );
         }
+
+        append_dir_recursive(
+            &mut archive,
+            db_snapshot_dir,
+            Path::new(DB_SNAPSHOT_TAR_PREFIX),
+        )?;
+        info!("Added database snapshot to backup archive");
 
         archive.finish()?;
     }
     encrypted.finish()?;
 
+    Ok(())
+}
+
+/// Recursively append all files under `src_dir` into the tar archive under
+/// `tar_prefix`. For example, if `src_dir` contains `file.sst` and
+/// `tar_prefix` is `db`, the archive entry will be `db/file.sst`.
+///
+/// Symlinks are rejected: fjall does not create them in its data directories,
+/// so the presence of one is either tampering or misconfiguration, and the
+/// restore path does not currently handle symlink tar entries correctly.
+fn append_dir_recursive<W: std::io::Write>(
+    archive: &mut tar::Builder<W>,
+    src_dir: &Path,
+    tar_prefix: &Path,
+) -> Result<()> {
+    for entry in walkdir::WalkDir::new(src_dir).min_depth(1) {
+        let entry = entry.with_context(|| {
+            format!(
+                "Failed to walk database snapshot directory {}",
+                src_dir.display()
+            )
+        })?;
+
+        if entry.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to archive symlink inside database snapshot directory: {}",
+                entry.path().display()
+            );
+        }
+
+        let relative = entry
+            .path()
+            .strip_prefix(src_dir)
+            .expect("walkdir entry is always under src_dir");
+        let archive_path = tar_prefix.join(relative);
+
+        if entry.file_type().is_dir() {
+            archive.append_dir(&archive_path, entry.path())?;
+        } else {
+            archive.append_path_with_name(entry.path(), &archive_path)?;
+        }
+    }
     Ok(())
 }
 
@@ -148,9 +246,11 @@ fn append_backup_manifest<W: std::io::Write>(
 
 /// Determine the directory name to extract a backup tarball into.
 ///
-/// Uses the tarball's file name with the `.tar.age` suffix stripped, so
+/// Strips the `.tar.age` or `.age` suffix from the tarball's file name, so
 /// `hashi-config-backup-20260409T230419Z.tar.age` becomes
-/// `hashi-config-backup-20260409T230419Z`.
+/// `hashi-config-backup-20260409T230419Z`. An input without one of those
+/// suffixes is rejected rather than silently used verbatim, to avoid
+/// surprising extraction directory names when users point at the wrong file.
 pub fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
     let file_name = backup_tarball
         .file_name()
@@ -165,11 +265,24 @@ pub fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
     let stem = file_name
         .strip_suffix(".tar.age")
         .or_else(|| file_name.strip_suffix(".age"))
-        .unwrap_or(file_name);
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Backup tarball must have a .tar.age or .age suffix: {}",
+                backup_tarball.display()
+            )
+        })?;
 
-    if stem.is_empty() {
+    // Require the stem to be exactly one plain directory component when
+    // joined under the user's output dir. Catches both the empty case (zero
+    // components) and traversal attempts like `../../tmp/pwn.tar.age` (a
+    // `ParentDir` component, not `Normal`).
+    let stem_path = Path::new(stem);
+    let mut components = stem_path.components();
+    let only = components.next();
+    let extra = components.next();
+    if extra.is_some() || !matches!(only, Some(Component::Normal(_))) {
         anyhow::bail!(
-            "Cannot derive extract directory name from {}",
+            "Backup tarball file name must be a single path component without separators or `..`: {}",
             backup_tarball.display()
         );
     }
@@ -204,19 +317,7 @@ pub fn read_backup_manifest<R: Read>(
 
 pub fn write_manifest_to_extract_dir(extract_dir: &Path, manifest_toml: &str) -> Result<()> {
     let manifest_path = extract_dir.join(BACKUP_MANIFEST_FILE_NAME);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&manifest_path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::AlreadyExists => anyhow::anyhow!(
-                "Refusing to overwrite existing file: {}",
-                manifest_path.display()
-            ),
-            _ => anyhow::Error::from(e)
-                .context(format!("Failed to create {}", manifest_path.display())),
-        })?;
+    let mut file = create_file_strict(&manifest_path)?;
     io::Write::write_all(&mut file, manifest_toml.as_bytes())
         .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
     info!(path = %manifest_path.display(), "Restored manifest");
@@ -227,97 +328,143 @@ pub fn restore_backup_entries<R: Read>(
     entries: tar::Entries<'_, R>,
     output_dir: &Path,
     manifest: &BackupManifest,
-) -> Result<HashMap<PathBuf, PathBuf>> {
-    let expected_files: HashMap<_, _> = manifest
-        .files
+) -> Result<()> {
+    let db_prefix = Path::new(DB_SNAPSHOT_TAR_PREFIX);
+    let expected_files: HashSet<PathBuf> = manifest
+        .paths
         .iter()
-        .map(|file| (file.archive_name.clone(), file))
+        .filter(|entry| entry.archive_name != db_prefix)
+        .map(|entry| entry.archive_name.clone())
         .collect();
-    let mut restored_files = HashMap::new();
+    let mut restored_count: usize = 0;
 
     for entry in entries {
         let mut entry = entry?;
         let archive_path = entry.path()?.into_owned();
-        let archive_name = PathBuf::from(archive_path.file_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Backup entry does not have a file name: {}",
-                archive_path.display()
-            )
-        })?);
 
-        let entry_type = entry.header().entry_type();
-        if entry_type != tar::EntryType::Regular {
-            anyhow::bail!(
-                "Backup entry {} has unexpected type {:?}; only regular files are supported",
-                archive_name.display(),
-                entry_type
-            );
+        if archive_path.starts_with(db_prefix) {
+            restore_db_entry(&mut entry, &archive_path, output_dir)?;
+        } else {
+            restore_config_entry(&mut entry, &archive_path, output_dir, &expected_files)?;
+            restored_count += 1;
         }
-
-        if archive_path != archive_name {
-            anyhow::bail!(
-                "Backup entry must be at the tar root: {}",
-                archive_path.display()
-            );
-        }
-
-        if !expected_files.contains_key(&archive_name) {
-            anyhow::bail!(
-                "Backup archive contains unexpected file: {}",
-                archive_name.display()
-            );
-        }
-
-        let output_path = output_dir.join(&archive_name);
-        let mut output_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&output_path)
-            .map_err(|e| match e.kind() {
-                ErrorKind::AlreadyExists => anyhow::anyhow!(
-                    "Refusing to overwrite existing file: {}",
-                    output_path.display()
-                ),
-                _ => anyhow::Error::from(e)
-                    .context(format!("Failed to create {}", output_path.display())),
-            })?;
-        io::copy(&mut entry, &mut output_file).with_context(|| {
-            format!(
-                "Failed to write restored file contents to {}",
-                output_path.display()
-            )
-        })?;
-        info!(
-            archive_name = %archive_name.display(),
-            output = %output_path.display(),
-            "Restored file",
-        );
-        restored_files.insert(archive_name, output_path);
     }
 
-    if restored_files.len() != manifest.files.len() {
+    if restored_count != expected_files.len() {
         anyhow::bail!(
             "Backup archive is missing file entries: expected {}, restored {}",
-            manifest.files.len(),
-            restored_files.len()
+            expected_files.len(),
+            restored_count
         );
     }
 
-    Ok(restored_files)
+    Ok(())
 }
 
+/// Extract a single tar entry that lives under the db/ prefix into
+/// `output_dir`, preserving the relative directory structure. Directory
+/// entries are created (recursively, since the tar may stream them in any
+/// order); file entries are written with mode 0o600.
+fn restore_db_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    archive_path: &Path,
+    output_dir: &Path,
+) -> Result<()> {
+    let output_path = output_dir.join(archive_path);
+    if entry.header().entry_type() == tar::EntryType::Directory {
+        fs::create_dir_all(&output_path)
+            .with_context(|| format!("Failed to create directory {}", output_path.display()))?;
+        return Ok(());
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+    let mut output_file = create_file_strict(&output_path)?;
+    io::copy(entry, &mut output_file).with_context(|| {
+        format!(
+            "Failed to write restored file contents to {}",
+            output_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Extract a single config-file tar entry into `output_dir`. Config entries
+/// must be regular files at the tar root and must appear in the manifest;
+/// anything else is rejected so a tampered archive can't sneak unexpected
+/// files past the restore.
+fn restore_config_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    archive_path: &Path,
+    output_dir: &Path,
+    expected_files: &HashSet<PathBuf>,
+) -> Result<()> {
+    let archive_name = PathBuf::from(archive_path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Backup entry does not have a file name: {}",
+            archive_path.display()
+        )
+    })?);
+
+    let entry_type = entry.header().entry_type();
+    if entry_type != tar::EntryType::Regular {
+        anyhow::bail!(
+            "Backup entry {} has unexpected type {entry_type:?}; only regular files are supported",
+            archive_name.display(),
+        );
+    }
+
+    if archive_path != archive_name {
+        anyhow::bail!(
+            "Backup entry must be at the tar root: {}",
+            archive_path.display()
+        );
+    }
+
+    if !expected_files.contains(&archive_name) {
+        anyhow::bail!(
+            "Backup archive contains unexpected file: {}",
+            archive_name.display()
+        );
+    }
+
+    let output_path = output_dir.join(&archive_name);
+    let mut output_file = create_file_strict(&output_path)?;
+    io::copy(entry, &mut output_file).with_context(|| {
+        format!(
+            "Failed to write restored file contents to {}",
+            output_path.display()
+        )
+    })?;
+    info!(
+        archive_name = %archive_name.display(),
+        output = %output_path.display(),
+        "Restored file",
+    );
+    Ok(())
+}
+
+/// Copy each restored config file from the extract directory to its original
+/// path as recorded in the manifest. Refuses to overwrite anything.
+///
+/// `extract_dir` is where the tarball was unpacked; this function joins it
+/// with each entry's `archive_name` to find the source. The DB entry is
+/// skipped — restoring the snapshot dir is handled by
+/// [`copy_db_snapshot_to_original_path`].
 pub fn copy_restored_files_to_original_paths(
-    restored_files: &HashMap<PathBuf, PathBuf>,
+    extract_dir: &Path,
     manifest: &BackupManifest,
 ) -> Result<()> {
-    for file in &manifest.files {
-        let restored_path = restored_files.get(&file.archive_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Restored file missing for archive entry {}",
-                file.archive_name.display()
-            )
-        })?;
+    let db_prefix = Path::new(DB_SNAPSHOT_TAR_PREFIX);
+
+    for file in manifest
+        .paths
+        .iter()
+        .filter(|entry| entry.archive_name != db_prefix)
+    {
+        let restored_path = extract_dir.join(&file.archive_name);
 
         if let Some(parent) = file.original_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -325,8 +472,11 @@ pub fn copy_restored_files_to_original_paths(
             })?;
         }
 
-        let mut source = File::open(restored_path)
+        let mut source = File::open(&restored_path)
             .with_context(|| format!("Failed to open {}", restored_path.display()))?;
+        // Custom AlreadyExists message: "original path" hints that the
+        // collision is with a path the manifest pointed at, not a freshly
+        // chosen output location.
         let mut dest = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -355,4 +505,214 @@ pub fn copy_restored_files_to_original_paths(
     }
 
     Ok(())
+}
+
+/// Copy the extracted database snapshot directory to its original path.
+///
+/// Looks up the DB entry in the manifest to determine the original path,
+/// then recursively copies the extracted `db/` directory into a sibling
+/// staging directory and renames it into place on success. The rename is
+/// atomic on a single filesystem, so a crash mid-copy leaves the staging
+/// directory behind without ever creating a half-populated DB at `dest`.
+///
+/// Fails if `dest` already exists.
+pub fn copy_db_snapshot_to_original_path(
+    extract_dir: &Path,
+    manifest: &BackupManifest,
+) -> Result<()> {
+    let db_prefix = Path::new(DB_SNAPSHOT_TAR_PREFIX);
+    let db_entry = manifest
+        .paths
+        .iter()
+        .find(|entry| entry.archive_name == db_prefix)
+        .ok_or_else(|| anyhow::anyhow!("Backup manifest does not contain a database entry"))?;
+
+    let source = extract_dir.join(DB_SNAPSHOT_TAR_PREFIX);
+    let dest = &db_entry.original_path;
+
+    // Pre-flight: refuse early if the destination already exists. This is
+    // checked again implicitly by the final rename, but failing here gives a
+    // clear error before doing all the copy work.
+    if dest
+        .try_exists()
+        .with_context(|| format!("Failed to stat database destination {}", dest.display()))?
+    {
+        anyhow::bail!(
+            "Refusing to overwrite existing database directory: {}",
+            dest.display()
+        );
+    }
+
+    let parent = dest.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Database destination has no parent directory: {}",
+            dest.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
+
+    // Stage into a sibling temp directory so the entire copy is invisible
+    // until the final rename. Using a sibling guarantees we're on the same
+    // filesystem, which is required for `rename` to be atomic.
+    let staging = tempfile::Builder::new()
+        .prefix(".hashi-db-restore-")
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "Failed to create db staging directory in {}",
+                parent.display()
+            )
+        })?;
+
+    copy_dir_recursive_strict(&source, staging.path()).with_context(|| {
+        format!(
+            "Failed to copy database snapshot from {} to staging directory {}",
+            source.display(),
+            staging.path().display()
+        )
+    })?;
+
+    // Disarm the TempDir guard before rename so it doesn't try to delete the
+    // path we just moved away.
+    let staging_path = staging.keep();
+    fs::rename(&staging_path, dest).map_err(|e| {
+        // Best-effort cleanup of the staging directory if the rename failed,
+        // since `into_path` consumed the auto-deleting guard.
+        let _ = fs::remove_dir_all(&staging_path);
+        match e.kind() {
+            ErrorKind::AlreadyExists => anyhow::anyhow!(
+                "Refusing to overwrite existing database directory: {}",
+                dest.display()
+            ),
+            _ => anyhow::Error::from(e).context(format!(
+                "Failed to move staged database into place at {}",
+                dest.display()
+            )),
+        }
+    })?;
+
+    info!(
+        from = %source.display(),
+        to = %dest.display(),
+        "Copied database snapshot to original path",
+    );
+
+    Ok(())
+}
+
+/// Recursively copy a directory tree from `src` to `dest` without ever
+/// overwriting existing files.
+///
+/// - The root `dest` is assumed to have already been created by the caller.
+/// - Subdirectories below the root use `create_dir` (non-recursive), so any
+///   collision surfaces as an error rather than merging into existing state.
+/// - Files are opened with `create_new(true)` and mode `0o600`, matching the
+///   protection `copy_restored_files_to_original_paths` applies to config
+///   files. fjall on-disk files are not sensitive individually, but we keep
+///   the mode consistent so the restored DB never advertises looser
+///   permissions than the backup did.
+/// - Symlinks are rejected outright.
+fn copy_dir_recursive_strict(src: &Path, dest: &Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(src).min_depth(1) {
+        let entry = entry?;
+
+        if entry.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to restore symlink from database snapshot: {}",
+                entry.path().display()
+            );
+        }
+
+        let relative = entry.path().strip_prefix(src).expect("walkdir under src");
+        let target = dest.join(relative);
+
+        if entry.file_type().is_dir() {
+            create_dir_strict(&target)?;
+        } else {
+            let mut source_file = File::open(entry.path())
+                .with_context(|| format!("Failed to open {}", entry.path().display()))?;
+            let mut dest_file = create_file_strict(&target)?;
+            io::copy(&mut source_file, &mut dest_file).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    entry.path().display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_disambiguates_user_file_colliding_with_db_prefix() {
+        // A user-backed-up file whose basename equals DB_SNAPSHOT_TAR_PREFIX
+        // must be renamed so it doesn't collide with the db snapshot entry.
+        let files = vec![PathBuf::from("/etc/hashi/hashi-db-snapshot")];
+        let db_path = PathBuf::from("/var/lib/hashi/db");
+
+        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+
+        assert_eq!(manifest.paths.len(), 2);
+
+        // The user's file should have been renamed away from the reserved prefix.
+        let user_entry = &manifest.paths[0];
+        assert_eq!(
+            user_entry.original_path,
+            PathBuf::from("/etc/hashi/hashi-db-snapshot")
+        );
+        assert_ne!(
+            user_entry.archive_name,
+            PathBuf::from(DB_SNAPSHOT_TAR_PREFIX)
+        );
+        assert_eq!(
+            user_entry.archive_name,
+            PathBuf::from("hashi-db-snapshot-2")
+        );
+
+        // The db snapshot entry should still own the reserved prefix.
+        let db_entry = &manifest.paths[1];
+        assert_eq!(db_entry.archive_name, PathBuf::from(DB_SNAPSHOT_TAR_PREFIX));
+        assert_eq!(db_entry.original_path, db_path);
+    }
+
+    #[test]
+    fn manifest_disambiguates_chain_of_collisions_with_db_prefix() {
+        // Two user files: one basenamed `hashi-db-snapshot` (collides with
+        // the reserved db prefix) and one basenamed `hashi-db-snapshot-2`
+        // (collides with the first file's renamed slot).
+        //
+        // The disambiguator always derives its candidate suffixes from the
+        // original basename, so the second file lands at
+        // `hashi-db-snapshot-2-2` rather than `hashi-db-snapshot-3`. Both
+        // names are unique and deterministic, which is all we need; this
+        // test pins that exact behaviour so a future refactor doesn't
+        // silently change the output layout.
+        let files = vec![
+            PathBuf::from("/etc/hashi/hashi-db-snapshot"),
+            PathBuf::from("/etc/hashi/hashi-db-snapshot-2"),
+        ];
+        let db_path = PathBuf::from("/var/lib/hashi/db");
+
+        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+
+        assert_eq!(manifest.paths.len(), 3);
+        assert_eq!(
+            manifest.paths[0].archive_name,
+            PathBuf::from("hashi-db-snapshot-2")
+        );
+        assert_eq!(
+            manifest.paths[1].archive_name,
+            PathBuf::from("hashi-db-snapshot-2-2")
+        );
+        assert_eq!(
+            manifest.paths[2].archive_name,
+            PathBuf::from(DB_SNAPSHOT_TAR_PREFIX)
+        );
+    }
 }

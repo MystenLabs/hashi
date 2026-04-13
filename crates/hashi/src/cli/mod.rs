@@ -274,7 +274,13 @@ pub enum BackupCommands {
         output_dir: std::path::PathBuf,
     },
 
-    /// Restore files from an encrypted config backup
+    /// Restore files from an encrypted config backup.
+    ///
+    /// When `--copy-to-original-paths` is set, files are written to the
+    /// absolute paths stored in the manifest at backup time. If the restore
+    /// is running on a different host or with a different filesystem layout,
+    /// those paths will be used verbatim — extract without the flag and copy
+    /// files manually in that case.
     Restore {
         /// Path to the encrypted backup tarball
         backup_tarball: std::path::PathBuf,
@@ -287,7 +293,10 @@ pub enum BackupCommands {
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
 
-        /// Copy restored files to their original paths after extraction
+        /// Copy restored files to their original paths after extraction.
+        ///
+        /// Uses the absolute paths captured in the backup manifest. Intended
+        /// for in-place recovery on the same host the backup came from.
         #[clap(long)]
         copy_to_original_paths: bool,
     },

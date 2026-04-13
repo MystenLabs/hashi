@@ -834,6 +834,7 @@ fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
             .map(std::path::PathBuf::from),
         backup_age_pubkey: None,
         gas_coin: None,
+        node_config_path: None,
         bitcoin: Some(hashi::cli::config::BitcoinConfig {
             rpc_url: Some(state.btc_rpc_url.clone()),
             rpc_user: Some(state.btc_rpc_user.clone()),

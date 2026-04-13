@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::avss;
@@ -55,9 +56,13 @@ const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 
 impl Database {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let db = fjall::Database::builder(path)
-            .open()
-            .map_err(|e| anyhow::anyhow!("failed to open database at {}: {e}", path.display()))?;
+        // Preserve the underlying `fjall::Error` as the source so callers can
+        // `downcast_ref::<fjall::Error>()` and match on variants like
+        // `fjall::Error::Locked`. Using `anyhow!("...: {e}")` with a format
+        // string would stringify the error and drop the source chain.
+        let db = fjall::Database::builder(path).open().map_err(|e| {
+            anyhow::Error::new(e).context(format!("failed to open database at {}", path.display()))
+        })?;
         let encryption_keys =
             db.keyspace(ENCRYPTION_KEYS_CF_NAME, KeyspaceCreateOptions::default)?;
         let dealer_messages =
@@ -76,8 +81,13 @@ impl Database {
 
     /// Returns all keyspaces paired with their names. When adding a new
     /// keyspace, add it here so that it is included in snapshots and backups.
-    fn all_keyspaces(&self) -> [(&str, &Keyspace); 4] {
-        [
+    ///
+    /// Returns a `Vec` rather than a fixed-size array so callers don't have
+    /// to know the keyspace count, and so adding a new keyspace is a one-line
+    /// change here. Only invoked on the snapshot path, so the per-call
+    /// allocation is irrelevant.
+    fn all_keyspaces(&self) -> Vec<(&str, &Keyspace)> {
+        vec![
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
             (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
             (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
@@ -92,24 +102,71 @@ impl Database {
     /// while the source database remains open for writes. The destination is a
     /// fully self-contained fjall database that can later be opened with
     /// [`Database::open`].
+    ///
+    /// `dest` must not already exist. The function refuses to write into an
+    /// existing directory because fjall would otherwise happily merge the
+    /// snapshot rows into whatever's already there, producing a hybrid DB that
+    /// looks valid but isn't a true point-in-time snapshot.
     pub fn snapshot_to_path(&self, dest: &Path) -> anyhow::Result<()> {
+        // Bound batch memory by serialized payload size rather than entry
+        // count: keyspaces in this DB hold values ranging from 32-byte
+        // scalars to multi-MB BCS-encoded MPC messages, so a fixed entry
+        // count would spike memory unpredictably for the large-value keyspaces.
+        //
+        // 16 MiB is a comfortable middle ground: small enough that the
+        // worst-case batch fits easily in RAM on any host that can run a
+        // validator, large enough to amortise per-batch journal commit cost.
+        const BATCH_BYTE_BUDGET: usize = 16 * 1024 * 1024;
+
+        if dest
+            .try_exists()
+            .with_context(|| format!("failed to stat snapshot destination {}", dest.display()))?
+        {
+            anyhow::bail!(
+                "snapshot destination {} already exists; refusing to merge into an existing directory",
+                dest.display()
+            );
+        }
+
         let snapshot = self.db.snapshot();
 
         let dest_db = fjall::Database::builder(dest).open().map_err(|e| {
-            anyhow::anyhow!(
-                "failed to open destination database at {}: {e}",
+            anyhow::Error::new(e).context(format!(
+                "failed to open destination database at {}",
                 dest.display()
-            )
+            ))
         })?;
 
         for (name, source_ks) in self.all_keyspaces() {
             let dest_ks = dest_db.keyspace(name, KeyspaceCreateOptions::default)?;
+            let mut batch = dest_db.batch();
+            let mut batch_bytes = 0usize;
+
             for guard in snapshot.iter(source_ks) {
                 let (key, value) = guard.into_inner()?;
-                dest_ks.insert(&*key, &*value)?;
+                let entry_bytes = key.len() + value.len();
+                batch.insert(&dest_ks, &*key, &*value);
+                batch_bytes += entry_bytes;
+
+                if batch_bytes >= BATCH_BYTE_BUDGET {
+                    batch.commit()?;
+                    batch = dest_db.batch();
+                    batch_bytes = 0;
+                }
+            }
+
+            if batch_bytes > 0 {
+                batch.commit()?;
             }
         }
 
+        // `persist(SyncAll)` fsyncs the destination journal. Freshly inserted
+        // rows live in the active memtable and are recovered from the journal
+        // on next open, so the destination directory is self-contained and
+        // safe to archive after this call returns. We do not fsync the dest
+        // directory entry here: this function's caller immediately tars the
+        // directory in the same process, so a crash before archival just
+        // discards an incomplete backup and loses no committed state.
         dest_db.persist(fjall::PersistMode::SyncAll)?;
 
         Ok(())
@@ -1064,13 +1121,14 @@ mod tests {
             .unwrap();
         db.store_nonce_message(10, 0, &dealer1, &nonce_msg).unwrap();
 
-        let dest_dir = tempfile::Builder::new().tempdir().unwrap();
-        db.snapshot_to_path(dest_dir.path()).unwrap();
+        let dest_parent = tempfile::Builder::new().tempdir().unwrap();
+        let dest_path = dest_parent.path().join("snapshot");
+        db.snapshot_to_path(&dest_path).unwrap();
 
         // Drop the source so we know we're reading from the destination
         drop(db);
 
-        let restored = Database::open(dest_dir.path()).unwrap();
+        let restored = Database::open(&dest_path).unwrap();
 
         // Verify encryption key
         assert_eq!(restored.get_encryption_key(10).unwrap().unwrap(), enc_key);
@@ -1098,12 +1156,30 @@ mod tests {
         let src_dir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(src_dir.path()).unwrap();
 
-        let dest_dir = tempfile::Builder::new().tempdir().unwrap();
-        db.snapshot_to_path(dest_dir.path()).unwrap();
+        let dest_parent = tempfile::Builder::new().tempdir().unwrap();
+        let dest_path = dest_parent.path().join("snapshot");
+        db.snapshot_to_path(&dest_path).unwrap();
         drop(db);
 
-        let restored = Database::open(dest_dir.path()).unwrap();
+        let restored = Database::open(&dest_path).unwrap();
         assert!(restored.latest_encryption_key_epoch().unwrap().is_none());
         assert!(restored.list_all_dealer_messages(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_to_path_rejects_existing_destination() {
+        // Refusing to merge into an existing dir is the snapshot API's
+        // contract — silently merging would produce a hybrid DB that's not a
+        // true point-in-time snapshot.
+        let src_dir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(src_dir.path()).unwrap();
+
+        let dest_dir = tempfile::Builder::new().tempdir().unwrap();
+        let err = db.snapshot_to_path(dest_dir.path()).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("already exists"),
+            "expected already-exists error, got: {chain}"
+        );
     }
 }

@@ -2869,6 +2869,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "walkdir",
  "x509-parser",
 ]
 
