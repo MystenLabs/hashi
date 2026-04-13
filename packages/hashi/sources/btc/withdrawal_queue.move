@@ -253,10 +253,13 @@ public(package) fun borrow_request(
     self.requests.borrow(request_id)
 }
 
-/// Check if an active request is approved (for cancel guard).
-public(package) fun is_request_approved(self: &WithdrawalRequestQueue, request_id: address): bool {
-    let request: &WithdrawalRequest = self.requests.borrow(request_id);
-    request.status == WithdrawalStatus::Approved
+/// Check if a request has already been committed to a WithdrawalTransaction
+/// (i.e. is in the processed bag as Processing/Signed/Confirmed).
+public(package) fun is_request_processing(
+    self: &WithdrawalRequestQueue,
+    request_id: address,
+): bool {
+    self.processed.contains(request_id)
 }
 
 // ======== Committed Request Info ========

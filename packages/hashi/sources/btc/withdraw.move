@@ -29,7 +29,8 @@ const EUnauthorizedCancellation: vector<u8> = b"Only the original requester can 
 #[error]
 const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed";
 #[error]
-const ECannotCancelAfterApproval: vector<u8> = b"Cannot cancel a withdrawal that has been approved";
+const ECannotCancelProcessingWithdrawal: vector<u8> =
+    b"Cannot cancel a withdrawal that is already being processed";
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
@@ -302,6 +303,11 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
 }
 
 /// Cancel a pending withdrawal request and return the stored BTC to the requester.
+///
+/// Cancellation is allowed while the request is in the `Requested` or `Approved`
+/// state (i.e. still in the active requests bag). Once the committee commits the
+/// request to a `WithdrawalTransaction` it moves to `Processing` in the processed
+/// bag and its BTC is burned — cancellation is no longer possible.
 public fun cancel_withdrawal(
     hashi: &mut Hashi,
     request_id: address,
@@ -310,12 +316,12 @@ public fun cancel_withdrawal(
 ): Balance<BTC> {
     hashi.config().assert_version_enabled();
 
-    let request = hashi.bitcoin().withdrawal_queue().borrow_request(request_id);
-
     assert!(
-        !hashi.bitcoin().withdrawal_queue().is_request_approved(request_id),
-        ECannotCancelAfterApproval,
+        !hashi.bitcoin().withdrawal_queue().is_request_processing(request_id),
+        ECannotCancelProcessingWithdrawal,
     );
+
+    let request = hashi.bitcoin().withdrawal_queue().borrow_request(request_id);
 
     // Only the original requester can cancel.
     assert!(request.request_sender() == ctx.sender(), EUnauthorizedCancellation);
