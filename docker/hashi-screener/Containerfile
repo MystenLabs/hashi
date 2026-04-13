@@ -29,7 +29,7 @@ RUN mkdir -p crates/hashi-screener/src \
 ENV TARGET=x86_64-unknown-linux-musl
 ENV OPENSSL_STATIC=true
 ENV CARGO_INCREMENTAL=0
-ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64 -C codegen-units=1"
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 
 RUN cargo fetch
 RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi-screener
