@@ -470,7 +470,7 @@ pub struct Config {
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 
 // These mirror the defaults in mpc_config.move and must be kept in sync.
-pub const DEFAULT_MPC_THRESHOLD_BASIS_POINTS: u16 = 3333;
+pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
 pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 
 impl Config {
@@ -515,12 +515,12 @@ impl Config {
         }
     }
 
-    pub fn mpc_threshold_basis_points(&self) -> u16 {
-        match self.config.get("mpc_threshold_basis_points") {
+    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
+        match self.config.get("mpc_threshold_in_basis_points") {
             Some(ConfigValue::U64(v)) => {
-                u16::try_from(*v).expect("mpc_threshold_basis_points exceeds u16::MAX")
+                u16::try_from(*v).expect("mpc_threshold_in_basis_points exceeds u16::MAX")
             }
-            _ => DEFAULT_MPC_THRESHOLD_BASIS_POINTS,
+            _ => DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
         }
     }
 

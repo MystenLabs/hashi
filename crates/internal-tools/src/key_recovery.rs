@@ -114,7 +114,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         let mut manager = {
             let state = onchain_state.state();
             let hashi = state.hashi();
-            let threshold_basis_points = hashi.config.mpc_threshold_basis_points();
+            let threshold_in_basis_points = hashi.config.mpc_threshold_in_basis_points();
             let weight_reduction_allowed_delta = hashi.config.mpc_weight_reduction_allowed_delta();
             MpcManager::new(
                 validator_address,
@@ -123,7 +123,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
                 encryption_key,
                 dummy_signing_key.clone(),
                 Box::new(store),
-                threshold_basis_points,
+                threshold_in_basis_points,
                 weight_reduction_allowed_delta,
                 chain_id,
                 None, // weight_divisor

@@ -394,8 +394,8 @@ impl OnchainState {
         self.state().hashi().config.bitcoin_confirmation_threshold()
     }
 
-    pub fn mpc_threshold_basis_points(&self) -> u16 {
-        self.state().hashi().config.mpc_threshold_basis_points()
+    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
+        self.state().hashi().config.mpc_threshold_in_basis_points()
     }
 
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-const TEST_THRESHOLD_BASIS_POINTS: u16 = 3333;
+const TEST_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
 /// Use 0 for weight_reduction_allowed_delta in tests to disable weight reduction.
 const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
 /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
@@ -288,7 +288,7 @@ impl TestSetup {
             self.encryption_keys[validator_index].clone(),
             self.signing_keys[validator_index].clone(),
             store,
-            TEST_THRESHOLD_BASIS_POINTS,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
@@ -902,7 +902,7 @@ fn test_mpc_manager_new_from_committee_set() {
         encryption_key,
         signing_key,
         Box::new(MockPublicMessagesStore),
-        TEST_THRESHOLD_BASIS_POINTS,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -966,7 +966,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         encryption_keys[0].clone(),
         signing_keys[0].clone(),
         Box::new(MockPublicMessagesStore),
-        TEST_THRESHOLD_BASIS_POINTS,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         "test",
         None,
@@ -4959,7 +4959,7 @@ impl RotationTestSetup {
         let committee = self.setup.committee();
         let (nodes, threshold) = build_reduced_nodes(
             committee,
-            TEST_THRESHOLD_BASIS_POINTS,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_WEIGHT_DIVISOR,
         )
@@ -4985,7 +4985,7 @@ impl RotationTestSetup {
         if let Some(ref prev) = previous_committee {
             let (nodes, threshold) = build_reduced_nodes(
                 prev,
-                TEST_THRESHOLD_BASIS_POINTS,
+                TEST_THRESHOLD_IN_BASIS_POINTS,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_WEIGHT_DIVISOR,
             )
@@ -6133,7 +6133,7 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_encryption_key,
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
-        TEST_THRESHOLD_BASIS_POINTS,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -7274,7 +7274,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
-        TEST_THRESHOLD_BASIS_POINTS,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -7437,7 +7437,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         setup.encryption_keys[target_index].clone(),
         setup.signing_keys[target_index].clone(),
         Box::new(store),
-        TEST_THRESHOLD_BASIS_POINTS,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
@@ -7518,7 +7518,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
-            TEST_THRESHOLD_BASIS_POINTS,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
@@ -7550,7 +7550,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
-            TEST_THRESHOLD_BASIS_POINTS,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_CHAIN_ID,
             None,
@@ -7638,7 +7638,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
-        TEST_THRESHOLD_BASIS_POINTS,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_CHAIN_ID,
         None,
