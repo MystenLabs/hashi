@@ -4101,7 +4101,6 @@ fn create_cheating_message(
         Some(secret), // Use same secret so commitment matches
         config.nodes.clone(),
         config.threshold,
-        config.max_faulty,
         dealer_session_id.to_vec(),
     )
     .unwrap();
@@ -4173,7 +4172,6 @@ fn create_cheating_rotation_message(
         Some(share_value),
         config.nodes.clone(),
         config.threshold,
-        config.max_faulty,
         rotation_session_id.to_vec(),
     )
     .unwrap();

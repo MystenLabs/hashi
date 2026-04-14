@@ -1382,7 +1382,6 @@ impl MpcManager {
             None,
             nodes,
             self.mpc_config.threshold,
-            self.mpc_config.max_faulty,
             dealer_session_id.to_vec(),
         )
         .expect("checked threshold above");
@@ -1548,7 +1547,6 @@ impl MpcManager {
             nodes,
             self.party_id,
             self.mpc_config.threshold,
-            self.mpc_config.max_faulty,
             dealer_sid.to_vec(),
             self.batch_size_per_weight,
         )
@@ -2461,7 +2459,6 @@ impl MpcManager {
                     Some(share.value),
                     nodes,
                     self.mpc_config.threshold,
-                    self.mpc_config.max_faulty,
                     sid.to_vec(),
                 )
                 .expect(EXPECT_THRESHOLD_VALIDATED);

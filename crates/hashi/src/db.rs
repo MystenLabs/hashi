@@ -475,7 +475,6 @@ mod tests {
             None,
             nodes,
             3, // threshold
-            1, // max_faulty
             b"test-session".to_vec(),
         )
         .unwrap();
