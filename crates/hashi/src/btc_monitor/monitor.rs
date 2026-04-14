@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,11 +29,28 @@ const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 30;
 /// Delay before restarting Kyoto after connectivity loss.
 const KYOTO_RESTART_DELAY: Duration = Duration::from_secs(5);
 
+/// How many Bitcoin blocks a deposit observation can go without being
+/// refreshed before it's dropped from the confirmation-metrics cache.
+const STALE_OBSERVATION_BLOCKS: u32 = 10;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxStatus {
     Confirmed { confirmations: u32 },
     InMempool,
     NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedDepositObservation {
+    NotFound,
+    InMempool,
+    InBlock { height: u32 },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedDepositEntry {
+    observation: CachedDepositObservation,
+    last_updated_tip: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +81,7 @@ pub struct Monitor {
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
     rpc_workers: JoinSet<()>,
+    deposit_observation_cache: HashMap<bitcoin::OutPoint, CachedDepositEntry>,
 }
 
 /// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
@@ -135,6 +154,7 @@ impl Monitor {
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
                     rpc_workers: JoinSet::new(),
+                    deposit_observation_cache: HashMap::new(),
                 };
 
                 monitor
@@ -418,7 +438,46 @@ impl Monitor {
                     result_tx,
                 ));
             }
+            MonitorMessage::RecordDepositObservation {
+                outpoint,
+                observation,
+            } => {
+                self.record_deposit_observation(outpoint, observation);
+                self.rebuild_confirmation_metrics();
+            }
+            MonitorMessage::ForgetDeposit(outpoint) => {
+                if self.deposit_observation_cache.remove(&outpoint).is_some() {
+                    self.rebuild_confirmation_metrics();
+                }
+            }
         }
+    }
+
+    fn record_deposit_observation(
+        &mut self,
+        outpoint: bitcoin::OutPoint,
+        observation: CachedDepositObservation,
+    ) {
+        let last_updated_tip = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
+        self.deposit_observation_cache.insert(
+            outpoint,
+            CachedDepositEntry {
+                observation,
+                last_updated_tip,
+            },
+        );
+    }
+
+    /// Drop cache entries that haven't been refreshed in the last
+    /// `STALE_OBSERVATION_BLOCKS` Bitcoin blocks, then write the current
+    /// bucket counts to `deposit_request_confirmations`.
+    fn rebuild_confirmation_metrics(&mut self) {
+        let tip_height = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
+        rebuild_confirmation_metrics_inner(
+            &mut self.deposit_observation_cache,
+            tip_height,
+            &self.metrics,
+        );
     }
 
     fn confirm_deposit(&mut self, pending_deposit: PendingDeposit) {
@@ -567,6 +626,8 @@ impl Monitor {
     }
 
     fn process_pending_deposits(&mut self) {
+        self.rebuild_confirmation_metrics();
+
         let Some(tip) = &self.tip else {
             // Can't confirm deposits if we don't yet know the tip of the chain.
             return;
@@ -606,7 +667,8 @@ impl Monitor {
         }
 
         pending_deposit.checked_at_height = tip.height;
-        let mut pending_deposit = PendingDepositGuard::new(pending_deposit, client_tx);
+        let mut pending_deposit = PendingDepositGuard::new(pending_deposit, client_tx.clone());
+        let outpoint = pending_deposit.outpoint;
 
         // Look up block from the txid.
         let block_info = match pending_deposit.block_info {
@@ -623,6 +685,15 @@ impl Monitor {
                 .await
                 {
                     Ok(tx_info) => tx_info,
+                    Err(corepc_client::client_sync::Error::JsonRpc(
+                        jsonrpc::error::Error::Rpc(ref e),
+                    )) if e.code == -5 => {
+                        // RPC error -5: "No such mempool or blockchain transaction"
+                        debug!("Transaction {txid} not found in mempool or blockchain");
+                        send_observation(&client_tx, outpoint, CachedDepositObservation::NotFound)
+                            .await;
+                        return;
+                    }
                     Err(e) => {
                         error!("Failed to look up txid {txid}: {e}");
                         return;
@@ -643,6 +714,8 @@ impl Monitor {
                         "Transaction {} is not yet included in a block",
                         pending_deposit.outpoint.txid
                     );
+                    send_observation(&client_tx, outpoint, CachedDepositObservation::InMempool)
+                        .await;
                     return;
                 };
                 // Verify the block hash is in kyoto's independently-validated
@@ -670,6 +743,15 @@ impl Monitor {
                 block_info
             }
         };
+
+        send_observation(
+            &client_tx,
+            outpoint,
+            CachedDepositObservation::InBlock {
+                height: block_info.height,
+            },
+        )
+        .await;
 
         // Check if the deposit has enough confirmations yet.
         let confirmations = (tip.height + 1).saturating_sub(block_info.height);
@@ -717,6 +799,7 @@ impl Monitor {
         let txout = match transaction.tx_out(pending_deposit.outpoint.vout.try_into().unwrap()) {
             Ok(txout) => txout.clone(),
             Err(e) => {
+                send_forget(&client_tx, outpoint).await;
                 let pending_deposit = pending_deposit.take();
                 let _ = pending_deposit
                     .result_tx
@@ -747,6 +830,7 @@ impl Monitor {
                     "Deposit {}:{} confirmed with {confirmations}/{confirmation_threshold} confirmations",
                     pending_deposit.outpoint.txid, pending_deposit.outpoint.vout,
                 );
+                send_forget(&client_tx, outpoint).await;
                 let pending_deposit = pending_deposit.take();
                 let _ = pending_deposit.result_tx.send(Ok(txout));
             }
@@ -757,6 +841,7 @@ impl Monitor {
                 );
                 let txid = pending_deposit.outpoint.txid;
                 let vout = pending_deposit.outpoint.vout;
+                send_forget(&client_tx, outpoint).await;
                 let pending_deposit = pending_deposit.take();
                 let _ = pending_deposit
                     .result_tx
@@ -766,6 +851,69 @@ impl Monitor {
                 error!("Failed to check UTXO spent status via gettxout: {e}");
             }
         }
+    }
+}
+
+/// GC stale entries from the cache, then write bucket counts into the
+/// `deposit_request_confirmations` gauge.
+fn rebuild_confirmation_metrics_inner(
+    cache: &mut HashMap<bitcoin::OutPoint, CachedDepositEntry>,
+    tip_height: u32,
+    metrics: &Metrics,
+) {
+    let min_fresh = tip_height.saturating_sub(STALE_OBSERVATION_BLOCKS);
+    cache.retain(|_, entry| entry.last_updated_tip >= min_fresh);
+
+    let mut counts = [0i64; crate::metrics::CONFIRMATION_STATUS_LABELS.len()];
+    for entry in cache.values() {
+        let idx = match entry.observation {
+            CachedDepositObservation::NotFound => 0,
+            CachedDepositObservation::InMempool => 1,
+            CachedDepositObservation::InBlock { height } => {
+                let confirmations = (tip_height + 1).saturating_sub(height);
+                // +2 skips the not_found/mempool slots; 0..=6 confirmations land in indices 2..=8.
+                (2 + confirmations.min(6) as usize).min(8)
+            }
+        };
+        counts[idx] += 1;
+    }
+
+    for (i, label) in crate::metrics::CONFIRMATION_STATUS_LABELS
+        .iter()
+        .enumerate()
+    {
+        metrics
+            .deposit_request_confirmations
+            .with_label_values(&[label])
+            .set(counts[i]);
+    }
+}
+
+async fn send_observation(
+    client_tx: &tokio::sync::mpsc::Sender<MonitorMessage>,
+    outpoint: bitcoin::OutPoint,
+    observation: CachedDepositObservation,
+) {
+    if let Err(e) = client_tx
+        .send(MonitorMessage::RecordDepositObservation {
+            outpoint,
+            observation,
+        })
+        .await
+    {
+        debug!("Failed to record deposit observation (monitor shutting down?): {e}");
+    }
+}
+
+async fn send_forget(
+    client_tx: &tokio::sync::mpsc::Sender<MonitorMessage>,
+    outpoint: bitcoin::OutPoint,
+) {
+    if let Err(e) = client_tx
+        .send(MonitorMessage::ForgetDeposit(outpoint))
+        .await
+    {
+        debug!("Failed to forget deposit observation (monitor shutting down?): {e}");
     }
 }
 
@@ -904,4 +1052,13 @@ enum MonitorMessage {
 
     // Query the status of a transaction (confirmed, in mempool, or not found).
     GetTransactionStatus(bitcoin::Txid, oneshot::Sender<Result<TxStatus>>),
+
+    // Updates `deposit_observation_cache`
+    RecordDepositObservation {
+        outpoint: bitcoin::OutPoint,
+        observation: CachedDepositObservation,
+    },
+
+    // Drop a deposit from `deposit_observation_cache`
+    ForgetDeposit(bitcoin::OutPoint),
 }
