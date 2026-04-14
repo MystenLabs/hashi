@@ -121,6 +121,12 @@ pub enum ProposalCommands {
         proposal_id: String,
     },
 
+    /// Execute a proposal that has reached quorum
+    Execute {
+        /// The proposal object ID to execute
+        proposal_id: String,
+    },
+
     /// Create a new proposal
     Create {
         #[clap(subcommand)]
@@ -528,6 +534,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             ProposalCommands::RemoveVote { proposal_id } => {
                 commands::proposal::remove_vote(&config, &proposal_id, &tx_opts).await?;
+            }
+            ProposalCommands::Execute { proposal_id } => {
+                commands::proposal::execute(&config, &proposal_id, &tx_opts).await?;
             }
             ProposalCommands::Create { proposal } => match proposal {
                 CreateProposalCommands::Upgrade { digest, metadata } => {

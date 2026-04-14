@@ -265,6 +265,50 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     Ok(())
 }
 
+/// Execute a proposal that has reached quorum
+pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+    let mut client = HashiClient::new(config).await?;
+
+    let proposal_addr = Address::from_hex(proposal_id)
+        .with_context(|| format!("Invalid proposal ID: {}", proposal_id))?;
+
+    print_info(&format!("Fetching proposal {}...", proposal_id));
+
+    let proposal = client
+        .fetch_proposal(&proposal_addr)
+        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+
+    let proposal_type = &proposal.proposal_type;
+    let proposal_type_str = display::format_proposal_type(proposal_type);
+
+    use crate::onchain::types::ProposalType;
+    if matches!(proposal_type, ProposalType::Upgrade) {
+        anyhow::bail!(
+            "Upgrade proposals cannot be executed via the CLI. \
+             Use the full upgrade flow (execute + publish + finalize) instead."
+        );
+    }
+
+    println!("\n{}", "Execute Proposal:".bold());
+    println!("  Type: {}", proposal_type_str.cyan());
+    println!("  ID:   {}", proposal_id);
+
+    if !tx_opts.skip_confirm && !confirm_action("execute this proposal").await? {
+        return Ok(());
+    }
+
+    let tx = client.build_execute_proposal_transaction(proposal_addr, proposal_type)?;
+
+    print_info(&format!(
+        "Transaction: {}::execute on {}",
+        proposal_type.as_str(),
+        proposal_id
+    ));
+
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    Ok(())
+}
+
 /// Create an upgrade proposal
 pub async fn create_upgrade_proposal(
     config: &CliConfig,
