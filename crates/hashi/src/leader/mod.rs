@@ -233,6 +233,11 @@ impl LeaderService {
     }
 
     pub fn is_current_leader(&self, checkpoint_height: u64) -> bool {
+        if self.inner.onchain_state().state().hashi().config.paused() {
+            trace!("Bridge is paused, not acting as leader");
+            return false;
+        }
+
         match self.inner.config.force_run_as_leader() {
             ForceRunAsLeader::Always => return true,
             ForceRunAsLeader::Never => return false,
