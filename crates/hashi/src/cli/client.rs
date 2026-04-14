@@ -305,7 +305,9 @@ impl HashiClient {
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::Upgrade => {
-                anyhow::bail!("Upgrade proposals require the full upgrade flow (execute + publish + finalize)");
+                anyhow::bail!(
+                    "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
+                );
             }
             ProposalType::Unknown(s) => {
                 anyhow::bail!("Cannot execute unknown proposal type: {s}");
