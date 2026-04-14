@@ -138,7 +138,11 @@ impl LeaderService {
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                 }
-                Ok(()) = btc_block_rx.changed() => {
+                wait_result = btc_block_rx.changed() => {
+                    if let Err(e) = wait_result {
+                        error!("Error waiting for Bitcoin block height change: {e}");
+                        break;
+                    }
                     let block_height = *btc_block_rx.borrow_and_update();
                     let (checkpoint_height, checkpoint_timestamp_ms) = {
                         let checkpoint_info = checkpoint_rx.borrow();
