@@ -3,7 +3,6 @@
 
 use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
-use crate::leader::RetryPolicy;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use anyhow::Context;
@@ -320,44 +319,6 @@ impl Hashi {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DepositRequestErrorKind {
-    BitcoinConfirmFailed,
-    AmlServiceError,
-    NotReady,
-    TimedOut,
-    TaskFailed,
-    NeverRetry,
-}
-
-impl RetryPolicy for DepositRequestErrorKind {
-    fn retry_base_delay_ms(self) -> u64 {
-        match self {
-            Self::AmlServiceError => 5 * 1000,
-            Self::NotReady => 5 * 1000,
-            Self::BitcoinConfirmFailed => 60 * 1000,
-            Self::TimedOut => 60 * 1000,
-            Self::TaskFailed => 5 * 1000,
-            Self::NeverRetry => u64::MAX,
-        }
-    }
-
-    fn max_delay_ms(self) -> u64 {
-        match self {
-            Self::BitcoinConfirmFailed | Self::TimedOut => 10 * 60 * 1000,
-            _ => 60 * 1000,
-        }
-    }
-
-    fn max_retries(self) -> u32 {
-        match self {
-            Self::AmlServiceError | Self::NotReady | Self::TaskFailed => u32::MAX,
-            Self::BitcoinConfirmFailed | Self::TimedOut => 60 * 24,
-            Self::NeverRetry => 0,
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum DepositValidationError {
     #[error("Failed to confirm Bitcoin deposit: {0}")]
@@ -371,15 +332,4 @@ pub enum DepositValidationError {
 
     #[error("Never retry: {0}")]
     NeverRetry(#[source] anyhow::Error),
-}
-
-impl DepositValidationError {
-    pub fn kind(&self) -> DepositRequestErrorKind {
-        match self {
-            Self::BitcoinConfirmFailed(_) => DepositRequestErrorKind::BitcoinConfirmFailed,
-            Self::AmlServiceError(_) => DepositRequestErrorKind::AmlServiceError,
-            Self::NotReady(_) => DepositRequestErrorKind::NotReady,
-            Self::NeverRetry(_) => DepositRequestErrorKind::NeverRetry,
-        }
-    }
 }

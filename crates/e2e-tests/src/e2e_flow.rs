@@ -295,6 +295,9 @@ mod tests {
             .await?;
         info!("Deposit request created: {}", request_id);
 
+        // Mine blocks in the background so the leader's BTC-block-driven
+        // deposit processing loop fires.
+        let _miner = BackgroundMiner::start(&networks.bitcoin_node);
         wait_for_deposit_confirmation(
             &mut networks.sui_network.client,
             request_id,
@@ -1653,6 +1656,9 @@ mod tests {
         // Poll the on-chain deposit queue until all deposits are confirmed.
         // The hashi node's watcher keeps OnchainState up-to-date; confirmed
         // deposits leave the queue automatically.
+        // Mine blocks in the background so the leader's BTC-block-driven
+        // deposit processing loop keeps firing.
+        let _deposit_miner = BackgroundMiner::start(&networks.bitcoin_node);
         info!("Waiting for {} deposit confirmations...", num_deposits);
         let deposit_timeout = Duration::from_secs(600);
         let deposit_start = std::time::Instant::now();

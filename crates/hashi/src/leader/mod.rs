@@ -8,7 +8,6 @@ pub(crate) use retry::RetryPolicy;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
-use crate::deposits::DepositRequestErrorKind;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositConfirmationMessage;
@@ -58,7 +57,6 @@ const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct LeaderService {
     inner: Arc<Hashi>,
-    deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
@@ -77,7 +75,6 @@ impl LeaderService {
     pub fn new(hashi: Arc<Hashi>) -> Self {
         Self {
             inner: hashi,
-            deposit_retry_tracker: RetryTracker::new(),
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
@@ -111,6 +108,7 @@ impl LeaderService {
         info!("MPC key is ready, starting leader loop");
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
+        let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
 
         loop {
             trace!("Waiting for next checkpoint or task completion...");
@@ -134,18 +132,34 @@ impl LeaderService {
                         continue;
                     }
 
-                    // TODO: Remove this drain once the leader loop is restructured
-                    // to avoid the checkpoint branch blocking task draining.
-                    while let Some(result) = self.deposit_tasks.try_join_next() {
-                        self.handle_completed_deposit_task(result);
-                    }
-
-                    self.process_deposit_requests(checkpoint_timestamp_ms);
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
+                }
+                wait_result = btc_block_rx.changed() => {
+                    if let Err(e) = wait_result {
+                        error!("Error waiting for Bitcoin block height change: {e}");
+                        break;
+                    }
+                    let block_height = *btc_block_rx.borrow_and_update();
+                    let (checkpoint_height, checkpoint_timestamp_ms) = {
+                        let checkpoint_info = checkpoint_rx.borrow();
+                        (checkpoint_info.height, checkpoint_info.timestamp_ms)
+                    };
+
+                    if !self.is_current_leader(checkpoint_height) {
+                        continue;
+                    }
+
+                    debug!("New Bitcoin block {block_height}: processing deposit requests");
+
+                    while let Some(result) = self.deposit_tasks.try_join_next() {
+                        self.handle_completed_deposit_task(result);
+                    }
+
+                    self.process_deposit_requests(checkpoint_timestamp_ms);
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
@@ -290,7 +304,6 @@ impl LeaderService {
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
         let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
-        self.deposit_retry_tracker.prune(&deposit_ids);
         // TODO: If we keep AbortHandles for deposit tasks, explicitly abort tasks whose
         // deposit IDs are no longer present here so they do not linger until timeout.
         self.inflight_deposits
@@ -306,106 +319,46 @@ impl LeaderService {
             if self.inflight_deposits.contains(&deposit_request.id) {
                 continue;
             }
-            if self
-                .deposit_retry_tracker
-                .should_skip(&deposit_request.id, checkpoint_timestamp_ms)
-            {
-                continue;
-            }
 
             let deposit_id = deposit_request.id;
             let inner = self.inner.clone();
-            let deposit_retry_tracker = self.deposit_retry_tracker.clone();
 
             self.inflight_deposits.insert(deposit_id);
             self.deposit_tasks.spawn(async move {
-                let task_result = tokio::time::timeout(
+                let result = tokio::time::timeout(
                     LEADER_TASK_TIMEOUT,
-                    Self::process_deposit_request(
-                        inner.clone(),
-                        deposit_retry_tracker.clone(),
-                        deposit_request,
-                        checkpoint_timestamp_ms,
-                    ),
+                    Self::process_deposit_request(inner, deposit_request),
                 )
                 .await;
 
-                let (result, failure_kind) = match task_result {
-                    Ok(result) => (result, None),
-                    Err(_) => {
-                        let kind = DepositRequestErrorKind::TimedOut;
-                        inner
-                            .metrics
-                            .leader_retries_total
-                            .with_label_values(&["deposit", &format!("{kind:?}")])
-                            .inc();
-                        deposit_retry_tracker.record_failure(
-                            kind,
-                            deposit_id,
-                            checkpoint_timestamp_ms,
-                        );
-                        (
-                            Err(anyhow::anyhow!(
-                                "deposit {deposit_id} timed out after {LEADER_TASK_TIMEOUT:?}"
-                            )),
-                            Some(kind),
-                        )
-                    }
+                let result = match result {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "deposit {deposit_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                    )),
                 };
-
-                if result.is_err() && failure_kind.is_none() {
-                    let kind = DepositRequestErrorKind::TaskFailed;
-                    inner
-                        .metrics
-                        .leader_retries_total
-                        .with_label_values(&["deposit", &format!("{kind:?}")])
-                        .inc();
-                    deposit_retry_tracker.record_failure(kind, deposit_id, checkpoint_timestamp_ms);
-                }
 
                 (deposit_id, result)
             });
         }
-
-        self.inner
-            .metrics
-            .leader_items_in_backoff
-            .with_label_values(&["deposit"])
-            .set(
-                self.deposit_retry_tracker
-                    .in_backoff_count(checkpoint_timestamp_ms) as i64,
-            );
 
         self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms);
     }
 
     async fn process_deposit_request(
         inner: Arc<Hashi>,
-        deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
         deposit_request: DepositRequest,
-        checkpoint_timestamp_ms: u64,
     ) -> anyhow::Result<()> {
         info!(deposit_request_id = %deposit_request.id, "Processing deposit request");
 
         // Validate deposit_request before asking for signatures
-        match inner.validate_deposit_request(&deposit_request).await {
-            Ok(()) => {}
-            Err(e) => {
+        inner
+            .validate_deposit_request(&deposit_request)
+            .await
+            .map_err(|e| {
                 debug!(request_id = ?deposit_request.id, "Deposit validation failed: {e}");
-                let kind = e.kind();
-                inner
-                    .metrics
-                    .leader_retries_total
-                    .with_label_values(&["deposit", &format!("{kind:?}")])
-                    .inc();
-                deposit_retry_tracker.record_failure(
-                    kind,
-                    deposit_request.id,
-                    checkpoint_timestamp_ms,
-                );
-                return Ok(());
-            }
-        }
+                anyhow::anyhow!(e)
+            })?;
 
         info!(deposit_request_id = %deposit_request.id, "Deposit request validated successfully");
 
@@ -477,7 +430,6 @@ impl LeaderService {
                     .with_label_values(&["confirm_deposit", "failure"])
                     .inc();
             })?;
-        deposit_retry_tracker.clear(&deposit_request.id);
         Ok(())
     }
 

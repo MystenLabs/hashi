@@ -59,6 +59,7 @@ pub struct Monitor {
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
     tip: Option<HeaderCheckpoint>,
+    block_height_tx: tokio::sync::watch::Sender<u32>,
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
     rpc_workers: JoinSet<()>,
@@ -113,6 +114,7 @@ impl Monitor {
         )?;
 
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(100);
+        let (block_height_tx, block_height_rx) = tokio::sync::watch::channel(0u32);
 
         let service = Service::new().spawn_aborting({
             let client_tx = client_tx.clone();
@@ -129,6 +131,7 @@ impl Monitor {
                     requester: kyoto_client.requester.clone(),
                     client_tx,
                     tip: None,
+                    block_height_tx,
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
                     rpc_workers: JoinSet::new(),
@@ -140,7 +143,13 @@ impl Monitor {
             }
         });
 
-        Ok((MonitorClient { tx: client_tx }, service))
+        Ok((
+            MonitorClient {
+                tx: client_tx,
+                block_height_rx,
+            },
+            service,
+        ))
     }
 
     /// Run the monitor with automatic Kyoto restart on connectivity loss.
@@ -329,6 +338,7 @@ impl Monitor {
                     indexed_header.height,
                     indexed_header.block_hash(),
                 ));
+                let _ = self.block_height_tx.send(indexed_header.height);
                 self.process_pending_deposits();
             }
             kyoto::chain::BlockHeaderChanges::Reorganized {
@@ -347,6 +357,7 @@ impl Monitor {
                         new_tip.block_hash(),
                     ));
                     self.metrics.kyoto_best_height.set(new_tip.height as i64);
+                    let _ = self.block_height_tx.send(new_tip.height);
                 }
                 // Re-check pending deposits — some may have been on the
                 // reorged branch and need re-verification.
@@ -374,6 +385,7 @@ impl Monitor {
         self.metrics.kyoto_best_height.set(tip.height as i64);
         self.metrics.kyoto_sync_percent.set(100);
         self.tip = Some(tip);
+        let _ = self.block_height_tx.send(tip.height);
         self.process_pending_deposits();
     }
 
@@ -818,9 +830,14 @@ impl Drop for PendingDepositGuard {
 #[derive(Clone)]
 pub struct MonitorClient {
     tx: tokio::sync::mpsc::Sender<MonitorMessage>,
+    block_height_rx: tokio::sync::watch::Receiver<u32>,
 }
 
 impl MonitorClient {
+    pub fn subscribe_block_height(&self) -> tokio::sync::watch::Receiver<u32> {
+        self.block_height_rx.clone()
+    }
+
     pub async fn confirm_deposit(
         &self,
         outpoint: bitcoin::OutPoint,
