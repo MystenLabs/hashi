@@ -234,7 +234,7 @@ impl LeaderService {
 
     pub fn is_current_leader(&self, checkpoint_height: u64) -> bool {
         if self.inner.onchain_state().state().hashi().config.paused() {
-            trace!("Bridge is paused, not acting as leader");
+            debug!("Bridge is paused, not acting as leader");
             return false;
         }
 
@@ -269,8 +269,23 @@ impl LeaderService {
         is_leader
     }
 
+    fn is_reconfiguring(&self) -> bool {
+        self.inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .pending_epoch_change()
+            .is_some()
+    }
+
     fn process_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_deposit_requests");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping deposit request processing");
+            return;
+        }
+
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
@@ -524,6 +539,10 @@ impl LeaderService {
 
     fn process_unapproved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_unapproved_withdrawal_requests");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping withdrawal approval processing");
+            return;
+        }
 
         if self.withdrawal_approval_task.is_some() {
             debug!("Withdrawal approval task already in-flight, skipping");
@@ -842,6 +861,10 @@ impl LeaderService {
 
     fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_approved_withdrawal_requests");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping withdrawal commitment processing");
+            return;
+        }
 
         if self.withdrawal_commitment_task.is_some() {
             debug!("Withdrawal commitment task already in-flight, skipping");
@@ -1082,6 +1105,11 @@ impl LeaderService {
 
     fn process_unsigned_withdrawal_txns(&mut self) {
         debug!("Entering process_unsigned_withdrawal_txns");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping withdrawal tx signing");
+            return;
+        }
+
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
         withdrawal_txns.retain(|p| p.signatures.is_none());
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
