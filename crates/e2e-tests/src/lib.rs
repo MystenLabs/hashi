@@ -197,6 +197,13 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_test_disable_withdrawal_processing(mut self, disable: bool) -> Self {
+        self.hashi_builder = self
+            .hashi_builder
+            .with_test_disable_withdrawal_processing(disable);
+        self
+    }
+
     pub async fn build(self) -> Result<TestNetworks> {
         let dir = tempfile::Builder::new()
             .prefix("hashi-test-env-")
