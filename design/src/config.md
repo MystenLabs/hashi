@@ -43,7 +43,7 @@ fee deduction. The floor ensures the worst-case network fee is always at least
 | | |
 |---|---|
 | **Type** | `u64` |
-| **Default** | `1` (will be set to `6` before mainnet) |
+| **Default** | `6` |
 | **Unit** | blocks |
 
 The number of Bitcoin block confirmations required before a deposit is

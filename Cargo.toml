@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-default-members = ["crates/hashi"]
 
 [workspace.dependencies]
 # sui sdk crates
@@ -44,7 +43,16 @@ tabled = "0.16"
 anyhow = "1.0.98"
 toml = "0.9.2"
 futures = "0.3.31"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+# TODO: Switch back to a crates.io release once age 0.12+ is published.
+# We pin to this specific commit because age 0.11.x depends on i18n-embed-fl 0.9.x,
+# which has a non-determinism bug (HashMap iteration in the fl!() proc macro) that
+# breaks reproducible builds. The fix landed in i18n-embed-fl 0.10.0, and this commit
+# (from rage PR #584) is the first to pull it in via i18n-embed 0.16.
+# Upstream issues: https://github.com/str4d/rage/issues/568
+#                  https://github.com/kellpossible/cargo-i18n/issues/150
+age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4", features = ["cli-common", "plugin"] }
+rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 rustls = { version = "0.23.29", default-features = false, features = ["ring"] }
 ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
 x509-parser = { version = "0.17.0", features = ["verify"] }
@@ -67,6 +75,7 @@ test-strategy = "0.4"
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 jiff = "0.2"
+tar = "0.4"
 
 # fastcrypto
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ff39c4b8e7fa041ecc43789be214e3b2dc8027c2" }

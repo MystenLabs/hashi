@@ -3,6 +3,7 @@
 
 //! Command implementations for the Hashi CLI
 
+pub mod backup;
 pub mod balance;
 pub mod committee;
 pub mod config;

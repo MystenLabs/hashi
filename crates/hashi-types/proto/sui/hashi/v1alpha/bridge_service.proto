@@ -126,8 +126,8 @@ message SignWithdrawalTxConstructionResponse {
 }
 
 message SignWithdrawalTransactionRequest {
-  // The id of the PendingWithdrawal on Sui (32 bytes).
-  bytes pending_withdrawal_id = 1;
+  // The id of the WithdrawalTransaction on Sui (32 bytes).
+  bytes withdrawal_txn_id = 1;
 }
 
 message SignWithdrawalTransactionResponse {
@@ -137,7 +137,7 @@ message SignWithdrawalTransactionResponse {
 
 // Maps to crate::withdrawals::WithdrawalTxSigning
 message SignWithdrawalTxSigningRequest {
-  // Pending withdrawal id on Sui (32 bytes).
+  // The id of the WithdrawalTransaction on Sui (32 bytes).
   bytes withdrawal_id = 1;
 
   // Withdrawal request ids (each 32 bytes).
@@ -152,8 +152,8 @@ message SignWithdrawalTxSigningResponse {
 }
 
 message SignWithdrawalConfirmationRequest {
-  // Pending withdrawal id on Sui.
-  bytes pending_withdrawal_id = 1;
+  // The id of the WithdrawalTransaction on Sui (32 bytes).
+  bytes withdrawal_txn_id = 1;
 }
 
 message SignWithdrawalConfirmationResponse {

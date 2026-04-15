@@ -37,6 +37,7 @@ ed25519-consensus = "2.1"
 miniscript = "13.0.0"
 serde_json.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 time = "0.3"
 hex.workspace = true
 

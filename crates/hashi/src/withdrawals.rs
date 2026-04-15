@@ -34,11 +34,11 @@ use crate::leader::RetryPolicy;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
-use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::onchain::types::WithdrawalRequest;
+use crate::onchain::types::WithdrawalTransaction;
 use crate::utxo_pool;
 use crate::utxo_pool::AncestorTx;
 use crate::utxo_pool::CoinSelectionParams;
@@ -104,6 +104,7 @@ pub struct WithdrawalConfirmation {
 impl Hashi {
     // --- Step 1: Request approval (lightweight) ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(request_id = %approval.request_id))]
     pub async fn validate_and_sign_withdrawal_request_approval(
         &self,
         approval: &WithdrawalRequestApproval,
@@ -132,6 +133,7 @@ impl Hashi {
 
     // --- Step 2: Construction approval (with UTXO selection) ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_and_sign_withdrawal_tx_commitment(
         &self,
         approval: &WithdrawalTxCommitment,
@@ -140,6 +142,7 @@ impl Hashi {
         self.sign_withdrawal_tx_commitment(approval)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_withdrawal_tx_commitment(
         &self,
         approval: &WithdrawalTxCommitment,
@@ -185,11 +188,11 @@ impl Hashi {
         //    full UTXO data. We look up via utxo_records so we can
         //    distinguish "missing" from "locked by another withdrawal" and
         //    also inspect the `produced_by` chain for ancestor depth.
-        let (utxo_records, pending_withdrawals) = {
+        let (utxo_records, withdrawal_txns) = {
             let state = self.onchain_state().state();
             (
                 state.hashi().utxo_pool.utxo_records().clone(),
-                state.hashi().withdrawal_queue.pending_withdrawals().clone(),
+                state.hashi().withdrawal_queue.withdrawal_txns().clone(),
             )
         };
 
@@ -215,7 +218,7 @@ impl Hashi {
         //     itself, so the existing chain must leave room for the
         //     transaction we are about to construct.
         for record in &selected_records {
-            let depth = unconfirmed_ancestor_depth(record, &pending_withdrawals, &utxo_records);
+            let depth = unconfirmed_ancestor_depth(record, &withdrawal_txns, &utxo_records);
             anyhow::ensure!(
                 depth < MAX_ANCESTOR_DEPTH,
                 "UTXO {:?} has an unconfirmed ancestor chain of depth {} \
@@ -379,16 +382,16 @@ impl Hashi {
 
     pub fn sign_withdrawal_confirmation(
         &self,
-        pending_withdrawal_id: &Address,
+        withdrawal_txn_id: &Address,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        let pending = self
+        let txn = self
             .onchain_state()
-            .pending_withdrawal(pending_withdrawal_id)
+            .withdrawal_txn(withdrawal_txn_id)
             .ok_or_else(|| {
-                anyhow!("PendingWithdrawal {pending_withdrawal_id} not found on-chain")
+                anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
         let confirmation = WithdrawalConfirmation {
-            withdrawal_id: pending.id,
+            withdrawal_id: txn.id,
         };
 
         self.sign_message_proto(&confirmation)
@@ -396,42 +399,43 @@ impl Hashi {
 
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
     pub fn validate_and_sign_withdrawal_tx_signing(
         &self,
         message: &WithdrawalTxSigning,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        let pending = self
+        let txn = self
             .onchain_state()
-            .pending_withdrawal(&message.withdrawal_id)
+            .withdrawal_txn(&message.withdrawal_id)
             .ok_or_else(|| {
                 anyhow!(
-                    "PendingWithdrawal {} not found on-chain",
+                    "WithdrawalTransaction {} not found on-chain",
                     message.withdrawal_id
                 )
             })?;
 
         anyhow::ensure!(
-            pending.signatures.is_none(),
-            "PendingWithdrawal {} is already signed",
+            txn.signatures.is_none(),
+            "WithdrawalTransaction {} is already signed",
             message.withdrawal_id
         );
 
         anyhow::ensure!(
-            message.request_ids == pending.request_ids,
-            "Request IDs mismatch for PendingWithdrawal {}",
+            message.request_ids == txn.request_ids,
+            "Request IDs mismatch for WithdrawalTransaction {}",
             message.withdrawal_id
         );
 
         anyhow::ensure!(
-            message.signatures.len() == pending.inputs.len(),
-            "Signature count ({}) does not match input count ({}) for PendingWithdrawal {}",
+            message.signatures.len() == txn.inputs.len(),
+            "Signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
             message.signatures.len(),
-            pending.inputs.len(),
+            txn.inputs.len(),
             message.withdrawal_id
         );
 
-        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
-        let signing_messages = self.withdrawal_signing_messages(&tx, &pending.inputs)?;
+        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
         let hashi_pubkey = self.get_hashi_pubkey()?;
 
         for (i, (sig_bytes, sighash)) in message
@@ -442,7 +446,7 @@ impl Hashi {
         {
             let arr: &[u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
                 anyhow!(
-                    "Signature {i} is not 64 bytes for PendingWithdrawal {}",
+                    "Signature {i} is not 64 bytes for WithdrawalTransaction {}",
                     message.withdrawal_id
                 )
             })?;
@@ -450,7 +454,7 @@ impl Hashi {
                 .map_err(|e| anyhow!("Invalid Schnorr signature at input {i}: {e}"))?;
 
             let input_pubkey =
-                self.deposit_pubkey(&hashi_pubkey, pending.inputs[i].derivation_path.as_ref())?;
+                self.deposit_pubkey(&hashi_pubkey, txn.inputs[i].derivation_path.as_ref())?;
             let schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
                 .map_err(|e| anyhow!("Failed to convert pubkey for input {i}: {e}"))?;
 
@@ -496,58 +500,62 @@ impl Hashi {
 
     // --- MPC BTC tx signing ---
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
-        pending_withdrawal_id: &Address,
+        withdrawal_txn_id: &Address,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
-        let (pending, unsigned_tx) = self
-            .validate_withdrawal_signing(pending_withdrawal_id)
-            .await?;
-        self.mpc_sign_withdrawal_tx(&pending, &unsigned_tx).await
+        let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx).await
     }
 
     pub async fn validate_withdrawal_signing(
         &self,
-        pending_withdrawal_id: &Address,
+        withdrawal_txn_id: &Address,
     ) -> anyhow::Result<(
-        crate::onchain::types::PendingWithdrawal,
+        crate::onchain::types::WithdrawalTransaction,
         bitcoin::Transaction,
     )> {
-        let pending = self
+        let txn = self
             .onchain_state()
-            .pending_withdrawal(pending_withdrawal_id)
+            .withdrawal_txn(withdrawal_txn_id)
             .ok_or_else(|| {
-                anyhow!("PendingWithdrawal {pending_withdrawal_id} not found on-chain")
+                anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
 
         // Rebuild the unsigned BTC tx and verify the txid matches
-        let tx = self.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
+        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let expected_txid = BitcoinTxid::from(tx.compute_txid());
         anyhow::ensure!(
-            pending.txid == expected_txid,
-            "Txid mismatch: PendingWithdrawal has {:?}, rebuilt tx has {:?}",
-            pending.txid,
+            txn.txid == expected_txid,
+            "Txid mismatch: WithdrawalTransaction has {:?}, rebuilt tx has {:?}",
+            txn.txid,
             expected_txid
         );
 
-        Ok((pending.clone(), tx))
+        Ok((txn.clone(), tx))
     }
 
     /// Produce MPC Schnorr signatures for an unsigned withdrawal transaction.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(withdrawal_txn_id = %txn.id, input_count = txn.inputs.len()),
+    )]
     async fn mpc_sign_withdrawal_tx(
         &self,
-        pending: &crate::onchain::types::PendingWithdrawal,
+        txn: &crate::onchain::types::WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        if pending.epoch != epoch {
+        if txn.epoch != epoch {
             anyhow::bail!(
                 "Stale presig assignment: pending withdrawal {} has epoch {}, current is {}. \
-                 Either the leader hasn't called allocate_presigs_for_pending_withdrawal yet, \
+                 Either the leader hasn't called allocate_presigs_for_withdrawal_txn yet, \
                  or this node's on-chain state is behind.",
-                pending.id,
-                pending.epoch,
+                txn.id,
+                txn.epoch,
                 epoch,
             );
         }
@@ -558,17 +566,17 @@ impl Hashi {
             self.metrics.clone(),
         );
         let signing_manager = self.signing_manager();
-        let beacon = S::from_bytes_mod_order(&pending.randomness);
-        let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &pending.inputs)?;
+        let beacon = S::from_bytes_mod_order(&txn.randomness);
+        let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
         for (input_index, message) in signing_messages.iter().enumerate() {
-            let request_id = withdrawal_input_signing_request_id(&pending.id, input_index as u32);
-            let derivation_address = pending
+            let request_id = withdrawal_input_signing_request_id(&txn.id, input_index as u32);
+            let derivation_address = txn
                 .inputs
                 .get(input_index)
                 .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
             let sign_start = std::time::Instant::now();
-            let global_presig_index = pending.presig_start_index + input_index as u64;
+            let global_presig_index = txn.presig_start_index + input_index as u64;
             let sign_result = SigningManager::sign(
                 &signing_manager,
                 &p2p_channel,
@@ -714,6 +722,7 @@ impl Hashi {
     /// UTXOs using the batching-aware coin selection algorithm, build the
     /// unsigned BTC tx, and return a `WithdrawalTxCommitment` covering the
     /// selected requests.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_count = requests.len()))]
     pub async fn build_withdrawal_tx_commitment(
         &self,
         requests: &[WithdrawalRequest],
@@ -750,10 +759,10 @@ impl Hashi {
         // Snapshot both maps under a single read-lock so they are always
         // mutually consistent (e.g., a WithdrawalConfirmedEvent cannot update
         // one map but not the other between the two reads).
-        let (pending_withdrawals, utxo_records) = {
+        let (withdrawal_txns, utxo_records) = {
             let state = self.onchain_state().state();
             (
-                state.hashi().withdrawal_queue.pending_withdrawals().clone(),
+                state.hashi().withdrawal_queue.withdrawal_txns().clone(),
                 state.hashi().utxo_pool.utxo_records().clone(),
             )
         };
@@ -761,20 +770,15 @@ impl Hashi {
         // Query Bitcoin in parallel for the confirmation count of every
         // pending withdrawal so we can accurately fill AncestorTx::confirmations
         // instead of always hardcoding 0.
-        let tx_confirmations = fetch_withdrawal_tx_confirmations(self, &pending_withdrawals).await;
+        let tx_confirmations = fetch_withdrawal_tx_confirmations(self, &withdrawal_txns).await;
 
         // Map available (unlocked) UTXOs to UtxoCandidates.
         let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
             .filter(|r| r.locked_by.is_none())
             .map(|r| {
-                let status = build_utxo_status(
-                    self,
-                    r,
-                    &pending_withdrawals,
-                    &tx_confirmations,
-                    &utxo_records,
-                );
+                let status =
+                    build_utxo_status(self, r, &withdrawal_txns, &tx_confirmations, &utxo_records);
                 UtxoCandidate {
                     id: r.utxo.id,
                     amount: r.utxo.amount,
@@ -848,6 +852,7 @@ impl Hashi {
 
     /// Run AML/Sanctions checks for a withdrawal request.
     /// If no screener client is configured, checks are skipped.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id))]
     pub(crate) async fn screen_withdrawal(
         &self,
         request: &WithdrawalRequest,
@@ -1017,12 +1022,9 @@ fn output_weight_for_address(bitcoin_address: &[u8]) -> anyhow::Result<u64> {
     }
 }
 
-fn withdrawal_input_signing_request_id(
-    pending_withdrawal_id: &Address,
-    input_index: u32,
-) -> Address {
+fn withdrawal_input_signing_request_id(withdrawal_txn_id: &Address, input_index: u32) -> Address {
     let bytes =
-        bcs::to_bytes(&(pending_withdrawal_id, input_index)).expect("serialization should succeed");
+        bcs::to_bytes(&(withdrawal_txn_id, input_index)).expect("serialization should succeed");
     Address::new(Blake2b256::digest(&bytes).digest)
 }
 
@@ -1032,12 +1034,12 @@ fn withdrawal_input_signing_request_id(
 /// fails are mapped to 0 (treated as unconfirmed).
 async fn fetch_withdrawal_tx_confirmations(
     hashi: &Hashi,
-    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
 ) -> HashMap<Address, u32> {
-    let futures: Vec<_> = pending_withdrawals
+    let futures: Vec<_> = withdrawal_txns
         .iter()
-        .map(|(id, pending)| async {
-            let btc_txid = pending.txid.into();
+        .map(|(id, txn)| async {
+            let btc_txid = txn.txid.into();
             let confs = match hashi.btc_monitor().get_transaction_status(btc_txid).await {
                 Ok(TxStatus::Confirmed { confirmations }) => confirmations,
                 // Mempool, not found, or RPC error — treat as unconfirmed.
@@ -1059,12 +1061,12 @@ async fn fetch_withdrawal_tx_confirmations(
 /// (`produced_by = Some(withdrawal_id)`) we walk the full ancestor chain
 /// so that CPFP weight and mempool depth are accurately computed even for
 /// multi-level chains. If the producing withdrawal has already been removed
-/// from `pending_withdrawals` (confirmed and cleared), we promote the UTXO
+/// from `withdrawal_txns` (confirmed and cleared), we promote the UTXO
 /// to `Confirmed` — it is safe to spend immediately.
 fn build_utxo_status(
     hashi: &Hashi,
     record: &UtxoRecord,
-    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
     tx_confirmations: &HashMap<Address, u32>,
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
 ) -> UtxoStatus {
@@ -1075,14 +1077,14 @@ fn build_utxo_status(
     let chain = build_ancestor_chain(
         hashi,
         producing_id,
-        pending_withdrawals,
+        withdrawal_txns,
         tx_confirmations,
         utxo_records,
     );
 
     if chain.is_empty() {
         // The producing withdrawal was confirmed and removed from
-        // pending_withdrawals. The UTXO is safe to spend.
+        // withdrawal_txns. The UTXO is safe to spend.
         UtxoStatus::Confirmed
     } else {
         UtxoStatus::Pending { chain }
@@ -1098,7 +1100,7 @@ pub const MAX_ANCESTOR_DEPTH: usize = 25;
 
 /// Count the number of unconfirmed ancestors for a UTXO record by walking
 /// the `produced_by` chain. Every ancestor that still appears in
-/// `pending_withdrawals` is conservatively treated as unconfirmed (we skip
+/// `withdrawal_txns` is conservatively treated as unconfirmed (we skip
 /// querying Bitcoin for actual confirmation counts). This is used during
 /// commitment validation to reject UTXOs whose ancestor chain would exceed
 /// Bitcoin Core's relay limit.
@@ -1108,7 +1110,7 @@ pub const MAX_ANCESTOR_DEPTH: usize = 25;
 /// seen across all branches.
 fn unconfirmed_ancestor_depth(
     record: &UtxoRecord,
-    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
 ) -> usize {
     let Some(producing_id) = record.produced_by else {
@@ -1124,7 +1126,7 @@ fn unconfirmed_ancestor_depth(
             return depth;
         }
 
-        let Some(pending) = pending_withdrawals.get(&wid) else {
+        let Some(txn) = withdrawal_txns.get(&wid) else {
             // The producing withdrawal has been confirmed and removed;
             // it does not contribute to the unconfirmed chain.
             continue;
@@ -1134,7 +1136,7 @@ fn unconfirmed_ancestor_depth(
 
         // Enqueue any inputs that are themselves unconfirmed change
         // outputs of an earlier withdrawal.
-        for input_utxo in &pending.inputs {
+        for input_utxo in &txn.inputs {
             if let Some(input_record) = utxo_records.get(&input_utxo.id)
                 && let Some(parent_id) = input_record.produced_by
             {
@@ -1147,14 +1149,14 @@ fn unconfirmed_ancestor_depth(
 }
 
 /// Build the ancestor chain for a UTXO produced by `producing_id`. Each
-/// unconfirmed ancestor that still appears in `pending_withdrawals` gets
+/// unconfirmed ancestor that still appears in `withdrawal_txns` gets
 /// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
 /// The walk is a BFS over the ancestor DAG, capped at
 /// [`MAX_ANCESTOR_DEPTH`] levels.
 fn build_ancestor_chain(
     hashi: &Hashi,
     producing_id: Address,
-    pending_withdrawals: &BTreeMap<Address, PendingWithdrawal>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
     tx_confirmations: &HashMap<Address, u32>,
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
 ) -> Vec<AncestorTx> {
@@ -1167,18 +1169,17 @@ fn build_ancestor_chain(
             continue;
         }
 
-        let Some(pending) = pending_withdrawals.get(&wid) else {
+        let Some(txn) = withdrawal_txns.get(&wid) else {
             continue;
         };
 
-        let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())
-        else {
+        let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs()) else {
             continue;
         };
 
         let confirmations = tx_confirmations.get(&wid).copied().unwrap_or(0);
-        let input_total: u64 = pending.inputs.iter().map(|u| u.amount).sum();
-        let output_total: u64 = pending.all_outputs().iter().map(|o| o.amount).sum();
+        let input_total: u64 = txn.inputs.iter().map(|u| u.amount).sum();
+        let output_total: u64 = txn.all_outputs().iter().map(|o| o.amount).sum();
 
         chain.push(AncestorTx {
             confirmations,
@@ -1186,7 +1187,7 @@ fn build_ancestor_chain(
             tx_fee: input_total.saturating_sub(output_total),
         });
 
-        for input_utxo in &pending.inputs {
+        for input_utxo in &txn.inputs {
             if let Some(input_record) = utxo_records.get(&input_utxo.id)
                 && let Some(parent_id) = input_record.produced_by
             {

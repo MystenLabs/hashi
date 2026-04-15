@@ -24,6 +24,10 @@ use std::path::Path;
     about = "Manage a local Hashi dev environment"
 )]
 struct Cli {
+    /// Enable verbose tracing output (INFO level).
+    #[clap(long, short, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -72,10 +76,6 @@ enum Commands {
         /// Bitcoin regtest RPC port
         #[clap(long, default_value = "18443")]
         btc_rpc_port: u16,
-
-        /// Enable verbose tracing output
-        #[clap(long, short)]
-        verbose: bool,
 
         #[command(flatten)]
         opts: LocalnetOpts,
@@ -215,23 +215,24 @@ fn print_warning(msg: &str) {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let default_level = if cli.verbose {
+        tracing::level_filters::LevelFilter::INFO
+    } else {
+        tracing::level_filters::LevelFilter::OFF
+    };
+    hashi_types::telemetry::TelemetryConfig::new()
+        .with_default_level(default_level)
+        .with_target(false)
+        .with_env()
+        .init();
+
     match cli.command {
         Commands::Start {
             num_validators,
             sui_rpc_port,
             btc_rpc_port,
-            verbose,
             opts,
-        } => {
-            cmd_start(
-                num_validators,
-                sui_rpc_port,
-                btc_rpc_port,
-                verbose,
-                &opts.data_dir,
-            )
-            .await
-        }
+        } => cmd_start(num_validators, sui_rpc_port, btc_rpc_port, &opts.data_dir).await,
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
@@ -259,7 +260,6 @@ async fn cmd_start(
     num_validators: usize,
     sui_rpc_port: u16,
     btc_rpc_port: u16,
-    verbose: bool,
     data_dir: &Path,
 ) -> Result<()> {
     // Check for existing running instance
@@ -272,21 +272,6 @@ async fn cmd_start(
         }
         print_warning("Found stale state file, cleaning up...");
     }
-
-    let default_level = if verbose {
-        tracing::level_filters::LevelFilter::INFO
-    } else {
-        tracing::level_filters::LevelFilter::OFF
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(default_level.into())
-                .from_env_lossy(),
-        )
-        .with_target(false)
-        .init();
 
     use std::io::Write;
     print!(
@@ -823,6 +808,7 @@ fn cli_config_path(data_dir: &Path) -> std::path::PathBuf {
 /// Write a `hashi-cli.toml` config file that the main `hashi` CLI can read.
 fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
     let config = hashi::cli::config::CliConfig {
+        loaded_from_path: None,
         sui_rpc_url: state.sui_rpc_url.clone(),
         package_id: state.package_id.parse().ok(),
         hashi_object_id: state.hashi_object_id.parse().ok(),
@@ -830,6 +816,7 @@ fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
             .funded_sui_keypair_path
             .as_ref()
             .map(std::path::PathBuf::from),
+        backup_age_pubkey: None,
         gas_coin: None,
         bitcoin: Some(hashi::cli::config::BitcoinConfig {
             rpc_url: Some(state.btc_rpc_url.clone()),

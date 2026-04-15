@@ -26,11 +26,12 @@ impl EpochPublicMessagesStore {
 impl PublicMessagesStore for EpochPublicMessagesStore {
     fn store_dealer_message(
         &mut self,
+        epoch: u64,
         dealer: &Address,
         message: &avss::Message,
     ) -> anyhow::Result<()> {
         self.db
-            .store_dealer_message(self.epoch, dealer, message)
+            .store_dealer_message(epoch, dealer, message)
             .map_err(|e| anyhow::anyhow!("failed to store dealer message: {e}"))
     }
 
@@ -57,11 +58,12 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
 
     fn store_rotation_messages(
         &mut self,
+        epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
     ) -> anyhow::Result<()> {
         self.db
-            .store_rotation_messages(self.epoch, dealer, messages)
+            .store_rotation_messages(epoch, dealer, messages)
             .map_err(|e| anyhow::anyhow!("failed to store rotation messages: {e}"))
     }
 
@@ -88,12 +90,13 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
 
     fn store_nonce_message(
         &mut self,
+        epoch: u64,
         batch_index: u32,
         dealer: &Address,
         message: &batch_avss::Message,
     ) -> anyhow::Result<()> {
         self.db
-            .store_nonce_message(self.epoch, batch_index, dealer, message)
+            .store_nonce_message(epoch, batch_index, dealer, message)
             .map_err(|e| anyhow::anyhow!("failed to store nonce message: {e}"))
     }
 

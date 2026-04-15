@@ -121,6 +121,12 @@ pub enum ProposalCommands {
         proposal_id: String,
     },
 
+    /// Execute a proposal that has reached quorum
+    Execute {
+        /// The proposal object ID to execute
+        proposal_id: String,
+    },
+
     /// Create a new proposal
     Create {
         #[clap(subcommand)]
@@ -224,6 +230,38 @@ pub enum ConfigCommands {
 
     /// View on-chain configuration values
     OnChain,
+}
+
+#[derive(Subcommand)]
+pub enum BackupCommands {
+    /// Save an encrypted backup of the current config and referenced files
+    Save {
+        /// Age recipient public key used to encrypt the backup
+        #[clap(long)]
+        backup_age_pubkey: Option<String>,
+
+        /// Directory to write the encrypted backup into
+        #[clap(long, default_value = ".")]
+        output_dir: std::path::PathBuf,
+    },
+
+    /// Restore files from an encrypted config backup
+    Restore {
+        /// Path to the encrypted backup tarball
+        backup_tarball: std::path::PathBuf,
+
+        /// Age identity file used to decrypt the backup
+        #[clap(long)]
+        backup_age_identity: std::path::PathBuf,
+
+        /// Directory to extract the restored files into
+        #[clap(long, default_value = ".")]
+        output_dir: std::path::PathBuf,
+
+        /// Copy restored files to their original paths after extraction
+        #[clap(long)]
+        copy_to_original_paths: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -439,6 +477,9 @@ pub enum CliCommand {
     Config {
         action: ConfigCommands,
     },
+    Backup {
+        action: BackupCommands,
+    },
     Deposit {
         action: DepositCommands,
     },
@@ -493,6 +534,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             ProposalCommands::RemoveVote { proposal_id } => {
                 commands::proposal::remove_vote(&config, &proposal_id, &tx_opts).await?;
+            }
+            ProposalCommands::Execute { proposal_id } => {
+                commands::proposal::execute(&config, &proposal_id, &tx_opts).await?;
             }
             ProposalCommands::Create { proposal } => match proposal {
                 CreateProposalCommands::Upgrade { digest, metadata } => {
@@ -560,6 +604,27 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 commands::config::show_onchain_config(&config).await?;
             }
         },
+        CliCommand::Backup { action } => match action {
+            BackupCommands::Save {
+                backup_age_pubkey,
+                output_dir,
+            } => {
+                commands::backup::save(&config, backup_age_pubkey, &output_dir)?;
+            }
+            BackupCommands::Restore {
+                backup_tarball,
+                backup_age_identity,
+                output_dir,
+                copy_to_original_paths,
+            } => {
+                commands::backup::restore(
+                    &backup_tarball,
+                    &backup_age_identity,
+                    &output_dir,
+                    copy_to_original_paths,
+                )?;
+            }
+        },
         CliCommand::Deposit { action } => {
             commands::deposit::run(action, &config, &tx_opts).await?;
         }
@@ -603,19 +668,16 @@ fn parse_metadata(args: Vec<String>) -> Vec<(String, String)> {
 }
 
 fn init_tracing(verbose: bool) {
-    let filter = if verbose {
-        tracing_subscriber::EnvFilter::builder()
-            .with_default_directive(tracing::level_filters::LevelFilter::DEBUG.into())
-            .from_env_lossy()
+    let level = if verbose {
+        tracing::level_filters::LevelFilter::DEBUG
     } else {
-        tracing_subscriber::EnvFilter::builder()
-            .with_default_directive(tracing::level_filters::LevelFilter::WARN.into())
-            .from_env_lossy()
+        tracing::level_filters::LevelFilter::WARN
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    hashi_types::telemetry::TelemetryConfig::new()
+        .with_default_level(level)
         .with_target(false)
+        .with_env()
         .init();
 }
 

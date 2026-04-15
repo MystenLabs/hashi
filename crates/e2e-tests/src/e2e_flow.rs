@@ -188,8 +188,9 @@ mod tests {
                         match WithdrawalConfirmedEvent::from_bcs(event.contents().value()) {
                             Ok(event_data) => {
                                 info!(
-                                    "Withdrawal confirmed! pending_id={}, txid={}",
-                                    event_data.pending_id, event_data.txid
+                                    withdrawal_txn_id = %event_data.withdrawal_txn_id,
+                                    txid = %event_data.txid,
+                                    "Withdrawal confirmed!"
                                 );
                                 return Ok(event_data);
                             }
@@ -294,6 +295,9 @@ mod tests {
             .await?;
         info!("Deposit request created: {}", request_id);
 
+        // Mine blocks in the background so the leader's BTC-block-driven
+        // deposit processing loop fires.
+        let _miner = BackgroundMiner::start(&networks.bitcoin_node);
         wait_for_deposit_confirmation(
             &mut networks.sui_network.client,
             request_id,
@@ -770,8 +774,8 @@ mod tests {
                         {
                             Ok(data) => {
                                 info!(
-                                    "Withdrawal picked for processing: pending_id={}",
-                                    data.pending_id
+                                    withdrawal_txn_id = %data.withdrawal_txn_id,
+                                    "Withdrawal picked for processing"
                                 );
                                 return Ok(data);
                             }
@@ -836,10 +840,9 @@ mod tests {
                         match WithdrawalConfirmedEvent::from_bcs(event.contents().value()) {
                             Ok(data) => {
                                 info!(
-                                    "Withdrawal confirmed ({}/{}): pending_id={}",
-                                    events.len() + 1,
-                                    n,
-                                    data.pending_id
+                                    withdrawal_txn_id = %data.withdrawal_txn_id,
+                                    progress = %format!("{}/{}", events.len() + 1, n),
+                                    "Withdrawal confirmed"
                                 );
                                 events.push(data);
                             }
@@ -902,8 +905,9 @@ mod tests {
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(30))
                 .await?;
         info!(
-            "Withdrawal 1 committed: pending_id={}, txid={}",
-            picked1.pending_id, picked1.txid
+            withdrawal_txn_id = %picked1.withdrawal_txn_id,
+            txid = %picked1.txid,
+            "Withdrawal 1 committed"
         );
 
         assert!(
@@ -932,8 +936,9 @@ mod tests {
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(30))
                 .await?;
         info!(
-            "Withdrawal 2 committed: pending_id={}, txid={}",
-            picked2.pending_id, picked2.txid
+            withdrawal_txn_id = %picked2.withdrawal_txn_id,
+            txid = %picked2.txid,
+            "Withdrawal 2 committed"
         );
 
         // Assert that withdrawal 2 spent the pending change UTXO from
@@ -1020,9 +1025,9 @@ mod tests {
                         {
                             Ok(data) if data.request_ids.len() >= min_requests => {
                                 info!(
-                                    "Batched withdrawal picked: pending_id={}, request_count={}",
-                                    data.pending_id,
-                                    data.request_ids.len(),
+                                    withdrawal_txn_id = %data.withdrawal_txn_id,
+                                    request_count = %data.request_ids.len(),
+                                    "Batched withdrawal picked"
                                 );
                                 return Ok(data);
                             }
@@ -1112,9 +1117,9 @@ mod tests {
         .await?;
 
         info!(
-            "Batched withdrawal committed: pending_id={}, request_count={}",
-            picked.pending_id,
-            picked.request_ids.len(),
+            withdrawal_txn_id = %picked.withdrawal_txn_id,
+            request_count = %picked.request_ids.len(),
+            "Batched withdrawal committed"
         );
 
         assert_eq!(
@@ -1209,9 +1214,9 @@ mod tests {
         .await?;
 
         info!(
-            "Capacity-triggered batch committed: pending_id={}, request_count={}",
-            picked.pending_id,
-            picked.request_ids.len(),
+            withdrawal_txn_id = %picked.withdrawal_txn_id,
+            request_count = %picked.request_ids.len(),
+            "Capacity-triggered batch committed"
         );
 
         assert_eq!(
@@ -1312,13 +1317,41 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_mpc_config_defaults_match_rust() -> Result<()> {
+        init_test_logging();
+
+        let networks = TestNetworksBuilder::new().with_nodes(1).build().await?;
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+
+        use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+        use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi();
+        let threshold_bps = hashi.onchain_state().mpc_threshold_in_basis_points();
+        let weight_reduction_allowed_delta =
+            hashi.onchain_state().mpc_weight_reduction_allowed_delta();
+
+        assert_eq!(
+            threshold_bps, DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+            "on-chain mpc_threshold_in_basis_points ({threshold_bps}) != Rust default ({DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS})"
+        );
+        assert_eq!(
+            weight_reduction_allowed_delta, DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            "on-chain mpc_weight_reduction_allowed_delta ({weight_reduction_allowed_delta}) != Rust default ({DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA})"
+        );
+        Ok(())
+    }
+
     /// Verify that a withdrawal can spend a change output whose producing
     /// transaction is mined on Bitcoin but not yet confirmed on Sui. The
     /// actual Bitcoin confirmation count must be queried from the node
     /// instead of hardcoded to 0. A UTXO whose ancestor has
     /// `confirmations >= 1` has `mempool_chain_depth() == 0` and is eligible
     /// for coin selection, even though the producing withdrawal is still a
-    /// `PendingWithdrawal` on Sui.
+    /// `WithdrawalTransaction` on Sui.
     ///
     /// We set `bitcoin_confirmation_threshold = 6` so that mining 2 blocks
     /// leaves withdrawal 1 in the `[1, threshold)` window: mined on Bitcoin
@@ -1371,9 +1404,9 @@ mod tests {
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
                 .await?;
         info!(
-            "Withdrawal 1 picked: pending_id={}, has_change={}",
-            picked1.pending_id,
-            picked1.change_output.is_some(),
+            withdrawal_txn_id = %picked1.withdrawal_txn_id,
+            has_change = %picked1.change_output.is_some(),
+            "Withdrawal 1 picked"
         );
         assert!(
             picked1.change_output.is_some(),
@@ -1383,7 +1416,7 @@ mod tests {
         // Mine 2 blocks so withdrawal 1 has 2 Bitcoin confirmations, which is
         // below the on-chain threshold of 6. The leader will NOT call
         // confirm_withdrawal_on_sui yet, so withdrawal 1 remains a
-        // PendingWithdrawal and its change UTXO remains Pending { chain }.
+        // WithdrawalTransaction and its change UTXO remains Pending { chain }.
         // The AncestorTx for withdrawal 1 will have confirmations=2, so
         // mempool_chain_depth() returns 0 — the change UTXO is eligible.
         networks.bitcoin_node.generate_blocks(2)?;
@@ -1403,7 +1436,10 @@ mod tests {
         let picked2 =
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
                 .await?;
-        info!("Withdrawal 2 picked: pending_id={}", picked2.pending_id);
+        info!(
+            withdrawal_txn_id = %picked2.withdrawal_txn_id,
+            "Withdrawal 2 picked"
+        );
 
         // Mine to finality and wait for both withdrawals to be confirmed on Sui.
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
@@ -1470,9 +1506,9 @@ mod tests {
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
                 .await?;
         info!(
-            "Withdrawal A picked: pending_id={}, has_change={}",
-            picked_a.pending_id,
-            picked_a.change_output.is_some(),
+            withdrawal_txn_id = %picked_a.withdrawal_txn_id,
+            has_change = %picked_a.change_output.is_some(),
+            "Withdrawal A picked"
         );
         assert!(
             picked_a.change_output.is_some(),
@@ -1494,9 +1530,9 @@ mod tests {
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
                 .await?;
         info!(
-            "Withdrawal B picked: pending_id={}, has_change={}",
-            picked_b.pending_id,
-            picked_b.change_output.is_some(),
+            withdrawal_txn_id = %picked_b.withdrawal_txn_id,
+            has_change = %picked_b.change_output.is_some(),
+            "Withdrawal B picked"
         );
         assert!(
             picked_b.change_output.is_some(),
@@ -1517,7 +1553,10 @@ mod tests {
         let picked_c =
             wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(60))
                 .await?;
-        info!("Withdrawal C picked: pending_id={}", picked_c.pending_id);
+        info!(
+            withdrawal_txn_id = %picked_c.withdrawal_txn_id,
+            "Withdrawal C picked"
+        );
 
         // Mine to finality and wait for all three confirmation events.
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
@@ -1645,6 +1684,9 @@ mod tests {
         // Poll the on-chain deposit queue until all deposits are confirmed.
         // The hashi node's watcher keeps OnchainState up-to-date; confirmed
         // deposits leave the queue automatically.
+        // Mine blocks in the background so the leader's BTC-block-driven
+        // deposit processing loop keeps firing.
+        let _deposit_miner = BackgroundMiner::start(&networks.bitcoin_node);
         info!("Waiting for {} deposit confirmations...", num_deposits);
         let deposit_timeout = Duration::from_secs(600);
         let deposit_start = std::time::Instant::now();
@@ -1706,10 +1748,10 @@ mod tests {
         .await?;
 
         info!(
-            "Batched withdrawal picked: pending_id={}, requests={}, inputs={}",
-            picked.pending_id,
-            picked.request_ids.len(),
-            picked.inputs.len(),
+            withdrawal_txn_id = %picked.withdrawal_txn_id,
+            requests = %picked.request_ids.len(),
+            inputs = %picked.inputs.len(),
+            "Batched withdrawal picked"
         );
 
         assert_eq!(

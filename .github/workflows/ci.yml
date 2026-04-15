@@ -10,6 +10,7 @@ permissions:
 
 env:
   RUSTFLAGS: -Dwarnings
+  RUST_LOG_JSON: "0"
 
 jobs:
   test:

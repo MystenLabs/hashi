@@ -119,7 +119,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         .context("Invalid request ID")?;
 
     let withdrawal_requests = client.fetch_withdrawal_requests();
-    let pending_withdrawals = client.fetch_pending_withdrawals();
+    let withdrawal_txns = client.fetch_withdrawal_txns();
 
     println!("\n{}", "Withdrawal Status".bold());
     println!("{}", "━".repeat(60).dimmed());
@@ -178,8 +178,8 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         println!("    {} Broadcast", "[    ]".dimmed());
         println!("    {} Confirmed", "[    ]".dimmed());
     }
-    // Check committed/signed pending withdrawals
-    else if let Some(pw) = pending_withdrawals
+    // Check committed/signed withdrawal transactions
+    else if let Some(pw) = withdrawal_txns
         .iter()
         .find(|p| p.request_ids.contains(&req_addr))
     {
@@ -249,7 +249,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     let requests = client.fetch_withdrawal_requests();
-    let pending = client.fetch_pending_withdrawals();
+    let pending = client.fetch_withdrawal_txns();
 
     match output_format {
         OutputFormat::Json => {

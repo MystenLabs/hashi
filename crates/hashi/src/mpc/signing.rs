@@ -138,6 +138,19 @@ impl SigningManager {
         self.batches.last().map_or(0, |b| b.batch_index)
     }
 
+    pub fn available_presig_end_index(&self) -> u64 {
+        let batch_end = self.batches.last().map_or(0, |b| b.end_index());
+        match &self.next_batch {
+            Some(next) => batch_end + next.len() as u64,
+            None => batch_end,
+        }
+    }
+
+    pub fn trigger_refill(&self) {
+        let next = self.batch_index() + 1;
+        let _ = self.refill_tx.send(next);
+    }
+
     pub fn epoch(&self) -> u64 {
         self.committee.epoch()
     }
@@ -173,6 +186,11 @@ impl SigningManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(sui_request_id = %sui_request_id, global_presig_index),
+    )]
     pub async fn sign(
         signing_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
@@ -228,6 +246,9 @@ impl SigningManager {
                     {
                         &mut mgr.batches[b]
                     } else {
+                        if mgr.next_batch.is_none() {
+                            mgr.trigger_refill();
+                        }
                         tracing::error!(
                             "Presig index {global_presig_index} not found in any \
                              batch ({} batch(es) active).",
@@ -1395,6 +1416,37 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(SigningError::PoolExhausted)));
+    }
+
+    #[tokio::test]
+    async fn test_pool_miss_triggers_refill_signal() {
+        let mut setup = SigningTestSetup::new(4);
+        let pool_size = setup.managers[0].read().unwrap().initial_presig_count() as u64;
+
+        // Mark the refill_rx as seen so we can detect the next change.
+        setup.refill_rx.borrow_and_update();
+
+        // Request a presig index beyond the pool (no next_batch set).
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"beyond",
+            pool_size + 100, // beyond all batches
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+        assert!(
+            setup.refill_rx.has_changed().unwrap(),
+            "refill signal should have been sent on pool miss"
+        );
+        assert_eq!(*setup.refill_rx.borrow(), 1); // batch_index 0 + 1
     }
 
     #[test]

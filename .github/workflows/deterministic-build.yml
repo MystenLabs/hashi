@@ -1,0 +1,107 @@
+name: Deterministic Docker Builds
+
+on:
+  pull_request:
+    paths:
+      # for now don't run on every change
+      # - 'crates/**'
+      - 'docker/hashi/**'
+      - 'docker/hashi-screener/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/deterministic-build.yml'
+  workflow_dispatch:
+  schedule: [cron: "20 3 * * *"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [hashi, hashi-screener]
+        os: [ubuntu-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.image }} image
+        env:
+          GIT_REVISION: ${{ github.sha }}
+          IMAGE_NAME: ${{ matrix.image }}
+        run: bash docker/${{ matrix.image }}/build.sh --no-cache
+
+      - name: Compute sha256
+        id: hash
+        run: |
+          BIN="out/${{ matrix.image }}"
+          HASH=$(sha256sum "${BIN}" | awk '{print $1}')
+          echo "sha256=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "${HASH}  ${{ matrix.image }}" > "out/${{ matrix.image }}.sha256"
+
+      - name: Upload sha256
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.image }}-${{ matrix.os }}-sha256
+          path: out/${{ matrix.image }}.sha256
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.image }}-${{ matrix.os }}-binary
+          path: out/${{ matrix.image }}
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [hashi, hashi-screener]
+    steps:
+      - name: Download ubuntu-latest hash
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.image }}-ubuntu-latest-sha256
+          path: hash-latest
+
+      - name: Download ubuntu-22.04 hash
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.image }}-ubuntu-22.04-sha256
+          path: hash-22
+
+      - name: Compare hashes
+        id: compare
+        run: |
+          LATEST=$(awk '{print $1}' "hash-latest/${{ matrix.image }}.sha256")
+          OLDER=$(awk '{print $1}' "hash-22/${{ matrix.image }}.sha256")
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+          echo "older=${OLDER}" >> "$GITHUB_OUTPUT"
+          if [ "${LATEST}" = "${OLDER}" ]; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write summary
+        run: |
+          {
+            echo "## ${{ matrix.image }} reproducibility"
+            echo ""
+            echo "| Runner | SHA-256 |"
+            echo "|--------|---------|"
+            echo "| ubuntu-latest | \`${{ steps.compare.outputs.latest }}\` |"
+            echo "| ubuntu-22.04  | \`${{ steps.compare.outputs.older }}\` |"
+            echo ""
+            echo "**Result**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if hashes differ
+        if: steps.compare.outputs.match != 'true'
+        run: |
+          echo "${{ matrix.image }} binary hashes differ across runners!"
+          exit 1

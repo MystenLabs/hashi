@@ -205,9 +205,9 @@ impl HashiClient {
         self.onchain_state.withdrawal_requests()
     }
 
-    /// Fetch committed/signed withdrawals
-    pub fn fetch_pending_withdrawals(&self) -> Vec<crate::onchain::types::PendingWithdrawal> {
-        self.onchain_state.pending_withdrawals()
+    /// Fetch committed/signed withdrawal transactions
+    pub fn fetch_withdrawal_txns(&self) -> Vec<crate::onchain::types::WithdrawalTransaction> {
+        self.onchain_state.withdrawal_txns()
     }
 
     // ========================================================================
@@ -285,6 +285,58 @@ impl HashiClient {
         params: CreateProposalParams,
     ) -> TransactionBuilder {
         build_create_proposal_transaction(self.hashi_ids, params)
+    }
+
+    /// Build a transaction to execute a proposal that has reached quorum.
+    ///
+    /// Each proposal type has its own `module::execute(hashi, proposal_id, clock)`
+    /// entry point. This method dispatches to the correct one based on the
+    /// on-chain proposal type.
+    pub fn build_execute_proposal_transaction(
+        &self,
+        proposal_id: Address,
+        proposal_type: &crate::onchain::types::ProposalType,
+    ) -> anyhow::Result<TransactionBuilder> {
+        use crate::onchain::types::ProposalType;
+
+        let module_name = match proposal_type {
+            ProposalType::UpdateConfig => "update_config",
+            ProposalType::EnableVersion => "enable_version",
+            ProposalType::DisableVersion => "disable_version",
+            ProposalType::EmergencyPause => "emergency_pause",
+            ProposalType::Upgrade => {
+                anyhow::bail!(
+                    "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
+                );
+            }
+            ProposalType::Unknown(s) => {
+                anyhow::bail!("Cannot execute unknown proposal type: {s}");
+            }
+        };
+
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let proposal_id_arg = builder.pure(&proposal_id);
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::new(module_name)?,
+                Identifier::from_static("execute"),
+            ),
+            vec![hashi_arg, proposal_id_arg, clock_arg],
+        );
+
+        Ok(builder)
     }
 }
 
@@ -540,6 +592,7 @@ pub fn get_proposal_type_arg(
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
+        ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

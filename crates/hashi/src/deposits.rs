@@ -3,7 +3,6 @@
 
 use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
-use crate::leader::RetryPolicy;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use anyhow::Context;
@@ -47,6 +46,7 @@ pub fn derive_deposit_address(
 }
 
 impl Hashi {
+    #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]
     pub async fn validate_and_sign_deposit_confirmation(
         &self,
         deposit_request: &DepositRequest,
@@ -55,6 +55,7 @@ impl Hashi {
         self.sign_deposit_confirmation(deposit_request)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     pub async fn validate_deposit_request(
         &self,
         deposit_request: &DepositRequest,
@@ -68,6 +69,7 @@ impl Hashi {
 
     /// Run AML/Sanctions checks for the deposit request.
     /// If no screener client is configured, checks are skipped.
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn screen_deposit(
         &self,
         deposit_request: &DepositRequest,
@@ -105,6 +107,7 @@ impl Hashi {
     }
 
     /// Validate that the deposit request exists on Sui
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     fn validate_deposit_request_on_sui(
         &self,
         deposit_request: &DepositRequest,
@@ -144,6 +147,15 @@ impl Hashi {
     }
 
     /// Validate that there is a txout on Bitcoin that matches the deposit request
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            deposit_id = %deposit_request.id,
+            bitcoin_txid = %deposit_request.utxo.id.txid,
+            vout = deposit_request.utxo.id.vout,
+        ),
+    )]
     async fn validate_deposit_request_on_bitcoin(
         &self,
         deposit_request: &DepositRequest,
@@ -320,44 +332,6 @@ impl Hashi {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DepositRequestErrorKind {
-    BitcoinConfirmFailed,
-    AmlServiceError,
-    NotReady,
-    TimedOut,
-    TaskFailed,
-    NeverRetry,
-}
-
-impl RetryPolicy for DepositRequestErrorKind {
-    fn retry_base_delay_ms(self) -> u64 {
-        match self {
-            Self::AmlServiceError => 5 * 1000,
-            Self::NotReady => 5 * 1000,
-            Self::BitcoinConfirmFailed => 60 * 1000,
-            Self::TimedOut => 60 * 1000,
-            Self::TaskFailed => 5 * 1000,
-            Self::NeverRetry => u64::MAX,
-        }
-    }
-
-    fn max_delay_ms(self) -> u64 {
-        match self {
-            Self::BitcoinConfirmFailed | Self::TimedOut => 10 * 60 * 1000,
-            _ => 60 * 1000,
-        }
-    }
-
-    fn max_retries(self) -> u32 {
-        match self {
-            Self::AmlServiceError | Self::NotReady | Self::TaskFailed => u32::MAX,
-            Self::BitcoinConfirmFailed | Self::TimedOut => 60 * 24,
-            Self::NeverRetry => 0,
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum DepositValidationError {
     #[error("Failed to confirm Bitcoin deposit: {0}")]
@@ -371,15 +345,4 @@ pub enum DepositValidationError {
 
     #[error("Never retry: {0}")]
     NeverRetry(#[source] anyhow::Error),
-}
-
-impl DepositValidationError {
-    pub fn kind(&self) -> DepositRequestErrorKind {
-        match self {
-            Self::BitcoinConfirmFailed(_) => DepositRequestErrorKind::BitcoinConfirmFailed,
-            Self::AmlServiceError(_) => DepositRequestErrorKind::AmlServiceError,
-            Self::NotReady(_) => DepositRequestErrorKind::NotReady,
-            Self::NeverRetry(_) => DepositRequestErrorKind::NeverRetry,
-        }
-    }
 }

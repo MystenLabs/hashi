@@ -53,6 +53,7 @@ pub mod display {
             ProposalType::UpdateConfig => "UpdateConfig".to_string(),
             ProposalType::EnableVersion => "EnableVersion".to_string(),
             ProposalType::DisableVersion => "DisableVersion".to_string(),
+            ProposalType::EmergencyPause => "EmergencyPause".to_string(),
             ProposalType::Unknown(s) => format!("Unknown({})", s),
         }
     }

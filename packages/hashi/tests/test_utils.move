@@ -10,6 +10,7 @@ use hashi::{
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
     disable_version,
+    emergency_pause,
     enable_version,
     hashi::Hashi,
     update_config
@@ -241,4 +242,15 @@ public fun create_disable_version_proposal(
     ctx: &mut TxContext,
 ): ID {
     disable_version::propose(hashi, version, vec_map::empty(), clock, ctx)
+}
+
+/// Creates an emergency pause/unpause proposal and returns its ID
+public fun create_emergency_pause_proposal(
+    hashi: &mut Hashi,
+    pause: bool,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    let metadata = vec_map::empty();
+    emergency_pause::propose(hashi, pause, metadata, clock, ctx)
 }

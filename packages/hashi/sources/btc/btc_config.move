@@ -106,6 +106,6 @@ public(package) fun set_withdrawal_cancellation_cooldown_ms(self: &mut Config, c
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
-    config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(1)); // TODO: set to 6 before mainnet
+    config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(6));
     config.upsert(b"withdrawal_cancellation_cooldown_ms", config_value::new_u64(1000 * 60 * 60)); // 1 hour
 }

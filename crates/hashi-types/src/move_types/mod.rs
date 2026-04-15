@@ -61,6 +61,7 @@ pub struct BitcoinState {
     pub deposit_queue: DepositRequestQueue,
     pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
+    pub user_requests: Table,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
@@ -224,8 +225,6 @@ pub struct DepositRequestQueue {
     pub requests: Bag,
     /// Completed deposits (confirmed or expired)
     pub processed: Bag,
-    /// Per-sender index: sender address -> Bag of request IDs
-    pub user_requests: Table,
 }
 
 /// Rust version of the Move sui::table::Table type (header only).
@@ -242,10 +241,10 @@ pub struct WithdrawalRequestQueue {
     pub requests: Bag,
     /// Processed requests (Processing, Signed, Confirmed)
     pub processed: Bag,
-    /// In-flight withdrawal transactions (PendingWithdrawal)
-    pub pending_withdrawals: Bag,
-    /// Per-sender index: sender address -> Bag of request IDs
-    pub user_requests: Table,
+    /// In-flight withdrawal transactions
+    pub withdrawal_txns: Bag,
+    /// Confirmed withdrawal transactions (historical record)
+    pub confirmed_txns: Bag,
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalStatus enum.
@@ -253,13 +252,25 @@ pub struct WithdrawalRequestQueue {
 pub enum WithdrawalStatus {
     Requested,
     Approved,
-    Processing { pending_withdrawal_id: Address },
-    Signed { pending_withdrawal_id: Address },
-    Confirmed { txid: BitcoinTxid },
+    Processing,
+    Signed,
+    Confirmed,
+}
+
+impl WithdrawalStatus {
+    /// Returns true if the status is `Approved`.
+    pub fn is_approved(&self) -> bool {
+        matches!(self, Self::Approved)
+    }
+
+    /// Returns true if the status is `Requested`.
+    pub fn is_requested(&self) -> bool {
+        matches!(self, Self::Requested)
+    }
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct WithdrawalRequest {
     pub id: Address,
     pub sender: Address,
@@ -267,7 +278,7 @@ pub struct WithdrawalRequest {
     pub bitcoin_address: Vec<u8>,
     pub timestamp_ms: u64,
     pub status: WithdrawalStatus,
-    pub pending_withdrawal_id: Option<Address>,
+    pub withdrawal_txn_id: Option<Address>,
     pub sui_tx_digest: Digest,
     /// BTC balance in satoshis.
     pub btc: u64,
@@ -280,9 +291,9 @@ pub struct CommittedRequestInfo {
     pub bitcoin_address: Vec<u8>,
 }
 
-/// Rust version of the Move hashi::withdrawal_queue::PendingWithdrawal type.
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct PendingWithdrawal {
+/// Rust version of the Move hashi::withdrawal_queue::WithdrawalTransaction type.
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct WithdrawalTransaction {
     pub id: Address,
     pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
@@ -296,8 +307,18 @@ pub struct PendingWithdrawal {
     pub epoch: u64,
 }
 
+impl WithdrawalTransaction {
+    pub fn all_outputs(&self) -> Vec<OutputUtxo> {
+        let mut outputs = self.withdrawal_outputs.clone();
+        if let Some(ref change) = self.change_output {
+            outputs.push(change.clone());
+        }
+        outputs
+    }
+}
+
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct OutputUtxo {
     /// In satoshis
     pub amount: u64,
@@ -305,7 +326,7 @@ pub struct OutputUtxo {
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize)]
 pub struct DepositRequest {
     pub id: Address,
     pub sender: Address,
@@ -314,7 +335,7 @@ pub struct DepositRequest {
     pub utxo: Utxo,
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis
@@ -323,7 +344,7 @@ pub struct Utxo {
 }
 
 /// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Clone, Debug, serde_derive::Deserialize)]
 pub struct UtxoRecord {
     pub utxo: Utxo,
     pub produced_by: Option<Address>,
@@ -331,7 +352,18 @@ pub struct UtxoRecord {
 }
 
 /// txid:vout
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde_derive::Deserialize)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Hash,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde_derive::Deserialize,
+    serde_derive::Serialize,
+)]
 pub struct UtxoId {
     // a 32 byte sha256 of the transaction
     pub txid: BitcoinTxid,
@@ -397,6 +429,12 @@ pub struct DisableVersion {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Upgrade {
     pub digest: Vec<u8>,
+}
+
+/// Rust version of the Move hashi::emergency_pause::EmergencyPause type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct EmergencyPause {
+    pub pause: bool,
 }
 
 /// Rust version of the Move sui::vec_map::VecMap type.
@@ -941,7 +979,7 @@ impl From<WithdrawalApprovedEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalPickedForProcessingEvent {
-    pub pending_id: Address,
+    pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
@@ -964,7 +1002,7 @@ impl From<WithdrawalPickedForProcessingEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalSignedEvent {
-    pub withdrawal_id: Address,
+    pub withdrawal_txn_id: Address,
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
 }
@@ -982,7 +1020,7 @@ impl From<WithdrawalSignedEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct WithdrawalConfirmedEvent {
-    pub pending_id: Address,
+    pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
     pub change_utxo_id: Option<UtxoId>,
     pub request_ids: Vec<Address>,

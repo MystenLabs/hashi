@@ -33,7 +33,8 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let UpdateConfig { key, value } = proposal::execute(hashi, proposal_id, clock);
     assert!(
         config::is_valid_core_config_entry(&key, &value)
-            || hashi::btc_config::is_valid_config_entry(&key, &value),
+            || hashi::btc_config::is_valid_config_entry(&key, &value)
+            || hashi::mpc_config::is_valid_config_entry(&key, &value),
         EInvalidConfigEntry,
     );
     let bytes = *key.as_bytes();

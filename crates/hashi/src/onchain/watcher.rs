@@ -27,6 +27,7 @@ use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
 use hashi_types::move_types::HashiEvent;
 
+#[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
@@ -204,21 +205,24 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .proposals
                     .remove(&proposal_executed_event.proposal_id);
 
-                // When an UpdateConfig proposal executes, the Hashi object's
-                // config field changes on-chain. The event carries no key/value
-                // payload, so re-fetch the config from the Hashi object to
-                // keep the in-memory state current.
-                if parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type)
-                    == ProposalType::UpdateConfig
-                {
+                // When an UpdateConfig or EmergencyPause proposal executes,
+                // the Hashi object's config field changes on-chain. The event
+                // carries no key/value payload, so re-fetch the config from
+                // the Hashi object to keep the in-memory state current.
+                if matches!(
+                    parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
+                    ProposalType::UpdateConfig | ProposalType::EmergencyPause
+                ) {
                     match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
                         Ok(config) => {
                             state.state_mut().hashi.config = config;
-                            tracing::info!("on-chain config refreshed after UpdateConfig proposal");
+                            tracing::info!(
+                                "on-chain config refreshed after config-changing proposal"
+                            );
                         }
                         Err(e) => {
                             tracing::error!(
-                                "failed to refresh config after UpdateConfig proposal: {e}"
+                                "failed to refresh config after config-changing proposal: {e}"
                             );
                         }
                     }
@@ -244,7 +248,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     timestamp_ms: deposit_requested_event.timestamp_ms,
                     sui_tx_digest: deposit_requested_event.sui_tx_digest,
                     utxo: super::types::Utxo {
-                        id: deposit_requested_event.utxo_id.into(),
+                        id: deposit_requested_event.utxo_id,
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
@@ -262,7 +266,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 let mut state = state.state_mut();
 
                 let utxo = super::types::Utxo {
-                    id: deposit_confirmed_event.utxo_id.into(),
+                    id: deposit_confirmed_event.utxo_id,
                     amount: deposit_confirmed_event.amount,
                     derivation_path: deposit_confirmed_event.derivation_path,
                 };
@@ -300,7 +304,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
                     timestamp_ms: withdrawal_requested_event.timestamp_ms,
                     status: super::types::WithdrawalStatus::Requested,
-                    pending_withdrawal_id: None,
+                    withdrawal_txn_id: None,
                     sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
                     btc: withdrawal_requested_event.btc_amount,
                 };
@@ -324,7 +328,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 }
             }
             HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
-                tracing::info!(pending_withdrawal_id = %event.pending_id, "Withdrawal picked for processing");
+                tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal picked for processing");
                 // Remove requests from the queue
                 {
                     let mut state = state.state_mut();
@@ -333,32 +337,20 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     }
                 }
 
-                // Fetch the full pending withdrawal from chain
-                let pending_withdrawals_id = state
-                    .state()
-                    .hashi()
-                    .withdrawal_queue
-                    .pending_withdrawals_id()
-                    .to_owned();
-                match super::fetch_pending_withdrawal(
-                    client,
-                    pending_withdrawals_id,
-                    event.pending_id,
-                )
-                .await
-                {
-                    Ok(pending) => {
+                // Fetch the full withdrawal transaction from chain
+                match super::fetch_withdrawal_txn(client, event.withdrawal_txn_id).await {
+                    Ok(txn) => {
                         state
                             .state_mut()
                             .hashi
                             .withdrawal_queue
-                            .pending_withdrawals
-                            .insert(pending.id, pending);
+                            .withdrawal_txns
+                            .insert(txn.id, txn);
                     }
                     Err(e) => {
                         tracing::error!(
-                            pending_withdrawal_id = %event.pending_id,
-                            "Failed to fetch pending withdrawal: {e}",
+                            withdrawal_txn_id = %event.withdrawal_txn_id,
+                            "Failed to fetch withdrawal transaction: {e}",
                         );
                     }
                 }
@@ -368,9 +360,9 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 {
                     let mut state = state.state_mut();
                     for input in &event.inputs {
-                        let utxo_id: super::types::UtxoId = input.id.into();
-                        if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&utxo_id) {
-                            record.locked_by = Some(event.pending_id);
+                        if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&input.id)
+                        {
+                            record.locked_by = Some(event.withdrawal_txn_id);
                         }
                     }
                     if let Some(ref change_output) = event.change_output {
@@ -388,7 +380,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                             change_utxo_id,
                             super::types::UtxoRecord {
                                 utxo: change_utxo,
-                                produced_by: Some(event.pending_id),
+                                produced_by: Some(event.withdrawal_txn_id),
                                 locked_by: None,
                             },
                         );
@@ -396,48 +388,49 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 }
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
-                tracing::info!(pending_withdrawal_id = %event.withdrawal_id, "Withdrawal signatures stored on-chain");
+                tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
                 let mut state = state.state_mut();
-                if let Some(pending) = state
+                if let Some(txn) = state
                     .hashi
                     .withdrawal_queue
-                    .pending_withdrawals
-                    .get_mut(&event.withdrawal_id)
+                    .withdrawal_txns
+                    .get_mut(&event.withdrawal_txn_id)
                 {
-                    pending.signatures = Some(event.signatures.clone());
+                    txn.signatures = Some(event.signatures.clone());
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
-                tracing::info!(pending_withdrawal_id = %event.pending_id, "Withdrawal confirmed on-chain");
+                tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal confirmed on-chain");
                 let mut state = state.state_mut();
 
                 // Promote the change UTXO from pending to confirmed by
                 // clearing `produced_by`. The UTXO was already inserted at
                 // commit time; input UTXOs are removed via UtxoSpentEvent.
-                if let Some(change_utxo_id) = event.change_utxo_id {
-                    let change_utxo_id: super::types::UtxoId = change_utxo_id.into();
-                    if let Some(record) =
+                if let Some(change_utxo_id) = event.change_utxo_id
+                    && let Some(record) =
                         state.hashi.utxo_pool.utxo_records.get_mut(&change_utxo_id)
-                    {
-                        record.produced_by = None;
-                    }
+                {
+                    record.produced_by = None;
                 }
 
                 state
                     .hashi
                     .withdrawal_queue
-                    .pending_withdrawals
-                    .remove(&event.pending_id);
+                    .withdrawal_txns
+                    .remove(&event.withdrawal_txn_id);
             }
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
                 let mut state = state.state_mut();
-                let utxo_id = utxo_spent_event.utxo_id.into();
-                state.hashi.utxo_pool.utxo_records.remove(&utxo_id);
+                state
+                    .hashi
+                    .utxo_pool
+                    .utxo_records
+                    .remove(&utxo_spent_event.utxo_id);
                 state
                     .hashi
                     .utxo_pool
                     .spent_utxos
-                    .insert(utxo_id, utxo_spent_event.spent_epoch);
+                    .insert(utxo_spent_event.utxo_id, utxo_spent_event.spent_epoch);
             }
             HashiEvent::StartReconfigEvent(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;
@@ -534,6 +527,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
         ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
+        ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
         _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

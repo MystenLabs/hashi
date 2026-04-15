@@ -110,9 +110,9 @@ pub struct SignWithdrawalTxConstructionResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionRequest {
-    /// The id of the PendingWithdrawal on Sui (32 bytes).
+    /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
-    pub pending_withdrawal_id: ::prost::bytes::Bytes,
+    pub withdrawal_txn_id: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionResponse {
@@ -123,7 +123,7 @@ pub struct SignWithdrawalTransactionResponse {
 /// Maps to crate::withdrawals::WithdrawalTxSigning
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTxSigningRequest {
-    /// Pending withdrawal id on Sui (32 bytes).
+    /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub withdrawal_id: ::prost::bytes::Bytes,
     /// Withdrawal request ids (each 32 bytes).
@@ -140,9 +140,9 @@ pub struct SignWithdrawalTxSigningResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalConfirmationRequest {
-    /// Pending withdrawal id on Sui.
+    /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
-    pub pending_withdrawal_id: ::prost::bytes::Bytes,
+    pub withdrawal_txn_id: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalConfirmationResponse {

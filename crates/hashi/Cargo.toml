@@ -45,6 +45,8 @@ anyhow.workspace = true
 toml.workspace = true
 futures.workspace = true
 tracing-subscriber.workspace = true
+age.workspace = true
+rust-embed.workspace = true
 rustls.workspace = true
 ed25519-dalek.workspace = true
 tonic-rustls.workspace = true
@@ -69,6 +71,7 @@ rand.workspace = true
 tap.workspace = true
 backon.workspace = true
 jiff.workspace = true
+tar.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

@@ -27,6 +27,7 @@ RUN mkdir -p crates/hashi-screener/src \
  && touch crates/hashi-types/src/lib.rs
 
 ENV TARGET=x86_64-unknown-linux-musl
+ENV OPENSSL_STATIC=true
 ENV CARGO_INCREMENTAL=0
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 

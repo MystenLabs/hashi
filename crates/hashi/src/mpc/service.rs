@@ -43,6 +43,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(1200);
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -105,8 +106,16 @@ impl MpcService {
         })
     }
 
+    #[tracing::instrument(name = "mpc_service", skip_all)]
     async fn run(mut self) {
-        if let Some(epoch) = self.get_pending_epoch_change() {
+        let pending = self.get_pending_epoch_change();
+        let is_in_committee = self.inner.is_in_current_committee();
+        info!(
+            "MPC service starting: pending_epoch_change={pending:?}, \
+             is_in_current_committee={is_in_committee}",
+        );
+        if let Some(epoch) = pending {
+            info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
             // No committee has been formed yet (epoch 0, no committee for epoch 0).
@@ -278,6 +287,7 @@ impl MpcService {
         Ok(output)
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
@@ -560,10 +570,9 @@ impl MpcService {
         }
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn handle_reconfig(&self, target_epoch: u64) {
         let reconfig_start = Instant::now();
-        // Determine whether this is an initial DKG or a key rotation
-        // based on if we already have a committed mpc_public_key.
         let run_dkg = self
             .inner
             .onchain_state()
@@ -572,41 +581,48 @@ impl MpcService {
             .committees
             .mpc_public_key()
             .is_empty();
-
-        // Create the MpcManager once before the retry loop so retries reuse
-        // the same manager (and its accumulated messages) instead of generating
-        // fresh random dealer messages that conflict with previously sent ones.
-        if run_dkg {
-            if let Err(e) = self.setup_initial_dkg(target_epoch) {
-                error!(
-                    "Failed to set up initial DKG for epoch {}: {e}",
-                    target_epoch
-                );
-                return;
-            }
-        } else if let Err(e) = self.setup_key_rotation(target_epoch) {
-            error!(
-                "Failed to set up key rotation for epoch {}: {e}",
-                target_epoch
-            );
-            return;
-        }
-
         let protocol_label = if run_dkg {
             MPC_LABEL_DKG
         } else {
             MPC_LABEL_KEY_ROTATION
         };
         let metrics = &self.inner.metrics;
+        info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}, entering retry loop",);
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
+                info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
                 return;
+            }
+            let setup_result = if run_dkg {
+                self.setup_initial_dkg(target_epoch)
+            } else {
+                self.setup_key_rotation(target_epoch)
+            };
+            if let Err(e) = setup_result {
+                error!(
+                    "Failed to set up MPC manager for epoch {}: {e}, retrying...",
+                    target_epoch
+                );
+                self.sleep_if_still_pending(target_epoch).await;
+                continue;
             }
             let protocol_start = Instant::now();
             let result = if run_dkg {
-                self.run_dkg(target_epoch).await
+                tokio::time::timeout(MPC_PROTOCOL_TIMEOUT, self.run_dkg(target_epoch))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "DKG timed out after {MPC_PROTOCOL_TIMEOUT:?}"
+                        ))
+                    })
             } else {
-                self.run_key_rotation(target_epoch).await
+                tokio::time::timeout(MPC_PROTOCOL_TIMEOUT, self.run_key_rotation(target_epoch))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "Key rotation timed out after {MPC_PROTOCOL_TIMEOUT:?}"
+                        ))
+                    })
             };
             metrics
                 .mpc_total_duration_seconds
@@ -646,6 +662,9 @@ impl MpcService {
             .with_label_values(&[protocol_label])
             .observe(end_reconfig_start.elapsed().as_secs_f64());
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
+        if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
+            error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+        }
         let prepare_signing_start = Instant::now();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             match self.prepare_signing(target_epoch, &output).await {
@@ -692,6 +711,7 @@ impl MpcService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
@@ -699,11 +719,21 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for key rotation"))?;
         let source_epoch = mpc_manager.read().unwrap().source_epoch;
+        let onchain_mpc_key = hex::encode(onchain_state.mpc_public_key());
+        let onchain_epoch = onchain_state.epoch();
+        info!(
+            "run_key_rotation: target_epoch={target_epoch}, source_epoch={source_epoch}, \
+             onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
+        );
         let previous_certs = fetch_certificates(&onchain_state, source_epoch, None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
+        info!(
+            "run_key_rotation: fetched {} certs for source_epoch={source_epoch}",
+            previous_certs.len(),
+        );
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(
             onchain_state.clone(),

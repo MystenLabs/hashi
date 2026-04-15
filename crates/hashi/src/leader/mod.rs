@@ -8,13 +8,12 @@ pub(crate) use retry::RetryPolicy;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
-use crate::deposits::DepositRequestErrorKind;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
-use crate::onchain::types::PendingWithdrawal;
 use crate::onchain::types::WithdrawalRequest;
+use crate::onchain::types::WithdrawalTransaction;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
@@ -58,7 +57,6 @@ const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct LeaderService {
     inner: Arc<Hashi>,
-    deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
@@ -77,7 +75,6 @@ impl LeaderService {
     pub fn new(hashi: Arc<Hashi>) -> Self {
         Self {
             inner: hashi,
-            deposit_retry_tracker: RetryTracker::new(),
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
@@ -101,6 +98,7 @@ impl LeaderService {
         })
     }
 
+    #[tracing::instrument(name = "leader", skip_all)]
     async fn run(mut self) {
         info!("Starting leader service");
 
@@ -111,6 +109,7 @@ impl LeaderService {
         info!("MPC key is ready, starting leader loop");
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
+        let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
 
         loop {
             trace!("Waiting for next checkpoint or task completion...");
@@ -134,18 +133,34 @@ impl LeaderService {
                         continue;
                     }
 
-                    // TODO: Remove this drain once the leader loop is restructured
-                    // to avoid the checkpoint branch blocking task draining.
+                    self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
+                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
+                    self.process_unsigned_withdrawal_txns();
+                    self.process_signed_withdrawal_txns();
+                    self.check_delete_proposals(checkpoint_timestamp_ms);
+                }
+                wait_result = btc_block_rx.changed() => {
+                    if let Err(e) = wait_result {
+                        error!("Error waiting for Bitcoin block height change: {e}");
+                        break;
+                    }
+                    let block_height = *btc_block_rx.borrow_and_update();
+                    let (checkpoint_height, checkpoint_timestamp_ms) = {
+                        let checkpoint_info = checkpoint_rx.borrow();
+                        (checkpoint_info.height, checkpoint_info.timestamp_ms)
+                    };
+
+                    if !self.is_current_leader(checkpoint_height) {
+                        continue;
+                    }
+
+                    debug!("New Bitcoin block {block_height}: processing deposit requests");
+
                     while let Some(result) = self.deposit_tasks.try_join_next() {
                         self.handle_completed_deposit_task(result);
                     }
 
                     self.process_deposit_requests(checkpoint_timestamp_ms);
-                    self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_unsigned_pending_withdrawals();
-                    self.process_signed_pending_withdrawals();
-                    self.check_delete_proposals(checkpoint_timestamp_ms);
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
@@ -233,6 +248,11 @@ impl LeaderService {
     }
 
     pub fn is_current_leader(&self, checkpoint_height: u64) -> bool {
+        if self.inner.onchain_state().state().hashi().config.paused() {
+            debug!("Bridge is paused, not acting as leader");
+            return false;
+        }
+
         match self.inner.config.force_run_as_leader() {
             ForceRunAsLeader::Always => return true,
             ForceRunAsLeader::Never => return false,
@@ -264,13 +284,27 @@ impl LeaderService {
         is_leader
     }
 
+    fn is_reconfiguring(&self) -> bool {
+        self.inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .pending_epoch_change()
+            .is_some()
+    }
+
     fn process_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_deposit_requests");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping deposit request processing");
+            return;
+        }
+
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
         let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
-        self.deposit_retry_tracker.prune(&deposit_ids);
         // TODO: If we keep AbortHandles for deposit tasks, explicitly abort tasks whose
         // deposit IDs are no longer present here so they do not linger until timeout.
         self.inflight_deposits
@@ -286,110 +320,51 @@ impl LeaderService {
             if self.inflight_deposits.contains(&deposit_request.id) {
                 continue;
             }
-            if self
-                .deposit_retry_tracker
-                .should_skip(&deposit_request.id, checkpoint_timestamp_ms)
-            {
-                continue;
-            }
 
             let deposit_id = deposit_request.id;
             let inner = self.inner.clone();
-            let deposit_retry_tracker = self.deposit_retry_tracker.clone();
 
             self.inflight_deposits.insert(deposit_id);
             self.deposit_tasks.spawn(async move {
-                let task_result = tokio::time::timeout(
+                let result = tokio::time::timeout(
                     LEADER_TASK_TIMEOUT,
-                    Self::process_deposit_request(
-                        inner.clone(),
-                        deposit_retry_tracker.clone(),
-                        deposit_request,
-                        checkpoint_timestamp_ms,
-                    ),
+                    Self::process_deposit_request(inner, deposit_request),
                 )
                 .await;
 
-                let (result, failure_kind) = match task_result {
-                    Ok(result) => (result, None),
-                    Err(_) => {
-                        let kind = DepositRequestErrorKind::TimedOut;
-                        inner
-                            .metrics
-                            .leader_retries_total
-                            .with_label_values(&["deposit", &format!("{kind:?}")])
-                            .inc();
-                        deposit_retry_tracker.record_failure(
-                            kind,
-                            deposit_id,
-                            checkpoint_timestamp_ms,
-                        );
-                        (
-                            Err(anyhow::anyhow!(
-                                "deposit {deposit_id} timed out after {LEADER_TASK_TIMEOUT:?}"
-                            )),
-                            Some(kind),
-                        )
-                    }
+                let result = match result {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "deposit {deposit_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                    )),
                 };
-
-                if result.is_err() && failure_kind.is_none() {
-                    let kind = DepositRequestErrorKind::TaskFailed;
-                    inner
-                        .metrics
-                        .leader_retries_total
-                        .with_label_values(&["deposit", &format!("{kind:?}")])
-                        .inc();
-                    deposit_retry_tracker.record_failure(kind, deposit_id, checkpoint_timestamp_ms);
-                }
 
                 (deposit_id, result)
             });
         }
 
-        self.inner
-            .metrics
-            .leader_items_in_backoff
-            .with_label_values(&["deposit"])
-            .set(
-                self.deposit_retry_tracker
-                    .in_backoff_count(checkpoint_timestamp_ms) as i64,
-            );
-
         self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms);
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn process_deposit_request(
         inner: Arc<Hashi>,
-        deposit_retry_tracker: RetryTracker<DepositRequestErrorKind>,
         deposit_request: DepositRequest,
-        checkpoint_timestamp_ms: u64,
     ) -> anyhow::Result<()> {
-        info!(deposit_request_id = %deposit_request.id, "Processing deposit request");
+        info!("Processing deposit request");
 
         // Validate deposit_request before asking for signatures
-        match inner.validate_deposit_request(&deposit_request).await {
-            Ok(()) => {}
-            Err(e) => {
-                debug!(request_id = ?deposit_request.id, "Deposit validation failed: {e}");
-                let kind = e.kind();
-                inner
-                    .metrics
-                    .leader_retries_total
-                    .with_label_values(&["deposit", &format!("{kind:?}")])
-                    .inc();
-                deposit_retry_tracker.record_failure(
-                    kind,
-                    deposit_request.id,
-                    checkpoint_timestamp_ms,
-                );
-                return Ok(());
-            }
-        }
+        inner
+            .validate_deposit_request(&deposit_request)
+            .await
+            .map_err(|e| {
+                debug!("Deposit validation failed: {e}");
+                anyhow::anyhow!(e)
+            })?;
 
-        info!(deposit_request_id = %deposit_request.id, "Deposit request validated successfully");
+        info!("Deposit request validated successfully");
 
-        let proto_request = deposit_request.to_proto();
+        let proto_request = deposit_request_to_proto(&deposit_request);
         let members = inner
             .onchain_state()
             .current_committee_members()
@@ -421,7 +396,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(deposit_request_id = %deposit_request.id, "Failed to add deposit signature: {e}");
+                error!("Failed to add deposit signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -447,29 +422,27 @@ impl LeaderService {
                     .with_label_values(&["confirm_deposit", "success"])
                     .inc();
                 inner.metrics.deposits_confirmed_total.inc();
-                info!(deposit_request_id = %deposit_request.id, "Successfully submitted deposit confirmation");
+                info!("Successfully submitted deposit confirmation");
             })
-            .inspect_err(|_| {
+            .inspect_err(|e| {
+                error!("Failed to submit deposit confirmation: {e}");
                 inner
                     .metrics
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_deposit", "failure"])
                     .inc();
             })?;
-        deposit_retry_tracker.clear(&deposit_request.id);
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_deposit_confirmation_signature(
         inner: &Arc<Hashi>,
         proto_request: SignDepositConfirmationRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting deposit confirmation signature from {}",
-            validator_address
-        );
+        trace!("Requesting deposit confirmation signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -518,6 +491,10 @@ impl LeaderService {
 
     fn process_unapproved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_unapproved_withdrawal_requests");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping withdrawal approval processing");
+            return;
+        }
 
         if self.withdrawal_approval_task.is_some() {
             debug!("Withdrawal approval task already in-flight, skipping");
@@ -573,6 +550,7 @@ impl LeaderService {
         }));
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(batch_size = to_process.len()))]
     async fn process_unapproved_withdrawal_requests_task(
         inner: Arc<Hashi>,
         retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
@@ -660,10 +638,7 @@ impl LeaderService {
                     retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
                 }
                 if let Err(err) = &result {
-                    error!(
-                        withdrawal_request_id = %request_id,
-                        "Withdrawal approval failed: {err:#}"
-                    );
+                    error!(request_id = %request_id, "Withdrawal approval failed: {err:#}");
                 }
 
                 (request_id, result)
@@ -689,6 +664,7 @@ impl LeaderService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(request_id = %request.id))]
     async fn process_unapproved_withdrawal_request(
         inner: Arc<Hashi>,
         retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
@@ -728,7 +704,7 @@ impl LeaderService {
 
         let mut aggregator = BlsSignatureAggregator::new(committee, approval);
         if let Err(e) = aggregator.add_signature(local_sig) {
-            error!(withdrawal_request_id = %request.id, "Failed to add local approval signature: {e}");
+            error!("Failed to add local approval signature: {e}");
         }
 
         // Fan out signature requests to remote members in parallel.
@@ -749,7 +725,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(withdrawal_request_id = %request.id, "Failed to add approval signature: {e}");
+                error!("Failed to add approval signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -768,14 +744,14 @@ impl LeaderService {
                 request.id,
                 checkpoint_timestamp_ms,
             );
-            error!(withdrawal_request_id = %request.id, "Insufficient approval signatures: weight {weight} < {required_weight}");
+            error!("Insufficient approval signatures: weight {weight} < {required_weight}");
             return Ok(None);
         }
 
         match aggregator.finish() {
             Ok(signed) => Ok(Some((request.id, signed.committee_signature().clone()))),
             Err(e) => {
-                error!(withdrawal_request_id = %request.id, "Failed to build approval certificate: {e}");
+                error!("Failed to build approval certificate: {e}");
                 Ok(None)
             }
         }
@@ -836,6 +812,10 @@ impl LeaderService {
 
     fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_approved_withdrawal_requests");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping withdrawal commitment processing");
+            return;
+        }
 
         if self.withdrawal_commitment_task.is_some() {
             debug!("Withdrawal commitment task already in-flight, skipping");
@@ -936,6 +916,7 @@ impl LeaderService {
         }));
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(batch_size = requests.len()))]
     async fn process_approved_withdrawal_request_batch(
         inner: Arc<Hashi>,
         retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
@@ -1028,6 +1009,26 @@ impl LeaderService {
             }
         };
 
+        // Proactively trigger a presig refill if this commit will allocate
+        // indices beyond the current pool.
+        {
+            let num_inputs = approval.selected_utxos.len() as u64;
+            let num_consumed = inner.onchain_state().state().hashi().num_consumed_presigs;
+            let needed_end = num_consumed + num_inputs;
+            if let Some(sm) = inner.try_signing_manager() {
+                let mgr = sm.read().unwrap();
+                let available_end = mgr.available_presig_end_index();
+                if needed_end > available_end {
+                    info!(
+                        "Presig pool may be insufficient for this withdrawal: \
+                         need index {needed_end}, pool ends at {available_end}. \
+                         Triggering proactive refill.",
+                    );
+                    mgr.trigger_refill();
+                }
+            }
+        }
+
         // Submit commit_withdrawal_tx to Sui
         Self::submit_commit_withdrawal_tx(&inner, &approval, signed_approval.committee_signature())
             .await
@@ -1051,77 +1052,79 @@ impl LeaderService {
     }
 
     // ========================================================================
-    // Step 3: MPC sign pending withdrawals and store signatures on-chain
+    // Step 3: MPC sign withdrawal transactions and store signatures on-chain
     // ========================================================================
 
-    fn process_unsigned_pending_withdrawals(&mut self) {
-        debug!("Entering process_unsigned_pending_withdrawals");
-        let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
-        pending_withdrawals.retain(|p| p.signatures.is_none());
-        pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
+    fn process_unsigned_withdrawal_txns(&mut self) {
+        debug!("Entering process_unsigned_withdrawal_txns");
+        if self.is_reconfiguring() {
+            debug!("Reconfig in progress, skipping withdrawal tx signing");
+            return;
+        }
 
-        let pending_ids: Vec<Address> = pending_withdrawals.iter().map(|p| p.id).collect();
+        let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
+        withdrawal_txns.retain(|p| p.signatures.is_none());
+        withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
+
+        let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
         self.inflight_withdrawal_signings
             .retain(|id| pending_ids.contains(id));
 
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
-        for pending in pending_withdrawals {
+        for txn in withdrawal_txns {
             if self.withdrawal_signing_tasks.len() >= max_concurrent {
                 break;
             }
-            if self.inflight_withdrawal_signings.contains(&pending.id) {
+            if self.inflight_withdrawal_signings.contains(&txn.id) {
                 continue;
             }
 
-            let pending_id = pending.id;
+            let txn_id = txn.id;
             let inner = self.inner.clone();
 
-            self.inflight_withdrawal_signings.insert(pending_id);
+            self.inflight_withdrawal_signings.insert(txn_id);
             self.withdrawal_signing_tasks.spawn(async move {
                 let result = tokio::time::timeout(
                     LEADER_TASK_TIMEOUT,
-                    Self::process_unsigned_pending_withdrawal(inner, pending),
+                    Self::process_unsigned_withdrawal_txn(inner, txn),
                 )
                 .await;
 
                 let result = match result {
                     Ok(result) => result,
                     Err(_) => Err(anyhow::anyhow!(
-                        "withdrawal signing for {pending_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                        "withdrawal signing for {txn_id} timed out after {LEADER_TASK_TIMEOUT:?}"
                     )),
                 };
 
-                (pending_id, result)
+                (txn_id, result)
             });
         }
     }
 
-    async fn process_unsigned_pending_withdrawal(
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
+    async fn process_unsigned_withdrawal_txn(
         inner: Arc<Hashi>,
-        pending: PendingWithdrawal,
+        txn: WithdrawalTransaction,
     ) -> anyhow::Result<()> {
-        // If the pending withdrawal is from a previous epoch, reassign its presig
+        // If the withdrawal transaction is from a previous epoch, reassign its presig
         // indices from the new epoch's counter before signing.
         // TODO: Batch multiple stale-epoch withdrawals into a single PTB.
         let current_epoch = inner.onchain_state().epoch();
-        if pending.epoch != current_epoch {
+        if txn.epoch != current_epoch {
             info!(
-                pending_withdrawal_id = %pending.id,
-                "Pending withdrawal from epoch {} (current {}), reassigning presig indices",
-                pending.epoch, current_epoch,
+                "Withdrawal transaction from epoch {} (current {}), reassigning presig indices",
+                txn.epoch, current_epoch,
             );
             let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
             executor
-                .execute_allocate_presigs_for_pending_withdrawal(pending.id)
+                .execute_allocate_presigs_for_withdrawal_txn(txn.id)
                 .await?;
-            info!(
-                pending_withdrawal_id = %pending.id,
-                "Presig indices reassigned, will sign on next checkpoint"
-            );
+            info!("Presig indices reassigned, will sign on next checkpoint");
             // Return and let the next checkpoint iteration pick up the updated state.
             return Ok(());
         }
-        info!(pending_withdrawal_id = %pending.id, "MPC signing pending withdrawal");
+        info!("MPC signing withdrawal transaction");
 
         let members = inner
             .onchain_state()
@@ -1131,12 +1134,9 @@ impl LeaderService {
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
         // via P2P, so we must fan out requests in parallel.
-        let signatures_by_input =
-            Self::collect_withdrawal_tx_signatures(&inner, &pending.id, &members)
-                .await
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", pending.id)
-                })?;
+        let signatures_by_input = Self::collect_withdrawal_tx_signatures(&inner, &txn.id, &members)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
 
         // 2. Extract raw signature bytes for on-chain storage
         let witness_signatures: Vec<Vec<u8>> = signatures_by_input
@@ -1146,8 +1146,8 @@ impl LeaderService {
 
         // 3. Build the WithdrawalTxSigning and get BLS certificate via fan-out
         let signed_message = WithdrawalTxSigning {
-            withdrawal_id: pending.id,
-            request_ids: pending.request_ids.clone(),
+            withdrawal_id: txn.id,
+            request_ids: txn.request_ids.clone(),
             signatures: witness_signatures.clone(),
         };
 
@@ -1172,7 +1172,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(pending_withdrawal_id = %pending.id, "Failed to add withdrawal sign message signature: {e}");
+                error!(withdrawal_txn_id = %txn.id, "Failed to add withdrawal sign message signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -1189,11 +1189,11 @@ impl LeaderService {
         let signed = aggregator.finish()?;
 
         // 4. Submit sign_withdrawal to Sui (writes signatures on-chain).
-        // Broadcast + confirm happens via process_signed_pending_withdrawals on the next tick.
+        // Broadcast + confirm happens via process_signed_withdrawal_txns on the next tick.
         Self::submit_sign_withdrawal(
             &inner,
-            &pending.id,
-            &pending.request_ids.clone(),
+            &txn.id,
+            &txn.request_ids.clone(),
             &witness_signatures,
             signed.committee_signature(),
         )
@@ -1220,121 +1220,130 @@ impl LeaderService {
     // Step 4-5: Broadcast signed tx and confirm on-chain
     // ========================================================================
 
-    fn process_signed_pending_withdrawals(&mut self) {
-        debug!("Entering process_signed_pending_withdrawals");
-        let mut pending_withdrawals = self.inner.onchain_state().pending_withdrawals();
-        pending_withdrawals.retain(|p| p.signatures.is_some());
-        pending_withdrawals.sort_by_key(|p| p.timestamp_ms);
+    fn process_signed_withdrawal_txns(&mut self) {
+        debug!("Entering process_signed_withdrawal_txns");
+        let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
+        withdrawal_txns.retain(|p| p.signatures.is_some());
+        withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
-        let pending_ids: Vec<Address> = pending_withdrawals.iter().map(|p| p.id).collect();
+        let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
         self.inflight_withdrawal_broadcasts
             .retain(|id| pending_ids.contains(id));
 
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
-        for pending in pending_withdrawals {
+        for txn in withdrawal_txns {
             if self.withdrawal_broadcast_tasks.len() >= max_concurrent {
                 break;
             }
-            if self.inflight_withdrawal_broadcasts.contains(&pending.id) {
+            if self.inflight_withdrawal_broadcasts.contains(&txn.id) {
                 continue;
             }
 
-            let pending_id = pending.id;
+            let txn_id = txn.id;
             let inner = self.inner.clone();
 
-            self.inflight_withdrawal_broadcasts.insert(pending_id);
+            self.inflight_withdrawal_broadcasts.insert(txn_id);
             self.withdrawal_broadcast_tasks.spawn(async move {
                 let result = tokio::time::timeout(
                     LEADER_TASK_TIMEOUT,
-                    Self::handle_signed_withdrawal(inner, pending),
+                    Self::handle_signed_withdrawal(inner, txn),
                 )
                 .await;
 
                 let result = match result {
                     Ok(result) => result,
                     Err(_) => Err(anyhow::anyhow!(
-                        "withdrawal broadcast for {pending_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                        "withdrawal broadcast for {txn_id} timed out after {LEADER_TASK_TIMEOUT:?}"
                     )),
                 };
 
-                (pending_id, result)
+                (txn_id, result)
             });
         }
     }
 
     /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
     /// enough BTC confirmations are reached.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid))]
     async fn handle_signed_withdrawal(
         inner: Arc<Hashi>,
-        pending: PendingWithdrawal,
+        txn: WithdrawalTransaction,
     ) -> anyhow::Result<()> {
         let confirmation_threshold = inner.onchain_state().bitcoin_confirmation_threshold();
-        let txid: bitcoin::Txid = pending.txid.into();
+        let txid: bitcoin::Txid = txn.txid.into();
+        tracing::Span::current().record("bitcoin_txid", tracing::field::display(&txid));
 
         match inner.btc_monitor().get_transaction_status(txid).await {
             Ok(TxStatus::Confirmed { confirmations })
                 if confirmations >= confirmation_threshold =>
             {
-                info!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx confirmed with {confirmations} confirmations, proceeding to on-chain confirmation");
-                Self::confirm_withdrawal_on_sui(&inner, &pending).await?;
+                info!(
+                    confirmations,
+                    "Withdrawal tx confirmed, proceeding to on-chain confirmation"
+                );
+                Self::confirm_withdrawal_on_sui(&inner, &txn).await?;
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
-                debug!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx has {confirmations}/{confirmation_threshold} confirmations, waiting for more");
+                debug!(
+                    confirmations,
+                    confirmation_threshold, "Withdrawal tx waiting for more confirmations"
+                );
             }
             Ok(TxStatus::InMempool) => {
-                debug!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx in mempool, waiting for confirmations");
+                debug!("Withdrawal tx in mempool, waiting for confirmations");
             }
             Ok(TxStatus::NotFound) => {
-                Self::rebuild_and_broadcast_withdrawal_btc_tx(&inner, &pending, txid).await;
+                Self::rebuild_and_broadcast_withdrawal_btc_tx(&inner, &txn, txid).await;
             }
             Err(e) => {
                 anyhow::bail!(
-                    "failed to query transaction status for pending withdrawal {}: {e}",
-                    pending.id
+                    "failed to query transaction status for withdrawal transaction {}: {e}",
+                    txn.id
                 );
             }
         }
         Ok(())
     }
 
-    /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
+    /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
     /// data (stored witness signatures) and broadcast it to the Bitcoin network.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid))]
     async fn rebuild_and_broadcast_withdrawal_btc_tx(
         inner: &Arc<Hashi>,
-        pending: &PendingWithdrawal,
+        txn: &WithdrawalTransaction,
         txid: bitcoin::Txid,
     ) {
-        warn!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Withdrawal tx not found, re-broadcasting from on-chain signatures");
+        warn!("Withdrawal tx not found, re-broadcasting from on-chain signatures");
 
-        let tx = match Self::rebuild_signed_tx_from_onchain(inner, pending) {
+        let tx = match Self::rebuild_signed_tx_from_onchain(inner, txn) {
             Ok(tx) => tx,
             Err(e) => {
-                error!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Failed to rebuild signed withdrawal tx: {e}");
+                error!("Failed to rebuild signed withdrawal tx: {e}");
                 return;
             }
         };
 
         match inner.btc_monitor().broadcast_transaction(tx).await {
             Ok(()) => {
-                info!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Re-broadcast withdrawal tx");
+                info!("Re-broadcast withdrawal tx");
             }
             Err(e) => {
-                error!(pending_withdrawal_id = %pending.id, bitcoin_txid = %txid, "Failed to re-broadcast withdrawal tx: {e}");
+                error!("Failed to re-broadcast withdrawal tx: {e}");
             }
         }
     }
 
-    /// Rebuild a fully signed Bitcoin transaction from on-chain PendingWithdrawal
+    /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
     fn rebuild_signed_tx_from_onchain(
         inner: &Arc<Hashi>,
-        pending: &PendingWithdrawal,
+        txn: &WithdrawalTransaction,
     ) -> anyhow::Result<bitcoin::Transaction> {
-        let raw_sigs = pending
+        let raw_sigs = txn
             .signatures
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No signatures on pending withdrawal"))?;
+            .ok_or_else(|| anyhow::anyhow!("No signatures on withdrawal transaction"))?;
 
-        let mut tx = inner.build_unsigned_withdrawal_tx(&pending.inputs, &pending.all_outputs())?;
+        let mut tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
 
         anyhow::ensure!(
             raw_sigs.len() == tx.input.len(),
@@ -1343,18 +1352,17 @@ impl LeaderService {
             raw_sigs.len()
         );
         anyhow::ensure!(
-            tx.input.len() == pending.inputs.len(),
-            "Input count mismatch: tx has {} inputs, pending has {}",
+            tx.input.len() == txn.inputs.len(),
+            "Input count mismatch: tx has {} inputs, txn has {}",
             tx.input.len(),
-            pending.inputs.len()
+            txn.inputs.len()
         );
 
         let hashi_pubkey = inner.get_hashi_pubkey()?;
-        for ((input, pending_input), sig_bytes) in
-            tx.input.iter_mut().zip(pending.inputs.iter()).zip(raw_sigs)
+        for ((input, txn_input), sig_bytes) in
+            tx.input.iter_mut().zip(txn.inputs.iter()).zip(raw_sigs)
         {
-            let pubkey =
-                inner.deposit_pubkey(&hashi_pubkey, pending_input.derivation_path.as_ref())?;
+            let pubkey = inner.deposit_pubkey(&hashi_pubkey, txn_input.derivation_path.as_ref())?;
             let (script, control_block, _) =
                 bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
             let mut witness = bitcoin::Witness::new();
@@ -1367,9 +1375,10 @@ impl LeaderService {
         Ok(tx)
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn confirm_withdrawal_on_sui(
         inner: &Arc<Hashi>,
-        pending: &PendingWithdrawal,
+        txn: &WithdrawalTransaction,
     ) -> anyhow::Result<()> {
         let members = inner
             .onchain_state()
@@ -1377,9 +1386,9 @@ impl LeaderService {
             .ok_or_else(|| anyhow::anyhow!("No current committee members for confirmation"))?;
 
         let confirmation_cert =
-            Self::collect_withdrawal_confirmation_signature(inner, pending.id, &members).await?;
+            Self::collect_withdrawal_confirmation_signature(inner, txn.id, &members).await?;
 
-        Self::submit_confirm_withdrawal(inner, &pending.id, &confirmation_cert)
+        Self::submit_confirm_withdrawal(inner, &txn.id, &confirmation_cert)
             .await
             .inspect(|()| {
                 inner
@@ -1400,9 +1409,10 @@ impl LeaderService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
     async fn collect_withdrawal_confirmation_signature(
         inner: &Arc<Hashi>,
-        pending_id: Address,
+        withdrawal_txn_id: Address,
         members: &[CommitteeMember],
     ) -> anyhow::Result<CommitteeSignature> {
         let committee = inner
@@ -1410,7 +1420,7 @@ impl LeaderService {
             .current_committee()
             .expect("No current committee");
         let confirmation = crate::withdrawals::WithdrawalConfirmation {
-            withdrawal_id: pending_id,
+            withdrawal_id: withdrawal_txn_id,
         };
 
         let required_weight = certificate_threshold(committee.total_weight());
@@ -1420,7 +1430,8 @@ impl LeaderService {
             let inner = inner.clone();
             let member = member.clone();
             sig_tasks.spawn(async move {
-                Self::request_withdrawal_confirmation_signature(&inner, pending_id, &member).await
+                Self::request_withdrawal_confirmation_signature(&inner, withdrawal_txn_id, &member)
+                    .await
             });
         }
 
@@ -1428,7 +1439,7 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!(pending_withdrawal_id = %pending_id, "Failed to add withdrawal confirmation signature: {e}");
+                error!("Failed to add withdrawal confirmation signature: {e}");
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -1438,24 +1449,22 @@ impl LeaderService {
         let weight = aggregator.weight();
         if weight < required_weight {
             anyhow::bail!(
-                "Insufficient withdrawal confirmation signatures for pending {:?}: weight {weight} < {required_weight}",
-                pending_id
+                "Insufficient withdrawal confirmation signatures for {:?}: weight {weight} < {required_weight}",
+                withdrawal_txn_id
             );
         }
 
         Ok(aggregator.finish()?.into_parts().0)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_commitment_signature(
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalTxConstructionRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal approval signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal tx commitment signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1498,16 +1507,14 @@ impl LeaderService {
             .ok()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_approval_signature(
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalRequestApprovalRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal request approval signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal request approval signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1550,16 +1557,14 @@ impl LeaderService {
             .ok()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signing_signature(
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalTxSigningRequest,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal tx signing signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal tx signing signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1602,16 +1607,14 @@ impl LeaderService {
             .ok()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
-        pending_withdrawal_id: &Address,
+        withdrawal_txn_id: &Address,
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal tx signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal tx signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1624,7 +1627,7 @@ impl LeaderService {
             })?;
 
         let proto_request = SignWithdrawalTransactionRequest {
-            pending_withdrawal_id: pending_withdrawal_id.as_bytes().to_vec().into(),
+            withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
         };
 
         let response = rpc_client
@@ -1658,14 +1661,12 @@ impl LeaderService {
 
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
-        pending_withdrawal_id: &Address,
+        withdrawal_txn_id: &Address,
         members: &[CommitteeMember],
     ) -> Option<Vec<SchnorrSignature>> {
         let futures: Vec<_> = members
             .iter()
-            .map(|member| {
-                Self::request_withdrawal_tx_signature(inner, pending_withdrawal_id, member)
-            })
+            .map(|member| Self::request_withdrawal_tx_signature(inner, withdrawal_txn_id, member))
             .collect();
         let results = futures::future::join_all(futures).await;
 
@@ -1679,7 +1680,7 @@ impl LeaderService {
                 None => {
                     error!(
                         "Could not get mpc signatures for {:?}; stopping processing",
-                        pending_withdrawal_id
+                        withdrawal_txn_id
                     );
                     return None;
                 }
@@ -1687,16 +1688,14 @@ impl LeaderService {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_confirmation_signature(
         inner: &Arc<Hashi>,
-        pending_withdrawal_id: Address,
+        withdrawal_txn_id: Address,
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        trace!(
-            "Requesting withdrawal confirmation signature from {}",
-            validator_address
-        );
+        trace!("Requesting withdrawal confirmation signature");
 
         let mut rpc_client = inner
             .onchain_state()
@@ -1711,7 +1710,7 @@ impl LeaderService {
 
         let response = rpc_client
             .sign_withdrawal_confirmation(SignWithdrawalConfirmationRequest {
-                pending_withdrawal_id: pending_withdrawal_id.as_bytes().to_vec().into(),
+                withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
             })
             .await
             .inspect_err(|e| {
@@ -1787,39 +1786,34 @@ impl LeaderService {
 
     async fn submit_confirm_withdrawal(
         inner: &Arc<Hashi>,
-        pending_withdrawal_id: &Address,
+        withdrawal_txn_id: &Address,
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
-        info!("Confirming withdrawal {:?}", pending_withdrawal_id);
+        info!("Confirming withdrawal {:?}", withdrawal_txn_id);
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
-            .execute_confirm_withdrawal(pending_withdrawal_id, cert)
+            .execute_confirm_withdrawal(withdrawal_txn_id, cert)
             .await?;
 
-        info!(
-            "Successfully confirmed withdrawal {:?}",
-            pending_withdrawal_id
-        );
+        info!("Successfully confirmed withdrawal {:?}", withdrawal_txn_id);
         Ok(())
     }
 }
 
-impl DepositRequest {
-    fn to_proto(&self) -> SignDepositConfirmationRequest {
-        SignDepositConfirmationRequest {
-            id: self.id.as_bytes().to_vec().into(),
-            txid: self.utxo.id.txid.as_bytes().to_vec().into(),
-            vout: self.utxo.id.vout,
-            amount: self.utxo.amount,
-            derivation_path: self
-                .utxo
-                .derivation_path
-                .map(|p| p.as_bytes().to_vec().into()),
-            timestamp_ms: self.timestamp_ms,
-            requester_address: self.sender.as_bytes().to_vec().into(),
-            sui_tx_digest: self.sui_tx_digest.as_bytes().to_vec().into(),
-        }
+fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequest {
+    SignDepositConfirmationRequest {
+        id: req.id.as_bytes().to_vec().into(),
+        txid: req.utxo.id.txid.as_bytes().to_vec().into(),
+        vout: req.utxo.id.vout,
+        amount: req.utxo.amount,
+        derivation_path: req
+            .utxo
+            .derivation_path
+            .map(|p| p.as_bytes().to_vec().into()),
+        timestamp_ms: req.timestamp_ms,
+        requester_address: req.sender.as_bytes().to_vec().into(),
+        sui_tx_digest: req.sui_tx_digest.as_bytes().to_vec().into(),
     }
 }
 

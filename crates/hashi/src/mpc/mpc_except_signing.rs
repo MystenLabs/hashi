@@ -79,11 +79,8 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
+const MAX_BASIS_POINTS: u32 = 10000;
 
-// DKG protocol
-// 1) A dealer sends out a message to all parties containing the encrypted shares and the public keys of the nonces.
-// 2) Each party verifies the message and returns a signature. Once sufficient valid signatures are received from the parties, the dealer sends a certificate to Sui (TOB).
-// 3) Once sufficient valid certificates are received, a party completes the protocol locally by aggregating the shares from the dealers.
 pub struct MpcManager {
     // Immutable during the epoch
     pub party_id: PartyId,
@@ -103,7 +100,8 @@ pub struct MpcManager {
     previous_output: Option<MpcOutput>,
     pub batch_size_per_weight: u16,
 
-    // Mutable during the epoch
+    // TODO: Rename these fields so it is clear at the call site which are
+    // backed by persistent store and which live only in memory.
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
     pub dkg_messages: HashMap<Address, avss::Message>,
     pub rotation_messages: HashMap<Address, RotationMessages>,
@@ -128,7 +126,8 @@ impl MpcManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
-        allowed_delta: u16,
+        threshold_in_basis_points: u16,
+        weight_reduction_allowed_delta: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
@@ -149,8 +148,12 @@ impl MpcManager {
             .get(&epoch)
             .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
-        // TODO: Pass t and f as arguments instead of computing them
-        let (nodes, threshold) = build_reduced_nodes(&committee, allowed_delta, weight_divisor)?;
+        let (nodes, threshold) = build_reduced_nodes(
+            &committee,
+            threshold_in_basis_points,
+            weight_reduction_allowed_delta,
+            weight_divisor,
+        )?;
         let total_weight = nodes.total_weight();
         let max_faulty = ((total_weight - threshold) / 2).min(threshold - 1);
         let dkg_config = MpcConfig::new(epoch, nodes, threshold, max_faulty)?;
@@ -204,8 +207,12 @@ impl MpcManager {
         };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold) =
-                    build_reduced_nodes(prev_committee, allowed_delta, weight_divisor)?;
+                let (nodes, threshold) = build_reduced_nodes(
+                    prev_committee,
+                    threshold_in_basis_points,
+                    weight_reduction_allowed_delta,
+                    weight_divisor,
+                )?;
                 (Some(nodes), Some(threshold))
             }
             None => (None, None),
@@ -263,15 +270,14 @@ impl MpcManager {
             if let Some(response) = self.message_responses.get(&sender) {
                 return Ok(response.clone());
             }
-            return Err(MpcError::InvalidMessage {
-                sender,
-                reason: "Message previously received but no valid response was produced"
-                    .to_string(),
-            });
+            tracing::info!(
+                "handle_send_messages_request: existing message from {sender:?} but no \
+                 cached response (e.g. post-restart), re-processing"
+            );
         }
         let signature = match &request.messages {
             Messages::Dkg(msg) => {
-                self.store_dkg_message(sender, msg)?;
+                self.store_dkg_message(self.mpc_config.epoch, sender, msg)?;
                 self.try_sign_dkg_message(sender, &request.messages)?
             }
             Messages::Rotation(msgs) => {
@@ -279,11 +285,11 @@ impl MpcManager {
                     .previous_output
                     .clone()
                     .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
-                self.store_rotation_messages(sender, msgs)?;
+                self.store_rotation_messages(self.mpc_config.epoch, sender, msgs)?;
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)?
             }
             Messages::NonceGeneration(nonce) => {
-                self.store_nonce_message(sender, nonce);
+                self.store_nonce_message(self.mpc_config.epoch, sender, nonce)?;
                 self.try_sign_nonce_message(sender, &request.messages)?
             }
         };
@@ -296,10 +302,11 @@ impl MpcManager {
         &self,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
-        if let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer) {
+        if request.epoch == self.mpc_config.epoch
+            && let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer)
+        {
             return Ok(RetrieveMessagesResponse { messages });
         }
-        // Mainly for last-epoch retrieval
         let messages = match request.protocol_type {
             ProtocolTypeIndicator::Dkg => self
                 .public_messages_store
@@ -531,6 +538,7 @@ impl MpcManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
+        tracing::info!("run_key_rotation: starting prepare_previous_output");
         let prepare_prev_start = Instant::now();
         let (previous, is_member_of_previous_committee) =
             Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel).await?;
@@ -538,6 +546,10 @@ impl MpcManager {
             .mpc_rotation_prepare_previous_duration_seconds
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
             .observe(prepare_prev_start.elapsed().as_secs_f64());
+        tracing::info!(
+            "run_key_rotation: prepare_previous_output complete, \
+             is_member={is_member_of_previous_committee}",
+        );
         {
             let mut mgr = mpc_manager.write().unwrap();
             mgr.previous_output = Some(previous.clone());
@@ -553,7 +565,11 @@ impl MpcManager {
                 }
             }
         }
+        // Optimization: a node that fell back to the new-member path has empty
+        // key shares and cannot generate valid rotation messages.
+        let has_previous_shares = !previous.key_shares.shares.is_empty();
         if is_member_of_previous_committee
+            && has_previous_shares
             && {
                 let certified = ordered_broadcast_channel.certified_dealers().await;
                 let mgr = mpc_manager.read().unwrap();
@@ -566,11 +582,21 @@ impl MpcManager {
                 let certified_share_count: usize = certified
                     .iter()
                     .filter_map(|d| {
+                        let messages = mgr.rotation_messages.get(d)?;
+                        if messages.is_empty() {
+                            return None;
+                        }
                         let party_id = prev_committee.index_of(d)? as u16;
                         prev_nodes.share_ids_of(party_id).ok()
                     })
                     .map(|ids| ids.len())
                     .sum();
+                tracing::info!(
+                    "run_key_rotation: certified_share_count={certified_share_count}, \
+                     threshold={}, skip_dealer={}",
+                    previous.threshold,
+                    certified_share_count >= previous.threshold as usize,
+                );
                 certified_share_count < previous.threshold as usize
             }
             && let Err(e) = Self::run_key_rotation_as_dealer(
@@ -587,6 +613,7 @@ impl MpcManager {
                 e
             );
         }
+        tracing::info!("run_key_rotation: entering party phase");
         Self::run_key_rotation_as_party(
             mpc_manager,
             &previous,
@@ -924,7 +951,7 @@ impl MpcManager {
                         .expect("certificate verified above");
                     (signers, mgr.mpc_config.epoch)
                 };
-                Self::recover_shares_via_complaint(
+                let recovered = Self::recover_shares_via_complaint(
                     mpc_manager,
                     &dealer,
                     signers,
@@ -932,6 +959,13 @@ impl MpcManager {
                     epoch,
                 )
                 .await?;
+                {
+                    let mut mgr = mpc_manager.write().unwrap();
+                    mgr.dealer_outputs
+                        .insert(DealerOutputsKey::Dkg(dealer), recovered);
+                    mgr.complaints_to_process
+                        .remove(&ComplaintsToProcessKey::Dkg(dealer));
+                }
                 metrics
                     .mpc_complaint_recovery_duration_seconds
                     .with_label_values(&[MPC_LABEL_DKG])
@@ -1058,6 +1092,10 @@ impl MpcManager {
     ) -> MpcResult<MpcOutput> {
         let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
         let mut certified_dealers = HashSet::new();
+        tracing::info!(
+            "run_key_rotation_as_party: waiting for certs (threshold={})",
+            previous.threshold,
+        );
         loop {
             if certified_share_indices.len() >= previous.threshold as usize {
                 break;
@@ -1193,7 +1231,7 @@ impl MpcManager {
                 (signers, mgr.mpc_config.epoch)
             };
             let complaint_start = Instant::now();
-            Self::recover_rotation_shares_via_complaints(
+            let recovered = Self::recover_rotation_shares_via_complaints(
                 mpc_manager,
                 &dealer,
                 previous,
@@ -1202,6 +1240,15 @@ impl MpcManager {
                 epoch,
             )
             .await?;
+            {
+                let mut mgr = mpc_manager.write().unwrap();
+                for (share_index, output) in recovered {
+                    mgr.dealer_outputs
+                        .insert(DealerOutputsKey::Rotation(share_index), output);
+                    mgr.complaints_to_process
+                        .remove(&ComplaintsToProcessKey::Rotation(dealer, share_index));
+                }
+            }
             metrics
                 .mpc_complaint_recovery_duration_seconds
                 .with_label_values(&[MPC_LABEL_KEY_ROTATION])
@@ -1222,7 +1269,14 @@ impl MpcManager {
                 }
             }
             certified_dealers.insert(dealer);
+            tracing::info!(
+                "run_key_rotation_as_party: processed dealer {dealer}, \
+                 certified_dealers={}, certified_shares={}",
+                certified_dealers.len(),
+                certified_share_indices.len(),
+            );
         }
+        tracing::info!("run_key_rotation_as_party: threshold met, calling complete_key_rotation",);
         let completion_start = Instant::now();
         let output = {
             let mgr = Arc::clone(mpc_manager);
@@ -1496,35 +1550,43 @@ impl MpcManager {
         dealer.create_message(rng)
     }
 
-    fn store_dkg_message(&mut self, dealer: Address, message: &avss::Message) -> MpcResult<()> {
+    fn store_dkg_message(
+        &mut self,
+        epoch: u64,
+        dealer: Address,
+        message: &avss::Message,
+    ) -> MpcResult<()> {
         self.dkg_messages.insert(dealer, message.clone());
         self.public_messages_store
-            .store_dealer_message(&dealer, message)
+            .store_dealer_message(epoch, &dealer, message)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
 
     fn store_rotation_messages(
         &mut self,
+        epoch: u64,
         dealer: Address,
         messages: &RotationMessages,
     ) -> MpcResult<()> {
         self.rotation_messages.insert(dealer, messages.clone());
         self.public_messages_store
-            .store_rotation_messages(&dealer, messages)
+            .store_rotation_messages(epoch, &dealer, messages)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         Ok(())
     }
 
-    fn store_nonce_message(&mut self, dealer: Address, nonce: &NonceMessage) {
+    fn store_nonce_message(
+        &mut self,
+        epoch: u64,
+        dealer: Address,
+        nonce: &NonceMessage,
+    ) -> MpcResult<()> {
         self.nonce_messages.insert(dealer, nonce.clone());
-        if let Err(e) = self.public_messages_store.store_nonce_message(
-            nonce.batch_index,
-            &dealer,
-            &nonce.message,
-        ) {
-            tracing::error!("Failed to persist nonce message for dealer {dealer:?}: {e}");
-        }
+        self.public_messages_store
+            .store_nonce_message(epoch, nonce.batch_index, &dealer, &nonce.message)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        Ok(())
     }
 
     fn needs_nonce_retrieval(
@@ -1921,7 +1983,8 @@ impl MpcManager {
                             );
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_dkg_message(message.dealer_address, msg)?;
+                        let epoch = mgr.mpc_config.epoch;
+                        mgr.store_dkg_message(epoch, message.dealer_address, msg)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -1982,7 +2045,8 @@ impl MpcManager {
                             );
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_nonce_message(message.dealer_address, nonce);
+                        let epoch = mgr.mpc_config.epoch;
+                        mgr.store_nonce_message(epoch, message.dealer_address, nonce)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -2014,7 +2078,7 @@ impl MpcManager {
             Some(msg) => Messages::Dkg(msg.clone()),
             None => {
                 let msg = self.create_dealer_message(rng);
-                self.store_dkg_message(self.address, &msg)?;
+                self.store_dkg_message(self.mpc_config.epoch, self.address, &msg)?;
                 Messages::Dkg(msg)
             }
         };
@@ -2031,7 +2095,7 @@ impl MpcManager {
             Some(msgs) => Messages::Rotation(msgs.clone()),
             None => {
                 let msgs = self.create_rotation_messages(previous, rng);
-                self.store_rotation_messages(self.address, &msgs)?;
+                self.store_rotation_messages(self.mpc_config.epoch, self.address, &msgs)?;
                 Messages::Rotation(msgs)
             }
         };
@@ -2049,7 +2113,7 @@ impl MpcManager {
             None => {
                 let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
                 if let Messages::NonceGeneration(ref nonce) = msgs {
-                    self.store_nonce_message(self.address, nonce);
+                    self.store_nonce_message(self.mpc_config.epoch, self.address, nonce)?;
                 }
                 msgs
             }
@@ -2141,7 +2205,8 @@ impl MpcManager {
                             continue;
                         };
                         let mut mgr = mpc_manager.write().unwrap();
-                        mgr.store_rotation_messages(message.dealer_address, msgs)?;
+                        let epoch = mgr.mpc_config.epoch;
+                        mgr.store_rotation_messages(epoch, message.dealer_address, msgs)?;
                         return Ok(());
                     }
                     tracing::info!(
@@ -2170,7 +2235,7 @@ impl MpcManager {
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
-    ) -> MpcResult<()> {
+    ) -> MpcResult<avss::PartialOutput> {
         let (complaint_request, receiver, message) = {
             let mgr = mpc_manager.read().unwrap();
             let complaint = mgr
@@ -2233,12 +2298,7 @@ impl MpcManager {
             };
             match result {
                 Ok(partial_output) => {
-                    let mut mgr = mpc_manager.write().unwrap();
-                    mgr.dealer_outputs
-                        .insert(DealerOutputsKey::Dkg(*dealer), partial_output);
-                    mgr.complaints_to_process
-                        .remove(&ComplaintsToProcessKey::Dkg(*dealer));
-                    return Ok(());
+                    return Ok(partial_output);
                 }
                 Err(FastCryptoError::InputTooShort(_)) => {
                     continue;
@@ -2360,7 +2420,7 @@ impl MpcManager {
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
-    ) -> MpcResult<()> {
+    ) -> MpcResult<HashMap<ShareIndex, avss::PartialOutput>> {
         let (request, recovery_contexts) = {
             let mgr = mpc_manager.read().unwrap();
             let Some(RotationComplainContext {
@@ -2368,7 +2428,7 @@ impl MpcManager {
                 recovery_contexts,
             }) = mgr.prepare_rotation_complain_request(dealer, previous_dkg_output, epoch)?
             else {
-                return Ok(());
+                return Ok(HashMap::new());
             };
             tracing::info!(
                 "Rotation complaint detected for dealer {:?}, recovering via Complain RPC",
@@ -2387,6 +2447,7 @@ impl MpcManager {
             Vec<complaint::ComplaintResponse<avss::SharesForNode>>,
         > = HashMap::new();
         let mut pending_shares: HashSet<ShareIndex> = HashSet::new();
+        let mut recovered_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
         for &share_index in recovery_contexts.keys() {
             all_responses.insert(share_index, Vec::new());
             pending_shares.insert(share_index);
@@ -2422,15 +2483,7 @@ impl MpcManager {
                         };
                         match result {
                             Ok(partial_output) => {
-                                let mut mgr = mpc_manager.write().unwrap();
-                                mgr.dealer_outputs.insert(
-                                    DealerOutputsKey::Rotation(share_index),
-                                    partial_output,
-                                );
-                                mgr.complaints_to_process.remove(
-                                    &ComplaintsToProcessKey::Rotation(*dealer, share_index),
-                                );
-                                drop(mgr);
+                                recovered_outputs.insert(share_index, partial_output);
                                 pending_shares.remove(&share_index);
                             }
                             Err(FastCryptoError::InputTooShort(_)) => {
@@ -2462,7 +2515,7 @@ impl MpcManager {
                 dealer, pending_shares
             )));
         }
-        Ok(())
+        Ok(recovered_outputs)
     }
 
     fn load_stored_messages(&mut self) -> MpcResult<()> {
@@ -2729,16 +2782,21 @@ impl MpcManager {
     pub fn reconstruct_previous_output(
         &self,
         certificates: &[CertificateV1],
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         match certificates.first() {
             Some(CertificateV1::Dkg(_)) | None => {
-                self.reconstruct_from_dkg_certificates(certificates)
+                self.reconstruct_from_dkg_certificates(certificates, complaint_cache)
             }
             Some(CertificateV1::Rotation(_)) => {
                 let previous_threshold = self.previous_threshold.ok_or_else(|| {
                     MpcError::InvalidConfig("Key rotation requires previous threshold".into())
                 })?;
-                self.reconstruct_from_rotation_certificates(certificates, previous_threshold)
+                self.reconstruct_from_rotation_certificates(
+                    certificates,
+                    previous_threshold,
+                    complaint_cache,
+                )
             }
             Some(CertificateV1::NonceGeneration { .. }) => {
                 unreachable!(
@@ -2751,6 +2809,7 @@ impl MpcManager {
     fn reconstruct_from_dkg_certificates(
         &self,
         certificates: &[CertificateV1],
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let previous_committee = self.previous_committee.clone().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
@@ -2807,11 +2866,7 @@ impl MpcManager {
             let session_id = source_session_id
                 .dealer_session_id(&dealer_address)
                 .to_vec();
-            // Check for previously recovered output (from complaint recovery on a prior attempt).
-            if let Some(output) = self
-                .dealer_outputs
-                .get(&DealerOutputsKey::Dkg(dealer_address))
-            {
+            if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
                 let dealer_weight = previous_nodes
                     .weight_of(dealer_party_id)
@@ -2881,6 +2936,7 @@ impl MpcManager {
         &self,
         certificates: &[CertificateV1],
         previous_threshold: u16,
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
@@ -2928,11 +2984,13 @@ impl MpcManager {
                 )));
             }
             for (share_index, message) in rotation_msgs {
-                // Check for previously recovered output (from complaint recovery on a prior attempt).
-                if let Some(output) = self
-                    .dealer_outputs
-                    .get(&DealerOutputsKey::Rotation(share_index))
+                if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
                 {
+                    tracing::info!(
+                        "reconstruct_from_rotation_certificates: complaint cache hit for \
+                         dealer {:?} share_index={share_index}",
+                        dealer_address,
+                    );
                     local_outputs.insert(share_index, output.clone());
                     certified_share_indices.push(share_index);
                     continue;
@@ -3150,12 +3208,14 @@ impl MpcManager {
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<MpcOutput> {
+        let mut complaint_cache: HashMap<DealerOutputsKey, avss::PartialOutput> = HashMap::new();
         loop {
             let mgr = Arc::clone(mpc_manager);
             let certs = previous_certificates.to_vec();
+            let cache_snapshot = complaint_cache.clone();
             match spawn_blocking(move || {
                 let mgr = mgr.read().unwrap();
-                mgr.reconstruct_previous_output(&certs)
+                mgr.reconstruct_previous_output(&certs, &cache_snapshot)
             })
             .await?
             {
@@ -3215,7 +3275,7 @@ impl MpcManager {
                     match protocol_type {
                         ProtocolTypeIndicator::Dkg => {
                             let source_epoch = mpc_manager.read().unwrap().source_epoch;
-                            Self::recover_shares_via_complaint(
+                            let recovered = Self::recover_shares_via_complaint(
                                 mpc_manager,
                                 &dealer_address,
                                 signers,
@@ -3223,6 +3283,13 @@ impl MpcManager {
                                 source_epoch,
                             )
                             .await?;
+                            complaint_cache
+                                .insert(DealerOutputsKey::Dkg(dealer_address), recovered);
+                            mpc_manager
+                                .write()
+                                .unwrap()
+                                .complaints_to_process
+                                .remove(&ComplaintsToProcessKey::Dkg(dealer_address));
                         }
                         ProtocolTypeIndicator::KeyRotation => {
                             let (previous_output, source_epoch) = {
@@ -3234,7 +3301,7 @@ impl MpcManager {
                                     mgr.source_epoch,
                                 )
                             };
-                            Self::recover_rotation_shares_via_complaints(
+                            let recovered = Self::recover_rotation_shares_via_complaints(
                                 mpc_manager,
                                 &dealer_address,
                                 &previous_output,
@@ -3243,6 +3310,14 @@ impl MpcManager {
                                 source_epoch,
                             )
                             .await?;
+                            let mut mgr = mpc_manager.write().unwrap();
+                            for (share_index, output) in recovered {
+                                complaint_cache
+                                    .insert(DealerOutputsKey::Rotation(share_index), output);
+                                mgr.complaints_to_process.remove(
+                                    &ComplaintsToProcessKey::Rotation(dealer_address, share_index),
+                                );
+                            }
                         }
                         ProtocolTypeIndicator::NonceGeneration => {}
                     }
@@ -3413,14 +3488,20 @@ impl MpcManager {
         for signer in signers {
             match p2p_channel.retrieve_messages(&signer, &request).await {
                 Ok(response) => {
-                    if compute_messages_hash(&response.messages) == message.messages_hash {
+                    let actual_hash = compute_messages_hash(&response.messages);
+                    if actual_hash == message.messages_hash {
                         let mut mgr = mpc_manager.write().unwrap();
+                        let source_epoch = mgr.source_epoch;
                         match &response.messages {
                             Messages::Dkg(msg) => {
-                                mgr.store_dkg_message(message.dealer_address, msg)?;
+                                mgr.store_dkg_message(source_epoch, message.dealer_address, msg)?;
                             }
                             Messages::Rotation(msgs) => {
-                                mgr.store_rotation_messages(message.dealer_address, msgs)?;
+                                mgr.store_rotation_messages(
+                                    source_epoch,
+                                    message.dealer_address,
+                                    msgs,
+                                )?;
                             }
                             _ => {
                                 tracing::warn!(
@@ -3434,9 +3515,12 @@ impl MpcManager {
                         return Ok(());
                     }
                     tracing::info!(
-                        "Message hash mismatch from signer {:?} for dealer {:?}",
+                        "Message hash mismatch from signer {:?} for dealer {:?}: \
+                         expected={:?}, got={:?}",
                         signer,
-                        message.dealer_address
+                        message.dealer_address,
+                        message.messages_hash,
+                        actual_hash,
                     );
                 }
                 Err(e) => {
@@ -3664,18 +3748,10 @@ fn compute_messages_hash(messages: &Messages) -> MessageHash {
     MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
 
-fn compute_bft_threshold(total_weight: u16) -> MpcResult<u16> {
-    if total_weight == 0 {
-        return Err(MpcError::InvalidConfig(
-            "committee has zero total weight".into(),
-        ));
-    }
-    Ok((total_weight - 1) / 3 + 1)
-}
-
 fn build_reduced_nodes(
     committee: &Committee,
-    allowed_delta: u16,
+    threshold_in_basis_points: u16,
+    weight_reduction_allowed_delta: u16,
     test_weight_divisor: u16,
 ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
@@ -3689,8 +3765,9 @@ fn build_reduced_nodes(
         })
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
-    let threshold = compute_bft_threshold(total_weight)?;
-    Nodes::new_reduced(nodes_vec, threshold, allowed_delta, 1)
+    let threshold =
+        (total_weight as u32 * threshold_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
+    Nodes::new_reduced(nodes_vec, threshold, weight_reduction_allowed_delta, 1)
         .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 

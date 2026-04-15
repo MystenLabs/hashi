@@ -260,6 +260,11 @@ impl SuiTxExecutor {
     /// and resolving object versions/digests automatically.
     ///
     /// Note: The builder is consumed because `TransactionBuilder::build()` takes ownership.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(sui_digest = tracing::field::Empty),
+    )]
     pub async fn execute(
         &mut self,
         mut builder: TransactionBuilder,
@@ -282,6 +287,11 @@ impl SuiTxExecutor {
             .await?
             .into_inner();
 
+        tracing::Span::current().record(
+            "sui_digest",
+            tracing::field::display(response.transaction().digest()),
+        );
+
         Ok(response)
     }
 
@@ -292,6 +302,11 @@ impl SuiTxExecutor {
     /// Execute a deposit confirmation transaction.
     ///
     /// Passes a `Certificate` (BCS-encoded struct) to `deposit::confirm_deposit`.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(deposit_id = %deposit_request.id),
+    )]
     pub async fn execute_confirm_deposit(
         &mut self,
         deposit_request: &DepositRequest,
@@ -334,6 +349,11 @@ impl SuiTxExecutor {
     ///
     /// This builds and executes a PTB that calls `deposit::delete_expired_deposit`
     /// for each expired request in the batch.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(expired_count = expired_requests.len()),
+    )]
     pub async fn execute_delete_expired_deposit_requests(
         &mut self,
         expired_requests: &[DepositRequest],
@@ -384,6 +404,11 @@ impl SuiTxExecutor {
     ///
     /// Note: The `txid` parameter should be the Bitcoin transaction ID converted to a Sui Address
     /// (i.e., the 32-byte txid interpreted as a Sui address).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(bitcoin_txid = %txid, vout, amount = amount_sats),
+    )]
     pub async fn execute_create_deposit_request(
         &mut self,
         txid: Address,
@@ -471,6 +496,11 @@ impl SuiTxExecutor {
     /// 2. Calling deposit(hashi, utxo, clock) which creates the DepositRequest on-chain
     ///
     /// Returns the deposit request IDs on success.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(bitcoin_txid = %txid, utxo_count = utxos.len()),
+    )]
     pub async fn execute_create_deposit_requests_batch(
         &mut self,
         txid: Address,
@@ -567,6 +597,11 @@ impl SuiTxExecutor {
     ///
     /// Callers must ensure the batch size stays within the PTB command limit
     /// (roughly 300 deposits per PTB due to the 1024-command cap).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(deposit_count = deposits.len()),
+    )]
     pub async fn execute_create_deposit_requests_multi(
         &mut self,
         deposits: &[(Address, u32, u64)],
@@ -656,6 +691,11 @@ impl SuiTxExecutor {
     /// 2. Calling `withdraw::request_withdrawal`
     ///
     /// Returns the withdrawal request ID on success.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(amount = withdrawal_amount_sats, request_id = tracing::field::Empty),
+    )]
     pub async fn execute_create_withdrawal_request(
         &mut self,
         withdrawal_amount_sats: u64,
@@ -710,6 +750,10 @@ impl SuiTxExecutor {
         for event in response.transaction().events().events() {
             if event.contents().name().contains("WithdrawalRequestedEvent") {
                 let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
+                tracing::Span::current().record(
+                    "request_id",
+                    tracing::field::display(&event_data.request_id),
+                );
                 return Ok(event_data.request_id);
             }
         }
@@ -717,6 +761,7 @@ impl SuiTxExecutor {
         anyhow::bail!("WithdrawalRequestedEvent not found in transaction events")
     }
 
+    #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_start_reconfig(&mut self) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -747,6 +792,7 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_end_reconfig(
         &mut self,
         mpc_public_key: &[u8],
@@ -778,8 +824,13 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Reassign presig indices for a pending withdrawal from a previous epoch.
-    pub async fn execute_allocate_presigs_for_pending_withdrawal(
+    /// Reassign presig indices for a withdrawal transaction from a previous epoch.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_txn_id = %withdrawal_id),
+    )]
+    pub async fn execute_allocate_presigs_for_withdrawal_txn(
         &mut self,
         withdrawal_id: Address,
     ) -> anyhow::Result<()> {
@@ -794,14 +845,14 @@ impl SuiTxExecutor {
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("allocate_presigs_for_pending_withdrawal"),
+                Identifier::from_static("allocate_presigs_for_withdrawal_txn"),
             ),
             vec![hashi_arg, withdrawal_id_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "allocate_presigs_for_pending_withdrawal transaction failed: {:?}",
+                "allocate_presigs_for_withdrawal_txn transaction failed: {:?}",
                 response.transaction().effects().status()
             );
         }
@@ -813,6 +864,7 @@ impl SuiTxExecutor {
     /// Delegates to [`build_register_or_update_validator_tx`] to determine which
     /// move calls are needed, then signs and executes the resulting transaction.
     /// Returns `Ok(false)` if nothing needed to be updated.
+    #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_register_or_update_validator(
         &mut self,
         config: &Config,
@@ -858,6 +910,11 @@ impl SuiTxExecutor {
     /// This submits a DKG, rotation, or nonce generation certificate to the on-chain
     /// certificate store. The certificate contains the dealer's message hash and
     /// committee signature.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(cert_kind = tracing::field::Empty),
+    )]
     pub async fn execute_submit_certificate(&mut self, cert: &CertificateV1) -> anyhow::Result<()> {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
@@ -866,6 +923,7 @@ impl SuiTxExecutor {
                 (cert, "submit_nonce_cert", Some(*batch_index))
             }
         };
+        tracing::Span::current().record("cert_kind", function_name);
 
         let message = inner_cert.message();
         let dealer = message.dealer_address;
@@ -911,6 +969,11 @@ impl SuiTxExecutor {
     }
 
     /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(batch_size = approvals.len()),
+    )]
     pub async fn execute_approve_withdrawal_requests(
         &mut self,
         approvals: &[(Address, &CommitteeSignature)],
@@ -950,6 +1013,14 @@ impl SuiTxExecutor {
 
     /// Execute `withdraw::commit_withdrawal_tx` to commit to a withdrawal on-chain.
     /// - `r: &Random`
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(
+            bitcoin_txid = %approval.txid,
+            request_count = approval.request_ids.len(),
+        ),
+    )]
     pub async fn execute_commit_withdrawal_tx(
         &mut self,
         approval: &WithdrawalTxCommitment,
@@ -1062,6 +1133,15 @@ impl SuiTxExecutor {
     /// handle this, the signatures are split into chunks that each fit within
     /// the pure-arg budget and stitched back together via
     /// `0x1::vector::append` calls in the PTB.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(
+            withdrawal_txn_id = %withdrawal_id,
+            request_count = request_ids.len(),
+            input_count = signatures.len(),
+        ),
+    )]
     pub async fn execute_sign_withdrawal(
         &mut self,
         withdrawal_id: &Address,
@@ -1111,6 +1191,11 @@ impl SuiTxExecutor {
     ///
     /// The Move function returns a `Balance<BTC>` which is sent back to the
     /// sender's address balance.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(request_id = %withdrawal_id),
+    )]
     pub async fn execute_cancel_withdrawal(
         &mut self,
         withdrawal_id: &Address,
@@ -1172,6 +1257,11 @@ impl SuiTxExecutor {
     /// The Move function expects:
     /// - `hashi: &mut Hashi`
     /// - `withdrawal_id: address`
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_txn_id = %withdrawal_id),
+    )]
     pub async fn execute_confirm_withdrawal(
         &mut self,
         withdrawal_id: &Address,

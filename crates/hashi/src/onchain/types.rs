@@ -13,14 +13,25 @@ use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use sui_sdk_types::Address;
-use sui_sdk_types::Digest;
 use sui_sdk_types::TypeTag;
 
 use crate::grpc::Client;
-use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::utils::Base64;
+
+// Re-export types from hashi-types that are used as-is (identical to the
+// raw Move representation).
+pub use hashi_types::move_types::ConfigValue;
+pub use hashi_types::move_types::DepositRequest;
+pub use hashi_types::move_types::OutputUtxo;
+pub use hashi_types::move_types::UpgradeCap;
+pub use hashi_types::move_types::Utxo;
+pub use hashi_types::move_types::UtxoId;
+pub use hashi_types::move_types::UtxoRecord;
+pub use hashi_types::move_types::WithdrawalRequest;
+pub use hashi_types::move_types::WithdrawalStatus;
+pub use hashi_types::move_types::WithdrawalTransaction;
 
 #[derive(Debug)]
 pub struct Hashi {
@@ -420,6 +431,7 @@ pub enum ProposalType {
     EnableVersion,
     DisableVersion,
     Upgrade,
+    EmergencyPause,
     Unknown(String),
 }
 
@@ -430,6 +442,7 @@ impl ProposalType {
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
+            ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::Unknown(_) => "unknown",
         }
     }
@@ -440,6 +453,7 @@ impl ProposalType {
             "enable_version",
             "disable_version",
             "upgrade",
+            "emergency_pause",
             "unknown",
         ]
     }
@@ -454,6 +468,10 @@ pub struct Config {
 
 // This constant mirrors the value in btc_config.move and must be kept in sync.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
+
+// These mirror the defaults in mpc_config.move and must be kept in sync.
+pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
+pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 
 impl Config {
     /// Minimum deposit amount, mirroring the floor logic in btc_config.move.
@@ -496,23 +514,24 @@ impl Config {
             _ => 6,
         }
     }
-}
 
-#[derive(Debug)]
-pub struct UpgradeCap {
-    pub id: Address,
-    pub package: Address,
-    pub version: u64,
-    pub policy: u8,
-}
+    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
+        match self.config.get("mpc_threshold_in_basis_points") {
+            Some(ConfigValue::U64(v)) => {
+                u16::try_from(*v).expect("mpc_threshold_in_basis_points exceeds u16::MAX")
+            }
+            _ => DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+        }
+    }
 
-#[derive(Debug)]
-pub enum ConfigValue {
-    U64(u64),
-    Address(Address),
-    String(String),
-    Bool(bool),
-    Bytes(Vec<u8>),
+    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
+        match self.config.get("mpc_weight_reduction_allowed_delta") {
+            Some(ConfigValue::U64(v)) => {
+                u16::try_from(*v).expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX")
+            }
+            _ => DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -548,8 +567,9 @@ pub struct WithdrawalRequestQueue {
     pub(super) requests_id: Address,
     pub(super) requests: BTreeMap<Address, WithdrawalRequest>,
     pub(super) processed_id: Address,
-    pub(super) pending_withdrawals_id: Address,
-    pub(super) pending_withdrawals: BTreeMap<Address, PendingWithdrawal>,
+    pub(super) withdrawal_txns_id: Address,
+    pub(super) withdrawal_txns: BTreeMap<Address, WithdrawalTransaction>,
+    pub(super) confirmed_txns_id: Address,
 }
 
 impl WithdrawalRequestQueue {
@@ -565,90 +585,17 @@ impl WithdrawalRequestQueue {
         &self.processed_id
     }
 
-    pub fn pending_withdrawals_id(&self) -> &Address {
-        &self.pending_withdrawals_id
+    pub fn withdrawal_txns_id(&self) -> &Address {
+        &self.withdrawal_txns_id
     }
 
-    pub fn pending_withdrawals(&self) -> &BTreeMap<Address, PendingWithdrawal> {
-        &self.pending_withdrawals
-    }
-}
-
-/// Withdrawal lifecycle status, mirroring the Move `WithdrawalStatus` enum.
-#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub enum WithdrawalStatus {
-    Requested,
-    Approved,
-    Processing { pending_withdrawal_id: Address },
-    Signed { pending_withdrawal_id: Address },
-    Confirmed { txid: BitcoinTxid },
-}
-
-impl WithdrawalStatus {
-    /// Returns true if the status is `Approved`.
-    pub fn is_approved(&self) -> bool {
-        matches!(self, Self::Approved)
+    pub fn withdrawal_txns(&self) -> &BTreeMap<Address, WithdrawalTransaction> {
+        &self.withdrawal_txns
     }
 
-    /// Returns true if the status is `Requested`.
-    pub fn is_requested(&self) -> bool {
-        matches!(self, Self::Requested)
+    pub fn confirmed_txns_id(&self) -> &Address {
+        &self.confirmed_txns_id
     }
-}
-
-#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct WithdrawalRequest {
-    pub id: Address,
-    pub sender: Address,
-    pub btc_amount: u64,
-    pub bitcoin_address: Vec<u8>,
-    pub timestamp_ms: u64,
-    pub status: WithdrawalStatus,
-    pub pending_withdrawal_id: Option<Address>,
-    pub sui_tx_digest: Digest,
-    /// BTC balance in satoshis
-    pub btc: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct PendingWithdrawal {
-    pub id: Address,
-    pub txid: BitcoinTxid,
-    pub request_ids: Vec<Address>,
-    pub inputs: Vec<Utxo>,
-    pub withdrawal_outputs: Vec<OutputUtxo>,
-    pub change_output: Option<OutputUtxo>,
-    pub timestamp_ms: u64,
-    pub randomness: Vec<u8>,
-    pub signatures: Option<Vec<Vec<u8>>>,
-    pub presig_start_index: u64,
-    pub epoch: u64,
-}
-
-impl PendingWithdrawal {
-    pub fn all_outputs(&self) -> Vec<OutputUtxo> {
-        let mut outputs = self.withdrawal_outputs.clone();
-        if let Some(ref change) = self.change_output {
-            outputs.push(change.clone());
-        }
-        outputs
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct OutputUtxo {
-    /// In satoshis
-    pub amount: u64,
-    pub bitcoin_address: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DepositRequest {
-    pub id: Address,
-    pub sender: Address,
-    pub timestamp_ms: u64,
-    pub sui_tx_digest: Digest,
-    pub utxo: Utxo,
 }
 
 /// Message signed by the committee to confirm a deposit.
@@ -657,43 +604,6 @@ pub struct DepositRequest {
 pub struct DepositConfirmationMessage {
     pub request_id: Address,
     pub utxo: Utxo,
-}
-
-#[derive(Clone, Debug, PartialEq, serde_derive::Serialize)]
-pub struct Utxo {
-    pub id: UtxoId,
-    // In satoshis
-    pub amount: u64,
-    pub derivation_path: Option<Address>,
-}
-
-/// txid:vout
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde_derive::Serialize)]
-pub struct UtxoId {
-    // a 32 byte sha256 of the transaction
-    pub txid: BitcoinTxid,
-    // Out position of the UTXO
-    pub vout: u32,
-}
-
-impl From<hashi_types::move_types::UtxoId> for UtxoId {
-    fn from(id: hashi_types::move_types::UtxoId) -> Self {
-        Self {
-            txid: id.txid,
-            vout: id.vout,
-        }
-    }
-}
-
-/// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
-#[derive(Clone, Debug)]
-pub struct UtxoRecord {
-    pub utxo: Utxo,
-    /// The withdrawal_id that produced this UTXO as a change output; None if
-    /// confirmed (deposit or previously promoted change).
-    pub produced_by: Option<Address>,
-    /// The withdrawal_id currently spending this UTXO; None if available.
-    pub locked_by: Option<Address>,
 }
 
 #[derive(Debug)]
