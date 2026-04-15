@@ -4,7 +4,6 @@
 use std::time::Duration;
 
 use axum::http;
-use prost::Message as _;
 use tonic::Response;
 use tonic_rustls::Channel;
 use tonic_rustls::Endpoint;
@@ -106,41 +105,34 @@ impl Client {
         &self,
         epoch: u64,
         request: &SendMessagesRequest,
-    ) -> Result<(SendMessagesResponse, usize)> {
+    ) -> Result<SendMessagesResponse> {
         let proto_request = request.to_proto(epoch);
-        let request_size = proto_request.encoded_len();
         let response = self
             .mpc_service_client()
             .send_messages(proto_request)
             .await?;
-        let resp = SendMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok((resp, request_size))
+        SendMessagesResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
     pub async fn retrieve_messages(
         &self,
         request: &RetrieveMessagesRequest,
-    ) -> Result<(RetrieveMessagesResponse, usize, usize)> {
+    ) -> Result<RetrieveMessagesResponse> {
         let proto_request = request.to_proto();
-        let request_size = proto_request.encoded_len();
         let response = self
             .mpc_service_client()
             .retrieve_messages(proto_request)
             .await?;
-        let response_size = response.get_ref().encoded_len();
-        let resp = RetrieveMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok((resp, request_size, response_size))
+        RetrieveMessagesResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
-    pub async fn complain(&self, request: &ComplainRequest) -> Result<(ComplaintResponses, usize)> {
+    pub async fn complain(&self, request: &ComplainRequest) -> Result<ComplaintResponses> {
         let proto_request = request.to_proto();
-        let request_size = proto_request.encoded_len();
         let response = self.mpc_service_client().complain(proto_request).await?;
-        let resp = ComplaintResponses::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok((resp, request_size))
+        ComplaintResponses::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
     pub async fn get_public_mpc_output(
@@ -160,16 +152,14 @@ impl Client {
         &self,
         epoch: u64,
         request: &GetPartialSignaturesRequest,
-    ) -> Result<(GetPartialSignaturesResponse, usize)> {
+    ) -> Result<GetPartialSignaturesResponse> {
         let proto_request = request.to_proto(epoch);
-        let request_size = proto_request.encoded_len();
         let response = self
             .mpc_service_client()
             .get_partial_signatures(proto_request)
             .await?;
-        let resp = GetPartialSignaturesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok((resp, request_size))
+        GetPartialSignaturesResponse::try_from(response.get_ref())
+            .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
     pub async fn get_reconfig_completion_signature(&self, epoch: u64) -> Result<Option<Vec<u8>>> {

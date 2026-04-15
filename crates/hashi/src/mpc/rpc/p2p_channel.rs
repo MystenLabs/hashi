@@ -61,20 +61,21 @@ impl P2PChannel for RpcP2PChannel {
         recipient: &Address,
         request: &SendMessagesRequest,
     ) -> ChannelResult<SendMessagesResponse> {
-        let (response, request_size) = self
-            .get_client(recipient)?
+        if let Ok(bytes) = bcs::to_bytes(request) {
+            let size = bytes.len() as u64;
+            self.metrics
+                .mpc_p2p_message_size_bytes
+                .with_label_values(&[self.protocol_label])
+                .observe(size as f64);
+            self.metrics
+                .mpc_bytes_sent_total
+                .with_label_values(&[self.protocol_label])
+                .inc_by(size);
+        }
+        self.get_client(recipient)?
             .send_messages(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
-        self.metrics
-            .mpc_p2p_message_size_bytes
-            .with_label_values(&[self.protocol_label])
-            .observe(request_size as f64);
-        self.metrics
-            .mpc_bytes_sent_total
-            .with_label_values(&[self.protocol_label])
-            .inc_by(request_size as u64);
-        Ok(response)
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
     async fn retrieve_messages(
@@ -82,19 +83,17 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
-        let (response, request_size, response_size) = self
+        let response = self
             .get_client(party)?
             .retrieve_messages(request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
-        self.metrics
-            .mpc_bytes_sent_total
-            .with_label_values(&[self.protocol_label])
-            .inc_by(request_size as u64);
-        self.metrics
-            .mpc_bytes_received_total
-            .with_label_values(&[self.protocol_label])
-            .inc_by(response_size as u64);
+        if let Ok(bytes) = bcs::to_bytes(&response) {
+            self.metrics
+                .mpc_bytes_received_total
+                .with_label_values(&[self.protocol_label])
+                .inc_by(bytes.len() as u64);
+        }
         Ok(response)
     }
 
@@ -103,16 +102,16 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses> {
-        let (response, request_size) = self
-            .get_client(party)?
+        if let Ok(bytes) = bcs::to_bytes(request) {
+            self.metrics
+                .mpc_bytes_sent_total
+                .with_label_values(&[self.protocol_label])
+                .inc_by(bytes.len() as u64);
+        }
+        self.get_client(party)?
             .complain(request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
-        self.metrics
-            .mpc_bytes_sent_total
-            .with_label_values(&[self.protocol_label])
-            .inc_by(request_size as u64);
-        Ok(response)
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
     async fn get_public_mpc_output(
@@ -131,15 +130,9 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &GetPartialSignaturesRequest,
     ) -> ChannelResult<GetPartialSignaturesResponse> {
-        let (response, request_size) = self
-            .get_client(party)?
+        self.get_client(party)?
             .get_partial_signatures(self.epoch, request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
-        self.metrics
-            .mpc_bytes_sent_total
-            .with_label_values(&[self.protocol_label])
-            .inc_by(request_size as u64);
-        Ok(response)
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 }
