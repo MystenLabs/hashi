@@ -11,8 +11,9 @@ permissions:
 env:
   RUSTFLAGS: -Dwarnings
   # Force human-readable log output even though stderr is a pipe in GitHub
-  # Actions runners. Any hashi binary invoked from this workflow uses
-  # hashi-telemetry, which would otherwise auto-detect JSON for non-TTY stderr.
+  # Actions runners. Any hashi binary invoked from this workflow uses the
+  # telemetry module in hashi-types, which would otherwise auto-detect JSON
+  # for non-TTY stderr.
   RUST_LOG_JSON: "0"
 
 jobs:

@@ -279,7 +279,7 @@ async fn cmd_start(
         tracing::level_filters::LevelFilter::OFF
     };
 
-    let _guard = hashi_telemetry::TelemetryConfig::new()
+    let _guard = hashi_types::telemetry::TelemetryConfig::new()
         .with_default_level(default_level)
         .with_target(false)
         .with_env()

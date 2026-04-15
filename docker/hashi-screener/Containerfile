@@ -16,7 +16,6 @@ COPY --from=busybox . /
 COPY Cargo.toml Cargo.lock /src/
 COPY crates/hashi-screener/Cargo.toml /src/crates/hashi-screener/Cargo.toml
 COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
-COPY crates/hashi-telemetry/Cargo.toml /src/crates/hashi-telemetry/Cargo.toml
 
 WORKDIR /src
 
@@ -25,9 +24,7 @@ RUN mkdir -p crates/hashi-screener/src \
  && echo 'fn main(){}' > crates/hashi-screener/src/main.rs \
  && touch crates/hashi-screener/src/lib.rs \
  && mkdir -p crates/hashi-types/src \
- && touch crates/hashi-types/src/lib.rs \
- && mkdir -p crates/hashi-telemetry/src \
- && touch crates/hashi-telemetry/src/lib.rs
+ && touch crates/hashi-types/src/lib.rs
 
 ENV TARGET=x86_64-unknown-linux-musl
 ENV OPENSSL_STATIC=true
@@ -47,7 +44,6 @@ ENV GIT_REVISION=${GIT_REVISION}
 
 COPY crates/hashi-screener /src/crates/hashi-screener
 COPY crates/hashi-types /src/crates/hashi-types
-COPY crates/hashi-telemetry /src/crates/hashi-telemetry
 
 # Touch source files to invalidate cargo's fingerprint cache for local crates
 RUN find crates/ -name "*.rs" -exec touch {} +
