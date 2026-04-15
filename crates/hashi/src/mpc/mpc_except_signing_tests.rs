@@ -4294,7 +4294,7 @@ async fn test_handle_send_messages_request_equivocation() {
 }
 
 #[tokio::test]
-async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
+async fn test_handle_send_messages_request_invalid_shares_cached_on_retry() {
     // Second RPC call with invalid shares should not panic.
 
     let mut rng = rand::thread_rng();
@@ -4328,20 +4328,16 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
         _ => panic!("Expected InvalidMessage error"),
     }
 
-    // Second call: same message — re-processes and returns the same
-    // "Invalid shares" error. The point of this test is that the second
-    // call must NOT panic; the specific error message is allowed to be
-    // either the original Complaint reason or a short-circuit reason.
+    // Second call: same message — returns the cached error immediately
+    // without re-processing.
     let result2 = receiver_manager.handle_send_messages_request(dealer_addr, &request);
-    assert!(result2.is_err(), "Second call should also return error");
+    assert!(result2.is_err(), "Second call should return cached error");
     match result2.unwrap_err() {
         MpcError::InvalidMessage { sender, reason } => {
             assert_eq!(sender, dealer_addr);
             assert!(
-                reason.contains("Invalid shares")
-                    || reason.contains("previously received but no valid response"),
-                "Second call should return either the original Complaint error or a \
-                 'previously received' short-circuit, got: {reason}"
+                reason.contains("Invalid shares"),
+                "Should return the cached original error, got: {reason}"
             );
         }
         _ => panic!("Expected InvalidMessage error"),
@@ -4353,12 +4349,16 @@ async fn test_handle_send_messages_request_invalid_shares_no_panic_on_retry() {
         "Message should be stored even if invalid"
     );
 
-    // Verify no response was cached (since we returned error)
+    // Verify the error was cached so subsequent retries don't re-process.
     assert!(
-        !receiver_manager
+        receiver_manager
             .message_responses
             .contains_key(&dealer_addr),
-        "Response should not be cached for invalid shares"
+        "Error should be cached for invalid shares"
+    );
+    assert!(
+        receiver_manager.message_responses[&dealer_addr].is_err(),
+        "Cached response should be an error"
     );
 
     // Verify receiver can still serve the message via RetrieveMessagesRequest
