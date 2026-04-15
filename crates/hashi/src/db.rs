@@ -487,7 +487,6 @@ mod tests {
             nodes,
             0, // party_id
             3, // threshold
-            1, // max_faulty
             b"test-nonce-session".to_vec(),
             10, // batch_size_per_weight
         )

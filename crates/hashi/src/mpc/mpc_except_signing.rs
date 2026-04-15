@@ -75,6 +75,7 @@ const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
 const MAX_BASIS_POINTS: u32 = 10000;
+const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
 
 pub struct MpcManager {
     // Immutable during the epoch
@@ -121,6 +122,7 @@ impl MpcManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
+        max_faulty_in_basis_points: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
@@ -141,20 +143,20 @@ impl MpcManager {
             .get(&epoch)
             .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
-        let (nodes, threshold) = build_reduced_nodes(
+        let (nodes, threshold, max_faulty) = build_reduced_nodes(
             &committee,
             committee.mpc_threshold_in_basis_points(),
+            max_faulty_in_basis_points,
             committee.mpc_weight_reduction_allowed_delta(),
             weight_divisor,
         )?;
         let total_weight = nodes.total_weight();
-        let max_faulty = ((total_weight - threshold) / 2).min(threshold - 1);
-        let dkg_config = MpcConfig::new(epoch, nodes, threshold, max_faulty)?;
+        let mpc_config = MpcConfig::new(epoch, nodes, threshold, max_faulty);
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;
         let my_pk = PublicKey::<EncryptionGroupElement>::from_private_key(&encryption_key);
-        let committee_pk = &dkg_config
+        let committee_pk = &mpc_config
             .nodes
             .node_id_to_node(party_id as PartyId)
             .expect("party_id not in nodes")
@@ -168,7 +170,7 @@ impl MpcManager {
             threshold,
             total_weight,
             max_faulty,
-            num_nodes = dkg_config.nodes.num_nodes(),
+            num_nodes = mpc_config.nodes.num_nodes(),
             encryption_keys_match = keys_match,
             my_encryption_pk = hex::encode(my_pk.as_element().to_byte_array()),
             committee_encryption_pk = hex::encode(committee_pk.as_element().to_byte_array()),
@@ -200,9 +202,10 @@ impl MpcManager {
         };
         let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold) = build_reduced_nodes(
+                let (nodes, threshold, _prev_max_faulty) = build_reduced_nodes(
                     prev_committee,
                     prev_committee.mpc_threshold_in_basis_points(),
+                    max_faulty_in_basis_points,
                     prev_committee.mpc_weight_reduction_allowed_delta(),
                     weight_divisor,
                 )?;
@@ -213,7 +216,7 @@ impl MpcManager {
         let mut manager = Self {
             party_id,
             address,
-            mpc_config: dkg_config,
+            mpc_config,
             session_id,
             encryption_key,
             signing_key,
@@ -3587,9 +3590,10 @@ fn compute_messages_hash(messages: &Messages) -> MessageHash {
 fn build_reduced_nodes(
     committee: &Committee,
     threshold_in_basis_points: u16,
+    max_faulty_in_basis_points: u16,
     weight_reduction_allowed_delta: u16,
     test_weight_divisor: u16,
-) -> MpcResult<(Nodes<EncryptionGroupElement>, u16)> {
+) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
         .iter()
@@ -3603,8 +3607,19 @@ fn build_reduced_nodes(
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
     let threshold =
         (total_weight as u32 * threshold_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
-    Nodes::new_reduced(nodes_vec, threshold, weight_reduction_allowed_delta, 1)
-        .map_err(|e| MpcError::CryptoError(e.to_string()))
+    let max_faulty =
+        (total_weight as u32 * max_faulty_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
+    // Cap at `total_weight` for unit tests with small weights (< 100).
+    // In production `total_weight` >> 100 so the cap never fires.
+    let lower_bound = MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight);
+    Nodes::new_reduced_with_f(
+        nodes_vec,
+        threshold,
+        max_faulty,
+        weight_reduction_allowed_delta,
+        lower_bound,
+    )
+    .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 
 fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {

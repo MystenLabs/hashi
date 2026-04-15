@@ -1482,7 +1482,9 @@ mod tests {
         let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
 
         for i in 0..num_signings {
-            let request_id = sui_sdk_types::Address::new([i as u8; 32]);
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let request_id = sui_sdk_types::Address::new(bytes);
             let results =
                 sign_on_all_nodes(nodes, b"refill test", epoch, request_id, i as u64).await;
             assert_all_signatures_match(results);

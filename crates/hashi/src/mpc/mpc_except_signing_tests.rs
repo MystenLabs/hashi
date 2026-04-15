@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 const TEST_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
+const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 2000;
 /// Use 0 for weight_reduction_allowed_delta in tests to disable weight reduction.
 const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
 /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
@@ -308,6 +309,7 @@ impl TestSetup {
             self.encryption_keys[validator_index].clone(),
             self.signing_keys[validator_index].clone(),
             store,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -920,6 +922,7 @@ fn test_mpc_manager_new_from_committee_set() {
         encryption_key,
         signing_key,
         Box::new(MockPublicMessagesStore),
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -982,6 +985,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         encryption_keys[0].clone(),
         signing_keys[0].clone(),
         Box::new(MockPublicMessagesStore),
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1004,10 +1008,12 @@ fn test_mpc_manager_new_with_weighted_committee() {
 
     let manager = setup.create_manager(0);
 
-    // With total_weight=15, threshold=ceil(15*3333/10000)=ceil(4.9995)=5
-    // max_faulty = min((15-5)/2, 5-1) = min(5, 4) = 4
+    // With total_weight=15:
+    // threshold = ceil(15*3333/10000) = ceil(4.9995) = 5
+    // max_faulty = ceil(15*2000/10000) = ceil(3.0) = 3
+    // (after new_reduced_with_f with allowed_delta=0, no reduction)
     assert_eq!(manager.mpc_config.threshold, 5);
-    assert_eq!(manager.mpc_config.max_faulty, 4);
+    assert_eq!(manager.mpc_config.max_faulty, 3);
 }
 
 #[test]
@@ -2483,7 +2489,7 @@ async fn test_run_as_party_exact_weight_threshold() {
 
 #[tokio::test]
 async fn test_run_as_party_with_reduced_weights() {
-    let weights = vec![2500, 2500, 2500, 2500];
+    let weights = vec![100, 100, 100, 100];
     let test_setup = setup_weight_based_test(weights.clone(), 0, None); // threshold computed automatically
 
     let manager = test_setup.setup.create_manager(0);
@@ -4969,9 +4975,10 @@ impl RotationTestSetup {
     /// This matches `run_as_party` behavior during live DKG.
     fn threshold_dealer_addresses(&self) -> Vec<Address> {
         let committee = self.setup.committee();
-        let (nodes, threshold) = build_reduced_nodes(
+        let (nodes, threshold, _max_faulty) = build_reduced_nodes(
             committee,
             TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_WEIGHT_DIVISOR,
         )
@@ -4995,9 +5002,10 @@ impl RotationTestSetup {
     fn prepare_for_rotation(&self, manager: &mut MpcManager) {
         let previous_committee = self.setup.committee_set.previous_committee().cloned();
         if let Some(ref prev) = previous_committee {
-            let (nodes, threshold) = build_reduced_nodes(
+            let (nodes, threshold, _max_faulty) = build_reduced_nodes(
                 prev,
                 TEST_THRESHOLD_IN_BASIS_POINTS,
+                TEST_MAX_FAULTY_IN_BASIS_POINTS,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_WEIGHT_DIVISOR,
             )
@@ -6150,6 +6158,7 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_encryption_key,
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7299,6 +7308,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7470,6 +7480,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         setup.encryption_keys[target_index].clone(),
         setup.signing_keys[target_index].clone(),
         Box::new(store),
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7559,6 +7570,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7589,6 +7601,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7685,6 +7698,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7747,7 +7761,6 @@ fn create_nonce_dealer_message(
         config.nodes.clone(),
         dealer_party_id,
         config.threshold,
-        config.max_faulty,
         dealer_session_id.to_vec(),
         TEST_BATCH_SIZE_PER_WEIGHT,
     )
