@@ -102,7 +102,7 @@ pub struct EphemeralKeyPairs {
 /// SETUP_MODE=false: all endpoints except setup_new_key are enabled.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _guard = hashi_types::telemetry::TelemetryConfig::new()
+    hashi_types::telemetry::TelemetryConfig::new()
         .with_file_line(true)
         .with_env()
         .init();

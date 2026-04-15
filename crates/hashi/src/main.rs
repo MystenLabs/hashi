@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    let _guard = hashi_types::telemetry::TelemetryConfig::new()
+    hashi_types::telemetry::TelemetryConfig::new()
         .with_file_line(true)
         .with_env()
         .init();

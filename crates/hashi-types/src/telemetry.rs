@@ -66,7 +66,7 @@ impl TelemetryConfig {
         self
     }
 
-    pub fn init(self) -> TelemetryGuard {
+    pub fn init(self) {
         let use_json = match self.json {
             Some(true) => true,
             Some(false) => false,
@@ -96,12 +96,5 @@ impl TelemetryConfig {
 
             tracing_subscriber::registry().with(fmt_layer).init();
         }
-
-        TelemetryGuard { _private: () }
     }
-}
-
-#[must_use = "dropping the guard immediately will lose buffered log output"]
-pub struct TelemetryGuard {
-    _private: (),
 }

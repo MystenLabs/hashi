@@ -674,8 +674,7 @@ fn init_tracing(verbose: bool) {
         tracing::level_filters::LevelFilter::WARN
     };
 
-    // Guard is intentionally leaked — the CLI runs to completion in main().
-    let _guard = hashi_types::telemetry::TelemetryConfig::new()
+    hashi_types::telemetry::TelemetryConfig::new()
         .with_default_level(level)
         .with_target(false)
         .with_env()

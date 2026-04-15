@@ -252,7 +252,7 @@ async fn metrics_handler(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _guard = hashi_types::telemetry::TelemetryConfig::new()
+    hashi_types::telemetry::TelemetryConfig::new()
         .with_file_line(true)
         .with_env()
         .init();

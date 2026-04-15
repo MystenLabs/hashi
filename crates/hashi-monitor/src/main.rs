@@ -51,7 +51,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _guard = hashi_types::telemetry::TelemetryConfig::new()
+    hashi_types::telemetry::TelemetryConfig::new()
         .with_target(false)
         .with_env()
         .init();

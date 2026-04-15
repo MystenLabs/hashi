@@ -24,6 +24,10 @@ use std::path::Path;
     about = "Manage a local Hashi dev environment"
 )]
 struct Cli {
+    /// Enable verbose tracing output (INFO level).
+    #[clap(long, short, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -72,10 +76,6 @@ enum Commands {
         /// Bitcoin regtest RPC port
         #[clap(long, default_value = "18443")]
         btc_rpc_port: u16,
-
-        /// Enable verbose tracing output
-        #[clap(long, short)]
-        verbose: bool,
 
         #[command(flatten)]
         opts: LocalnetOpts,
@@ -215,23 +215,24 @@ fn print_warning(msg: &str) {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let default_level = if cli.verbose {
+        tracing::level_filters::LevelFilter::INFO
+    } else {
+        tracing::level_filters::LevelFilter::OFF
+    };
+    hashi_types::telemetry::TelemetryConfig::new()
+        .with_default_level(default_level)
+        .with_target(false)
+        .with_env()
+        .init();
+
     match cli.command {
         Commands::Start {
             num_validators,
             sui_rpc_port,
             btc_rpc_port,
-            verbose,
             opts,
-        } => {
-            cmd_start(
-                num_validators,
-                sui_rpc_port,
-                btc_rpc_port,
-                verbose,
-                &opts.data_dir,
-            )
-            .await
-        }
+        } => cmd_start(num_validators, sui_rpc_port, btc_rpc_port, &opts.data_dir).await,
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
@@ -259,7 +260,6 @@ async fn cmd_start(
     num_validators: usize,
     sui_rpc_port: u16,
     btc_rpc_port: u16,
-    verbose: bool,
     data_dir: &Path,
 ) -> Result<()> {
     // Check for existing running instance
@@ -272,18 +272,6 @@ async fn cmd_start(
         }
         print_warning("Found stale state file, cleaning up...");
     }
-
-    let default_level = if verbose {
-        tracing::level_filters::LevelFilter::INFO
-    } else {
-        tracing::level_filters::LevelFilter::OFF
-    };
-
-    let _guard = hashi_types::telemetry::TelemetryConfig::new()
-        .with_default_level(default_level)
-        .with_target(false)
-        .with_env()
-        .init();
 
     use std::io::Write;
     print!(
