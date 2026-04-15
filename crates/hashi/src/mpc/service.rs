@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
@@ -352,7 +351,10 @@ impl MpcService {
             signer,
         );
         let metrics = &self.inner.metrics;
-        let nonce_start = Instant::now();
+        let _timer = metrics
+            .mpc_total_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .start_timer();
         let nonce_result = MpcManager::run_nonce_generation(
             &mpc_manager,
             batch_index,
@@ -361,10 +363,7 @@ impl MpcService {
             metrics,
         )
         .await;
-        metrics
-            .mpc_total_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GEN])
-            .observe(nonce_start.elapsed().as_secs_f64());
+        drop(_timer);
         let nonce_outputs =
             nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
         let (batch_size_per_weight, f) = {
@@ -374,13 +373,13 @@ impl MpcService {
                 mgr.mpc_config.max_faulty as usize,
             )
         };
-        let presig_start = Instant::now();
-        let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
-            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
-        metrics
+        let _timer = metrics
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GEN])
-            .observe(presig_start.elapsed().as_secs_f64());
+            .start_timer();
+        let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        drop(_timer);
         Ok((committee, presignatures))
     }
 
@@ -572,7 +571,6 @@ impl MpcService {
 
     #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
     async fn handle_reconfig(&self, target_epoch: u64) {
-        let reconfig_start = Instant::now();
         let run_dkg = self
             .inner
             .onchain_state()
@@ -587,6 +585,10 @@ impl MpcService {
             MPC_LABEL_KEY_ROTATION
         };
         let metrics = &self.inner.metrics;
+        let _reconfig_timer = metrics
+            .mpc_reconfig_total_duration_seconds
+            .with_label_values(&[protocol_label])
+            .start_timer();
         info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}, entering retry loop",);
         let output = loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
@@ -606,7 +608,10 @@ impl MpcService {
                 self.sleep_if_still_pending(target_epoch).await;
                 continue;
             }
-            let protocol_start = Instant::now();
+            let _timer = metrics
+                .mpc_total_duration_seconds
+                .with_label_values(&[protocol_label])
+                .start_timer();
             let result = if run_dkg {
                 tokio::time::timeout(MPC_PROTOCOL_TIMEOUT, self.run_dkg(target_epoch))
                     .await
@@ -624,10 +629,7 @@ impl MpcService {
                         ))
                     })
             };
-            metrics
-                .mpc_total_duration_seconds
-                .with_label_values(&[protocol_label])
-                .observe(protocol_start.elapsed().as_secs_f64());
+            drop(_timer);
             match result {
                 Ok(output) => break output,
                 Err(e) => {
@@ -641,7 +643,10 @@ impl MpcService {
         };
         let _ = self.key_ready_tx.send(Some(output.public_key));
         info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
-        let end_reconfig_start = Instant::now();
+        let _end_reconfig_timer = metrics
+            .mpc_end_reconfig_duration_seconds
+            .with_label_values(&[protocol_label])
+            .start_timer();
         loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 break;
@@ -657,15 +662,15 @@ impl MpcService {
                 }
             }
         }
-        metrics
-            .mpc_end_reconfig_duration_seconds
-            .with_label_values(&[protocol_label])
-            .observe(end_reconfig_start.elapsed().as_secs_f64());
+        drop(_end_reconfig_timer);
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
-        let prepare_signing_start = Instant::now();
+        let _prepare_signing_timer = metrics
+            .mpc_prepare_signing_duration_seconds
+            .with_label_values(&[protocol_label])
+            .start_timer();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             match self.prepare_signing(target_epoch, &output).await {
                 Ok(()) => break,
@@ -685,14 +690,8 @@ impl MpcService {
                 }
             }
         }
-        metrics
-            .mpc_prepare_signing_duration_seconds
-            .with_label_values(&[protocol_label])
-            .observe(prepare_signing_start.elapsed().as_secs_f64());
-        metrics
-            .mpc_reconfig_total_duration_seconds
-            .with_label_values(&[protocol_label])
-            .observe(reconfig_start.elapsed().as_secs_f64());
+        drop(_prepare_signing_timer);
+        drop(_reconfig_timer);
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {

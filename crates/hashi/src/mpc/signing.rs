@@ -277,7 +277,10 @@ impl SigningManager {
                      batch_index={used_batch_index}, \
                      position={target_position})",
                 );
-                let gen_start = std::time::Instant::now();
+                let _timer = metrics
+                    .mpc_sign_partial_gen_duration_seconds
+                    .with_label_values(&[MPC_LABEL_SIGNING])
+                    .start_timer();
                 let result = generate_partial_signatures(
                     message,
                     presig,
@@ -287,10 +290,7 @@ impl SigningManager {
                     derivation_address,
                 )
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
-                metrics
-                    .mpc_sign_partial_gen_duration_seconds
-                    .with_label_values(&[MPC_LABEL_SIGNING])
-                    .observe(gen_start.elapsed().as_secs_f64());
+                drop(_timer);
 
                 // Trigger refill based on the latest batch's consumption.
                 if let Some(latest) = mgr.batches.last() {
@@ -347,7 +347,10 @@ impl SigningManager {
             .collect();
         let request = GetPartialSignaturesRequest { sui_request_id };
         let deadline = Instant::now() + timeout;
-        let collection_start = std::time::Instant::now();
+        let _collection_timer = metrics
+            .mpc_sign_collection_duration_seconds
+            .with_label_values(&[MPC_LABEL_SIGNING])
+            .start_timer();
         loop {
             if all_partial_sigs.len() >= threshold as usize {
                 break;
@@ -366,10 +369,7 @@ impl SigningManager {
             )
             .await;
         }
-        metrics
-            .mpc_sign_collection_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .observe(collection_start.elapsed().as_secs_f64());
+        drop(_collection_timer);
         let params = AggregationParams {
             message,
             public_nonce: &public_nonce,
@@ -378,7 +378,10 @@ impl SigningManager {
             verifying_key: &verifying_key,
             derivation_address,
         };
-        let agg_start = std::time::Instant::now();
+        let _agg_timer = metrics
+            .mpc_sign_aggregation_duration_seconds
+            .with_label_values(&[MPC_LABEL_SIGNING])
+            .start_timer();
         let result = match aggregate_signatures(
             params.message,
             params.public_nonce,
@@ -407,10 +410,7 @@ impl SigningManager {
             }
             Err(e) => Err(SigningError::CryptoError(e.to_string())),
         };
-        metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .observe(agg_start.elapsed().as_secs_f64());
+        drop(_agg_timer);
         match &result {
             Ok(_) => {}
             Err(e) => {

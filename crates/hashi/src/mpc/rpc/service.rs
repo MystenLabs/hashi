@@ -19,7 +19,6 @@ use hashi_types::proto::RetrieveMessagesResponse;
 use hashi_types::proto::SendMessagesRequest;
 use hashi_types::proto::SendMessagesResponse;
 use hashi_types::proto::mpc_service_server::MpcService;
-use std::time::Instant;
 use sui_sdk_types::Address;
 use tonic::Status;
 
@@ -40,7 +39,11 @@ impl MpcService for HttpService {
             types::Messages::NonceGeneration(_) => crate::metrics::MPC_LABEL_NONCE_GEN,
         };
         let mpc_manager = self.mpc_manager()?;
-        let process_start = Instant::now();
+        let _timer = self
+            .metrics()
+            .mpc_rpc_handler_process_duration_seconds
+            .with_label_values(&[label])
+            .start_timer();
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
             validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
@@ -55,10 +58,7 @@ impl MpcService for HttpService {
                 })
         })
         .await?;
-        self.metrics()
-            .mpc_rpc_handler_process_duration_seconds
-            .with_label_values(&[label])
-            .observe(process_start.elapsed().as_secs_f64());
+        drop(_timer);
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
     }
 
