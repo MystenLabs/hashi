@@ -1093,6 +1093,7 @@ mod tests {
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
 
+        use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
@@ -1100,6 +1101,7 @@ mod tests {
         let threshold_bps = hashi.onchain_state().mpc_threshold_in_basis_points();
         let weight_reduction_allowed_delta =
             hashi.onchain_state().mpc_weight_reduction_allowed_delta();
+        let max_faulty_bps = hashi.onchain_state().mpc_max_faulty_in_basis_points();
 
         assert_eq!(
             threshold_bps, DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
@@ -1108,6 +1110,10 @@ mod tests {
         assert_eq!(
             weight_reduction_allowed_delta, DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             "on-chain mpc_weight_reduction_allowed_delta ({weight_reduction_allowed_delta}) != Rust default ({DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA})"
+        );
+        assert_eq!(
+            max_faulty_bps, DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            "on-chain mpc_max_faulty_in_basis_points ({max_faulty_bps}) != Rust default ({DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS})"
         );
         Ok(())
     }

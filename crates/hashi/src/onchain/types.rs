@@ -488,6 +488,9 @@ const DUST_RELAY_MIN_VALUE: u64 = 546;
 pub use hashi_types::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 pub use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
+// Mirrors DEFAULT_MAX_FAULTY_IN_BASIS_POINTS in mpc_config.move.
+pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
+
 impl Config {
     /// Minimum deposit amount, mirroring the floor logic in btc_config.move.
     pub fn bitcoin_deposit_minimum(&self) -> u64 {
@@ -545,6 +548,15 @@ impl Config {
                 u16::try_from(*v).expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX")
             }
             _ => DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        }
+    }
+
+    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
+        match self.config.get("mpc_max_faulty_in_basis_points") {
+            Some(ConfigValue::U64(v)) => {
+                u16::try_from(*v).expect("mpc_max_faulty_in_basis_points exceeds u16::MAX")
+            }
+            _ => DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
         }
     }
 }

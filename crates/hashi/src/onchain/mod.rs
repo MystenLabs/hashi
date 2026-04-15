@@ -413,6 +413,10 @@ impl OnchainState {
             .mpc_weight_reduction_allowed_delta()
     }
 
+    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
+        self.state().hashi().config.mpc_max_faulty_in_basis_points()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,
