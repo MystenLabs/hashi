@@ -23,6 +23,8 @@ pub mod e2e_flow;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
+pub mod test_helpers;
+pub mod upgrade_flow;
 
 pub use bitcoin_node::BitcoinNodeBuilder;
 pub use bitcoin_node::BitcoinNodeHandle;
@@ -67,6 +69,10 @@ impl TestNetworks {
 
     pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
         &self.bitcoin_node
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
     }
 
     pub async fn restart(&mut self) -> Result<()> {
