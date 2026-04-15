@@ -707,6 +707,20 @@ pub(crate) async fn scrape_hashi_config(
     Ok(convert_move_config(config))
 }
 
+/// Return the child object's type as a string, preferring the dedicated
+/// `object_type` field (always set by Sui indexing) and falling back to the
+/// BCS `contents.name` (which some fullnodes leave empty in dynamic-field
+/// list responses).
+fn child_object_type_name(child_object: &sui_rpc::proto::sui::rpc::v2::Object) -> &str {
+    let object_type = child_object.object_type_opt().unwrap_or("");
+    if !object_type.is_empty() {
+        object_type
+    } else {
+        child_object.contents().name()
+    }
+}
+
+
 fn convert_move_config(config: move_types::Config) -> types::Config {
     types::Config {
         config: config.config.into_iter().collect(),
@@ -730,6 +744,7 @@ async fn scrape_treasury(
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder().child_object().object_type(),
                     DynamicField::path_builder()
                         .child_object()
                         .contents()
@@ -739,7 +754,16 @@ async fn scrape_treasury(
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        let type_tag = field.child_object().contents().name().parse()?;
+        let name = child_object_type_name(field.child_object());
+        let type_tag: TypeTag = match name.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping treasury dynamic field with unparseable type {name:?}: {e}"
+                );
+                continue;
+            }
+        };
         let contents = field.child_object().contents().value();
 
         if let Some(treasury_cap) = types::TreasuryCap::try_from_contents(&type_tag, contents) {
@@ -1209,6 +1233,9 @@ async fn scrape_proposals(
 ) -> Result<types::Proposals> {
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
+    // Proposals live in a `0x2::bag::Bag` (dynamic FIELD, value stored inline),
+    // so we read `value_type` + `value` off the `DynamicField` proto itself —
+    // NOT `child_object` (that's only populated for DynamicObject kinds).
     let mut stream = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
@@ -1216,22 +1243,30 @@ async fn scrape_proposals(
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder()
-                        .child_object()
-                        .contents()
-                        .finish(),
+                    DynamicField::path_builder().value_type(),
+                    DynamicField::path_builder().value().finish(),
                 ])),
         )
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        // Parse the proposal type from the type tag
-        // The type will be something like: <package>::proposal::Proposal<<package>::update_deposit_fee::UpdateDepositFee>
-        let type_tag: TypeTag = field.child_object().contents().name().parse()?;
+        // The value_type is the inner type, e.g.
+        //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
+        let value_type = field.value_type_opt().unwrap_or("");
+        let type_tag: TypeTag = match value_type.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping proposal dynamic field with unparseable value_type \
+                     {value_type:?}: {e}"
+                );
+                continue;
+            }
+        };
         let proposal_type = parse_proposal_type(&type_tag);
 
         // Deserialize proposal based on the proposal type
-        let contents = field.child_object().contents().value();
+        let contents: &[u8] = field.value().value();
         let result: Option<(Address, u64)> = match &proposal_type {
             types::ProposalType::UpdateConfig => {
                 bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
