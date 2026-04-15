@@ -25,12 +25,16 @@ use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::guardian::bitcoin_utils;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
+use tokio::task::JoinSet;
+use tracing::error;
 
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::leader::RetryPolicy;
+use crate::leader::parse_member_signature;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -1037,6 +1041,71 @@ impl Hashi {
         Ok(())
     }
 
+    /// Build a withdrawal tx commitment for `requests` and collect a quorum of
+    /// committee signatures over it via the same `sign_withdrawal_tx_construction`
+    /// RPC fan-out used by the leader loop.
+    ///
+    /// Returns the commitment and an aggregated `CommitteeSignature` ready to
+    /// feed into `commit_withdrawal_tx`. Useful for tests that want to drive a
+    /// commit PTB directly without going through the leader's periodic tick.
+    pub async fn build_and_sign_withdrawal_commitment(
+        self: &Arc<Self>,
+        requests: &[WithdrawalRequest],
+    ) -> anyhow::Result<(
+        WithdrawalTxCommitment,
+        hashi_types::committee::CommitteeSignature,
+    )> {
+        use hashi_types::committee::BlsSignatureAggregator;
+        use hashi_types::committee::certificate_threshold;
+
+        let approval = self
+            .build_withdrawal_tx_commitment(requests)
+            .await
+            .map_err(|e| anyhow!("build_withdrawal_tx_commitment failed: {e}"))?;
+
+        let members = self
+            .onchain_state()
+            .current_committee_members()
+            .ok_or_else(|| anyhow!("No current committee members"))?;
+        let committee = self
+            .onchain_state()
+            .current_committee()
+            .ok_or_else(|| anyhow!("No current committee"))?;
+
+        let required_weight = certificate_threshold(committee.total_weight());
+        let proto_request = approval.to_proto();
+
+        let mut sig_tasks = JoinSet::new();
+        for member in members {
+            let hashi = self.clone();
+            let proto_request = proto_request.clone();
+            sig_tasks.spawn(async move {
+                request_withdrawal_tx_construction_signature(&hashi, proto_request, &member).await
+            });
+        }
+
+        let mut aggregator = BlsSignatureAggregator::new(&committee, approval.clone());
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!("Failed to add withdrawal commitment signature: {e}");
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+
+        if aggregator.weight() < required_weight {
+            anyhow::bail!(
+                "Insufficient withdrawal commitment signatures: weight {} < {required_weight}",
+                aggregator.weight()
+            );
+        }
+
+        let signed = aggregator.finish()?;
+        Ok((approval, signed.into_parts().0))
+    }
+
     /// Convert raw witness program bytes to a human-readable Bitcoin address string.
     fn bitcoin_address_string_from_raw(&self, address_bytes: &[u8]) -> anyhow::Result<String> {
         let version = match address_bytes.len() {
@@ -1051,6 +1120,35 @@ impl Hashi {
             .map_err(|e| anyhow!("Failed to convert script to address: {e}"))?;
         Ok(address.to_string())
     }
+}
+
+async fn request_withdrawal_tx_construction_signature(
+    hashi: &Arc<Hashi>,
+    proto_request: hashi_types::proto::SignWithdrawalTxConstructionRequest,
+    member: &hashi_types::committee::CommitteeMember,
+) -> Option<hashi_types::committee::MemberSignature> {
+    let validator_address = member.validator_address();
+    let mut rpc_client = hashi
+        .onchain_state()
+        .bridge_service_client(&validator_address)?;
+
+    let response = rpc_client
+        .sign_withdrawal_tx_construction(proto_request)
+        .await
+        .inspect_err(|e| {
+            error!("Failed to get withdrawal commitment signature from {validator_address}: {e}");
+        })
+        .ok()?;
+
+    response
+        .into_inner()
+        .member_signature
+        .ok_or_else(|| anyhow!("No member_signature in response"))
+        .and_then(parse_member_signature)
+        .inspect_err(|e| {
+            error!("Failed to parse member signature from {validator_address}: {e}");
+        })
+        .ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -268,6 +268,9 @@ pub struct HashiNetworkBuilder {
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
     pub guardian_endpoint: Option<String>,
+    /// When true, the leader skips withdrawal approval + commit phases.
+    /// Used to stage manual cancellation tests.
+    pub test_disable_withdrawal_processing: Option<bool>,
 }
 
 impl HashiNetworkBuilder {
@@ -282,6 +285,7 @@ impl HashiNetworkBuilder {
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
             guardian_endpoint: None,
+            test_disable_withdrawal_processing: None,
         }
     }
 
@@ -330,6 +334,11 @@ impl HashiNetworkBuilder {
         self
     }
 
+    pub fn with_test_disable_withdrawal_processing(mut self, disable: bool) -> Self {
+        self.test_disable_withdrawal_processing = Some(disable);
+        self
+    }
+
     pub async fn build(
         self,
         dir: &Path,
@@ -370,6 +379,7 @@ impl HashiNetworkBuilder {
             config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
             config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
             config.max_mempool_chain_depth = self.max_mempool_chain_depth;
+            config.test_disable_withdrawal_processing = self.test_disable_withdrawal_processing;
             // All nodes EXCEPT the target corrupt shares for the target.
             if let Some(target_addr) = corrupt_target_address
                 && Some(i) != self.test_corrupt_shares_target
