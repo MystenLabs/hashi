@@ -79,6 +79,7 @@ impl TelemetryConfig {
 
         if use_json {
             let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_writer(stderr)
                 .with_file(true)
                 .with_line_number(true)
                 .with_target(self.target)
@@ -88,6 +89,7 @@ impl TelemetryConfig {
             tracing_subscriber::registry().with(fmt_layer).init();
         } else {
             let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_writer(stderr)
                 .with_file(self.file_line)
                 .with_line_number(self.file_line)
                 .with_target(self.target)
