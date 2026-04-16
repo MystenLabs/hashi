@@ -640,7 +640,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 3333u16, 0u16);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16);
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);

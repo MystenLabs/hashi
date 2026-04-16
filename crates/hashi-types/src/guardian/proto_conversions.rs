@@ -54,6 +54,7 @@ use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
+use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
@@ -677,11 +678,16 @@ fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
         .mpc_weight_reduction_allowed_delta
         .map(|v| v as u16)
         .unwrap_or(DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA);
+    let mpc_max_faulty_in_basis_points = c
+        .mpc_max_faulty_in_basis_points
+        .map(|v| v as u16)
+        .unwrap_or(DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS);
     let committee = HashiCommittee::new(
         members,
         epoch,
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
     );
 
     if committee.total_weight() != total_weight {
@@ -705,6 +711,7 @@ fn hashi_committee_to_pb(c: HashiCommittee) -> pb::Committee {
         total_weight: Some(c.total_weight()),
         mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points() as u64),
         mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta() as u64),
+        mpc_max_faulty_in_basis_points: Some(c.mpc_max_faulty_in_basis_points() as u64),
     }
 }
 

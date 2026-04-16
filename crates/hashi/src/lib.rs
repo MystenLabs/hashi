@@ -220,7 +220,6 @@ impl Hashi {
         let state = self.onchain_state().state();
         let hashi = state.hashi();
         let committee_set = &hashi.committees;
-        let max_faulty_in_basis_points = hashi.config.mpc_max_faulty_in_basis_points();
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let encryption_key = self.config.encryption_private_key()?;
         self.db
@@ -261,7 +260,6 @@ impl Hashi {
             encryption_key,
             signing_key,
             store,
-            max_faulty_in_basis_points,
             chain_id,
             self.config.test_weight_divisor,
             batch_size_per_weight,

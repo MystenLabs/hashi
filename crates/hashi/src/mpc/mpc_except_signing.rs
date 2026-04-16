@@ -122,7 +122,6 @@ impl MpcManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
-        max_faulty_in_basis_points: u16,
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
@@ -146,7 +145,7 @@ impl MpcManager {
         let (nodes, threshold, max_faulty) = build_reduced_nodes(
             &committee,
             committee.mpc_threshold_in_basis_points(),
-            max_faulty_in_basis_points,
+            committee.mpc_max_faulty_in_basis_points(),
             committee.mpc_weight_reduction_allowed_delta(),
             weight_divisor,
         )?;
@@ -205,7 +204,7 @@ impl MpcManager {
                 let (nodes, threshold, _prev_max_faulty) = build_reduced_nodes(
                     prev_committee,
                     prev_committee.mpc_threshold_in_basis_points(),
-                    max_faulty_in_basis_points,
+                    prev_committee.mpc_max_faulty_in_basis_points(),
                     prev_committee.mpc_weight_reduction_allowed_delta(),
                     weight_divisor,
                 )?;

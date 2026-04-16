@@ -8,6 +8,7 @@ message Committee {
   optional uint64 total_weight = 3;
   optional uint64 mpc_threshold_in_basis_points = 4;
   optional uint64 mpc_weight_reduction_allowed_delta = 5;
+  optional uint64 mpc_max_faulty_in_basis_points = 6;
 }
 
 message CommitteeMember {

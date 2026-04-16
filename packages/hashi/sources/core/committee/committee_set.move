@@ -291,6 +291,7 @@ fun new_committee_from_validator_set(
     sui_system: &sui_system::sui_system::SuiSystemState,
     mpc_threshold_in_basis_points: u64,
     mpc_weight_reduction_allowed_delta: u64,
+    mpc_max_faulty_in_basis_points: u64,
     ctx: &TxContext,
 ): Committee {
     let epoch = ctx.epoch();
@@ -336,6 +337,7 @@ fun new_committee_from_validator_set(
         committee_members,
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
     )
 }
 
@@ -356,6 +358,7 @@ public(package) fun start_reconfig(
     sui_system: &sui_system::sui_system::SuiSystemState,
     mpc_threshold_in_basis_points: u64,
     mpc_weight_reduction_allowed_delta: u64,
+    mpc_max_faulty_in_basis_points: u64,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
@@ -371,6 +374,7 @@ public(package) fun start_reconfig(
         sui_system,
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
         ctx,
     );
 
