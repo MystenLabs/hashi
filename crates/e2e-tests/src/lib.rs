@@ -18,6 +18,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
+pub mod backup_restore;
 pub mod bitcoin_node;
 pub mod e2e_flow;
 pub mod hashi_network;
