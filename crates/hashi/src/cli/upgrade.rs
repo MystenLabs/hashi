@@ -31,6 +31,45 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 
+/// Relative path (from a package root) to the Move source file declaring the
+/// `PACKAGE_VERSION` constant.
+const PACKAGE_VERSION_SOURCE: &str = "sources/core/config/config.move";
+
+/// Parse the `PACKAGE_VERSION` constant from `sources/core/config/config.move`
+/// in a package source tree.
+///
+/// This is the version gate enforced by `config::assert_version_enabled`; it
+/// must be bumped in every upgrade or the new package will reject all entry
+/// points guarded by that check.
+pub fn read_package_version(package_path: &Path) -> Result<u64> {
+    let source_path = package_path.join(PACKAGE_VERSION_SOURCE);
+    let source = std::fs::read_to_string(&source_path).map_err(|e| {
+        anyhow!(
+            "failed to read {} to parse PACKAGE_VERSION: {e}",
+            source_path.display()
+        )
+    })?;
+
+    let line = source
+        .lines()
+        .find(|l| l.trim_start().starts_with("const PACKAGE_VERSION"))
+        .ok_or_else(|| {
+            anyhow!(
+                "PACKAGE_VERSION declaration not found in {}",
+                source_path.display()
+            )
+        })?;
+
+    let rhs = line
+        .split_once('=')
+        .and_then(|(_, rhs)| rhs.split(';').next())
+        .ok_or_else(|| anyhow!("malformed PACKAGE_VERSION line: {line:?}"))?
+        .trim();
+
+    rhs.parse::<u64>()
+        .map_err(|e| anyhow!("PACKAGE_VERSION value {rhs:?} is not a u64: {e}"))
+}
+
 /// Build an upgrade package by invoking `sui move build --dump-bytecode-as-base64`
 /// and parsing the resulting JSON.
 ///
@@ -39,13 +78,25 @@ use sui_transaction_builder::TransactionBuilder;
 /// `client_config` is passed as `--client.config` when supplied, otherwise the
 /// `sui` binary's default client config is used.
 ///
+/// Runs a pre-flight check that the package declares `PACKAGE_VERSION ==
+/// expected_version`, failing before shelling out if the constant wasn't
+/// bumped. Callers typically pass `current_highest_version + 1`.
+///
 /// Returns the compiled `Publish` (modules + dependencies) plus the package
 /// digest — the latter is what goes into the `Upgrade` proposal.
 pub fn build_upgrade_package(
     sui_binary: &Path,
     package_path: &Path,
     client_config: Option<&Path>,
+    expected_version: u64,
 ) -> Result<(Publish, Vec<u8>)> {
+    let declared_version = read_package_version(package_path)?;
+    anyhow::ensure!(
+        declared_version == expected_version,
+        "upgrade package declares PACKAGE_VERSION = {declared_version}, expected {expected_version} \
+         (must be exactly +1 of the currently published version)"
+    );
+
     let mut cmd = std::process::Command::new(sui_binary);
     cmd.arg("move");
 

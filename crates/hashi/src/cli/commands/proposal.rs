@@ -6,6 +6,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use colored::Colorize;
+use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use tabled::Table;
 use tabled::Tabled;
@@ -57,35 +58,50 @@ fn print_simulation_result(result: &SimulationResult) {
     );
 }
 
-/// Execute or simulate a transaction based on tx_opts
+/// Execute or simulate a transaction based on tx_opts.
 ///
-/// Returns Ok(true) if execution/simulation succeeded, Ok(false) if no keypair configured.
+/// Returns `Some(response)` when a real transaction was executed, and `None`
+/// on dry-run or when no keypair is configured.
 async fn execute_or_simulate(
     client: &mut HashiClient,
     tx: sui_transaction_builder::TransactionBuilder,
     tx_opts: &TxOptions,
-) -> Result<bool> {
+) -> Result<Option<ExecuteTransactionResponse>> {
     if !client.can_execute() {
         print_warning("Transaction execution requires keypair configuration (--keypair).");
-        return Ok(false);
+        return Ok(None);
     }
 
     if tx_opts.dry_run {
         print_info("Simulating transaction (dry-run)...");
         let result = client.simulate(tx).await?;
         print_simulation_result(&result);
-    } else {
-        print_info("Executing transaction...");
-        let response = client.execute(tx).await?;
-        let digest = response.transaction().digest();
-        println!(
-            "\n{} Transaction submitted: {}",
-            "✓".green(),
-            digest.to_string().cyan()
-        );
+        return Ok(None);
     }
 
-    Ok(true)
+    print_info("Executing transaction...");
+    let response = client.execute(tx).await?;
+    let digest = response.transaction().digest();
+    println!(
+        "\n{} Transaction submitted: {}",
+        "✓".green(),
+        digest.to_string().cyan()
+    );
+    Ok(Some(response))
+}
+
+/// Print the newly-created proposal's ID after a `create_*_proposal` call,
+/// when the response is available (real execute, not dry-run).
+fn print_created_proposal_id(response: Option<&ExecuteTransactionResponse>) {
+    let Some(response) = response else {
+        return;
+    };
+    match crate::cli::upgrade::extract_proposal_id_from_response(response) {
+        Ok(id) => println!("  {} {}", "Proposal ID:".bold(), id.to_hex().cyan()),
+        Err(e) => {
+            tracing::warn!("Could not extract proposal ID from response: {e}");
+        }
+    }
 }
 
 /// List all active proposals
@@ -135,8 +151,10 @@ pub async fn list_proposals(
     println!("\n📋 Active Proposals:\n");
 
     if detailed {
+        // List mode skips the per-proposal vote/quorum fetch to avoid N extra
+        // network calls; use `proposal view <id>` for full vote progress.
         for proposal in &proposals {
-            print_proposal_detailed(proposal);
+            print_proposal_detailed(proposal, None, None);
             println!();
         }
     } else {
@@ -185,14 +203,23 @@ pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> 
         .fetch_proposal(&proposal_addr)
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
+    let details = client.fetch_proposal_details(proposal_addr).await.ok();
+    let committee = client.fetch_current_committee();
+
     println!();
-    print_proposal_detailed(&proposal);
+    print_proposal_detailed(&proposal, details.as_ref(), committee.as_ref());
 
     Ok(())
 }
 
-/// Vote on a proposal
-pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+/// Vote on a proposal, optionally chaining an execute if this vote pushes
+/// the proposal over quorum.
+pub async fn vote(
+    config: &CliConfig,
+    proposal_id: &str,
+    execute: bool,
+    tx_opts: &TxOptions,
+) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
@@ -209,8 +236,8 @@ pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) ->
     println!("\n{}", "Proposal Details:".bold());
     println!("  Type: {}", proposal_type_str.cyan());
 
-    if !tx_opts.skip_confirm && !confirm_action("vote on this proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("vote on this proposal").await?;
     }
 
     print_info("Building vote transaction...");
@@ -224,7 +251,76 @@ pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) ->
         proposal_type_str, proposal_id
     ));
 
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let vote_response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+
+    if !execute {
+        return Ok(());
+    }
+
+    // `--execute` was requested. Only meaningful after a real execute (not a
+    // dry-run / missing-keypair).
+    if vote_response.is_none() {
+        return Ok(());
+    }
+
+    // Upgrade proposals require the dedicated upgrade flow — the generic
+    // `<module>::execute` path can't construct an UpgradeTicket.
+    use crate::onchain::types::ProposalType;
+    if matches!(proposal.proposal_type, ProposalType::Upgrade) {
+        print_warning(
+            "--execute is not supported for Upgrade proposals; run the \
+             dedicated upgrade flow once quorum is reached.",
+        );
+        return Ok(());
+    }
+
+    // Re-fetch live vote state to see whether the vote we just submitted
+    // pushed us over quorum. `HashiClient`'s cached scrape is from CLI start,
+    // so this has to be the live `list_dynamic_fields` call.
+    let details = client
+        .fetch_proposal_details(proposal_addr)
+        .await
+        .context("failed to re-fetch proposal state after voting")?;
+    let committee = client
+        .fetch_current_committee()
+        .ok_or_else(|| anyhow::anyhow!("no committee available to compute quorum"))?;
+
+    let total_weight = committee.total_weight();
+    let voted_weight: u64 = details
+        .votes
+        .iter()
+        .map(|voter| {
+            committee
+                .members()
+                .iter()
+                .find(|m| m.validator_address() == *voter)
+                .map(|m| m.weight())
+                .unwrap_or(0)
+        })
+        .sum();
+    let threshold_weight = total_weight
+        .saturating_mul(details.quorum_threshold_bps)
+        .div_ceil(10_000);
+
+    if voted_weight < threshold_weight {
+        print_info(&format!(
+            "Quorum not reached yet ({voted_weight}/{threshold_weight} weight); \
+             skipping --execute."
+        ));
+        return Ok(());
+    }
+
+    print_info(&format!(
+        "Quorum reached ({voted_weight}/{threshold_weight} weight); executing..."
+    ));
+    let execute_tx =
+        client.build_execute_proposal_transaction(proposal_addr, &proposal.proposal_type)?;
+    print_info(&format!(
+        "Transaction: {}::execute on {}",
+        proposal.proposal_type.as_str(),
+        proposal_id
+    ));
+    execute_or_simulate(&mut client, execute_tx, tx_opts).await?;
     Ok(())
 }
 
@@ -246,8 +342,8 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     println!("\n{}", "Proposal Details:".bold());
     println!("  Type: {}", proposal_type_str.cyan());
 
-    if !tx_opts.skip_confirm && !confirm_action("remove your vote from this proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("remove your vote from this proposal").await?;
     }
 
     print_info("Building remove_vote transaction...");
@@ -293,8 +389,8 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     println!("  Type: {}", proposal_type_str.cyan());
     println!("  ID:   {}", proposal_id);
 
-    if !tx_opts.skip_confirm && !confirm_action("execute this proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("execute this proposal").await?;
     }
 
     let tx = client.build_execute_proposal_transaction(proposal_addr, proposal_type)?;
@@ -309,32 +405,74 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     Ok(())
 }
 
-/// Create an upgrade proposal
+/// Create an upgrade proposal.
+///
+/// Exactly one of `digest` or `package_path` must be `Some`. When
+/// `package_path` is provided, the CLI builds the package via `sui move build`
+/// and verifies that its `PACKAGE_VERSION` constant is exactly +1 of the
+/// currently published version (pre-flight check) before submitting the
+/// proposal. The `--digest` path skips that check and is retained only for
+/// callers with a pre-built package.
 pub async fn create_upgrade_proposal(
     config: &CliConfig,
-    digest: &str,
+    digest: Option<&str>,
+    package_path: Option<&std::path::Path>,
+    sui_binary: &std::path::Path,
+    sui_client_config: Option<&std::path::Path>,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    let digest_bytes =
-        hex::decode(digest.trim_start_matches("0x")).context("Invalid digest hex")?;
+    let mut client = HashiClient::new(config).await?;
+
+    let digest_bytes = match (digest, package_path) {
+        (Some(d), None) => {
+            print_warning(
+                "--digest skips pre-flight checks (PACKAGE_VERSION = current + 1). \
+                 Prefer --package-path.",
+            );
+            hex::decode(d.trim_start_matches("0x")).context("Invalid digest hex")?
+        }
+        (None, Some(path)) => {
+            let current_version = client.highest_package_version().context(
+                "could not determine current package version from on-chain state; \
+                 is the package deployed?",
+            )?;
+            let expected_version = current_version + 1;
+            print_info(&format!(
+                "Building upgrade package at {} (expecting PACKAGE_VERSION = {expected_version})",
+                path.display()
+            ));
+            let (_compiled, digest) = crate::cli::upgrade::build_upgrade_package(
+                sui_binary,
+                path,
+                sui_client_config,
+                expected_version,
+            )
+            .context("failed to build upgrade package")?;
+            digest
+        }
+        (None, None) => {
+            anyhow::bail!("must provide either --digest or --package-path");
+        }
+        (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
+    };
 
     println!("\n{}", "Creating Upgrade Proposal:".bold());
     println!("  Digest: 0x{}", hex::encode(&digest_bytes));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this upgrade proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this upgrade proposal").await?;
     }
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
         metadata,
     });
 
     print_info("Transaction: upgrade::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -354,8 +492,8 @@ pub async fn create_update_config_proposal(
     println!("  Value: {}", value_str);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this config update proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this config update proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -366,7 +504,8 @@ pub async fn create_update_config_proposal(
     });
 
     print_info("Transaction: update_config::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -403,8 +542,8 @@ pub async fn create_enable_version_proposal(
     println!("  Version: {}", version);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this enable version proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this enable version proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -414,7 +553,8 @@ pub async fn create_enable_version_proposal(
     });
 
     print_info("Transaction: enable_version::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -429,8 +569,8 @@ pub async fn create_disable_version_proposal(
     println!("  Version: {}", version);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this disable version proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this disable version proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -440,13 +580,18 @@ pub async fn create_disable_version_proposal(
     });
 
     print_info("Transaction: disable_version::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
 // ============ Helper Functions ============
 
-fn print_proposal_detailed(proposal: &Proposal) {
+fn print_proposal_detailed(
+    proposal: &Proposal,
+    details: Option<&crate::cli::client::ProposalDetails>,
+    committee: Option<&hashi_types::committee::Committee>,
+) {
     println!("{}", "━".repeat(60).dimmed());
     println!(
         "  {} {}",
@@ -463,26 +608,86 @@ fn print_proposal_detailed(proposal: &Proposal) {
         "Created:".bold(),
         display::format_timestamp(proposal.timestamp_ms)
     );
+
+    if let Some(details) = details {
+        println!(
+            "  {} {}",
+            "Creator:".bold(),
+            details.creator.to_hex().dimmed()
+        );
+
+        // Vote tally + quorum progress.
+        let total_weight = committee.map(|c| c.total_weight()).unwrap_or(0);
+        let voted_weight: u64 = details
+            .votes
+            .iter()
+            .map(|voter| {
+                committee
+                    .and_then(|c| c.members().iter().find(|m| m.validator_address() == *voter))
+                    .map(|m| m.weight())
+                    .unwrap_or(0)
+            })
+            .sum();
+        let threshold_weight = total_weight
+            .saturating_mul(details.quorum_threshold_bps)
+            .div_ceil(10_000);
+        let quorum_met = voted_weight >= threshold_weight && total_weight > 0;
+
+        let status = if quorum_met {
+            "QUORUM REACHED".green().bold()
+        } else {
+            format!(
+                "{}/{} weight ({} more needed)",
+                voted_weight,
+                threshold_weight,
+                threshold_weight.saturating_sub(voted_weight)
+            )
+            .yellow()
+        };
+        println!(
+            "  {} {} voter(s) — {} of total weight {} — {}",
+            "Votes:".bold(),
+            details.votes.len().to_string().cyan(),
+            voted_weight.to_string().cyan(),
+            total_weight.to_string().dimmed(),
+            status
+        );
+        println!(
+            "  {} {} bps ({:.2}%)",
+            "Threshold:".bold(),
+            details.quorum_threshold_bps,
+            details.quorum_threshold_bps as f64 / 100.0
+        );
+        if !details.votes.is_empty() {
+            println!("  {}", "Voters:".bold());
+            for voter in &details.votes {
+                println!("    - {}", voter.to_hex().dimmed());
+            }
+        }
+
+        if !details.metadata.contents.is_empty() {
+            println!("  {}", "Metadata:".bold());
+            for entry in &details.metadata.contents {
+                println!("    {}: {}", entry.key.dimmed(), entry.value);
+            }
+        }
+    }
+
     println!("{}", "━".repeat(60).dimmed());
 }
 
-async fn confirm_action(action: &str) -> Result<bool> {
+/// Pause for user acknowledgement. Press enter to proceed, Ctrl+C to cancel.
+async fn prompt_continue(action: &str) -> Result<()> {
     use tokio::io::AsyncBufReadExt;
     use tokio::io::BufReader;
 
     println!(
         "\n{}",
-        format!("Are you sure you want to {}? (y/N)", action).yellow()
+        format!("Press enter to {action}, or Ctrl+C to cancel...").yellow()
     );
 
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut input = String::new();
     reader.read_line(&mut input).await?;
-
-    if input.trim().eq_ignore_ascii_case("y") {
-        Ok(true)
-    } else {
-        print_warning("Cancelled.");
-        Ok(false)
-    }
+    Ok(())
 }
