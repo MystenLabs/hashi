@@ -6,6 +6,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use colored::Colorize;
+use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use tabled::Table;
 use tabled::Tabled;
@@ -57,35 +58,50 @@ fn print_simulation_result(result: &SimulationResult) {
     );
 }
 
-/// Execute or simulate a transaction based on tx_opts
+/// Execute or simulate a transaction based on tx_opts.
 ///
-/// Returns Ok(true) if execution/simulation succeeded, Ok(false) if no keypair configured.
+/// Returns `Some(response)` when a real transaction was executed, and `None`
+/// on dry-run or when no keypair is configured.
 async fn execute_or_simulate(
     client: &mut HashiClient,
     tx: sui_transaction_builder::TransactionBuilder,
     tx_opts: &TxOptions,
-) -> Result<bool> {
+) -> Result<Option<ExecuteTransactionResponse>> {
     if !client.can_execute() {
         print_warning("Transaction execution requires keypair configuration (--keypair).");
-        return Ok(false);
+        return Ok(None);
     }
 
     if tx_opts.dry_run {
         print_info("Simulating transaction (dry-run)...");
         let result = client.simulate(tx).await?;
         print_simulation_result(&result);
-    } else {
-        print_info("Executing transaction...");
-        let response = client.execute(tx).await?;
-        let digest = response.transaction().digest();
-        println!(
-            "\n{} Transaction submitted: {}",
-            "✓".green(),
-            digest.to_string().cyan()
-        );
+        return Ok(None);
     }
 
-    Ok(true)
+    print_info("Executing transaction...");
+    let response = client.execute(tx).await?;
+    let digest = response.transaction().digest();
+    println!(
+        "\n{} Transaction submitted: {}",
+        "✓".green(),
+        digest.to_string().cyan()
+    );
+    Ok(Some(response))
+}
+
+/// Print the newly-created proposal's ID after a `create_*_proposal` call,
+/// when the response is available (real execute, not dry-run).
+fn print_created_proposal_id(response: Option<&ExecuteTransactionResponse>) {
+    let Some(response) = response else {
+        return;
+    };
+    match crate::cli::upgrade::extract_proposal_id_from_response(response) {
+        Ok(id) => println!("  {} {}", "Proposal ID:".bold(), id.to_hex().cyan()),
+        Err(e) => {
+            tracing::warn!("Could not extract proposal ID from response: {e}");
+        }
+    }
 }
 
 /// List all active proposals
@@ -209,8 +225,8 @@ pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) ->
     println!("\n{}", "Proposal Details:".bold());
     println!("  Type: {}", proposal_type_str.cyan());
 
-    if !tx_opts.skip_confirm && !confirm_action("vote on this proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("vote on this proposal").await?;
     }
 
     print_info("Building vote transaction...");
@@ -246,8 +262,8 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     println!("\n{}", "Proposal Details:".bold());
     println!("  Type: {}", proposal_type_str.cyan());
 
-    if !tx_opts.skip_confirm && !confirm_action("remove your vote from this proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("remove your vote from this proposal").await?;
     }
 
     print_info("Building remove_vote transaction...");
@@ -293,8 +309,8 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     println!("  Type: {}", proposal_type_str.cyan());
     println!("  ID:   {}", proposal_id);
 
-    if !tx_opts.skip_confirm && !confirm_action("execute this proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("execute this proposal").await?;
     }
 
     let tx = client.build_execute_proposal_transaction(proposal_addr, proposal_type)?;
@@ -323,8 +339,8 @@ pub async fn create_upgrade_proposal(
     println!("  Digest: 0x{}", hex::encode(&digest_bytes));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this upgrade proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this upgrade proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -334,7 +350,8 @@ pub async fn create_upgrade_proposal(
     });
 
     print_info("Transaction: upgrade::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -354,8 +371,8 @@ pub async fn create_update_config_proposal(
     println!("  Value: {}", value_str);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this config update proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this config update proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -366,7 +383,8 @@ pub async fn create_update_config_proposal(
     });
 
     print_info("Transaction: update_config::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -403,8 +421,8 @@ pub async fn create_enable_version_proposal(
     println!("  Version: {}", version);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this enable version proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this enable version proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -414,7 +432,8 @@ pub async fn create_enable_version_proposal(
     });
 
     print_info("Transaction: enable_version::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -429,8 +448,8 @@ pub async fn create_disable_version_proposal(
     println!("  Version: {}", version);
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm && !confirm_action("create this disable version proposal").await? {
-        return Ok(());
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this disable version proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -440,7 +459,8 @@ pub async fn create_disable_version_proposal(
     });
 
     print_info("Transaction: disable_version::propose");
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 
@@ -466,23 +486,18 @@ fn print_proposal_detailed(proposal: &Proposal) {
     println!("{}", "━".repeat(60).dimmed());
 }
 
-async fn confirm_action(action: &str) -> Result<bool> {
+/// Pause for user acknowledgement. Press enter to proceed, Ctrl+C to cancel.
+async fn prompt_continue(action: &str) -> Result<()> {
     use tokio::io::AsyncBufReadExt;
     use tokio::io::BufReader;
 
     println!(
         "\n{}",
-        format!("Are you sure you want to {}? (y/N)", action).yellow()
+        format!("Press enter to {action}, or Ctrl+C to cancel...").yellow()
     );
 
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut input = String::new();
     reader.read_line(&mut input).await?;
-
-    if input.trim().eq_ignore_ascii_case("y") {
-        Ok(true)
-    } else {
-        print_warning("Cancelled.");
-        Ok(false)
-    }
+    Ok(())
 }
