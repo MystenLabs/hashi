@@ -3632,9 +3632,11 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .expect("spawn_blocking task panicked")
+    match tokio::task::spawn_blocking(f).await {
+        Ok(v) => v,
+        Err(e) if e.is_cancelled() => std::future::pending().await,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
 }
 
 #[cfg(test)]
