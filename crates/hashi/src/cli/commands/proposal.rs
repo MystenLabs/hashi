@@ -151,8 +151,10 @@ pub async fn list_proposals(
     println!("\n📋 Active Proposals:\n");
 
     if detailed {
+        // List mode skips the per-proposal vote/quorum fetch to avoid N extra
+        // network calls; use `proposal view <id>` for full vote progress.
         for proposal in &proposals {
-            print_proposal_detailed(proposal);
+            print_proposal_detailed(proposal, None, None);
             println!();
         }
     } else {
@@ -201,8 +203,14 @@ pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> 
         .fetch_proposal(&proposal_addr)
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
+    let details = client
+        .fetch_proposal_details(proposal_addr, &proposal.proposal_type)
+        .await
+        .ok();
+    let committee = client.fetch_current_committee();
+
     println!();
-    print_proposal_detailed(&proposal);
+    print_proposal_detailed(&proposal, details.as_ref(), committee.as_ref());
 
     Ok(())
 }
@@ -466,7 +474,11 @@ pub async fn create_disable_version_proposal(
 
 // ============ Helper Functions ============
 
-fn print_proposal_detailed(proposal: &Proposal) {
+fn print_proposal_detailed(
+    proposal: &Proposal,
+    details: Option<&crate::cli::client::ProposalDetails>,
+    committee: Option<&hashi_types::committee::Committee>,
+) {
     println!("{}", "━".repeat(60).dimmed());
     println!(
         "  {} {}",
@@ -483,6 +495,71 @@ fn print_proposal_detailed(proposal: &Proposal) {
         "Created:".bold(),
         display::format_timestamp(proposal.timestamp_ms)
     );
+
+    if let Some(details) = details {
+        println!(
+            "  {} {}",
+            "Creator:".bold(),
+            details.creator.to_hex().dimmed()
+        );
+
+        // Vote tally + quorum progress.
+        let total_weight = committee.map(|c| c.total_weight()).unwrap_or(0);
+        let voted_weight: u64 = details
+            .votes
+            .iter()
+            .map(|voter| {
+                committee
+                    .and_then(|c| c.members().iter().find(|m| m.validator_address() == *voter))
+                    .map(|m| m.weight())
+                    .unwrap_or(0)
+            })
+            .sum();
+        let threshold_weight = total_weight
+            .saturating_mul(details.quorum_threshold_bps)
+            .div_ceil(10_000);
+        let quorum_met = voted_weight >= threshold_weight && total_weight > 0;
+
+        let status = if quorum_met {
+            "QUORUM REACHED".green().bold()
+        } else {
+            format!(
+                "{}/{} weight ({} more needed)",
+                voted_weight,
+                threshold_weight,
+                threshold_weight.saturating_sub(voted_weight)
+            )
+            .yellow()
+        };
+        println!(
+            "  {} {} voter(s) — {} of total weight {} — {}",
+            "Votes:".bold(),
+            details.votes.len().to_string().cyan(),
+            voted_weight.to_string().cyan(),
+            total_weight.to_string().dimmed(),
+            status
+        );
+        println!(
+            "  {} {} bps ({:.2}%)",
+            "Threshold:".bold(),
+            details.quorum_threshold_bps,
+            details.quorum_threshold_bps as f64 / 100.0
+        );
+        if !details.votes.is_empty() {
+            println!("  {}", "Voters:".bold());
+            for voter in &details.votes {
+                println!("    - {}", voter.to_hex().dimmed());
+            }
+        }
+
+        if !details.metadata.contents.is_empty() {
+            println!("  {}", "Metadata:".bold());
+            for entry in &details.metadata.contents {
+                println!("    {}: {}", entry.key.dimmed(), entry.value);
+            }
+        }
+    }
+
     println!("{}", "━".repeat(60).dimmed());
 }
 

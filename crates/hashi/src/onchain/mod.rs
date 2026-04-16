@@ -720,7 +720,6 @@ fn child_object_type_name(child_object: &sui_rpc::proto::sui::rpc::v2::Object) -
     }
 }
 
-
 fn convert_move_config(config: move_types::Config) -> types::Config {
     types::Config {
         config: config.config.into_iter().collect(),
