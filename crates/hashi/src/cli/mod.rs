@@ -145,9 +145,30 @@ pub enum ProposalCommands {
 #[derive(Subcommand)]
 pub enum CreateProposalCommands {
     /// Propose a package upgrade
+    ///
+    /// Exactly one of `--digest` or `--package-path` must be provided.
+    /// `--package-path` is recommended: the CLI builds the package, verifies
+    /// that its `PACKAGE_VERSION` constant is exactly +1 of the currently
+    /// published version, and derives the digest for the proposal.
     Upgrade {
-        /// The digest of the new package (hex encoded)
-        digest: String,
+        /// The digest of a pre-built package (hex encoded). Skips pre-flight
+        /// checks — prefer `--package-path`.
+        #[clap(long, conflicts_with = "package_path")]
+        digest: Option<String>,
+
+        /// Path to the upgrade package source. The CLI will run `sui move
+        /// build` and verify the `PACKAGE_VERSION` constant before submitting.
+        #[clap(long, value_name = "PATH")]
+        package_path: Option<std::path::PathBuf>,
+
+        /// Path to the `sui` CLI binary. Only used with `--package-path`.
+        #[clap(long, env = "SUI_BINARY", default_value = "sui")]
+        sui_binary: std::path::PathBuf,
+
+        /// Optional path to a sui `client.yaml` for dependency resolution.
+        /// Only used with `--package-path`.
+        #[clap(long)]
+        sui_client_config: Option<std::path::PathBuf>,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -550,10 +571,19 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 commands::proposal::execute(&config, &proposal_id, &tx_opts).await?;
             }
             ProposalCommands::Create { proposal } => match proposal {
-                CreateProposalCommands::Upgrade { digest, metadata } => {
+                CreateProposalCommands::Upgrade {
+                    digest,
+                    package_path,
+                    sui_binary,
+                    sui_client_config,
+                    metadata,
+                } => {
                     commands::proposal::create_upgrade_proposal(
                         &config,
-                        &digest,
+                        digest.as_deref(),
+                        package_path.as_deref(),
+                        &sui_binary,
+                        sui_client_config.as_deref(),
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

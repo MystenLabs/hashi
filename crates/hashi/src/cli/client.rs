@@ -179,6 +179,19 @@ impl HashiClient {
     // Read operations (delegating to OnchainState)
     // ========================================================================
 
+    /// Highest package version currently known on-chain, i.e. the version of
+    /// the latest published upgrade (or the original package before any
+    /// upgrade). Returns `None` only if the state hasn't been scraped yet,
+    /// which shouldn't happen after `HashiClient::new`.
+    pub fn highest_package_version(&self) -> Option<u64> {
+        self.onchain_state
+            .state()
+            .package_versions()
+            .keys()
+            .copied()
+            .max()
+    }
+
     /// Fetch current epoch from on-chain state
     pub fn fetch_epoch(&self) -> u64 {
         self.onchain_state.epoch()

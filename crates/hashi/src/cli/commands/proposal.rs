@@ -408,15 +408,57 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     Ok(())
 }
 
-/// Create an upgrade proposal
+/// Create an upgrade proposal.
+///
+/// Exactly one of `digest` or `package_path` must be `Some`. When
+/// `package_path` is provided, the CLI builds the package via `sui move build`
+/// and verifies that its `PACKAGE_VERSION` constant is exactly +1 of the
+/// currently published version (pre-flight check) before submitting the
+/// proposal. The `--digest` path skips that check and is retained only for
+/// callers with a pre-built package.
 pub async fn create_upgrade_proposal(
     config: &CliConfig,
-    digest: &str,
+    digest: Option<&str>,
+    package_path: Option<&std::path::Path>,
+    sui_binary: &std::path::Path,
+    sui_client_config: Option<&std::path::Path>,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    let digest_bytes =
-        hex::decode(digest.trim_start_matches("0x")).context("Invalid digest hex")?;
+    let mut client = HashiClient::new(config).await?;
+
+    let digest_bytes = match (digest, package_path) {
+        (Some(d), None) => {
+            print_warning(
+                "--digest skips pre-flight checks (PACKAGE_VERSION = current + 1). \
+                 Prefer --package-path.",
+            );
+            hex::decode(d.trim_start_matches("0x")).context("Invalid digest hex")?
+        }
+        (None, Some(path)) => {
+            let current_version = client.highest_package_version().context(
+                "could not determine current package version from on-chain state; \
+                 is the package deployed?",
+            )?;
+            let expected_version = current_version + 1;
+            print_info(&format!(
+                "Building upgrade package at {} (expecting PACKAGE_VERSION = {expected_version})",
+                path.display()
+            ));
+            let (_compiled, digest) = crate::cli::upgrade::build_upgrade_package(
+                sui_binary,
+                path,
+                sui_client_config,
+                expected_version,
+            )
+            .context("failed to build upgrade package")?;
+            digest
+        }
+        (None, None) => {
+            anyhow::bail!("must provide either --digest or --package-path");
+        }
+        (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
+    };
 
     println!("\n{}", "Creating Upgrade Proposal:".bold());
     println!("  Digest: 0x{}", hex::encode(&digest_bytes));
@@ -426,7 +468,6 @@ pub async fn create_upgrade_proposal(
         prompt_continue("create this upgrade proposal").await?;
     }
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
         metadata,

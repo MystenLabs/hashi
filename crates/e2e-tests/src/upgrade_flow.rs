@@ -122,7 +122,21 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
 
     // 2. Build the upgrade
     tracing::info!("building upgrade package from {}", upgrade_path.display());
-    let (compiled, digest) = build_upgrade_package(sui_binary(), &upgrade_path, client_config)?;
+    let current_version = nodes[0]
+        .hashi()
+        .onchain_state()
+        .state()
+        .package_versions()
+        .keys()
+        .copied()
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("onchain state has no package versions yet"))?;
+    let (compiled, digest) = build_upgrade_package(
+        sui_binary(),
+        &upgrade_path,
+        client_config,
+        current_version + 1,
+    )?;
     tracing::info!("upgrade package built, digest: {digest:?}");
 
     // 3. Propose the upgrade
