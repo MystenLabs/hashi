@@ -114,6 +114,13 @@ pub enum ProposalCommands {
     Vote {
         /// The proposal object ID to vote on
         proposal_id: String,
+
+        /// Also execute the proposal if this vote pushes it over quorum.
+        /// Skipped silently (with an info message) when quorum isn't reached.
+        /// Not supported for `Upgrade` proposals — use the dedicated upgrade
+        /// flow instead.
+        #[clap(long, short = 'e')]
+        execute: bool,
     },
 
     /// Remove your vote from a proposal
@@ -530,8 +537,11 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             ProposalCommands::View { proposal_id } => {
                 commands::proposal::view_proposal(&config, &proposal_id).await?;
             }
-            ProposalCommands::Vote { proposal_id } => {
-                commands::proposal::vote(&config, &proposal_id, &tx_opts).await?;
+            ProposalCommands::Vote {
+                proposal_id,
+                execute,
+            } => {
+                commands::proposal::vote(&config, &proposal_id, execute, &tx_opts).await?;
             }
             ProposalCommands::RemoveVote { proposal_id } => {
                 commands::proposal::remove_vote(&config, &proposal_id, &tx_opts).await?;

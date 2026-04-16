@@ -215,8 +215,14 @@ pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> 
     Ok(())
 }
 
-/// Vote on a proposal
-pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) -> Result<()> {
+/// Vote on a proposal, optionally chaining an execute if this vote pushes
+/// the proposal over quorum.
+pub async fn vote(
+    config: &CliConfig,
+    proposal_id: &str,
+    execute: bool,
+    tx_opts: &TxOptions,
+) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
 
     let proposal_addr = Address::from_hex(proposal_id)
@@ -248,7 +254,76 @@ pub async fn vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions) ->
         proposal_type_str, proposal_id
     ));
 
-    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    let vote_response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+
+    if !execute {
+        return Ok(());
+    }
+
+    // `--execute` was requested. Only meaningful after a real execute (not a
+    // dry-run / missing-keypair).
+    if vote_response.is_none() {
+        return Ok(());
+    }
+
+    // Upgrade proposals require the dedicated upgrade flow — the generic
+    // `<module>::execute` path can't construct an UpgradeTicket.
+    use crate::onchain::types::ProposalType;
+    if matches!(proposal.proposal_type, ProposalType::Upgrade) {
+        print_warning(
+            "--execute is not supported for Upgrade proposals; run the \
+             dedicated upgrade flow once quorum is reached.",
+        );
+        return Ok(());
+    }
+
+    // Re-fetch live vote state to see whether the vote we just submitted
+    // pushed us over quorum. `HashiClient`'s cached scrape is from CLI start,
+    // so this has to be the live `list_dynamic_fields` call.
+    let details = client
+        .fetch_proposal_details(proposal_addr, &proposal.proposal_type)
+        .await
+        .context("failed to re-fetch proposal state after voting")?;
+    let committee = client
+        .fetch_current_committee()
+        .ok_or_else(|| anyhow::anyhow!("no committee available to compute quorum"))?;
+
+    let total_weight = committee.total_weight();
+    let voted_weight: u64 = details
+        .votes
+        .iter()
+        .map(|voter| {
+            committee
+                .members()
+                .iter()
+                .find(|m| m.validator_address() == *voter)
+                .map(|m| m.weight())
+                .unwrap_or(0)
+        })
+        .sum();
+    let threshold_weight = total_weight
+        .saturating_mul(details.quorum_threshold_bps)
+        .div_ceil(10_000);
+
+    if voted_weight < threshold_weight {
+        print_info(&format!(
+            "Quorum not reached yet ({voted_weight}/{threshold_weight} weight); \
+             skipping --execute."
+        ));
+        return Ok(());
+    }
+
+    print_info(&format!(
+        "Quorum reached ({voted_weight}/{threshold_weight} weight); executing..."
+    ));
+    let execute_tx =
+        client.build_execute_proposal_transaction(proposal_addr, &proposal.proposal_type)?;
+    print_info(&format!(
+        "Transaction: {}::execute on {}",
+        proposal.proposal_type.as_str(),
+        proposal_id
+    ));
+    execute_or_simulate(&mut client, execute_tx, tx_opts).await?;
     Ok(())
 }
 
