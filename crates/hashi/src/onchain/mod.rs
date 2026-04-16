@@ -707,19 +707,6 @@ pub(crate) async fn scrape_hashi_config(
     Ok(convert_move_config(config))
 }
 
-/// Return the child object's type as a string, preferring the dedicated
-/// `object_type` field (always set by Sui indexing) and falling back to the
-/// BCS `contents.name` (which some fullnodes leave empty in dynamic-field
-/// list responses).
-fn child_object_type_name(child_object: &sui_rpc::proto::sui::rpc::v2::Object) -> &str {
-    let object_type = child_object.object_type_opt().unwrap_or("");
-    if !object_type.is_empty() {
-        object_type
-    } else {
-        child_object.contents().name()
-    }
-}
-
 fn convert_move_config(config: move_types::Config) -> types::Config {
     types::Config {
         config: config.config.into_iter().collect(),
@@ -753,12 +740,12 @@ async fn scrape_treasury(
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        let name = child_object_type_name(field.child_object());
-        let type_tag: TypeTag = match name.parse() {
+        let object_type = field.child_object().object_type();
+        let type_tag: TypeTag = match object_type.parse() {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
-                    "skipping treasury dynamic field with unparseable type {name:?}: {e}"
+                    "skipping treasury dynamic field with unparseable type {object_type:?}: {e}"
                 );
                 continue;
             }
@@ -1316,7 +1303,7 @@ async fn scrape_proposals(
     })
 }
 
-fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
+pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
     let TypeTag::Struct(struct_tag) = type_tag else {
         return types::ProposalType::Unknown(format!("{:?}", type_tag));
     };

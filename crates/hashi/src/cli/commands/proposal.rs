@@ -203,10 +203,7 @@ pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> 
         .fetch_proposal(&proposal_addr)
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
-    let details = client
-        .fetch_proposal_details(proposal_addr, &proposal.proposal_type)
-        .await
-        .ok();
+    let details = client.fetch_proposal_details(proposal_addr).await.ok();
     let committee = client.fetch_current_committee();
 
     println!();
@@ -281,7 +278,7 @@ pub async fn vote(
     // pushed us over quorum. `HashiClient`'s cached scrape is from CLI start,
     // so this has to be the live `list_dynamic_fields` call.
     let details = client
-        .fetch_proposal_details(proposal_addr, &proposal.proposal_type)
+        .fetch_proposal_details(proposal_addr)
         .await
         .context("failed to re-fetch proposal state after voting")?;
     let committee = client

@@ -221,11 +221,11 @@ impl HashiClient {
     /// metadata) for a specific proposal via one `list_dynamic_fields` call on
     /// the proposals bag. Separate from the cached `fetch_proposal` because
     /// validators don't need these fields in their in-memory state.
-    pub async fn fetch_proposal_details(
-        &self,
-        proposal_id: Address,
-        proposal_type: &crate::onchain::types::ProposalType,
-    ) -> Result<ProposalDetails> {
+    ///
+    /// The proposal type is derived from the matched field's `value_type` —
+    /// callers don't pass it, so they can't pass the wrong one.
+    pub async fn fetch_proposal_details(&self, proposal_id: Address) -> Result<ProposalDetails> {
+        use crate::onchain::parse_proposal_type;
         use crate::onchain::types::ProposalType;
         use futures::TryStreamExt;
         use hashi_types::move_types;
@@ -243,6 +243,7 @@ impl HashiClient {
                     .with_page_size(u32::MAX)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
+                        DynamicField::path_builder().value_type(),
                         DynamicField::path_builder().value().finish(),
                     ])),
             ),
@@ -256,6 +257,12 @@ impl HashiClient {
             if key != proposal_id {
                 continue;
             }
+
+            let value_type_str = field.value_type();
+            let type_tag: TypeTag = value_type_str
+                .parse()
+                .with_context(|| format!("parse value_type {value_type_str:?}"))?;
+            let proposal_type = parse_proposal_type(&type_tag);
 
             let value_bytes = field.value().value();
             let (creator, votes, quorum_threshold_bps, metadata) = match proposal_type {
