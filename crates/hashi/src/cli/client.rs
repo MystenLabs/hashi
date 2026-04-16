@@ -222,8 +222,8 @@ impl HashiClient {
     /// the proposals bag. Separate from the cached `fetch_proposal` because
     /// validators don't need these fields in their in-memory state.
     ///
-    /// The proposal type is derived from the matched field's `value_type` —
-    /// callers don't pass it, so they can't pass the wrong one.
+    /// The proposal type is derived from the matched child object's
+    /// `object_type` — callers don't pass it, so they can't pass the wrong one.
     pub async fn fetch_proposal_details(&self, proposal_id: Address) -> Result<ProposalDetails> {
         use crate::onchain::parse_proposal_type;
         use crate::onchain::types::ProposalType;
@@ -236,6 +236,9 @@ impl HashiClient {
 
         let proposals_bag_id = self.onchain_state.state().hashi().proposals.id;
         let client = self.onchain_state.client();
+        // Proposals are now stored in an `ObjectBag`, so each entry's payload
+        // lives on `child_object` (a standalone object), not inline on the
+        // `DynamicField` itself.
         let mut stream = Box::pin(
             client.list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
@@ -243,8 +246,11 @@ impl HashiClient {
                     .with_page_size(u32::MAX)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
-                        DynamicField::path_builder().value_type(),
-                        DynamicField::path_builder().value().finish(),
+                        DynamicField::path_builder().child_object().object_type(),
+                        DynamicField::path_builder()
+                            .child_object()
+                            .contents()
+                            .finish(),
                     ])),
             ),
         );
@@ -258,13 +264,13 @@ impl HashiClient {
                 continue;
             }
 
-            let value_type_str = field.value_type();
-            let type_tag: TypeTag = value_type_str
+            let object_type_str = field.child_object().object_type();
+            let type_tag: TypeTag = object_type_str
                 .parse()
-                .with_context(|| format!("parse value_type {value_type_str:?}"))?;
+                .with_context(|| format!("parse object_type {object_type_str:?}"))?;
             let proposal_type = parse_proposal_type(&type_tag);
 
-            let value_bytes = field.value().value();
+            let value_bytes = field.child_object().contents().value();
             let (creator, votes, quorum_threshold_bps, metadata) = match proposal_type {
                 ProposalType::UpdateConfig => {
                     let p: move_types::Proposal<move_types::UpdateConfig> =

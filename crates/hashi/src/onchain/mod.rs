@@ -1215,13 +1215,14 @@ async fn scrape_spent_utxos(
 
 async fn scrape_proposals(
     client: Client,
-    proposals_bag: move_types::Bag,
+    proposals_bag: move_types::ObjectBag,
 ) -> Result<types::Proposals> {
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
-    // Proposals live in a `0x2::bag::Bag` (dynamic FIELD, value stored inline),
-    // so we read `value_type` + `value` off the `DynamicField` proto itself —
-    // NOT `child_object` (that's only populated for DynamicObject kinds).
+    // Proposals live in a `0x2::object_bag::ObjectBag`, so each entry's
+    // payload is a standalone child object. Read `child_object` directly —
+    // fullnode gRPC populates `child_object.object_type` + BCS `contents`
+    // for dynamic-object-field kinds.
     let mut stream = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
@@ -1229,22 +1230,25 @@ async fn scrape_proposals(
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value_type(),
-                    DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder().child_object().object_type(),
+                    DynamicField::path_builder()
+                        .child_object()
+                        .contents()
+                        .finish(),
                 ])),
         )
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        // The value_type is the inner type, e.g.
+        // `child_object.object_type` is the fully-qualified type, e.g.
         //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
-        let value_type = field.value_type_opt().unwrap_or("");
-        let type_tag: TypeTag = match value_type.parse() {
+        let object_type = field.child_object().object_type();
+        let type_tag: TypeTag = match object_type.parse() {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
-                    "skipping proposal dynamic field with unparseable value_type \
-                     {value_type:?}: {e}"
+                    "skipping proposal dynamic object field with unparseable type \
+                     {object_type:?}: {e}"
                 );
                 continue;
             }
@@ -1252,7 +1256,7 @@ async fn scrape_proposals(
         let proposal_type = parse_proposal_type(&type_tag);
 
         // Deserialize proposal based on the proposal type
-        let contents: &[u8] = field.value().value();
+        let contents: &[u8] = field.child_object().contents().value();
         let result: Option<(Address, u64)> = match &proposal_type {
             types::ProposalType::UpdateConfig => {
                 bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)

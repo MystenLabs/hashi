@@ -42,7 +42,7 @@ pub struct Hashi {
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub proposals: Bag,
+    pub proposals: ObjectBag,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
