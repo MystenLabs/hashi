@@ -222,31 +222,7 @@ impl HashiClient {
         proposal_id: Address,
         type_arg: TypeTag,
     ) -> TransactionBuilder {
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let proposal_id_arg = builder.pure(&proposal_id);
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("proposal"),
-                Identifier::from_static("vote"),
-            )
-            .with_type_args(vec![type_arg]),
-            vec![hashi_arg, proposal_id_arg, clock_arg],
-        );
-
-        builder
+        build_vote_transaction(self.hashi_ids, proposal_id, type_arg)
     }
 
     /// Build a remove_vote transaction for a proposal.
@@ -494,18 +470,14 @@ fn build_metadata(
     map
 }
 
-/// Build a `TransactionBuilder` for voting on an `UpdateConfig` proposal.
-///
-/// Calls: `proposal::vote<UpdateConfig>(hashi, proposal_id, clock, ctx)`
-///
-/// This is a standalone function so it can be reused outside `HashiClient`
-/// (e.g., in test infrastructure where a `HashiClient` is not available).
-pub fn build_vote_update_config_transaction(
+/// Build a `proposal::vote<T>` transaction as a standalone. Reusable outside
+/// `HashiClient` — e2e test infra needs to build vote PTBs for every
+/// committee member.
+pub fn build_vote_transaction(
     hashi_ids: HashiIds,
     proposal_id: Address,
+    type_arg: TypeTag,
 ) -> TransactionBuilder {
-    let type_arg = update_config_type_tag(hashi_ids.package_id);
-
     let mut builder = TransactionBuilder::new();
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
@@ -530,52 +502,6 @@ pub fn build_vote_update_config_transaction(
     );
 
     builder
-}
-
-/// Build a `TransactionBuilder` for executing an `UpdateConfig` proposal once
-/// quorum has been reached.
-///
-/// Calls: `update_config::execute(hashi, proposal_id, clock)`
-///
-/// This is a standalone function so it can be reused outside `HashiClient`
-/// (e.g., in test infrastructure where a `HashiClient` is not available).
-pub fn build_execute_update_config_transaction(
-    hashi_ids: HashiIds,
-    proposal_id: Address,
-) -> TransactionBuilder {
-    let mut builder = TransactionBuilder::new();
-    let hashi_arg = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    let proposal_id_arg = builder.pure(&proposal_id);
-    let clock_arg = builder.object(
-        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-            .as_shared()
-            .with_mutable(false),
-    );
-
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("update_config"),
-            Identifier::from_static("execute"),
-        ),
-        vec![hashi_arg, proposal_id_arg, clock_arg],
-    );
-
-    builder
-}
-
-/// Returns the `TypeTag` for the `UpdateConfig` proposal type.
-fn update_config_type_tag(package_id: Address) -> TypeTag {
-    TypeTag::Struct(Box::new(StructTag::new(
-        package_id,
-        Identifier::from_static("update_config"),
-        Identifier::from_static("UpdateConfig"),
-        vec![],
-    )))
 }
 
 /// Get the TypeTag for a proposal type (from on-chain type)

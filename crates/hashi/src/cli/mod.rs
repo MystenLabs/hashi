@@ -17,6 +17,7 @@ pub mod client;
 pub mod commands;
 pub mod config;
 pub mod types;
+pub mod upgrade;
 
 pub const STYLES: Styles = Styles::styled()
     .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
