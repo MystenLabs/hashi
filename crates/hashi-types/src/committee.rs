@@ -23,7 +23,7 @@ use sui_sdk_types::Address;
 
 /// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS` in
 /// `mpc_config.move`.
-pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
+pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3334;
 
 /// Default allowed delta for weight reduction. Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in
 /// `mpc_config.move`.

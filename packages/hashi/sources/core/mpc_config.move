@@ -5,7 +5,7 @@ module hashi::mpc_config;
 
 use hashi::{config::Config, config_value};
 
-const DEFAULT_THRESHOLD_IN_BASIS_POINTS: u64 = 3333;
+const DEFAULT_THRESHOLD_IN_BASIS_POINTS: u64 = 3334;
 
 const MAX_BPS: u64 = 10000;
 
