@@ -101,7 +101,7 @@ pub struct MpcManager {
     pub dkg_messages: HashMap<Address, avss::Message>,
     pub rotation_messages: HashMap<Address, RotationMessages>,
     pub nonce_messages: HashMap<Address, NonceMessage>,
-    pub message_responses: HashMap<Address, SendMessagesResponse>,
+    pub message_responses: HashMap<Address, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
     pub complaint_responses: HashMap<(Address, ProtocolTypeIndicator), ComplaintResponses>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
@@ -262,18 +262,18 @@ impl MpcManager {
                     reason: "Dealer sent different messages".to_string(),
                 });
             }
-            if let Some(response) = self.message_responses.get(&sender) {
-                return Ok(response.clone());
+            if let Some(cached) = self.message_responses.get(&sender) {
+                return cached.clone();
             }
             tracing::info!(
                 "handle_send_messages_request: existing message from {sender:?} but no \
                  cached response (e.g. post-restart), re-processing"
             );
         }
-        let signature = match &request.messages {
+        let result = match &request.messages {
             Messages::Dkg(msg) => {
                 self.store_dkg_message(self.mpc_config.epoch, sender, msg)?;
-                self.try_sign_dkg_message(sender, &request.messages)?
+                self.try_sign_dkg_message(sender, &request.messages)
             }
             Messages::Rotation(msgs) => {
                 let previous = self
@@ -281,16 +281,16 @@ impl MpcManager {
                     .clone()
                     .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
                 self.store_rotation_messages(self.mpc_config.epoch, sender, msgs)?;
-                self.try_sign_rotation_messages(&previous, sender, &request.messages)?
+                self.try_sign_rotation_messages(&previous, sender, &request.messages)
             }
             Messages::NonceGeneration(nonce) => {
                 self.store_nonce_message(self.mpc_config.epoch, sender, nonce)?;
-                self.try_sign_nonce_message(sender, &request.messages)?
+                self.try_sign_nonce_message(sender, &request.messages)
             }
-        };
-        let response = SendMessagesResponse { signature };
-        self.message_responses.insert(sender, response.clone());
-        Ok(response)
+        }
+        .map(|signature| SendMessagesResponse { signature });
+        self.message_responses.insert(sender, result.clone());
+        result
     }
 
     pub fn handle_retrieve_messages_request(

@@ -391,7 +391,7 @@ impl CertificateV1 {
 
 pub type MpcResult<T> = Result<T, MpcError>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MpcError {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
