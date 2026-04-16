@@ -1062,3 +1062,148 @@ enum MonitorMessage {
     // Drop a deposit from `deposit_observation_cache`
     ForgetDeposit(bitcoin::OutPoint),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::hashes::Hash;
+
+    fn make_outpoint(seed: u8) -> bitcoin::OutPoint {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array(bytes),
+            vout: 0,
+        }
+    }
+
+    fn fresh_metrics() -> Metrics {
+        Metrics::new(&prometheus::Registry::new())
+    }
+
+    fn bucket(metrics: &Metrics, label: &str) -> i64 {
+        metrics
+            .deposit_request_confirmations
+            .with_label_values(&[label])
+            .get()
+    }
+
+    fn entry(observation: CachedDepositObservation, last_updated_tip: u32) -> CachedDepositEntry {
+        CachedDepositEntry {
+            observation,
+            last_updated_tip,
+        }
+    }
+
+    #[test]
+    fn empty_cache_writes_all_labels_as_zero() {
+        let metrics = fresh_metrics();
+        let mut cache: HashMap<bitcoin::OutPoint, CachedDepositEntry> = HashMap::new();
+
+        rebuild_confirmation_metrics_inner(&mut cache, 100, &metrics);
+
+        for label in crate::metrics::CONFIRMATION_STATUS_LABELS {
+            assert_eq!(bucket(&metrics, label), 0, "label {label} should be zero");
+        }
+    }
+
+    #[test]
+    fn observation_to_bucket_mapping() {
+        // (observation, tip, expected bucket). Covers NotFound, InMempool,
+        // and InBlock at 0 (height > tip via saturating_sub), 1, 5, 6 (boundary),
+        // and a far-clamp case.
+        let cases: &[(CachedDepositObservation, u32, &str)] = &[
+            (CachedDepositObservation::NotFound, 100, "not_found"),
+            (CachedDepositObservation::InMempool, 100, "mempool"),
+            (CachedDepositObservation::InBlock { height: 101 }, 100, "0"),
+            (CachedDepositObservation::InBlock { height: 100 }, 100, "1"),
+            (CachedDepositObservation::InBlock { height: 96 }, 100, "5"),
+            (
+                CachedDepositObservation::InBlock { height: 95 },
+                100,
+                "6_plus",
+            ),
+            (
+                CachedDepositObservation::InBlock { height: 0 },
+                100,
+                "6_plus",
+            ),
+        ];
+
+        for &(observation, tip, want_label) in cases {
+            let metrics = fresh_metrics();
+            let mut cache = HashMap::from([(make_outpoint(1), entry(observation, tip))]);
+            rebuild_confirmation_metrics_inner(&mut cache, tip, &metrics);
+            assert_eq!(
+                bucket(&metrics, want_label),
+                1,
+                "{observation:?} with tip {tip} should land in {want_label}"
+            );
+        }
+    }
+
+    #[test]
+    fn tip_advance_shifts_buckets_without_fresh_observations() {
+        let metrics = fresh_metrics();
+        let mut cache = HashMap::from([(
+            make_outpoint(1),
+            entry(CachedDepositObservation::InBlock { height: 100 }, 100),
+        )]);
+
+        // Tip 100: confirmations = (100+1) - 100 = 1 → bucket "1".
+        rebuild_confirmation_metrics_inner(&mut cache, 100, &metrics);
+        assert_eq!(bucket(&metrics, "1"), 1);
+
+        // Tip 101 (no re-observation): confirmations = 2 → bucket "2".
+        rebuild_confirmation_metrics_inner(&mut cache, 101, &metrics);
+        assert_eq!(bucket(&metrics, "1"), 0);
+        assert_eq!(bucket(&metrics, "2"), 1);
+    }
+
+    #[test]
+    fn stale_entries_gced_at_inclusive_boundary() {
+        let metrics = fresh_metrics();
+        let tip = 100;
+        let mut cache = HashMap::from([
+            // On the boundary: kept (inclusive).
+            (
+                make_outpoint(1),
+                entry(
+                    CachedDepositObservation::InMempool,
+                    tip - STALE_OBSERVATION_BLOCKS,
+                ),
+            ),
+            // Just past the boundary: dropped.
+            (
+                make_outpoint(2),
+                entry(
+                    CachedDepositObservation::InMempool,
+                    tip - STALE_OBSERVATION_BLOCKS - 1,
+                ),
+            ),
+        ]);
+
+        rebuild_confirmation_metrics_inner(&mut cache, tip, &metrics);
+
+        assert_eq!(cache.len(), 1, "entry past boundary should be GC'd");
+        assert!(cache.contains_key(&make_outpoint(1)));
+        assert_eq!(bucket(&metrics, "mempool"), 1);
+    }
+
+    #[test]
+    fn tip_zero_bootstrap_keeps_entries() {
+        // Before the first block, tip is 0. Entries with `last_updated_tip = 0`
+        // must not be GC'd immediately, otherwise fresh observations would
+        // vanish before the first block arrives.
+        let metrics = fresh_metrics();
+        let mut cache = HashMap::from([(
+            make_outpoint(1),
+            entry(CachedDepositObservation::InMempool, 0),
+        )]);
+
+        rebuild_confirmation_metrics_inner(&mut cache, 0, &metrics);
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(bucket(&metrics, "mempool"), 1);
+    }
+}
