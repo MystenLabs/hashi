@@ -23,6 +23,8 @@ pub mod e2e_flow;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
+pub mod test_helpers;
+pub mod upgrade_flow;
 
 pub use bitcoin_node::BitcoinNodeBuilder;
 pub use bitcoin_node::BitcoinNodeHandle;
@@ -67,6 +69,10 @@ impl TestNetworks {
 
     pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
         &self.bitcoin_node
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
     }
 
     pub async fn restart(&mut self) -> Result<()> {
@@ -271,9 +277,13 @@ async fn apply_onchain_config_overrides(
 ) -> Result<()> {
     use hashi::cli::client::CreateProposalParams;
     use hashi::cli::client::build_create_proposal_transaction;
-    use hashi::cli::client::build_execute_update_config_transaction;
-    use hashi::cli::client::build_vote_update_config_transaction;
+    use hashi::cli::client::build_vote_transaction;
+    use hashi::cli::upgrade::build_execute_proposal_transaction;
+    use hashi::cli::upgrade::extract_proposal_id_from_response;
     use hashi::sui_tx_executor::SuiTxExecutor;
+    use sui_sdk_types::Identifier;
+    use sui_sdk_types::StructTag;
+    use sui_sdk_types::TypeTag;
 
     let nodes = networks.hashi_network.nodes();
 
@@ -298,6 +308,13 @@ async fn apply_onchain_config_overrides(
     // to wait for all nodes to catch up to the last applied override.
     let mut exec_checkpoint: u64 = 0;
 
+    let update_config_type_tag = TypeTag::Struct(Box::new(StructTag::new(
+        hashi_ids.package_id,
+        Identifier::from_static("update_config"),
+        Identifier::from_static("UpdateConfig"),
+        vec![],
+    )));
+
     //TODO could we build the proposals and vote/execute on them all at the same time vs doing them
     //one at a time?
     for (key, value) in overrides {
@@ -318,31 +335,14 @@ async fn apply_onchain_config_overrides(
             "create UpdateConfig proposal for '{key}' failed"
         );
 
-        // Extract the proposal ID from the ProposalCreatedEvent. The event BCS
-        // layout is (Address, u64) — proposal_id followed by timestamp_ms.
-        let proposal_id = response
-            .transaction()
-            .events()
-            .events()
-            .iter()
-            .find(|e| e.contents().name().contains("ProposalCreatedEvent"))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ProposalCreatedEvent not found after creating proposal for '{key}'"
-                )
-            })
-            .and_then(|e| {
-                let (id, _ts): (sui_sdk_types::Address, u64) =
-                    bcs::from_bytes(e.contents().value())?;
-                Ok(id)
-            })?;
-
+        let proposal_id = extract_proposal_id_from_response(&response)?;
         tracing::info!("proposal {proposal_id} created for '{key}'; collecting votes");
 
         // 2. All remaining nodes vote. This gives 100% of total weight,
         //    guaranteeing the 66.67% quorum threshold is met.
         for executor in &mut executors[1..] {
-            let vote_tx = build_vote_update_config_transaction(hashi_ids, proposal_id);
+            let vote_tx =
+                build_vote_transaction(hashi_ids, proposal_id, update_config_type_tag.clone());
             let vote_resp = executor.execute(vote_tx).await?;
             anyhow::ensure!(
                 vote_resp.transaction().effects().status().success(),
@@ -351,7 +351,12 @@ async fn apply_onchain_config_overrides(
         }
 
         // 3. Node 0 executes the proposal now that quorum is reached.
-        let execute_tx = build_execute_update_config_transaction(hashi_ids, proposal_id);
+        let execute_tx = build_execute_proposal_transaction(
+            hashi_ids,
+            proposal_id,
+            hashi_ids.package_id,
+            "update_config",
+        )?;
         let exec_resp = executors[0].execute(execute_tx).await?;
         anyhow::ensure!(
             exec_resp.transaction().effects().status().success(),

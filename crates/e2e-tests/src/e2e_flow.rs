@@ -10,20 +10,14 @@ mod tests {
 
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
-    use hashi_types::move_types::DepositConfirmedEvent;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
     use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use sui_rpc::field::FieldMask;
     use sui_rpc::field::FieldMaskUtil;
     use sui_rpc::proto::sui::rpc::v2::Checkpoint;
-    use sui_rpc::proto::sui::rpc::v2::GetBalanceRequest;
     use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
     use sui_sdk_types::Address;
-    use sui_sdk_types::StructTag;
     use sui_sdk_types::bcs::FromBcs;
     use tracing::debug;
     use tracing::info;
@@ -31,16 +25,12 @@ mod tests {
     use crate::TestNetworks;
     use crate::TestNetworksBuilder;
 
-    fn init_test_logging() {
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
-    }
+    use crate::test_helpers::BackgroundMiner;
+    use crate::test_helpers::create_deposit_and_wait;
+    use crate::test_helpers::get_hbtc_balance;
+    use crate::test_helpers::init_test_logging;
+    use crate::test_helpers::lookup_vout;
+    use crate::test_helpers::txid_to_address;
 
     async fn setup_test_networks() -> Result<TestNetworks> {
         info!("Setting up test networks...");
@@ -58,84 +48,6 @@ mod tests {
         info!("MPC key ready");
 
         Ok(networks)
-    }
-
-    fn txid_to_address(txid: &Txid) -> Address {
-        hashi_types::bitcoin_txid::BitcoinTxid::from(*txid).into()
-    }
-
-    async fn wait_for_deposit_confirmation(
-        sui_client: &mut sui_rpc::Client,
-        request_id: Address,
-        timeout: Duration,
-    ) -> Result<()> {
-        info!(
-            "Waiting for deposit confirmation for request_id: {}",
-            request_id
-        );
-
-        let start = std::time::Instant::now();
-        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
-            .transactions()
-            .events()
-            .events()
-            .contents()
-            .finish()]);
-        let mut subscription = sui_client
-            .subscription_client()
-            .subscribe_checkpoints(
-                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
-            )
-            .await?
-            .into_inner();
-
-        while let Some(item) = subscription.next().await {
-            if start.elapsed() > timeout {
-                return Err(anyhow!(
-                    "Timeout waiting for deposit confirmation after {:?}",
-                    timeout
-                ));
-            }
-
-            let checkpoint = match item {
-                Ok(checkpoint) => checkpoint,
-                Err(e) => {
-                    debug!("Error in checkpoint stream: {}", e);
-                    continue;
-                }
-            };
-
-            debug!(
-                "Received checkpoint {}, checking for DepositConfirmedEvent...",
-                checkpoint.cursor()
-            );
-
-            for txn in checkpoint.checkpoint().transactions() {
-                for event in txn.events().events() {
-                    let event_type = event.contents().name();
-
-                    if event_type.contains("DepositConfirmedEvent") {
-                        match DepositConfirmedEvent::from_bcs(event.contents().value()) {
-                            Ok(event_data) => {
-                                if event_data.request_id == request_id {
-                                    info!(
-                                        "Deposit confirmed! Found DepositConfirmedEvent for request_id: {}",
-                                        request_id
-                                    );
-                                    return Ok(());
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Failed to parse DepositConfirmedEvent: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
     }
 
     async fn wait_for_withdrawal_confirmation(
@@ -205,151 +117,6 @@ mod tests {
         }
 
         Err(anyhow!("Checkpoint subscription ended unexpectedly"))
-    }
-
-    async fn get_hbtc_balance(
-        sui_client: &mut sui_rpc::Client,
-        package_id: Address,
-        owner: Address,
-    ) -> Result<u64> {
-        let btc_type = format!("{}::btc::BTC", package_id);
-        let btc_struct_tag: StructTag = btc_type.parse()?;
-        let request = GetBalanceRequest::default()
-            .with_owner(owner.to_string())
-            .with_coin_type(btc_struct_tag.to_string());
-
-        let response = sui_client
-            .state_client()
-            .get_balance(request)
-            .await?
-            .into_inner();
-
-        let balance = response.balance().balance_opt().unwrap_or(0);
-        debug!("hBTC balance for {}: {} sats", owner, balance);
-        Ok(balance)
-    }
-
-    fn lookup_vout(
-        networks: &TestNetworks,
-        txid: Txid,
-        address: bitcoin::Address,
-        amount: u64,
-    ) -> Result<usize> {
-        let tx = networks
-            .bitcoin_node
-            .rpc_client()
-            .get_raw_transaction(txid)
-            .and_then(|r| r.transaction().map_err(Into::into))?;
-        let vout = tx
-            .output
-            .iter()
-            .position(|output| {
-                output.value == Amount::from_sat(amount)
-                    && output.script_pubkey == address.script_pubkey()
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "Could not find output with amount {} and deposit address",
-                    amount
-                )
-            })?;
-        debug!("Found deposit in tx output {}", vout);
-        Ok(vout)
-    }
-
-    async fn create_deposit_and_wait(
-        networks: &mut TestNetworks,
-        amount_sats: u64,
-    ) -> Result<Address> {
-        let user_key = networks.sui_network.user_keys.first().unwrap();
-        let hbtc_recipient = user_key.public_key().derive_address();
-        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
-        // Use the on-chain MPC key rather than the local key-ready channel.
-        // The on-chain key is set during end_reconfig and is guaranteed
-        // available once HashiNetworkBuilder::build() returns.
-        let deposit_address =
-            hashi.get_deposit_address(&hashi.get_onchain_mpc_pubkey()?, Some(&hbtc_recipient))?;
-
-        info!("Sending Bitcoin to deposit address...");
-        let txid = networks
-            .bitcoin_node
-            .send_to_address(&deposit_address, Amount::from_sat(amount_sats))?;
-        info!("Transaction sent: {}", txid);
-
-        info!("Mining blocks for confirmation...");
-        let blocks_to_mine = 10;
-        networks.bitcoin_node.generate_blocks(blocks_to_mine)?;
-        info!("{blocks_to_mine} blocks mined");
-
-        info!("Creating deposit request on Sui...");
-        let vout = lookup_vout(networks, txid, deposit_address, amount_sats)?;
-        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
-        let request_id = executor
-            .execute_create_deposit_request(
-                txid_to_address(&txid),
-                vout as u32,
-                amount_sats,
-                Some(hbtc_recipient),
-            )
-            .await?;
-        info!("Deposit request created: {}", request_id);
-
-        // Mine blocks in the background so the leader's BTC-block-driven
-        // deposit processing loop fires.
-        let _miner = BackgroundMiner::start(&networks.bitcoin_node);
-        wait_for_deposit_confirmation(
-            &mut networks.sui_network.client,
-            request_id,
-            Duration::from_secs(300),
-        )
-        .await?;
-        info!("Deposit confirmed on Sui");
-
-        Ok(hbtc_recipient)
-    }
-
-    /// Mines one block per second on Bitcoin regtest until stopped.
-    /// Stops automatically when dropped.
-    struct BackgroundMiner {
-        stop_flag: Arc<AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl BackgroundMiner {
-        fn start(bitcoin_node: &crate::BitcoinNodeHandle) -> Self {
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_clone = stop_flag.clone();
-            let rpc_url = bitcoin_node.rpc_url().to_string();
-            let handle = std::thread::spawn(move || {
-                let rpc = corepc_client::client_sync::v29::Client::new_with_auth(
-                    &rpc_url,
-                    corepc_client::client_sync::Auth::UserPass(
-                        crate::bitcoin_node::RPC_USER.to_string(),
-                        crate::bitcoin_node::RPC_PASSWORD.to_string(),
-                    ),
-                )
-                .expect("failed to create mining RPC client");
-                let addr = rpc.new_address().expect("failed to get mining address");
-                while !stop_clone.load(Ordering::Relaxed) {
-                    let _ = rpc.generate_to_address(1, &addr);
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            });
-            Self {
-                stop_flag,
-                handle: Some(handle),
-            }
-        }
-    }
-
-    impl Drop for BackgroundMiner {
-        fn drop(&mut self) {
-            self.stop_flag.store(true, Ordering::Relaxed);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
     }
 
     fn extract_witness_program(address: &bitcoin::Address) -> Result<Vec<u8>> {
