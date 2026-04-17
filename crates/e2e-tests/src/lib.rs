@@ -442,6 +442,33 @@ mod tests {
         nodes[0].current_epoch().unwrap()
     }
 
+    async fn wait_for_signing_manager(
+        nodes: &[HashiNodeHandle],
+        epoch: u64,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let all_ready = nodes
+                .iter()
+                .all(|node| node.hashi().signing_manager_for(epoch).is_some());
+            if all_ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let statuses: Vec<_> = nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, node)| (i, node.hashi().signing_manager_for(epoch).is_some()))
+                    .collect();
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for SigningManager for epoch {epoch} on all nodes: {statuses:?}"
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
     async fn force_rotate_and_assert_key_agreement(
         test_networks: &mut TestNetworks,
         target_epoch: u64,
@@ -1268,6 +1295,53 @@ mod tests {
         // n=7, t=3, f=2. Two nodes have wrong key shares.
         // Each node collects 7 sigs (2 bad), RS capacity (7-3)/2=2 → corrects 2.
         run_signing_test(7, &[0, 1]).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sync_if_stale_recovers_cleared_signing_manager() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+        const RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        crate::test_helpers::init_test_logging();
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let epoch = nodes[0].current_epoch().unwrap();
+        wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
+
+        nodes[0].hashi().clear_signing_manager_for_test();
+        assert!(
+            nodes[0].hashi().signing_manager_for(epoch).is_none(),
+            "clear_signing_manager_for_test should have nulled the stored manager"
+        );
+
+        wait_for_signing_manager(&nodes[..1], epoch, RECOVERY_TIMEOUT).await?;
+
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(
+            nodes,
+            b"msg-after-sync-if-stale-recovery",
+            epoch,
+            request_id,
+            0,
+        )
+        .await;
+        assert_all_signatures_match(results);
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
