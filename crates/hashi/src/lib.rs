@@ -418,6 +418,32 @@ impl Hashi {
             match grpc::guardian_client::GuardianClient::new(endpoint) {
                 Ok(client) => {
                     tracing::info!("Guardian client configured for {}", client.endpoint());
+                    // Seed the seq counter from the guardian's `LimiterState.next_seq`
+                    // so it survives restarts and leader rotations. If the guardian is
+                    // unreachable or hasn't been bootstrapped we fall back to 0.
+                    match client.get_guardian_info().await {
+                        Ok(info) => {
+                            if let Some(limiter_state) = info.limiter_state {
+                                let next_seq = limiter_state.next_seq.unwrap_or(0);
+                                self.guardian_seq.store(next_seq, Ordering::SeqCst);
+                                tracing::info!(
+                                    next_seq,
+                                    "Seeded guardian seq counter from guardian limiter state"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "Guardian is not fully initialized (no limiter state); \
+                                     seq counter starts at 0"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch guardian info for seq initialization: {e}; \
+                                 seq counter starts at 0"
+                            );
+                        }
+                    }
                     Some(client)
                 }
                 Err(e) => {

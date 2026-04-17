@@ -85,6 +85,7 @@ impl GetGuardianInfoResponse {
             attestation: "abcd".as_bytes().to_vec(),
             signing_pub_key,
             signed_info: GuardianSigned::new(info, &signing_key, 1234),
+            limiter_state: None,
         }
     }
 }

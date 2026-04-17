@@ -200,10 +200,13 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
         let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
 
+        let limiter_state = resp.limiter_state.map(pb_to_limiter_state).transpose()?;
+
         Ok(GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
             signing_pub_key,
             signed_info,
+            limiter_state,
         })
     }
 }
@@ -335,6 +338,7 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         attestation: Some(r.attestation.into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
+        limiter_state: r.limiter_state.map(limiter_state_to_pb),
     }
 }
 

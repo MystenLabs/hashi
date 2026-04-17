@@ -33,6 +33,10 @@ message GetGuardianInfoResponse {
 
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
+
+  // Current rate limiter state (if initialized). Lets clients seed their
+  // local seq counter at startup so it survives restarts and leader rotations.
+  LimiterState limiter_state = 4;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.

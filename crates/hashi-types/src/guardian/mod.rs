@@ -178,6 +178,9 @@ pub struct GetGuardianInfoResponse {
     pub signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     pub signed_info: GuardianSigned<GuardianInfo>,
+    /// Current rate limiter state (if initialized). Includes `next_seq` which
+    /// clients use to seed their local seq counter at startup.
+    pub limiter_state: Option<LimiterState>,
 }
 
 /// TODO: Add network?

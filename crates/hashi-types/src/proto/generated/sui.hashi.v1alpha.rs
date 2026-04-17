@@ -1122,6 +1122,10 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
+    /// Current rate limiter state (if initialized). Lets clients seed their
+    /// local seq counter at startup so it survives restarts and leader rotations.
+    #[prost(message, optional, tag = "4")]
+    pub limiter_state: ::core::option::Option<LimiterState>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
 #[derive(Clone, PartialEq, ::prost::Message)]

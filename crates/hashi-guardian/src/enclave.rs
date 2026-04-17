@@ -319,6 +319,14 @@ impl EnclaveState {
         guard.consume(seq, timestamp, amount_sats)?;
         Ok(LimiterGuard::new(guard))
     }
+
+    /// Snapshot the current rate limiter state, if the limiter has been
+    /// initialized. Used by `GetGuardianInfo` so that clients can seed their
+    /// local `seq` counter at startup.
+    pub async fn limiter_state(&self) -> Option<LimiterState> {
+        let limiter = self.rate_limiter.get()?;
+        Some(*limiter.lock().await.state())
+    }
 }
 
 impl Enclave {
