@@ -1772,8 +1772,30 @@ impl LeaderService {
             );
 
         match guardian.standard_withdrawal(proto_request).await {
-            Ok(_response) => {
-                info!("Guardian approved withdrawal (rate limit passed)");
+            Ok(response_pb) => {
+                // Verify the guardian's Ed25519 signature on the response before
+                // trusting the approval. If the pubkey wasn't cached at startup
+                // (guardian was unreachable then) we warn and proceed — the
+                // response still passed the guardian's rate-limit check end to
+                // end, we just can't cryptographically prove it came from the
+                // expected enclave.
+                if let Some(pubkey) = inner.guardian_signing_pubkey() {
+                    let signed_response = hashi_types::guardian::GuardianSigned::<
+                        hashi_types::guardian::StandardWithdrawalResponse,
+                    >::try_from(response_pb)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}")
+                    })?;
+                    signed_response.verify(pubkey).map_err(|e| {
+                        anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
+                    })?;
+                    info!("Guardian approved withdrawal (rate limit passed, signature verified)");
+                } else {
+                    warn!(
+                        "Guardian approved withdrawal but signing pubkey not available; \
+                         skipping response verification"
+                    );
+                }
                 Ok(())
             }
             Err(status) => {

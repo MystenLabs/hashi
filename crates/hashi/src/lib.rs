@@ -57,10 +57,13 @@ pub struct Hashi {
     /// PRs add RPC methods that callers check for `guardian_client()`
     /// being `Some` before using.
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
+    /// Guardian Ed25519 signing pubkey, cached at startup so the leader can
+    /// verify `StandardWithdrawalResponse` signatures before trusting them.
+    guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
     /// Monotonic sequence counter for guardian withdrawal requests. The leader
     /// bumps this on every call; the guardian rejects out-of-order `seq` values
-    /// as replay attempts. A later commit seeds this from the guardian's
-    /// `LimiterState.next_seq` at startup so it survives restarts.
+    /// as replay attempts. Seeded from the guardian's `LimiterState.next_seq`
+    /// at startup so it survives restarts.
     guardian_seq: AtomicU64,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
@@ -84,6 +87,7 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
             guardian_seq: AtomicU64::new(0),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
@@ -110,6 +114,7 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
             guardian_seq: AtomicU64::new(0),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
@@ -204,6 +209,15 @@ impl Hashi {
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
         self.guardian_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    /// Guardian Ed25519 signing pubkey, cached at startup. Returns `None`
+    /// when no guardian is configured, or the guardian was unreachable at
+    /// startup.
+    pub fn guardian_signing_pubkey(&self) -> Option<&hashi_types::guardian::GuardianPubKey> {
+        self.guardian_signing_pubkey
+            .get()
+            .and_then(|opt| opt.as_ref())
     }
 
     /// Return the next monotonic sequence number for guardian withdrawal
@@ -418,12 +432,15 @@ impl Hashi {
             match grpc::guardian_client::GuardianClient::new(endpoint) {
                 Ok(client) => {
                     tracing::info!("Guardian client configured for {}", client.endpoint());
-                    // Seed the seq counter from the guardian's `LimiterState.next_seq`
-                    // so it survives restarts and leader rotations. If the guardian is
-                    // unreachable or hasn't been bootstrapped we fall back to 0.
+                    // Fetch once at startup to (1) seed the seq counter from
+                    // `LimiterState.next_seq` so it survives restarts, and
+                    // (2) cache the guardian's Ed25519 signing pubkey for
+                    // response verification. Both are best-effort: if the
+                    // guardian is unreachable we keep the client configured
+                    // but skip seq sync / response verification.
                     match client.get_guardian_info().await {
-                        Ok(info) => {
-                            if let Some(limiter_state) = info.limiter_state {
+                        Ok(info_pb) => {
+                            if let Some(limiter_state) = info_pb.limiter_state {
                                 let next_seq = limiter_state.next_seq.unwrap_or(0);
                                 self.guardian_seq.store(next_seq, Ordering::SeqCst);
                                 tracing::info!(
@@ -436,11 +453,28 @@ impl Hashi {
                                      seq counter starts at 0"
                                 );
                             }
+                            match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb)
+                            {
+                                Ok(info) => {
+                                    tracing::info!(
+                                        "Guardian signing pubkey cached for response verification"
+                                    );
+                                    let _ = self
+                                        .guardian_signing_pubkey
+                                        .set(Some(info.signing_pub_key));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to parse guardian info: {e}; \
+                                         response signature verification disabled"
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "Failed to fetch guardian info for seq initialization: {e}; \
-                                 seq counter starts at 0"
+                                "Failed to fetch guardian info: {e}; \
+                                 seq starts at 0, response verification disabled"
                             );
                         }
                     }
