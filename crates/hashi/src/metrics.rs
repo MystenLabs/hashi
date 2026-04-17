@@ -50,6 +50,7 @@ pub struct Metrics {
     reconfig_in_progress: IntGauge,
     paused: IntGauge,
     deposit_queue_size: IntGauge,
+    pub deposit_request_confirmations: IntGaugeVec,
     withdrawal_queue_size: IntGaugeVec,
     withdrawal_queue_value: IntGaugeVec,
     utxo_pool_size: IntGaugeVec,
@@ -80,6 +81,18 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
 ];
 
 const MPC_SIGN_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 1.5, 2., 2.5, 3., 4., 5., 7.5, 10.];
+
+pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
+    "not_found",
+    "mempool",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6_plus",
+];
 
 impl Metrics {
     pub fn new_default() -> Self {
@@ -213,6 +226,14 @@ impl Metrics {
             deposit_queue_size: register_int_gauge_with_registry!(
                 "hashi_deposit_queue_size",
                 "number of pending deposit requests",
+                registry,
+            )
+            .unwrap(),
+            deposit_request_confirmations: register_int_gauge_vec_with_registry!(
+                "hashi_deposit_request_confirmations",
+                "Pending deposit requests bucketed by their transaction status (and block confirmations) on Bitcoin. \
+                 The `status` label is one of: not_found, mempool, 0, 1, 2, 3, 4, 5, 6_plus.",
+                &["status"],
                 registry,
             )
             .unwrap(),
