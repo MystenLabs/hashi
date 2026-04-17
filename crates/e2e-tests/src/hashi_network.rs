@@ -98,6 +98,12 @@ impl HashiNodeHandle {
             "Cannot open DB while node is running"
         );
         let db_path = self.config.db.as_deref().expect("db path not set");
+        for _ in 0..10 {
+            if let Ok(db) = hashi::db::Database::open(db_path) {
+                return Ok(db);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
         hashi::db::Database::open(db_path)
     }
 
