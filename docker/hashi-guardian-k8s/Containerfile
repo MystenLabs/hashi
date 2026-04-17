@@ -37,7 +37,7 @@ ENV CARGO_INCREMENTAL=0
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 
 RUN cargo fetch
-RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi-guardian
+RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-guardian --features non-enclave-dev --bin hashi-guardian
 
 #
 # Build stage: compile with real source (only local crates recompile)
@@ -53,7 +53,7 @@ COPY crates/hashi-types /src/crates/hashi-types
 # Touch source files to invalidate cargo's fingerprint cache for local crates
 RUN find crates/ -name "*.rs" -exec touch {} +
 
-RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi-guardian
+RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-guardian --features non-enclave-dev --bin hashi-guardian
 
 #
 # Package stage: minimal runtime image
