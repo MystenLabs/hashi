@@ -41,8 +41,7 @@ pub struct GuardianSessionInfo {
 ///
 /// Returns the selected live session id if all invariants pass.
 pub async fn kp_heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
-    let recent_heartbeats = read_recent_heartbeats(s3_client).await?;
-    let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
+    let summary = collect_recent_sessions(s3_client).await?;
     let now = now_unix_seconds();
     select_live_session(
         &summary,
@@ -50,6 +49,17 @@ pub async fn kp_heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> 
         LIVE_SESSION_MAX_AGE.as_secs(),
         OTHER_SESSION_QUIET_PERIOD.as_secs(),
     )
+}
+
+/// Return all guardian sessions observed via heartbeats in the last ~2 hours
+/// with their first/last heartbeat timestamps. Used by restart rehydration
+/// to enumerate prior sessions whose withdrawal logs contribute to the
+/// authoritative LimiterState.
+pub async fn collect_recent_sessions(
+    s3_client: &S3Logger,
+) -> anyhow::Result<Vec<GuardianSessionInfo>> {
+    let recent_heartbeats = read_recent_heartbeats(s3_client).await?;
+    summarize_heartbeats_by_session(recent_heartbeats)
 }
 
 async fn read_recent_heartbeats(s3_client: &S3Logger) -> anyhow::Result<Vec<VerifiedLogRecord>> {

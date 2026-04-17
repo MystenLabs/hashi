@@ -57,7 +57,12 @@ use std::time::Duration;
 ///
 /// These are public so that external verifiers/monitors can apply the same expectations.
 pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(5 * 60);
-pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(5 * 60);
+/// Withdrawal logs are the authoritative state snapshot used by the next
+/// session's `ProvisionerInit` to rehydrate the rate limiter and idempotency
+/// cache. 60 minutes gives the KP a comfortable window to read the prior
+/// session's tail across a guardian restart without racing Object Lock
+/// expiry; longer than heartbeat retention on purpose.
+pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(60 * 60);
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
 
 /// S3 sub-prefixes used for guardian log streams.
@@ -268,6 +273,20 @@ pub enum WithdrawalLogMessage {
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         response: StandardWithdrawalResponse,
+        /// Committed rate-limiter state AFTER this withdrawal was applied.
+        /// Self-contained snapshot per log record — a key provisioner reading
+        /// the latest successful log reconstructs the authoritative limiter
+        /// state for the next session's `ProvisionerInit` without replaying
+        /// from genesis. `#[serde(default)]` keeps us compatible with logs
+        /// written before this field existed.
+        ///
+        /// The `response` field above is NOT re-signed per session; on
+        /// rehydration the new session re-signs it with its own Ed25519
+        /// signing key. The LogRecord's own signature attests to the
+        /// `response` data's provenance, so external verifiers don't need
+        /// a separately-signed envelope here.
+        #[serde(default)]
+        limiter_state_post: Option<LimiterState>,
     },
     /// Immediate withdraw failure
     Failure {
@@ -894,6 +913,7 @@ mod tests {
                 request_data: request_data.into(),
                 request_sign,
                 response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+                limiter_state_post: None,
             })),
             &signing_key,
         );

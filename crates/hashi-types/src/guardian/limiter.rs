@@ -4,6 +4,7 @@
 use super::GuardianError::InvalidInputs;
 use super::GuardianError::RateLimitExceeded;
 use super::GuardianResult;
+use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 pub const SOFT_RESERVE_TTL_SECS: u64 = 5 * 60;
 
 /// Immutable configuration for the token bucket rate limiter.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimiterConfig {
     /// Refill rate in sats per second.
     pub refill_rate: u64,
@@ -24,7 +25,7 @@ pub struct LimiterConfig {
 
 /// Serializable state for the token bucket rate limiter.
 /// Provisioners provide this when initializing the enclave.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimiterState {
     /// Available tokens in sats.
     pub num_tokens_available: u64,

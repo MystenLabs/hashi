@@ -44,11 +44,17 @@ pub async fn standard_withdrawal(
     match normal_withdrawal_inner(enclave.clone(), signed_request).await {
         Ok((txid, response, limiter_guard)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
+            // Snapshot the post-consume limiter state into the log so a
+            // future session can rehydrate the rate limiter from S3 alone.
+            // The LogRecord's signature attests to `response`, which is
+            // what future sessions re-sign when rehydrating the wid cache.
+            let limiter_state_post = limiter_guard.limiter_state();
             let msg = WithdrawalLogMessage::Success {
                 txid,
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 response: response.clone(),
+                limiter_state_post: Some(limiter_state_post),
             };
             log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
             let signed_response = enclave.sign(response);
@@ -203,6 +209,13 @@ impl LimiterGuard {
             guard,
             committed: false,
         }
+    }
+
+    /// Snapshot of the limiter state AFTER the successful consume this guard
+    /// wraps. Persisted into the withdrawal log so a subsequent session can
+    /// rehydrate the bucket state on boot.
+    pub fn limiter_state(&self) -> hashi_types::guardian::LimiterState {
+        *self.guard.state()
     }
 
     /// Mark this withdrawal as successful. Prevents revert on drop.

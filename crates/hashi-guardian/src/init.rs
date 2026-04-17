@@ -8,14 +8,25 @@ use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::Share;
+use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::InitLogMessage::PIEnclaveFullyInitialized;
 use hashi_types::guardian::InitLogMessage::PISuccess;
 use hashi_types::guardian::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
+use tracing::warn;
 use GuardianError::*;
+
+/// How many hour-scoped directories back we scan when rehydrating the
+/// wid-keyed response cache from prior-session withdrawal logs. Matches
+/// the Object Lock retention window for withdrawal logs (see
+/// `S3_OBJECT_LOCK_DURATION_WITHDRAW`) so we never try to read a
+/// directory whose entries have expired out from under us.
+const REHYDRATE_LOG_HOURS: u64 = 2;
 
 /// Receives S3 API keys & share commitments.
 /// Returns an error for malformed requests / dup call & panics for the rest.
@@ -178,6 +189,22 @@ pub async fn provisioner_init(
     if current_share_count >= THRESHOLD {
         let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
         finalize_init(&shares_vec, &enclave, request.into_state()).await;
+
+        // Rehydrate the wid-keyed response cache from prior-session
+        // withdrawal logs BEFORE we start serving withdrawals. Retries
+        // of prior-session wids will hit the cache and return the
+        // (re-signed) response instead of going through consume again
+        // — preventing double debits across a guardian restart. The
+        // KP-side rehydration of `LimiterState` already guarantees
+        // `next_seq` is correct; this closes the remaining gap.
+        if let Err(e) = rehydrate_response_cache(&enclave).await {
+            warn!(
+                error = %e,
+                "Response cache rehydration failed; proceeding with empty cache. \
+                 Retries of prior-session withdrawals may be rejected.",
+            );
+        }
+
         // Log to S3 indicating that withdrawals can be expected henceforth
         enclave
             .log_init(PIEnclaveFullyInitialized)
@@ -192,6 +219,129 @@ pub async fn provisioner_init(
     }
 
     Ok(())
+}
+
+/// Read prior-session withdrawal success logs from S3 and repopulate the
+/// current session's wid-keyed response cache.
+///
+/// Each cached entry is re-signed with the new session's Ed25519 key,
+/// so clients that fetch the current guardian's signing pubkey and
+/// verify responses will accept them. Errors are non-fatal — a cache
+/// miss at most causes a double-debit on retry, which is the same
+/// behavior we had before this function existed.
+async fn rehydrate_response_cache(enclave: &Arc<Enclave>) -> GuardianResult<()> {
+    let logger = enclave.config.s3_logger()?;
+    let current_session_id = enclave.s3_session_id();
+    let start_secs = now_timestamp_secs().saturating_sub(REHYDRATE_LOG_HOURS * 60 * 60);
+
+    // Resolve the signing pubkey of each prior session we will read logs
+    // from. We ignore sessions whose attestation can't be fetched —
+    // logs we can't verify get skipped rather than trusted blindly.
+    let prior_session_pubkeys =
+        resolve_prior_session_pubkeys(logger, &current_session_id, start_secs).await?;
+    if prior_session_pubkeys.is_empty() {
+        info!("No prior sessions detected for response-cache rehydration");
+        return Ok(());
+    }
+
+    let mut rehydrated = 0usize;
+    for hour in 0..=REHYDRATE_LOG_HOURS {
+        let dir = S3HourScopedDirectory::new(S3_DIR_WITHDRAW, start_secs + hour * 60 * 60);
+        let logs = match logger.list_all_objects_in_dir::<LogRecord>(&dir).await {
+            Ok(logs) => logs,
+            Err(e) => {
+                warn!(
+                    dir = %dir,
+                    error = %e,
+                    "Skipping withdrawal log directory during cache rehydration",
+                );
+                continue;
+            }
+        };
+        for log in logs {
+            let Some(pubkey) = prior_session_pubkeys.get(&log.session_id) else {
+                continue;
+            };
+            let verified = match log.verify(pubkey) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        session_id = %pubkey_session(pubkey),
+                        error = ?e,
+                        "Skipping unverifiable withdrawal log during cache rehydration",
+                    );
+                    continue;
+                }
+            };
+            let LogMessage::Withdrawal(withdrawal_message) = verified.message else {
+                continue;
+            };
+            let WithdrawalLogMessage::Success {
+                request_data,
+                response,
+                ..
+            } = *withdrawal_message
+            else {
+                continue;
+            };
+            // Re-sign with the CURRENT session's key so clients that
+            // verify against the new guardian pubkey accept the response.
+            let signed = enclave.sign(response);
+            enclave.state.cache_response(request_data.wid, signed);
+            rehydrated += 1;
+        }
+    }
+
+    info!(
+        rehydrated,
+        "Rehydrated wid-keyed response cache from prior-session logs"
+    );
+    Ok(())
+}
+
+/// For every prior session whose heartbeats we can see in the recent
+/// window, fetch its OperatorInit attestation and return its Ed25519
+/// signing pubkey. Sessions whose attestation is unavailable are
+/// silently skipped (we'd be unable to verify their logs anyway).
+async fn resolve_prior_session_pubkeys(
+    logger: &S3Logger,
+    current_session_id: &str,
+    start_secs: u64,
+) -> GuardianResult<HashMap<String, GuardianPubKey>> {
+    let mut session_ids = std::collections::HashSet::new();
+    for hour in 0..=REHYDRATE_LOG_HOURS {
+        let dir = S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, start_secs + hour * 60 * 60);
+        let logs = match logger.list_all_objects_in_dir::<LogRecord>(&dir).await {
+            Ok(logs) => logs,
+            Err(_) => continue,
+        };
+        for log in logs {
+            if log.session_id != current_session_id {
+                session_ids.insert(log.session_id);
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    for session_id in session_ids {
+        match logger.get_attestation(&session_id).await {
+            Ok((_attestation, pubkey)) => {
+                out.insert(session_id, pubkey);
+            }
+            Err(e) => {
+                warn!(
+                    session_id,
+                    error = %e,
+                    "Could not resolve prior session signing pubkey; logs from this session will be skipped",
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn pubkey_session(pubkey: &GuardianPubKey) -> String {
+    session_id_from_signing_pubkey(pubkey)
 }
 
 /// Finalize the initialization process.

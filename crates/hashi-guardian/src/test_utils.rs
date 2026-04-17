@@ -24,6 +24,7 @@ use std::sync::Arc;
 /// Mock S3 logger for use in API calls post operator_init,
 /// e.g., provisioner_init, withdrawals.
 pub fn mock_logger() -> S3Logger {
+    use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
@@ -35,7 +36,13 @@ pub fn mock_logger() -> S3Logger {
     // The `then_output` helper creates a "simple" rule that repeats indefinitely.
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
 
-    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
+    // `provisioner_init` runs a post-finalize rehydration pass that lists
+    // prior-session withdrawal logs. Unit tests start against a fresh
+    // bucket (no prior sessions) — return an empty page.
+    let list_empty = mock!(Client::list_object_versions)
+        .then_output(|| ListObjectVersionsOutput::builder().build());
+
+    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok, &list_empty]);
 
     let config = S3Config::mock_for_testing();
 
