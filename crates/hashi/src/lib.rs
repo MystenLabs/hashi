@@ -5,8 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 
 use anyhow::anyhow;
 use sui_futures::service::Service;
@@ -60,11 +58,6 @@ pub struct Hashi {
     /// Guardian Ed25519 signing pubkey, cached at startup so the leader can
     /// verify `StandardWithdrawalResponse` signatures before trusting them.
     guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
-    /// Monotonic sequence counter for guardian withdrawal requests. The leader
-    /// bumps this on every call; the guardian rejects out-of-order `seq` values
-    /// as replay attempts. Seeded from the guardian's `LimiterState.next_seq`
-    /// at startup so it survives restarts.
-    guardian_seq: AtomicU64,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -88,7 +81,6 @@ impl Hashi {
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_signing_pubkey: OnceLock::new(),
-            guardian_seq: AtomicU64::new(0),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -115,7 +107,6 @@ impl Hashi {
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_signing_pubkey: OnceLock::new(),
-            guardian_seq: AtomicU64::new(0),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -218,12 +209,6 @@ impl Hashi {
         self.guardian_signing_pubkey
             .get()
             .and_then(|opt| opt.as_ref())
-    }
-
-    /// Return the next monotonic sequence number for guardian withdrawal
-    /// requests and increment the counter.
-    pub fn next_guardian_seq(&self) -> u64 {
-        self.guardian_seq.fetch_add(1, Ordering::SeqCst)
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -432,27 +417,15 @@ impl Hashi {
             match grpc::guardian_client::GuardianClient::new(endpoint) {
                 Ok(client) => {
                     tracing::info!("Guardian client configured for {}", client.endpoint());
-                    // Fetch once at startup to (1) seed the seq counter from
-                    // `LimiterState.next_seq` so it survives restarts, and
-                    // (2) cache the guardian's Ed25519 signing pubkey for
-                    // response verification. Both are best-effort: if the
-                    // guardian is unreachable we keep the client configured
-                    // but skip seq sync / response verification.
+                    // Best-effort fetch at startup to cache the guardian's
+                    // Ed25519 signing pubkey for response verification. The
+                    // limiter `next_seq` is intentionally NOT cached here:
+                    // it is queried just-in-time per withdrawal to stay
+                    // correct across leader rotation, pod restart, and lost
+                    // responses (idempotency comes from the deterministic
+                    // `wid`, not an in-memory counter).
                     match client.get_guardian_info().await {
                         Ok(info_pb) => {
-                            if let Some(limiter_state) = info_pb.limiter_state {
-                                let next_seq = limiter_state.next_seq.unwrap_or(0);
-                                self.guardian_seq.store(next_seq, Ordering::SeqCst);
-                                tracing::info!(
-                                    next_seq,
-                                    "Seeded guardian seq counter from guardian limiter state"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "Guardian is not fully initialized (no limiter state); \
-                                     seq counter starts at 0"
-                                );
-                            }
                             match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb)
                             {
                                 Ok(info) => {
@@ -474,7 +447,7 @@ impl Hashi {
                         Err(e) => {
                             tracing::warn!(
                                 "Failed to fetch guardian info: {e}; \
-                                 seq starts at 0, response verification disabled"
+                                 response signature verification disabled"
                             );
                         }
                     }

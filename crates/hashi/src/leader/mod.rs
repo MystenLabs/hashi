@@ -1171,17 +1171,6 @@ impl LeaderService {
             .current_committee_members()
             .expect("No current committee members");
 
-        // 0. Guardian rate-limiting gate (before MPC signing).
-        //
-        // When a `guardian_endpoint` is configured we forward a committee-
-        // signed `StandardWithdrawalRequest` to the guardian and only proceed
-        // if it approves. Any guardian error — rate limited, unavailable,
-        // not-yet-bootstrapped — aborts this iteration so the leader picks
-        // the txn back up on the next tick.
-        if let Some(guardian) = inner.guardian_client() {
-            Self::gate_withdrawal_through_guardian(&inner, &txn, &members, guardian).await?;
-        }
-
         info!("MPC signing withdrawal transaction");
 
         // 1. Request signed withdrawal tx witnesses from committee members.
@@ -1197,7 +1186,18 @@ impl LeaderService {
             .map(|s| s.to_byte_array().to_vec())
             .collect();
 
-        // 3. Build the WithdrawalTxSigning and get BLS certificate via fan-out
+        // 3. Guardian rate-limiting hard reserve (after MPC, before on-chain sign).
+        //
+        // When a `guardian_endpoint` is configured we forward a committee-
+        // signed `StandardWithdrawalRequest` to the guardian and only proceed
+        // if it approves. Any guardian error — rate limited, unavailable,
+        // not-yet-bootstrapped — aborts this iteration so the leader picks
+        // the txn back up on the next tick (MPC sigs are re-collected then).
+        if let Some(guardian) = inner.guardian_client() {
+            Self::finalize_withdrawal_through_guardian(&inner, &txn, &members, guardian).await?;
+        }
+
+        // 4. Build the WithdrawalTxSigning and get BLS certificate via fan-out
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: txn.id,
             request_ids: txn.request_ids.clone(),
@@ -1241,7 +1241,7 @@ impl LeaderService {
 
         let signed = aggregator.finish()?;
 
-        // 4. Submit sign_withdrawal to Sui (writes signatures on-chain).
+        // 5. Submit sign_withdrawal to Sui (writes signatures on-chain).
         // Broadcast + confirm happens via process_signed_withdrawal_txns on the next tick.
         Self::submit_sign_withdrawal(
             &inner,
@@ -1742,78 +1742,142 @@ impl LeaderService {
     }
 
     // ========================================================================
-    // Guardian: rate-limiting gate (runs before MPC signing)
+    // Guardian: rate-limiting hard reserve (runs after MPC signing, before
+    // submitting sign_withdrawal on-chain)
     // ========================================================================
+
+    /// Maximum times to re-run the committee BLS fan-out + guardian call
+    /// when the guardian reports a `seq mismatch` (a concurrent withdrawal
+    /// consumed the seq we had just queried).
+    const GUARDIAN_SEQ_MISMATCH_RETRIES: usize = 3;
 
     /// Build a committee-signed `StandardWithdrawalRequest` and forward it to
     /// the guardian. Returns `Ok(())` when the guardian approves; otherwise
     /// propagates an error so the caller can skip this iteration.
-    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, seq))]
-    async fn gate_withdrawal_through_guardian(
+    ///
+    /// The `timestamp_secs` comes from the on-chain `WithdrawalTransaction`
+    /// so it is monotonic across restarts and leader rotations. The `seq` is
+    /// queried just-in-time from `GetGuardianInfo.limiter_state.next_seq` —
+    /// there is no in-memory counter to keep in sync.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
+    async fn finalize_withdrawal_through_guardian(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
         members: &[CommitteeMember],
         guardian: &crate::grpc::guardian_client::GuardianClient,
     ) -> anyhow::Result<()> {
-        let timestamp_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let seq = inner.next_guardian_seq();
-        tracing::Span::current().record("seq", seq);
+        let timestamp_secs = txn.timestamp_ms / 1000;
 
-        let signed_request =
-            Self::collect_guardian_withdrawal_signatures(inner, txn, members, timestamp_secs, seq)
-                .await?;
-
-        let proto_request =
-            hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb(
-                &signed_request,
-            );
-
-        match guardian.standard_withdrawal(proto_request).await {
-            Ok(response_pb) => {
-                // Verify the guardian's Ed25519 signature on the response before
-                // trusting the approval. If the pubkey wasn't cached at startup
-                // (guardian was unreachable then) we warn and proceed — the
-                // response still passed the guardian's rate-limit check end to
-                // end, we just can't cryptographically prove it came from the
-                // expected enclave.
-                if let Some(pubkey) = inner.guardian_signing_pubkey() {
-                    let signed_response = hashi_types::guardian::GuardianSigned::<
-                        hashi_types::guardian::StandardWithdrawalResponse,
-                    >::try_from(response_pb)
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}")
-                    })?;
-                    signed_response.verify(pubkey).map_err(|e| {
-                        anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
-                    })?;
-                    info!("Guardian approved withdrawal (rate limit passed, signature verified)");
-                } else {
-                    warn!(
-                        "Guardian approved withdrawal but signing pubkey not available; \
-                         skipping response verification"
-                    );
-                }
-                Ok(())
-            }
-            Err(status) => {
-                let label = if status.message().contains("Rate limit exceeded") {
-                    warn!("Guardian rate-limited withdrawal, will retry later");
-                    "GuardianRateLimited"
-                } else {
-                    error!("Guardian call failed: {}", status.message());
-                    "GuardianUnavailable"
-                };
+        for attempt in 0..Self::GUARDIAN_SEQ_MISMATCH_RETRIES {
+            // JIT-query the guardian's current `next_seq` so we stay in sync
+            // across leader rotation, pod restart, and lost responses without
+            // tracking seq locally.
+            let info_pb = guardian.get_guardian_info().await.map_err(|status| {
                 inner
                     .metrics
                     .leader_retries_total
-                    .with_label_values(&["withdrawal_signing", label])
+                    .with_label_values(&["withdrawal_signing", "GuardianUnavailable"])
                     .inc();
-                anyhow::bail!("Guardian rejected withdrawal: {}", status.message())
+                anyhow::anyhow!("Guardian get_guardian_info failed: {}", status.message())
+            })?;
+            let seq = info_pb
+                .limiter_state
+                .and_then(|ls| ls.next_seq)
+                .ok_or_else(|| {
+                    inner
+                        .metrics
+                        .leader_retries_total
+                        .with_label_values(&["withdrawal_signing", "GuardianNotBootstrapped"])
+                        .inc();
+                    anyhow::anyhow!("Guardian has no limiter state (not yet bootstrapped)")
+                })?;
+
+            let signed_request = Self::collect_guardian_withdrawal_signatures(
+                inner,
+                txn,
+                members,
+                timestamp_secs,
+                seq,
+            )
+            .await?;
+
+            let proto_request =
+                hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb(
+                    &signed_request,
+                );
+
+            match guardian.standard_withdrawal(proto_request).await {
+                Ok(response_pb) => {
+                    // Verify the guardian's Ed25519 signature on the response
+                    // before trusting the approval. If the pubkey wasn't
+                    // cached at startup (guardian was unreachable then) we
+                    // warn and proceed — the response still passed the
+                    // guardian's rate-limit check end to end, we just can't
+                    // cryptographically prove it came from the expected
+                    // enclave.
+                    if let Some(pubkey) = inner.guardian_signing_pubkey() {
+                        let signed_response = hashi_types::guardian::GuardianSigned::<
+                            hashi_types::guardian::StandardWithdrawalResponse,
+                        >::try_from(response_pb)
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}")
+                        })?;
+                        signed_response.verify(pubkey).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Guardian response signature verification failed: {e:?}"
+                            )
+                        })?;
+                        info!(
+                            seq,
+                            "Guardian approved withdrawal (rate limit passed, signature verified)"
+                        );
+                    } else {
+                        warn!(
+                            seq,
+                            "Guardian approved withdrawal but signing pubkey not available; \
+                             skipping response verification"
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(status) if status.message().contains("seq mismatch") => {
+                    // Another request consumed the seq between our query and
+                    // our call. Re-query and retry.
+                    warn!(
+                        attempt,
+                        seq,
+                        "Guardian seq mismatch, retrying with fresh seq: {}",
+                        status.message()
+                    );
+                    inner
+                        .metrics
+                        .leader_retries_total
+                        .with_label_values(&["withdrawal_signing", "GuardianSeqMismatch"])
+                        .inc();
+                    continue;
+                }
+                Err(status) => {
+                    let label = if status.message().contains("Rate limit exceeded") {
+                        warn!("Guardian rate-limited withdrawal, will retry later");
+                        "GuardianRateLimited"
+                    } else {
+                        error!("Guardian call failed: {}", status.message());
+                        "GuardianUnavailable"
+                    };
+                    inner
+                        .metrics
+                        .leader_retries_total
+                        .with_label_values(&["withdrawal_signing", label])
+                        .inc();
+                    anyhow::bail!("Guardian rejected withdrawal: {}", status.message())
+                }
             }
         }
+
+        anyhow::bail!(
+            "Guardian seq mismatch after {} retries; will retry on next leader tick",
+            Self::GUARDIAN_SEQ_MISMATCH_RETRIES
+        )
     }
 
     /// Fan out `SignGuardianWithdrawalRequest` to the committee and aggregate
