@@ -1,15 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bootstrap a hashi-guardian instance by calling `OperatorInit` with AWS S3
-//! credentials and dummy share commitments. This is a *development-only* helper
-//! intended to make a running guardian fully initialized enough to emit
-//! heartbeats against a real AWS S3 bucket with Object Lock enabled.
-//!
-//! It does **not** run a real `SetupNewKey` + `ProvisionerInit` flow — the
-//! resulting guardian will accept `OperatorInit` and start heartbeating, but
-//! will not be able to sign withdrawals (because no real key shares are ever
-//! combined). For production bootstrap use the operator + KP flow, not this.
+//! Bootstrap a hashi-guardian via `OperatorInit` against a real AWS S3 bucket.
+//! Dev-only: skips `SetupNewKey` + `ProvisionerInit`, so the resulting guardian
+//! heartbeats but cannot sign withdrawals. For production, run the full
+//! operator + KP flow.
 //!
 //! Usage (from repo root):
 //!
@@ -24,6 +19,7 @@
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
+use hashi_types::guardian::crypto::NUM_OF_SHARES;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::GuardianShareCommitment;
 use hashi_types::proto::GuardianShareId;
@@ -31,12 +27,6 @@ use hashi_types::proto::Network as ProtoNetwork;
 use hashi_types::proto::OperatorInitRequest;
 use hashi_types::proto::S3Config as ProtoS3Config;
 use std::env;
-
-/// Must match `hashi_types::guardian::crypto::NUM_OF_SHARES`. We provide that
-/// many dummy commitments because `OperatorInitRequest` stores them verbatim;
-/// actual share verification happens later in `ProvisionerInit`, which this
-/// helper does not drive.
-const NUM_OF_SHARES: u32 = 5;
 
 fn required_env(name: &str) -> Result<String> {
     env::var(name).map_err(|_| anyhow!("required env var `{name}` is not set"))
@@ -85,7 +75,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to connect to guardian at {endpoint}"))?;
 
-    let share_commitments: Vec<GuardianShareCommitment> = (1..=NUM_OF_SHARES)
+    let share_commitments: Vec<GuardianShareCommitment> = (1..=NUM_OF_SHARES as u32)
         .map(|id| GuardianShareCommitment {
             id: Some(GuardianShareId { id: Some(id) }),
             digest_hex: Some(String::new()),
