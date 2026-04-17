@@ -153,6 +153,11 @@ impl Hashi {
         *self.signing_manager.write().unwrap() = Some(Arc::new(manager));
     }
 
+    /// Test-only
+    pub fn clear_signing_manager_for_test(&self) {
+        *self.signing_manager.write().unwrap() = None;
+    }
+
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
         self.btc_monitor.get().expect("BtcMonitor not initialized")
     }
