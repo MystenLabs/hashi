@@ -1,0 +1,61 @@
+# Copyright (c) Mysten Labs, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Local dev stack for hashi-guardian: MinIO standing in for AWS S3.
+# Spins up a single-node MinIO with an Object-Lock-enabled bucket so the
+# guardian can satisfy its `assert_object_lock_enabled` check without real AWS.
+#
+# Usage (from repo root):
+#     docker compose -f docker/hashi-guardian-dev/compose.yaml up -d
+#     # Guardian env:
+#     #   AWS_ENDPOINT_URL_S3=http://localhost:9000
+#     #   AWS_S3_FORCE_PATH_STYLE=true
+#     # Bootstrap env (same creds for client and bootstrap):
+#     #   AWS_S3_BUCKET=hashi-guardian-dev
+#     #   AWS_S3_REGION=us-east-1
+#     #   AWS_ACCESS_KEY_ID=minioadmin
+#     #   AWS_SECRET_ACCESS_KEY=minioadmin
+#
+# MinIO console: http://localhost:9001 (login: minioadmin / minioadmin).
+
+name: hashi-guardian-dev
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  bucket-init:
+    image: minio/mc:RELEASE.2025-02-08T19-14-21Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        if ! mc ls local/hashi-guardian-dev >/dev/null 2>&1; then
+          mc mb --with-lock local/hashi-guardian-dev
+          echo "Created hashi-guardian-dev with Object Lock enabled"
+        else
+          echo "Bucket hashi-guardian-dev already exists"
+        fi
+
+volumes:
+  minio-data:
