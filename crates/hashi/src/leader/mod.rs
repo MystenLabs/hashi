@@ -35,6 +35,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::SignDepositConfirmationRequest;
+use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
@@ -1165,12 +1166,23 @@ impl LeaderService {
             // Return and let the next checkpoint iteration pick up the updated state.
             return Ok(());
         }
-        info!("MPC signing withdrawal transaction");
-
         let members = inner
             .onchain_state()
             .current_committee_members()
             .expect("No current committee members");
+
+        // 0. Guardian rate-limiting gate (before MPC signing).
+        //
+        // When a `guardian_endpoint` is configured we forward a committee-
+        // signed `StandardWithdrawalRequest` to the guardian and only proceed
+        // if it approves. Any guardian error — rate limited, unavailable,
+        // not-yet-bootstrapped — aborts this iteration so the leader picks
+        // the txn back up on the next tick.
+        if let Some(guardian) = inner.guardian_client() {
+            Self::gate_withdrawal_through_guardian(&inner, &txn, &members, guardian).await?;
+        }
+
+        info!("MPC signing withdrawal transaction");
 
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
@@ -1727,6 +1739,164 @@ impl LeaderService {
                 }
             }
         }
+    }
+
+    // ========================================================================
+    // Guardian: rate-limiting gate (runs before MPC signing)
+    // ========================================================================
+
+    /// Build a committee-signed `StandardWithdrawalRequest` and forward it to
+    /// the guardian. Returns `Ok(())` when the guardian approves; otherwise
+    /// propagates an error so the caller can skip this iteration.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, seq))]
+    async fn gate_withdrawal_through_guardian(
+        inner: &Arc<Hashi>,
+        txn: &WithdrawalTransaction,
+        members: &[CommitteeMember],
+        guardian: &crate::grpc::guardian_client::GuardianClient,
+    ) -> anyhow::Result<()> {
+        let timestamp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let seq = inner.next_guardian_seq();
+        tracing::Span::current().record("seq", seq);
+
+        let signed_request =
+            Self::collect_guardian_withdrawal_signatures(inner, txn, members, timestamp_secs, seq)
+                .await?;
+
+        let proto_request =
+            hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb(
+                &signed_request,
+            );
+
+        match guardian.standard_withdrawal(proto_request).await {
+            Ok(_response) => {
+                info!("Guardian approved withdrawal (rate limit passed)");
+                Ok(())
+            }
+            Err(status) => {
+                let label = if status.message().contains("Rate limit exceeded") {
+                    warn!("Guardian rate-limited withdrawal, will retry later");
+                    "GuardianRateLimited"
+                } else {
+                    error!("Guardian call failed: {}", status.message());
+                    "GuardianUnavailable"
+                };
+                inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_signing", label])
+                    .inc();
+                anyhow::bail!("Guardian rejected withdrawal: {}", status.message())
+            }
+        }
+    }
+
+    /// Fan out `SignGuardianWithdrawalRequest` to the committee and aggregate
+    /// BLS signatures until the certificate threshold is reached.
+    ///
+    /// Each validator independently reconstructs the same
+    /// `StandardWithdrawalRequest` from on-chain `WithdrawalTransaction` data
+    /// plus the leader-supplied `timestamp_secs` and `seq`, then signs it.
+    async fn collect_guardian_withdrawal_signatures(
+        inner: &Arc<Hashi>,
+        txn: &WithdrawalTransaction,
+        members: &[CommitteeMember],
+        timestamp_secs: u64,
+        seq: u64,
+    ) -> anyhow::Result<
+        hashi_types::committee::SignedMessage<hashi_types::guardian::StandardWithdrawalRequest>,
+    > {
+        let guardian_request =
+            crate::withdrawals::build_guardian_withdrawal_request(inner, txn, timestamp_secs, seq)?;
+
+        let committee = inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+        let required_weight = certificate_threshold(committee.total_weight());
+
+        let proto_request = SignGuardianWithdrawalRequestRequest {
+            withdrawal_txn_id: txn.id.as_bytes().to_vec().into(),
+            timestamp_secs,
+            seq,
+        };
+
+        let mut sig_tasks = JoinSet::new();
+        for member in members {
+            let inner = inner.clone();
+            let proto_request = proto_request.clone();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
+                Self::request_guardian_withdrawal_signature(&inner, proto_request, &member).await
+            });
+        }
+
+        let mut aggregator = BlsSignatureAggregator::new(&committee, guardian_request);
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!(
+                    withdrawal_txn_id = %txn.id,
+                    "Failed to add guardian withdrawal signature: {e}"
+                );
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+
+        let weight = aggregator.weight();
+        if weight < required_weight {
+            anyhow::bail!(
+                "Insufficient guardian withdrawal signatures: weight {weight} < {required_weight}"
+            );
+        }
+
+        Ok(aggregator.finish()?)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
+    async fn request_guardian_withdrawal_signature(
+        inner: &Arc<Hashi>,
+        proto_request: SignGuardianWithdrawalRequestRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!("Requesting guardian withdrawal signature");
+
+        let mut rpc_client = inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_guardian_withdrawal_request(proto_request.clone())
+            .await
+            .inspect_err(|e| {
+                error!("Failed to get guardian withdrawal signature from {validator_address}: {e}");
+            })
+            .ok()?;
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse guardian withdrawal member signature from {validator_address}: {e}"
+                );
+            })
+            .ok()
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]

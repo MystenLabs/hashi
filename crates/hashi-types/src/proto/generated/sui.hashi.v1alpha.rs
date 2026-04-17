@@ -149,6 +149,26 @@ pub struct SignWithdrawalConfirmationResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
+/// The leader sends the withdrawal-transaction id along with the guardian-specific
+/// fields (timestamp, seq) so each validator can independently reconstruct and
+/// BLS-sign the same `StandardWithdrawalRequest`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignGuardianWithdrawalRequestRequest {
+    /// The id of the WithdrawalTransaction on Sui (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub withdrawal_txn_id: ::prost::bytes::Bytes,
+    /// Timestamp in unix seconds (used for guardian rate limiting).
+    #[prost(uint64, tag = "2")]
+    pub timestamp_secs: u64,
+    /// Monotonic sequence number (used by guardian for replay prevention).
+    #[prost(uint64, tag = "3")]
+    pub seq: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignGuardianWithdrawalRequestResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
 /// Generated client implementations.
 pub mod bridge_service_client {
     #![allow(
@@ -388,6 +408,37 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Sign a guardian rate-limiting request so the leader can aggregate a
+        /// committee certificate and forward it to the guardian before MPC signing.
+        pub async fn sign_guardian_withdrawal_request(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignGuardianWithdrawalRequestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignGuardianWithdrawalRequestResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignGuardianWithdrawalRequest",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignGuardianWithdrawalRequest",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
         pub async fn sign_withdrawal_tx_signing(
             &mut self,
@@ -502,6 +553,15 @@ pub mod bridge_service_server {
             request: tonic::Request<super::SignWithdrawalTransactionRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignWithdrawalTransactionResponse>,
+            tonic::Status,
+        >;
+        /// Sign a guardian rate-limiting request so the leader can aggregate a
+        /// committee certificate and forward it to the guardian before MPC signing.
+        async fn sign_guardian_withdrawal_request(
+            &self,
+            request: tonic::Request<super::SignGuardianWithdrawalRequestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignGuardianWithdrawalRequestResponse>,
             tonic::Status,
         >;
         /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
@@ -837,6 +897,60 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SignWithdrawalTransactionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignGuardianWithdrawalRequest" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignGuardianWithdrawalRequestSvc<T: BridgeService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<
+                        super::SignGuardianWithdrawalRequestRequest,
+                    > for SignGuardianWithdrawalRequestSvc<T> {
+                        type Response = super::SignGuardianWithdrawalRequestResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignGuardianWithdrawalRequestRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_guardian_withdrawal_request(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignGuardianWithdrawalRequestSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

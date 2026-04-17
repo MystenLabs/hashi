@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use anyhow::anyhow;
 use sui_futures::service::Service;
@@ -55,6 +57,11 @@ pub struct Hashi {
     /// PRs add RPC methods that callers check for `guardian_client()`
     /// being `Some` before using.
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
+    /// Monotonic sequence counter for guardian withdrawal requests. The leader
+    /// bumps this on every call; the guardian rejects out-of-order `seq` values
+    /// as replay attempts. A later commit seeds this from the guardian's
+    /// `LimiterState.next_seq` at startup so it survives restarts.
+    guardian_seq: AtomicU64,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -77,6 +84,7 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_seq: AtomicU64::new(0),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -102,6 +110,7 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_seq: AtomicU64::new(0),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -195,6 +204,12 @@ impl Hashi {
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
         self.guardian_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    /// Return the next monotonic sequence number for guardian withdrawal
+    /// requests and increment the counter.
+    pub fn next_guardian_seq(&self) -> u64 {
+        self.guardian_seq.fetch_add(1, Ordering::SeqCst)
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
