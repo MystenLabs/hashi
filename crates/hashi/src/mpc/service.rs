@@ -63,7 +63,7 @@ impl MpcHandle {
                 }
             }
             if rx.changed().await.is_err() {
-                panic!("Key ready channel closed unexpectedly");
+                std::future::pending().await
             }
         }
     }
