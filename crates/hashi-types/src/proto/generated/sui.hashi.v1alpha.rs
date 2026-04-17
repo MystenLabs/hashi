@@ -1122,8 +1122,10 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
-    /// Current rate limiter state (if initialized). Lets clients seed their
-    /// local seq counter at startup so it survives restarts and leader rotations.
+    /// Current rate limiter state (if initialized). Clients query this
+    /// just-in-time per withdrawal to read `next_seq`; the guardian's
+    /// wid-keyed response cache makes repeated attempts idempotent so no
+    /// client-side seq bookkeeping is needed.
     #[prost(message, optional, tag = "4")]
     pub limiter_state: ::core::option::Option<LimiterState>,
 }
@@ -1343,6 +1345,34 @@ pub struct StandardWithdrawalResponseData {
     /// Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub enclave_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+}
+/// Pre-construction rate-limit check. Soft reserves are idempotent on
+/// `wid`: re-submitting the same wid extends / returns the existing
+/// reservation. The guardian does not debit the bucket until a matching
+/// StandardWithdrawal lands (or the reservation TTL elapses).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SoftReserveWithdrawalRequest {
+    /// Deterministic withdrawal identifier — same as
+    /// `StandardWithdrawalRequestData.wid`. Derived on the client from the
+    /// on-chain request ids so any validator converges on the same value.
+    #[prost(uint64, optional, tag = "1")]
+    pub wid: ::core::option::Option<u64>,
+    /// Upper-bound amount in satoshis being reserved (pre-fee sum of the
+    /// batched user-facing withdrawal amounts).
+    #[prost(uint64, optional, tag = "2")]
+    pub amount_sats: ::core::option::Option<u64>,
+    /// Unix seconds timestamp for the reserve, monotonically non-decreasing
+    /// across successful soft+hard reserves. Clients use the most recent
+    /// Sui checkpoint clock.
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_secs: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SoftReserveWithdrawalResponse {
+    /// Unix seconds at which this reservation will be garbage-collected if
+    /// no matching StandardWithdrawal has committed it by then.
+    #[prost(uint64, optional, tag = "1")]
+    pub expires_at_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -1581,6 +1611,41 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Soft-reserve a withdrawal slot (light-touch pre-construction check).
+        /// Any node may call this before committing an on-chain withdrawal tx to
+        /// learn whether rate-limit headroom exists for `amount_sats`. Soft
+        /// reserves are idempotent on `wid`, do not debit the bucket, and expire
+        /// after a server-enforced TTL (so a rogue or crashed caller cannot lock
+        /// capacity indefinitely).
+        pub async fn soft_reserve_withdrawal(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SoftReserveWithdrawalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SoftReserveWithdrawalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/SoftReserveWithdrawal",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "SoftReserveWithdrawal",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Standard withdrawal: request immediate withdrawal signature.
         pub async fn standard_withdrawal(
             &mut self,
@@ -1656,6 +1721,19 @@ pub mod guardian_service_server {
             request: tonic::Request<super::ProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
+            tonic::Status,
+        >;
+        /// Soft-reserve a withdrawal slot (light-touch pre-construction check).
+        /// Any node may call this before committing an on-chain withdrawal tx to
+        /// learn whether rate-limit headroom exists for `amount_sats`. Soft
+        /// reserves are idempotent on `wid`, do not debit the bucket, and expire
+        /// after a server-enforced TTL (so a rogue or crashed caller cannot lock
+        /// capacity indefinitely).
+        async fn soft_reserve_withdrawal(
+            &self,
+            request: tonic::Request<super::SoftReserveWithdrawalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SoftReserveWithdrawalResponse>,
             tonic::Status,
         >;
         /// Standard withdrawal: request immediate withdrawal signature.
@@ -1910,6 +1988,55 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ProvisionerInitSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/SoftReserveWithdrawal" => {
+                    #[allow(non_camel_case_types)]
+                    struct SoftReserveWithdrawalSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::SoftReserveWithdrawalRequest>
+                    for SoftReserveWithdrawalSvc<T> {
+                        type Response = super::SoftReserveWithdrawalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SoftReserveWithdrawalRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::soft_reserve_withdrawal(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SoftReserveWithdrawalSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -12,6 +12,7 @@ use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 use tracing::info;
@@ -61,8 +62,10 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
-    let heartbeat_future = HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES_INTERVAL)
+    let heartbeat_future = HeartbeatWriter::new(enclave.clone(), MAX_HEARTBEAT_FAILURES_INTERVAL)
         .run(HEARTBEAT_INTERVAL, HEARTBEAT_RETRY_INTERVAL);
+
+    let ttl_sweep_future = run_soft_reserve_sweep(enclave.clone());
 
     tokio::select! {
         res = server_future => {
@@ -70,6 +73,28 @@ async fn main() -> Result<()> {
         }
         res = heartbeat_future => {
             panic!("Heartbeat failed: {:?}", res)
+        }
+        _ = ttl_sweep_future => {
+            unreachable!("soft-reserve sweep loop should run forever")
+        }
+    }
+}
+
+/// Periodically drop soft reservations whose TTL has elapsed. Runs until
+/// shutdown. Swept entries free up capacity for subsequent soft reserves.
+async fn run_soft_reserve_sweep(enclave: Arc<Enclave>) -> ! {
+    const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+    let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let now = hashi_types::guardian::now_timestamp_secs();
+        let removed = enclave.state.expire_pending_reserves(now).await;
+        if removed > 0 {
+            info!(
+                removed,
+                "soft-reserve TTL sweep dropped {removed} expired reservations"
+            );
         }
     }
 }

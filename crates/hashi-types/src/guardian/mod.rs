@@ -13,7 +13,9 @@ pub mod s3_utils;
 
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
+pub use limiter::PendingReserve;
 pub use limiter::RateLimiter;
+pub use limiter::SOFT_RESERVE_TTL_SECS;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
 pub use time_utils::now_timestamp_secs;

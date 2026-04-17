@@ -12,6 +12,7 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::PendingReserve;
 use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
@@ -67,6 +68,60 @@ pub async fn standard_withdrawal(
     }
 }
 
+/// Light-touch pre-construction rate-limit probe.
+///
+/// Idempotent on `wid`: callers may re-submit the same wid from any node
+/// at any time to learn whether capacity is available. A successful
+/// reserve debits against future `soft_reserve` capacity checks but does
+/// NOT advance `next_seq` or `last_updated_at`. The reservation is
+/// dropped either by a matching `standard_withdrawal` commit or by the
+/// TTL sweep.
+///
+/// Unlike `standard_withdrawal`, soft reserve does not require a
+/// committee certificate — the 5-minute TTL bounds the DoS blast radius
+/// of a rogue or buggy caller to at most one bucket's worth of headroom.
+pub async fn soft_reserve_withdrawal(
+    enclave: Arc<Enclave>,
+    wid: u64,
+    timestamp_secs: u64,
+    amount_sats: u64,
+) -> GuardianResult<PendingReserve> {
+    info!(wid, amount_sats, "soft reserve");
+
+    if !enclave.is_fully_initialized() {
+        return Err(EnclaveUninitialized);
+    }
+
+    // A wid that has already been fully processed has no meaning in the
+    // pending queue; short-circuit to avoid confusing callers.
+    if let Some(_cached) = enclave.state.get_cached_response(wid) {
+        // Already hard-reserved: nothing to pend. Return a sentinel
+        // reservation pointing at "now" so callers can proceed to the
+        // hard reserve (which will hit the idempotency cache).
+        let now = now_timestamp_secs();
+        return Ok(PendingReserve {
+            amount_sats,
+            timestamp_secs,
+            expires_at_secs: now,
+        });
+    }
+
+    // Reject timestamps too far in the future (clock skew protection).
+    const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
+    let guardian_now = now_timestamp_secs();
+    if timestamp_secs > guardian_now + MAX_CLOCK_SKEW_SECS {
+        return Err(InvalidInputs(format!(
+            "soft reserve timestamp {timestamp_secs} is too far in the future \
+             (guardian clock: {guardian_now})"
+        )));
+    }
+
+    enclave
+        .state
+        .soft_reserve(wid, timestamp_secs, amount_sats, guardian_now)
+        .await
+}
+
 // TODO: Support batched withdrawals (multiple wids per transaction).
 async fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
@@ -109,9 +164,11 @@ async fn normal_withdrawal_inner(
 
     info!("Checking rate limits.");
     let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
+    let wid = *request.wid();
     let limiter_guard = enclave
         .state
         .consume_from_limiter(
+            wid,
             request.seq(),
             request.timestamp_secs(),
             consumed_amount_sats,

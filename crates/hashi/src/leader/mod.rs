@@ -41,6 +41,7 @@ use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
+use hashi_types::proto::SoftReserveWithdrawalRequest;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -990,6 +991,25 @@ impl LeaderService {
             }
         };
 
+        // Soft reserve against the guardian BEFORE the expensive committee
+        // BLS fan-out and on-chain commit. Idempotent on `wid` (derived
+        // deterministically from the selected request_ids) and expires on
+        // the guardian after a bounded TTL, so a crash or network hiccup
+        // does not permanently lock capacity. No-op when `guardian_client`
+        // is unconfigured.
+        if let Err(e) = Self::soft_reserve_withdrawal_through_guardian(
+            &inner,
+            &approval,
+            checkpoint_timestamp_ms,
+        )
+        .await
+        {
+            // Rate limiter or guardian unavailable — skip this iteration;
+            // the leader will retry on the next tick.
+            warn!("Soft reserve failed: {e:#}");
+            return Ok(());
+        }
+
         // Fan out to committee for BLS signatures over the commitment message
         let members = inner
             .onchain_state()
@@ -1737,6 +1757,80 @@ impl LeaderService {
                     );
                     return None;
                 }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Guardian: rate-limiting soft reserve (runs before committee fan-out
+    // for commit_withdrawal_tx)
+    // ========================================================================
+
+    /// Probe the guardian for rate-limit headroom before we invest in the
+    /// committee BLS fan-out + on-chain commit. Idempotent on wid so
+    /// concurrent probes from multiple leaders converge to the same
+    /// reservation, and TTL-bounded so a crash does not permanently lock
+    /// capacity.
+    ///
+    /// Returns `Ok(())` on a fresh or refreshed reservation, `Err` when
+    /// the guardian rejects (rate-limited / unavailable / uninitialized) —
+    /// the caller should skip the iteration and let the next leader tick
+    /// retry.
+    #[tracing::instrument(level = "info", skip_all, fields(
+        request_count = approval.request_ids.len(),
+        wid
+    ))]
+    async fn soft_reserve_withdrawal_through_guardian(
+        inner: &Arc<Hashi>,
+        approval: &WithdrawalTxCommitment,
+        checkpoint_timestamp_ms: u64,
+    ) -> anyhow::Result<()> {
+        let Some(guardian) = inner.guardian_client() else {
+            return Ok(());
+        };
+
+        let wid = crate::withdrawals::compute_withdrawal_wid(&approval.request_ids);
+        tracing::Span::current().record("wid", wid);
+
+        // External-out amount: the first N outputs (one per selected
+        // request) pay the user; any trailing output is change to the
+        // bridge. The guardian debits the external sum.
+        let num_requests = approval.request_ids.len();
+        let amount_sats: u64 = approval
+            .outputs
+            .iter()
+            .take(num_requests)
+            .map(|o| o.amount)
+            .sum();
+
+        let timestamp_secs = checkpoint_timestamp_ms / 1000;
+        let proto_request = SoftReserveWithdrawalRequest {
+            wid: Some(wid),
+            amount_sats: Some(amount_sats),
+            timestamp_secs: Some(timestamp_secs),
+        };
+
+        match guardian.soft_reserve_withdrawal(proto_request).await {
+            Ok(response) => {
+                info!(
+                    amount_sats,
+                    expires_at_secs = response.expires_at_secs.unwrap_or(0),
+                    "Guardian soft-reserved withdrawal",
+                );
+                Ok(())
+            }
+            Err(status) => {
+                let label = if status.message().contains("Rate limit exceeded") {
+                    "GuardianRateLimited"
+                } else {
+                    "GuardianUnavailable"
+                };
+                inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_commitment", label])
+                    .inc();
+                anyhow::bail!("Guardian soft reserve rejected: {}", status.message())
             }
         }
     }

@@ -18,6 +18,14 @@ service GuardianService {
   // Provisioner initialization: submit encrypted share and readiness info.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
+  // Soft-reserve a withdrawal slot (light-touch pre-construction check).
+  // Any node may call this before committing an on-chain withdrawal tx to
+  // learn whether rate-limit headroom exists for `amount_sats`. Soft
+  // reserves are idempotent on `wid`, do not debit the bucket, and expire
+  // after a server-enforced TTL (so a rogue or crashed caller cannot lock
+  // capacity indefinitely).
+  rpc SoftReserveWithdrawal(SoftReserveWithdrawalRequest) returns (SoftReserveWithdrawalResponse);
+
   // Standard withdrawal: request immediate withdrawal signature.
   rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
 }
@@ -34,8 +42,10 @@ message GetGuardianInfoResponse {
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
 
-  // Current rate limiter state (if initialized). Lets clients seed their
-  // local seq counter at startup so it survives restarts and leader rotations.
+  // Current rate limiter state (if initialized). Clients query this
+  // just-in-time per withdrawal to read `next_seq`; the guardian's
+  // wid-keyed response cache makes repeated attempts idempotent so no
+  // client-side seq bookkeeping is needed.
   LimiterState limiter_state = 4;
 }
 
@@ -248,4 +258,34 @@ message SignedStandardWithdrawalResponse {
 message StandardWithdrawalResponseData {
   // Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
   repeated bytes enclave_signatures = 1;
+}
+
+// ============================
+//    SoftReserveWithdrawal
+// ============================
+
+// Pre-construction rate-limit check. Soft reserves are idempotent on
+// `wid`: re-submitting the same wid extends / returns the existing
+// reservation. The guardian does not debit the bucket until a matching
+// StandardWithdrawal lands (or the reservation TTL elapses).
+message SoftReserveWithdrawalRequest {
+  // Deterministic withdrawal identifier — same as
+  // `StandardWithdrawalRequestData.wid`. Derived on the client from the
+  // on-chain request ids so any validator converges on the same value.
+  optional uint64 wid = 1;
+
+  // Upper-bound amount in satoshis being reserved (pre-fee sum of the
+  // batched user-facing withdrawal amounts).
+  optional uint64 amount_sats = 2;
+
+  // Unix seconds timestamp for the reserve, monotonically non-decreasing
+  // across successful soft+hard reserves. Clients use the most recent
+  // Sui checkpoint clock.
+  optional uint64 timestamp_secs = 3;
+}
+
+message SoftReserveWithdrawalResponse {
+  // Unix seconds at which this reservation will be garbage-collected if
+  // no matching StandardWithdrawal has committed it by then.
+  optional uint64 expires_at_secs = 1;
 }

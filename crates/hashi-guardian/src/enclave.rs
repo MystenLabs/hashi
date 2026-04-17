@@ -309,6 +309,7 @@ impl EnclaveState {
 
     pub async fn consume_from_limiter(
         &self,
+        wid: u64,
         seq: u64,
         timestamp: u64,
         amount_sats: u64,
@@ -323,8 +324,51 @@ impl EnclaveState {
         )
         .await
         .map_err(|_| InvalidInputs("timed out waiting for rate limiter lock".into()))?;
-        guard.consume(seq, timestamp, amount_sats)?;
+        guard.consume(wid, seq, timestamp, amount_sats)?;
         Ok(LimiterGuard::new(guard))
+    }
+
+    /// Soft-reserve headroom for `amount_sats` against `wid`. Idempotent:
+    /// repeat calls for the same wid return (and refresh) the existing
+    /// reservation. Reservations are dropped either by a matching
+    /// `consume_from_limiter` call or by a TTL sweep.
+    pub async fn soft_reserve(
+        &self,
+        wid: u64,
+        timestamp_secs: u64,
+        amount_sats: u64,
+        now_unix_secs: u64,
+    ) -> GuardianResult<hashi_types::guardian::PendingReserve> {
+        let rate_limiter = self
+            .rate_limiter
+            .get()
+            .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
+        let mut guard = tokio::time::timeout(
+            Self::LIMITER_LOCK_TIMEOUT,
+            rate_limiter.clone().lock_owned(),
+        )
+        .await
+        .map_err(|_| InvalidInputs("timed out waiting for rate limiter lock".into()))?;
+        guard.soft_reserve(wid, timestamp_secs, amount_sats, now_unix_secs)
+    }
+
+    /// Drop any soft reservation whose TTL has elapsed. Called periodically
+    /// from the guardian's background sweep task.
+    pub async fn expire_pending_reserves(&self, now_unix_secs: u64) -> usize {
+        let Some(rate_limiter) = self.rate_limiter.get() else {
+            return 0;
+        };
+        // Use a short timeout — if the limiter is held longer than that by
+        // an in-flight withdrawal, we'll just try again next tick.
+        match tokio::time::timeout(
+            Self::LIMITER_LOCK_TIMEOUT,
+            rate_limiter.clone().lock_owned(),
+        )
+        .await
+        {
+            Ok(mut guard) => guard.expire_pending(now_unix_secs),
+            Err(_) => 0,
+        }
     }
 
     /// Snapshot the current rate limiter state, if the limiter has been

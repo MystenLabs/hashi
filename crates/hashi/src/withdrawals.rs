@@ -1315,11 +1315,7 @@ pub fn build_guardian_withdrawal_request(
     let utxos = TxUTXOs::new(inputs, outputs)
         .map_err(|e| anyhow!("Failed to build guardian TxUTXOs: {e}"))?;
 
-    // Deterministic `wid`: leading 8 bytes of Blake2b256 over the BCS-encoded
-    // request ids. Stable across restarts and leader rotations.
-    let wid_bytes = bcs::to_bytes(&txn.request_ids).expect("serialization should succeed");
-    let wid_hash = Blake2b256::digest(&wid_bytes);
-    let wid = u64::from_le_bytes(wid_hash.digest[..8].try_into().unwrap());
+    let wid = compute_withdrawal_wid(&txn.request_ids);
 
     Ok(hashi_types::guardian::StandardWithdrawalRequest::new(
         wid,
@@ -1327,4 +1323,15 @@ pub fn build_guardian_withdrawal_request(
         timestamp_secs,
         seq,
     ))
+}
+
+/// Deterministic withdrawal identifier — the leading 8 bytes of
+/// Blake2b256 over the BCS-encoded request ids. Stable across restarts
+/// and leader rotations, so any node converges on the same wid for the
+/// same request set. Used as the idempotency key for soft reserves and
+/// the hard reserve, and as the cache key on the guardian side.
+pub fn compute_withdrawal_wid(request_ids: &[Address]) -> u64 {
+    let bytes = bcs::to_bytes(&request_ids).expect("serialization should succeed");
+    let hash = Blake2b256::digest(&bytes);
+    u64::from_le_bytes(hash.digest[..8].try_into().unwrap())
 }

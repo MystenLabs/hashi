@@ -135,4 +135,39 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let resp_pb = proto_conversions::standard_withdrawal_response_signed_to_pb(response);
         Ok(Response::new(resp_pb))
     }
+
+    async fn soft_reserve_withdrawal(
+        &self,
+        request: Request<proto::SoftReserveWithdrawalRequest>,
+    ) -> Result<Response<proto::SoftReserveWithdrawalResponse>, Status> {
+        if self.setup_mode {
+            return Err(Status::failed_precondition(
+                "soft_reserve_withdrawal is disabled when SETUP_MODE=true",
+            ));
+        }
+
+        let req = request.into_inner();
+        let wid = req
+            .wid
+            .ok_or_else(|| Status::invalid_argument("wid is required"))?;
+        let amount_sats = req
+            .amount_sats
+            .ok_or_else(|| Status::invalid_argument("amount_sats is required"))?;
+        let timestamp_secs = req
+            .timestamp_secs
+            .ok_or_else(|| Status::invalid_argument("timestamp_secs is required"))?;
+
+        let reserve = withdraw::soft_reserve_withdrawal(
+            self.enclave.clone(),
+            wid,
+            timestamp_secs,
+            amount_sats,
+        )
+        .await
+        .map_err(to_status)?;
+
+        Ok(Response::new(proto::SoftReserveWithdrawalResponse {
+            expires_at_secs: Some(reserve.expires_at_secs),
+        }))
+    }
 }

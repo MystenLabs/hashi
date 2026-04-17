@@ -67,4 +67,15 @@ impl GuardianClient {
             .await?;
         Ok(response.into_inner())
     }
+
+    pub async fn soft_reserve_withdrawal(
+        &self,
+        request: hashi_types::proto::SoftReserveWithdrawalRequest,
+    ) -> Result<hashi_types::proto::SoftReserveWithdrawalResponse, tonic::Status> {
+        let response = self
+            .guardian_service_client()
+            .soft_reserve_withdrawal(request)
+            .await?;
+        Ok(response.into_inner())
+    }
 }
