@@ -61,6 +61,13 @@ pub struct EnclaveState {
     /// Rate limiter. Set once during provisioner_init.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
+    /// LRU cache of signed withdrawal responses keyed by `wid`. Lets the
+    /// guardian return the same response for retried requests (leader
+    /// restart, leader rotation, lost response) without re-consuming from
+    /// the limiter or re-signing. Inserted only after a successful S3 log
+    /// commit, so the bucket and the cache never disagree.
+    recent_responses:
+        std::sync::Mutex<lru::LruCache<u64, GuardianSigned<StandardWithdrawalResponse>>>,
 }
 
 /// Scratchpad used only during initialization.
@@ -327,6 +334,33 @@ impl EnclaveState {
         let limiter = self.rate_limiter.get()?;
         Some(*limiter.lock().await.state())
     }
+
+    // ========================================================================
+    // Recent-response cache (wid-keyed idempotency)
+    // ========================================================================
+
+    /// Look up a previously signed response by wid. Marks the entry as
+    /// most-recently-used on hit.
+    pub fn get_cached_response(
+        &self,
+        wid: u64,
+    ) -> Option<GuardianSigned<StandardWithdrawalResponse>> {
+        self.recent_responses
+            .lock()
+            .expect("recent_responses mutex poisoned")
+            .get(&wid)
+            .cloned()
+    }
+
+    /// Insert a signed response into the cache. Called only after the
+    /// withdrawal has been logged to S3 and the limiter committed, so the
+    /// cache and bucket are always consistent.
+    pub fn cache_response(&self, wid: u64, response: GuardianSigned<StandardWithdrawalResponse>) {
+        self.recent_responses
+            .lock()
+            .expect("recent_responses mutex poisoned")
+            .put(wid, response);
+    }
 }
 
 impl Enclave {
@@ -340,10 +374,19 @@ impl Enclave {
             state: EnclaveState {
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
+                recent_responses: std::sync::Mutex::new(lru::LruCache::new(
+                    Self::RECENT_RESPONSES_CAPACITY,
+                )),
             },
             scratchpad: Scratchpad::default(),
         }
     }
+
+    /// Capacity of the wid-keyed response cache. Each entry is small
+    /// (Ed25519 sig + Schnorr sigs for each input), so 1024 is ample for
+    /// any realistic withdrawal throughput while bounding memory.
+    const RECENT_RESPONSES_CAPACITY: std::num::NonZeroUsize =
+        std::num::NonZeroUsize::new(1024).expect("1024 > 0");
 
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.config.is_provisioner_init_complete()

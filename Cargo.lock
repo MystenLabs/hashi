@@ -2893,6 +2893,7 @@ dependencies = [
  "hashi-types",
  "hpke",
  "k256",
+ "lru",
  "rand 0.8.5",
  "serde",
  "serde_bytes",

@@ -32,6 +32,14 @@ pub async fn standard_withdrawal(
     let request_signature = signed_request.committee_signature().clone(); // for logging
     let wid = unsigned_request.wid;
 
+    // Idempotency: retries (leader rotation, pod restart, lost response)
+    // re-submit the same `wid`. Replay the cached signed response so the
+    // limiter is debited at most once per unique withdrawal.
+    if let Some(cached) = enclave.state.get_cached_response(wid) {
+        info!("Withdrawal {} served from idempotency cache.", wid);
+        return Ok(cached);
+    }
+
     match normal_withdrawal_inner(enclave.clone(), signed_request).await {
         Ok((txid, response, limiter_guard)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
@@ -42,7 +50,9 @@ pub async fn standard_withdrawal(
                 response: response.clone(),
             };
             log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
-            Ok(enclave.sign(response))
+            let signed_response = enclave.sign(response);
+            enclave.state.cache_response(wid, signed_response.clone());
+            Ok(signed_response)
         }
         Err(withdraw_err) => {
             error!("Withdrawal {} failed: {:?}", wid, withdraw_err);
@@ -321,5 +331,85 @@ mod tests {
             second.unwrap_err(),
             GuardianError::RateLimitExceeded
         ));
+    }
+
+    /// Retrying the same `wid` (e.g. after leader rotation or a lost
+    /// response) returns the cached signed response and does NOT debit the
+    /// bucket a second time. Bucket capacity is sized to exactly one
+    /// withdrawal so a second debit would tip it over the rate limit.
+    #[tokio::test]
+    async fn test_standard_withdrawal_wid_cache_is_idempotent() {
+        let wid = 42;
+        let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            wid,
+            100,
+            0,
+        );
+        let amount_sats = req1.message().utxos().external_out_amount().to_sat();
+        let enclave =
+            setup_fully_initialized_enclave(Network::Regtest, committee.clone(), amount_sats).await;
+
+        let first = standard_withdrawal(enclave.clone(), req1)
+            .await
+            .expect("first withdrawal succeeds");
+
+        // Same wid, fresh timestamp + seq. Without the cache this would
+        // fail with a seq mismatch (or debit the bucket a second time); the
+        // cache short-circuits before any of that.
+        let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            wid,
+            200,
+            1,
+        );
+        let second = standard_withdrawal(enclave.clone(), req2)
+            .await
+            .expect("retry serves cached response");
+        assert_eq!(first, second, "cache must return identical signed response");
+
+        // Bucket should still reflect exactly one debit.
+        let limiter_state = enclave.state.limiter_state().await.unwrap();
+        assert_eq!(limiter_state.next_seq, 1);
+        assert_eq!(limiter_state.num_tokens_available, 0);
+    }
+
+    /// A failed withdrawal must NOT be cached — otherwise retries would
+    /// permanently receive the same error even if the underlying cause
+    /// (e.g. a corrupted one-off request) is gone on the next attempt.
+    #[tokio::test]
+    async fn test_standard_withdrawal_failures_not_cached() {
+        // Bucket capacity = 0 so the first request fails with RateLimitExceeded.
+        let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            42,
+            100,
+            0,
+        );
+        let enclave = setup_fully_initialized_enclave(Network::Regtest, committee, 0).await;
+
+        let first = standard_withdrawal(enclave.clone(), req1).await;
+        assert!(matches!(
+            first.unwrap_err(),
+            GuardianError::RateLimitExceeded
+        ));
+
+        // Retry with the same wid should NOT hit the cache — it gets
+        // another attempt. It will still fail here (bucket still 0) but
+        // via the live path, not a cached replay.
+        let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            42,
+            200,
+            0,
+        );
+        let second = standard_withdrawal(enclave.clone(), req2).await;
+        assert!(matches!(
+            second.unwrap_err(),
+            GuardianError::RateLimitExceeded
+        ));
+        // Nothing was committed in either attempt.
+        let limiter_state = enclave.state.limiter_state().await.unwrap();
+        assert_eq!(limiter_state.next_seq, 0);
     }
 }
