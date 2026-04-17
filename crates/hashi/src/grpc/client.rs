@@ -1,13 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http;
 use tonic::Response;
+use tonic::body::Body;
 use tonic_rustls::Channel;
 use tonic_rustls::Endpoint;
+use tower::ServiceBuilder;
+use tower::util::BoxCloneService;
 
+use sui_http::middleware::callback::CallbackLayer;
+
+use crate::grpc::metrics_layer::RpcMetricsMakeCallbackHandler;
+use crate::metrics::Metrics;
 use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -28,13 +36,31 @@ use hashi_types::proto::mpc_service_client::MpcServiceClient;
 type Result<T, E = tonic::Status> = std::result::Result<T, E>;
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Type-erased transport handed to tonic-generated clients. Using a single
+/// boxed type keeps `Client` cloneable regardless of whether the metrics
+/// tower layer is attached.
+pub type BoxedChannel = BoxCloneService<http::Request<Body>, http::Response<Body>, tonic::Status>;
+
 const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     uri: http::Uri,
     channel: Channel,
     max_decoding_message_size: usize,
+    metrics: Option<Arc<Metrics>>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Skip the prometheus registry — it has no meaningful Debug impl
+        // and it would bloat every `{:?}` containing a `Client`.
+        f.debug_struct("Client")
+            .field("uri", &self.uri)
+            .field("max_decoding_message_size", &self.max_decoding_message_size)
+            .field("metrics_enabled", &self.metrics.is_some())
+            .finish()
+    }
 }
 
 impl Client {
@@ -65,11 +91,20 @@ impl Client {
             uri,
             channel,
             max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+            metrics: None,
         })
     }
 
     pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
         self.max_decoding_message_size = limit;
+        self
+    }
+
+    /// Attach the metrics registry so outbound RPCs are observed by
+    /// [`RpcMetricsMakeCallbackHandler`] via `sui_http`'s callback layer.
+    /// Without this, the client emits no RPC traffic metrics.
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -85,13 +120,46 @@ impl Client {
         &self.uri
     }
 
-    pub fn bridge_service_client(&self) -> BridgeServiceClient<Channel> {
-        BridgeServiceClient::new(self.channel.clone())
+    /// Build a boxed transport, applying the metrics callback layer when
+    /// a registry is configured.
+    ///
+    /// `CallbackLayer` wraps the request body in `RequestBody<_, _>` and
+    /// the response body in `ResponseBody<_, _>`. `tonic_rustls::Channel`
+    /// is monomorphic over `tonic::body::Body`, so we rebox each side
+    /// back to `tonic::body::Body` before/after the channel sees it. The
+    /// inner `tonic_rustls::Error` is mapped to `tonic::Status` so
+    /// tonic's generated clients receive the error type they expect.
+    fn boxed_channel(&self) -> BoxedChannel {
+        let channel = self.channel.clone();
+        match &self.metrics {
+            Some(metrics) => {
+                let svc = ServiceBuilder::new()
+                    .map_err(tonic::Status::from_error)
+                    .map_response(|resp: http::Response<_>| resp.map(Body::new))
+                    .layer(CallbackLayer::new(RpcMetricsMakeCallbackHandler::client(
+                        metrics.clone(),
+                    )))
+                    .map_request(|req: http::Request<_>| req.map(Body::new))
+                    .map_err(|e: tonic_rustls::Error| -> BoxError { Box::new(e) })
+                    .service(channel);
+                BoxCloneService::new(svc)
+            }
+            None => {
+                let svc = ServiceBuilder::new()
+                    .map_err(|e: tonic_rustls::Error| tonic::Status::from_error(Box::new(e)))
+                    .service(channel);
+                BoxCloneService::new(svc)
+            }
+        }
+    }
+
+    pub fn bridge_service_client(&self) -> BridgeServiceClient<BoxedChannel> {
+        BridgeServiceClient::new(self.boxed_channel())
             .max_decoding_message_size(self.max_decoding_message_size)
     }
 
-    pub fn mpc_service_client(&self) -> MpcServiceClient<Channel> {
-        MpcServiceClient::new(self.channel.clone())
+    pub fn mpc_service_client(&self) -> MpcServiceClient<BoxedChannel> {
+        MpcServiceClient::new(self.boxed_channel())
             .max_decoding_message_size(self.max_decoding_message_size)
     }
 

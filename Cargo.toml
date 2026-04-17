@@ -9,7 +9,7 @@ sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "21
 sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
 sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
 
-sui-http = "0.1.0"
+sui-http = "0.2.0"
 bitcoin = { version = "0.32.8", features =["serde"] }
 corepc-client = { version = "0.10.0", features = ["client-sync"] }
 jsonrpc = "0.18.0"

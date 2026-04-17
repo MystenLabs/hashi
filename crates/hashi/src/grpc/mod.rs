@@ -10,9 +10,11 @@ use tower::ServiceBuilder;
 use crate::Hashi;
 
 mod client;
+pub use client::BoxedChannel;
 pub use client::Client;
 
 pub mod bridge_service;
+pub mod metrics_layer;
 pub mod screener_client;
 
 /// Wrapper that triggers graceful HTTP server shutdown on drop.
@@ -98,7 +100,7 @@ impl HttpService {
             // Add middleware for mapping a request to a known validator
             .map_request(lookup_validator_middleware(self.inner.clone()))
             .layer(sui_http::middleware::callback::CallbackLayer::new(
-                crate::metrics::RpcMetricsMakeCallbackHandler::new(self.inner.metrics.clone()),
+                metrics_layer::RpcMetricsMakeCallbackHandler::server(self.inner.metrics.clone()),
             ));
 
         let router = router.merge(health_endpoint).layer(layers);

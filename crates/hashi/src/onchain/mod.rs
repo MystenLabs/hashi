@@ -86,6 +86,7 @@ struct Inner {
     state: RwLock<State>,
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 #[derive(Debug)]
@@ -124,6 +125,9 @@ impl OnchainState {
                 .committees
                 .set_grpc_max_decoding_message_size(limit);
         }
+        if let Some(metrics) = metrics.clone() {
+            state.hashi.committees.set_metrics(metrics);
+        }
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
@@ -135,6 +139,7 @@ impl OnchainState {
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
+            metrics: metrics.clone(),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -208,6 +213,9 @@ impl OnchainState {
         }
         if let Some(limit) = self.0.grpc_max_decoding_message_size {
             hashi.committees.set_grpc_max_decoding_message_size(limit);
+        }
+        if let Some(metrics) = &self.0.metrics {
+            hashi.committees.set_metrics(metrics.clone());
         }
         self.state_mut().hashi = hashi;
     }
@@ -408,8 +416,9 @@ impl OnchainState {
     pub fn bridge_service_client(
         &self,
         validator: &Address,
-    ) -> Option<hashi_types::proto::bridge_service_client::BridgeServiceClient<tonic_rustls::Channel>>
-    {
+    ) -> Option<
+        hashi_types::proto::bridge_service_client::BridgeServiceClient<crate::grpc::BoxedChannel>,
+    > {
         self.state()
             .hashi()
             .committees
@@ -420,7 +429,7 @@ impl OnchainState {
     pub fn mpc_service_client(
         &self,
         validator: &Address,
-    ) -> Option<hashi_types::proto::mpc_service_client::MpcServiceClient<tonic_rustls::Channel>>
+    ) -> Option<hashi_types::proto::mpc_service_client::MpcServiceClient<crate::grpc::BoxedChannel>>
     {
         self.state()
             .hashi()
