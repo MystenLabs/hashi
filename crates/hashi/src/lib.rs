@@ -44,7 +44,7 @@ pub struct Hashi {
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
     mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
-    signing_manager: OnceLock<Arc<RwLock<mpc::SigningManager>>>,
+    signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
@@ -65,7 +65,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             mpc_manager: OnceLock::new(),
-            signing_manager: OnceLock::new(),
+            signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
@@ -89,7 +89,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             mpc_manager: OnceLock::new(),
-            signing_manager: OnceLock::new(),
+            signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
@@ -127,46 +127,29 @@ impl Hashi {
         }
     }
 
-    pub fn signing_manager(&self) -> Arc<RwLock<mpc::SigningManager>> {
-        self.signing_manager
-            .get()
-            .expect("SigningManager not initialized")
-            .clone()
+    pub fn signing_manager_for(&self, epoch: u64) -> Option<Arc<mpc::SigningManager>> {
+        let stored = self.signing_manager.read().unwrap();
+        stored
+            .as_ref()
+            .filter(|manager| manager.epoch() == epoch)
+            .cloned()
     }
 
-    pub fn try_signing_manager(&self) -> Option<Arc<RwLock<mpc::SigningManager>>> {
-        self.signing_manager.get().cloned()
+    pub fn current_signing_manager(&self) -> Option<Arc<mpc::SigningManager>> {
+        let epoch = self.onchain_state_opt()?.epoch();
+        self.signing_manager_for(epoch)
     }
 
     pub fn signing_verifying_key(&self) -> Option<fastcrypto_tbls::threshold_schnorr::G> {
         self.signing_manager
-            .get()
-            .map(|manager| manager.read().unwrap().verifying_key())
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|manager| manager.verifying_key())
     }
 
-    pub fn init_signing_manager(&self, manager: mpc::SigningManager) {
-        self.signing_manager
-            .set(Arc::new(RwLock::new(manager)))
-            .map_err(|_| anyhow!("SigningManager already initialized"))
-            .unwrap();
-    }
-
-    pub fn set_signing_manager(&self, manager: mpc::SigningManager) {
-        *self
-            .signing_manager
-            .get()
-            .expect("SigningManager not initialized")
-            .write()
-            .unwrap() = manager;
-    }
-
-    pub fn set_or_init_signing_manager(&self, manager: mpc::SigningManager) {
-        match self.signing_manager.get() {
-            Some(lock) => *lock.write().unwrap() = manager,
-            None => {
-                let _ = self.signing_manager.set(Arc::new(RwLock::new(manager)));
-            }
-        }
+    pub fn store_signing_manager(&self, manager: mpc::SigningManager) {
+        *self.signing_manager.write().unwrap() = Some(Arc::new(manager));
     }
 
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {

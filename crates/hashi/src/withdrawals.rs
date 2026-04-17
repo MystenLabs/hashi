@@ -31,7 +31,6 @@ use sui_sdk_types::Address;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::leader::RetryPolicy;
-use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -560,7 +559,12 @@ impl Hashi {
             );
         }
         let p2p_channel = RpcP2PChannel::new(onchain_state, epoch);
-        let signing_manager = self.signing_manager();
+        let signing_manager = self.signing_manager_for(epoch).ok_or_else(|| {
+            anyhow::anyhow!(
+                "SigningManager not available for epoch {epoch}; \
+                 reconciliation may be catching up"
+            )
+        })?;
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
@@ -572,17 +576,17 @@ impl Hashi {
                 .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
             let sign_start = std::time::Instant::now();
             let global_presig_index = txn.presig_start_index + input_index as u64;
-            let sign_result = SigningManager::sign(
-                &signing_manager,
-                &p2p_channel,
-                request_id,
-                message,
-                global_presig_index,
-                &beacon,
-                derivation_address.as_ref(),
-                WITHDRAWAL_SIGNING_TIMEOUT,
-            )
-            .await;
+            let sign_result = signing_manager
+                .sign(
+                    &p2p_channel,
+                    request_id,
+                    message,
+                    global_presig_index,
+                    &beacon,
+                    derivation_address.as_ref(),
+                    WITHDRAWAL_SIGNING_TIMEOUT,
+                )
+                .await;
             let sign_duration = sign_start.elapsed().as_secs_f64();
 
             match &sign_result {
@@ -593,7 +597,7 @@ impl Hashi {
                         .observe(sign_duration);
                     self.metrics
                         .presig_pool_remaining
-                        .set(signing_manager.read().unwrap().presignatures_remaining() as i64);
+                        .set(signing_manager.presignatures_remaining() as i64);
                 }
                 Err(e) => {
                     self.metrics

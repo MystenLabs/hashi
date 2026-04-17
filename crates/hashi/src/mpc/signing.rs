@@ -61,22 +61,30 @@ impl PresigBatch {
     }
 }
 
-pub struct SigningManager {
+struct SigningEpochConfig {
     address: Address,
     committee: Committee,
     threshold: u16,
     key_shares: avss::SharesForNode,
     verifying_key: G,
+    refill_divisor: usize,
+}
+
+struct SigningPoolState {
     /// Active presig batches, ordered by `start_index`. Older batches are
     /// retained until all their presigs have been consumed so that
     /// out-of-order signing (e.g., withdrawal A allocated from batch 0 signs
     /// after withdrawal B advanced to batch 1) still works.
     batches: Vec<PresigBatch>,
-    /// Key: Sui address identifying the signing request
+    /// Key: Sui address identifying the signing request.
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
-    refill_divisor: usize,
-    refill_tx: Arc<watch::Sender<u32>>,
     next_batch: Option<Presignatures>,
+}
+
+pub struct SigningManager {
+    config: Arc<SigningEpochConfig>,
+    state: RwLock<SigningPoolState>,
+    refill_tx: Arc<watch::Sender<u32>>,
 }
 
 impl SigningManager {
@@ -100,45 +108,65 @@ impl SigningManager {
             batch_index,
         };
         Self {
-            address,
-            committee,
-            threshold,
-            key_shares,
-            verifying_key,
-            batches: vec![batch],
-            partial_signing_outputs: HashMap::new(),
-            refill_divisor,
+            config: Arc::new(SigningEpochConfig {
+                address,
+                committee,
+                threshold,
+                key_shares,
+                verifying_key,
+                refill_divisor,
+            }),
+            state: RwLock::new(SigningPoolState {
+                batches: vec![batch],
+                partial_signing_outputs: HashMap::new(),
+                next_batch: None,
+            }),
             refill_tx,
-            next_batch: None,
         }
     }
 
-    pub fn set_next_batch(&mut self, presignatures: Presignatures) {
-        self.next_batch = Some(presignatures);
+    pub fn set_next_batch(&self, presignatures: Presignatures) {
+        self.state.write().unwrap().next_batch = Some(presignatures);
     }
 
     pub fn has_next_batch(&self) -> bool {
-        self.next_batch.is_some()
+        self.state.read().unwrap().next_batch.is_some()
     }
 
     /// Size of the latest (most recent) batch.
     pub fn initial_presig_count(&self) -> usize {
-        self.batches.last().map_or(0, |b| b.pool.len())
+        self.state
+            .read()
+            .unwrap()
+            .batches
+            .last()
+            .map_or(0, |b| b.pool.len())
     }
 
     /// Remaining presignatures in the latest batch (used for refill checks).
     pub fn presignatures_remaining(&self) -> usize {
-        self.batches.last().map_or(0, |b| b.remaining())
+        self.state
+            .read()
+            .unwrap()
+            .batches
+            .last()
+            .map_or(0, |b| b.remaining())
     }
 
     /// The batch index of the latest (most recent) batch.
     pub fn batch_index(&self) -> u32 {
-        self.batches.last().map_or(0, |b| b.batch_index)
+        self.state
+            .read()
+            .unwrap()
+            .batches
+            .last()
+            .map_or(0, |b| b.batch_index)
     }
 
     pub fn available_presig_end_index(&self) -> u64 {
-        let batch_end = self.batches.last().map_or(0, |b| b.end_index());
-        match &self.next_batch {
+        let state = self.state.read().unwrap();
+        let batch_end = state.batches.last().map_or(0, |b| b.end_index());
+        match &state.next_batch {
             Some(next) => batch_end + next.len() as u64,
             None => batch_end,
         }
@@ -150,26 +178,27 @@ impl SigningManager {
     }
 
     pub fn epoch(&self) -> u64 {
-        self.committee.epoch()
+        self.config.committee.epoch()
     }
 
     pub fn threshold(&self) -> u16 {
-        self.threshold
+        self.config.threshold
     }
 
     pub fn key_shares(&self) -> &avss::SharesForNode {
-        &self.key_shares
+        &self.config.key_shares
     }
 
     pub fn verifying_key(&self) -> G {
-        self.verifying_key
+        self.config.verifying_key
     }
 
     pub fn handle_get_partial_signatures_request(
         &self,
         request: &GetPartialSignaturesRequest,
     ) -> SigningResult<GetPartialSignaturesResponse> {
-        let output = self
+        let state = self.state.read().unwrap();
+        let output = state
             .partial_signing_outputs
             .get(&request.sui_request_id)
             .ok_or_else(|| {
@@ -190,7 +219,7 @@ impl SigningManager {
         fields(sui_request_id = %sui_request_id, global_presig_index),
     )]
     pub async fn sign(
-        signing_manager: &Arc<RwLock<Self>>,
+        &self,
         p2p_channel: &impl P2PChannel,
         sui_request_id: Address,
         message: &[u8],
@@ -199,36 +228,38 @@ impl SigningManager {
         derivation_address: Option<&DerivationAddress>,
         timeout: Duration,
     ) -> SigningResult<SchnorrSignature> {
-        let (public_nonce, partial_sigs, threshold, address, committee, verifying_key) = {
-            let mut mgr = signing_manager.write().unwrap();
-            let mgr = &mut *mgr;
-            let (public_nonce, partial_sigs) = if let Some(existing) =
-                mgr.partial_signing_outputs.get(&sui_request_id)
-            {
+        let config = &self.config;
+        let threshold = config.threshold;
+        let address = config.address;
+        let committee = config.committee.clone();
+        let verifying_key = config.verifying_key;
+        let (public_nonce, partial_sigs) = {
+            let mut state = self.state.write().unwrap();
+            if let Some(existing) = state.partial_signing_outputs.get(&sui_request_id) {
                 tracing::info!(
                     "Cache hit for {sui_request_id} (global_presig_index={global_presig_index}), \
                      reusing cached partial sigs (batch_index={})",
-                    mgr.batch_index(),
+                    state.batches.last().map_or(0, |b| b.batch_index),
                 );
                 (existing.public_nonce, existing.partial_sigs.clone())
             } else {
                 // Find the batch containing this presig index, advancing
                 // into the next batch if needed.
-                let batch = if let Some(b) = mgr
+                let batch = if let Some(b) = state
                     .batches
                     .iter()
                     .position(|b| b.contains(global_presig_index))
                 {
-                    &mut mgr.batches[b]
+                    &mut state.batches[b]
                 } else {
                     // Index not found in any current batch; try to swap in
                     // the prefetched next batch.
-                    if let Some(latest) = mgr.batches.last() {
+                    if let Some(latest) = state.batches.last() {
                         let next_start = latest.end_index();
                         let next_batch_index = latest.batch_index + 1;
-                        if let Some(next) = mgr.next_batch.take() {
+                        if let Some(next) = state.next_batch.take() {
                             let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
-                            mgr.batches.push(PresigBatch {
+                            state.batches.push(PresigBatch {
                                 pool,
                                 start_index: next_start,
                                 batch_index: next_batch_index,
@@ -236,20 +267,21 @@ impl SigningManager {
                         }
                     }
                     // Check if the index is now covered.
-                    if let Some(b) = mgr
+                    if let Some(b) = state
                         .batches
                         .iter()
                         .position(|b| b.contains(global_presig_index))
                     {
-                        &mut mgr.batches[b]
+                        &mut state.batches[b]
                     } else {
-                        if mgr.next_batch.is_none() {
-                            mgr.trigger_refill();
+                        if state.next_batch.is_none() {
+                            let next = state.batches.last().map_or(0, |b| b.batch_index) + 1;
+                            let _ = self.refill_tx.send(next);
                         }
                         tracing::error!(
                             "Presig index {global_presig_index} not found in any \
                              batch ({} batch(es) active).",
-                            mgr.batches.len(),
+                            state.batches.len(),
                         );
                         return Err(SigningError::PoolExhausted);
                     }
@@ -278,29 +310,29 @@ impl SigningManager {
                     message,
                     presig,
                     beacon_value,
-                    &mgr.key_shares,
-                    &mgr.verifying_key,
+                    &config.key_shares,
+                    &config.verifying_key,
                     derivation_address,
                 )
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
 
                 // Trigger refill based on the latest batch's consumption.
-                if let Some(latest) = mgr.batches.last() {
+                if let Some(latest) = state.batches.last() {
                     let remaining = latest.remaining();
-                    let refill_at = latest.pool.len() / mgr.refill_divisor;
+                    let refill_at = latest.pool.len() / config.refill_divisor;
                     if remaining <= refill_at {
-                        let _ = mgr.refill_tx.send(latest.batch_index + 1);
+                        let _ = self.refill_tx.send(latest.batch_index + 1);
                     }
                 }
 
                 // Prune fully-consumed batches, but always keep the last
                 // one so its `end_index()` can anchor the next batch's
                 // start.
-                while mgr.batches.len() > 1 && mgr.batches[0].is_fully_consumed() {
-                    mgr.batches.remove(0);
+                while state.batches.len() > 1 && state.batches[0].is_fully_consumed() {
+                    state.batches.remove(0);
                 }
 
-                mgr.partial_signing_outputs.insert(
+                state.partial_signing_outputs.insert(
                     sui_request_id,
                     PartialSigningOutput {
                         public_nonce: result.0,
@@ -308,28 +340,16 @@ impl SigningManager {
                     },
                 );
                 result
-            };
-            tracing::info!(
-                "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}, \
-                 verifying_key={}, first_partial_sig_index={}, first_partial_sig_value={:?}",
-                hex::encode(message),
-                hex::encode(mgr.verifying_key.to_byte_array()),
-                partial_sigs[0].index,
-                partial_sigs[0].value,
-            );
-            let threshold = mgr.threshold;
-            let address = mgr.address;
-            let committee = mgr.committee.clone();
-            let verifying_key = mgr.verifying_key;
-            (
-                public_nonce,
-                partial_sigs,
-                threshold,
-                address,
-                committee,
-                verifying_key,
-            )
-        }; // write lock released
+            }
+        }; // state write lock released
+        tracing::info!(
+            "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}, \
+             verifying_key={}, first_partial_sig_index={}, first_partial_sig_value={:?}",
+            hex::encode(message),
+            hex::encode(verifying_key.to_byte_array()),
+            partial_sigs[0].index,
+            partial_sigs[0].value,
+        );
         let mut all_partial_sigs = partial_sigs;
         let mut remaining_peers: HashSet<Address> = committee
             .members()
@@ -396,12 +416,11 @@ impl SigningManager {
         match &result {
             Ok(_) => {}
             Err(e) => {
-                let mgr = signing_manager.read().unwrap();
                 tracing::error!(
                     "Signing failed for {sui_request_id}: {e}, \
                      presigs_remaining={}, batch_index={}",
-                    mgr.presignatures_remaining(),
-                    mgr.batch_index(),
+                    self.presignatures_remaining(),
+                    self.batch_index(),
                 );
             }
         }
@@ -577,7 +596,7 @@ mod tests {
     }
 
     struct MockSigningP2PChannel {
-        managers: HashMap<Address, Arc<RwLock<SigningManager>>>,
+        managers: HashMap<Address, Arc<SigningManager>>,
     }
 
     #[async_trait::async_trait]
@@ -620,9 +639,7 @@ mod tests {
                 .managers
                 .get(party)
                 .ok_or(ChannelError::ClientNotFound(*party))?;
-            mgr.read()
-                .unwrap()
-                .handle_get_partial_signatures_request(request)
+            mgr.handle_get_partial_signatures_request(request)
                 .map_err(|e| ChannelError::RequestFailed(e.to_string()))
         }
     }
@@ -705,7 +722,7 @@ mod tests {
     }
 
     struct SigningTestSetup {
-        managers: Vec<Arc<RwLock<SigningManager>>>,
+        managers: Vec<Arc<SigningManager>>,
         verifying_key: G,
         refill_rx: watch::Receiver<u32>,
         n: u16,
@@ -798,7 +815,7 @@ mod tests {
                         crate::constants::PRESIG_REFILL_DIVISOR,
                         refill_tx.clone(),
                     );
-                    Arc::new(RwLock::new(mgr))
+                    Arc::new(mgr)
                 })
                 .collect();
 
@@ -827,33 +844,33 @@ mod tests {
         ) -> (G, Vec<Vec<Eval<S>>>) {
             let mut public_nonce = None;
             let mut all_sigs = Vec::new();
-            for (idx, mgr_lock) in self.managers.iter().enumerate() {
+            for (idx, mgr) in self.managers.iter().enumerate() {
                 if skip == Some(idx) {
                     all_sigs.push(Vec::new());
                     continue;
                 }
-                let mgr = mgr_lock.read().unwrap();
-                let presig = mgr
-                    .batches
-                    .iter()
-                    .find(|b| b.contains(global_presig_index))
-                    .and_then(|b| {
-                        let pos = (global_presig_index - b.start_index) as usize;
-                        b.pool.get(pos).and_then(|s| s.clone())
-                    })
-                    .unwrap();
+                let presig = {
+                    let state = mgr.state.read().unwrap();
+                    state
+                        .batches
+                        .iter()
+                        .find(|b| b.contains(global_presig_index))
+                        .and_then(|b| {
+                            let pos = (global_presig_index - b.start_index) as usize;
+                            b.pool.get(pos).and_then(|s| s.clone())
+                        })
+                        .unwrap()
+                };
                 let (pn, sigs) = generate_partial_signatures(
                     message,
                     presig,
                     beacon_value,
-                    &mgr.key_shares,
-                    &mgr.verifying_key,
+                    &mgr.config.key_shares,
+                    &mgr.config.verifying_key,
                     None,
                 )
                 .unwrap();
-                drop(mgr);
-                let mut mgr = mgr_lock.write().unwrap();
-                mgr.partial_signing_outputs.insert(
+                mgr.state.write().unwrap().partial_signing_outputs.insert(
                     request_id,
                     PartialSigningOutput {
                         public_nonce: pn,
@@ -882,9 +899,9 @@ mod tests {
 
         /// Exhaust all presignatures on all managers by taking every slot.
         fn exhaust_pool(&self) {
-            for mgr_lock in &self.managers {
-                let mut mgr = mgr_lock.write().unwrap();
-                for batch in &mut mgr.batches {
+            for mgr in &self.managers {
+                let mut state = mgr.state.write().unwrap();
+                for batch in &mut state.batches {
                     for slot in &mut batch.pool {
                         slot.take();
                     }
@@ -914,7 +931,7 @@ mod tests {
                     (public_keys, nonce_shares)
                 })
                 .collect();
-            for (i, mgr_lock) in self.managers.iter().enumerate() {
+            for (i, mgr) in self.managers.iter().enumerate() {
                 let index = ShareIndex::new(i as u16 + 1).unwrap();
                 let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
                     .map(|j| batch_avss::ReceiverOutput {
@@ -932,7 +949,7 @@ mod tests {
                     .collect();
                 let presignatures =
                     Presignatures::new(outputs, batch_size_per_weight, self.f as usize).unwrap();
-                mgr_lock.write().unwrap().set_next_batch(presignatures);
+                mgr.set_next_batch(presignatures);
             }
         }
 
@@ -941,17 +958,17 @@ mod tests {
         /// `prepare_all` calls `generate_partial_signatures` directly (not
         /// `sign()`), so it doesn't trigger the batch-advance logic.
         fn advance_peers_to_next_batch(&self, caller_index: usize) {
-            for (i, mgr_lock) in self.managers.iter().enumerate() {
+            for (i, mgr) in self.managers.iter().enumerate() {
                 if i == caller_index {
                     continue;
                 }
-                let mut mgr = mgr_lock.write().unwrap();
-                let latest = mgr.batches.last().unwrap();
+                let mut state = mgr.state.write().unwrap();
+                let latest = state.batches.last().unwrap();
                 let next_start = latest.end_index();
                 let next_batch_index = latest.batch_index + 1;
-                let next = mgr.next_batch.take().unwrap();
+                let next = state.next_batch.take().unwrap();
                 let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
-                mgr.batches.push(PresigBatch {
+                state.batches.push(PresigBatch {
                     pool,
                     start_index: next_start,
                     batch_index: next_batch_index,
@@ -1062,8 +1079,7 @@ mod tests {
 
         setup.prepare_all(message, &beacon, req_id, 0, None);
 
-        let mgr = setup.managers[0].read().unwrap();
-        let resp = mgr
+        let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
                 sui_request_id: req_id,
             })
@@ -1074,10 +1090,10 @@ mod tests {
     #[test]
     fn test_handle_get_partial_signatures_not_found() {
         let setup = SigningTestSetup::new(4);
-        let mgr = setup.managers[0].read().unwrap();
-        let result = mgr.handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
-            sui_request_id: test_request_id(),
-        });
+        let result =
+            setup.managers[0].handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
+                sui_request_id: test_request_id(),
+            });
         assert!(matches!(result, Err(SigningError::NotFound(_))));
     }
 
@@ -1119,20 +1135,21 @@ mod tests {
 
         // Only peers 1 and 2 prepare partial sigs.
         for i in [1, 2] {
-            let mgr = setup.managers[i].read().unwrap();
-            let presig = mgr.batches[0].pool[0].clone().unwrap();
+            let mgr = &setup.managers[i];
+            let presig = {
+                let state = mgr.state.read().unwrap();
+                state.batches[0].pool[0].clone().unwrap()
+            };
             let (pn, sigs) = generate_partial_signatures(
                 message,
                 presig,
                 &beacon,
-                &mgr.key_shares,
-                &mgr.verifying_key,
+                &mgr.config.key_shares,
+                &mgr.config.verifying_key,
                 None,
             )
             .unwrap();
-            drop(mgr);
-            let mut mgr = setup.managers[i].write().unwrap();
-            mgr.partial_signing_outputs.insert(
+            mgr.state.write().unwrap().partial_signing_outputs.insert(
                 req_id,
                 PartialSigningOutput {
                     public_nonce: pn,
@@ -1338,7 +1355,7 @@ mod tests {
     async fn test_sign_pool_exhausted_with_next_batch() {
         // Exhaust batch 0, set next_batch, verify sign() advances to batch 1.
         let setup = SigningTestSetup::new(4);
-        let batch_size = setup.managers[0].read().unwrap().initial_presig_count() as u64;
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
         setup.exhaust_pool();
         setup.set_next_batch_on_all();
         setup.advance_peers_to_next_batch(0);
@@ -1361,9 +1378,8 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&setup.verifying_key, b"swap", &sig);
-        let mgr = setup.managers[0].read().unwrap();
-        assert_eq!(mgr.batch_index(), 1);
-        assert!(!mgr.has_next_batch());
+        assert_eq!(setup.managers[0].batch_index(), 1);
+        assert!(!setup.managers[0].has_next_batch());
     }
 
     #[tokio::test]
@@ -1391,7 +1407,7 @@ mod tests {
     #[tokio::test]
     async fn test_pool_miss_triggers_refill_signal() {
         let mut setup = SigningTestSetup::new(4);
-        let pool_size = setup.managers[0].read().unwrap().initial_presig_count() as u64;
+        let pool_size = setup.managers[0].initial_presig_count() as u64;
 
         // Mark the refill_rx as seen so we can detect the next change.
         setup.refill_rx.borrow_and_update();
@@ -1422,28 +1438,29 @@ mod tests {
     fn test_refill_threshold_triggers_signal() {
         // Consuming past 50% threshold sends refill signal via watch channel.
         let setup = SigningTestSetup::new(4);
-        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
+        let pool_size = setup.managers[0].initial_presig_count();
         let refill_at = pool_size / crate::constants::PRESIG_REFILL_DIVISOR;
         let beacon = S::zero();
 
         // Consume presignatures on manager 0 until we cross the threshold.
         for i in 0..(pool_size - refill_at) {
-            let mut mgr = setup.managers[0].write().unwrap();
-            let batch = mgr.batches.last_mut().unwrap();
+            let mgr = &setup.managers[0];
+            let mut state = mgr.state.write().unwrap();
+            let batch = state.batches.last_mut().unwrap();
             let presig = batch.pool[i].take().unwrap();
             let _ = generate_partial_signatures(
                 b"msg",
                 presig,
                 &beacon,
-                &mgr.key_shares,
-                &mgr.verifying_key,
+                &mgr.config.key_shares,
+                &mgr.config.verifying_key,
                 None,
             )
             .unwrap();
             // Simulate the threshold check that sign() does.
-            let latest = mgr.batches.last().unwrap();
+            let latest = state.batches.last().unwrap();
             let remaining = latest.remaining();
-            let threshold = latest.pool.len() / mgr.refill_divisor;
+            let threshold = latest.pool.len() / mgr.config.refill_divisor;
             if remaining <= threshold {
                 let _ = mgr.refill_tx.send(latest.batch_index + 1);
             }
@@ -1480,7 +1497,7 @@ mod tests {
     #[tokio::test]
     async fn test_sign_prunes_batch_then_pool_exhausted() {
         let setup = SigningTestSetup::new(4);
-        let pool_size = setup.managers[0].read().unwrap().initial_presig_count();
+        let pool_size = setup.managers[0].initial_presig_count();
         let beacon = S::zero();
         let p2p = setup.mock_p2p_for(0);
 
@@ -1504,11 +1521,12 @@ mod tests {
 
         // The last batch is always retained (as an anchor for computing the
         // next batch's start index), but all its presigs should be consumed.
-        {
-            let mgr = setup.managers[0].read().unwrap();
-            assert_eq!(mgr.batches.len(), 1, "last batch should be retained");
-            assert_eq!(mgr.presignatures_remaining(), 0);
-        }
+        assert_eq!(
+            setup.managers[0].state.read().unwrap().batches.len(),
+            1,
+            "last batch should be retained"
+        );
+        assert_eq!(setup.managers[0].presignatures_remaining(), 0);
 
         // The next sign should return PoolExhausted, not panic.
         let result = SigningManager::sign(
@@ -1536,13 +1554,13 @@ mod tests {
         setup.set_next_batch_on_all();
         setup.advance_peers_to_next_batch(0);
         {
-            let mut mgr = setup.managers[0].write().unwrap();
-            let latest = mgr.batches.last().unwrap();
+            let mut state = setup.managers[0].state.write().unwrap();
+            let latest = state.batches.last().unwrap();
             let next_start = latest.end_index();
             let next_batch_index = latest.batch_index + 1;
-            let next = mgr.next_batch.take().unwrap();
+            let next = state.next_batch.take().unwrap();
             let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
-            mgr.batches.push(PresigBatch {
+            state.batches.push(PresigBatch {
                 pool,
                 start_index: next_start,
                 batch_index: next_batch_index,
@@ -1615,7 +1633,7 @@ mod tests {
     #[tokio::test]
     async fn test_sign_batch_too_far_ahead() {
         let setup = SigningTestSetup::new(4);
-        let batch_size = setup.managers[0].read().unwrap().initial_presig_count() as u64;
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
 
         // Target index maps to batch 2, but manager is on batch 0 with no next_batch.
         let p2p = setup.mock_p2p_for(0);
@@ -1642,7 +1660,7 @@ mod tests {
         let req_id = test_request_id();
 
         // Record presig pool size before first sign.
-        let pool_before = setup.managers[0].read().unwrap().presignatures_remaining();
+        let pool_before = setup.managers[0].presignatures_remaining();
 
         // First sign — consumes one presig, caches partial sigs.
         setup.prepare_all(message, &beacon, req_id, 0, Some(0));
@@ -1660,7 +1678,7 @@ mod tests {
         .await
         .unwrap();
 
-        let pool_after_first = setup.managers[0].read().unwrap().presignatures_remaining();
+        let pool_after_first = setup.managers[0].presignatures_remaining();
         assert_eq!(
             pool_after_first,
             pool_before - 1,
@@ -1681,7 +1699,7 @@ mod tests {
         .await
         .unwrap();
 
-        let pool_after_second = setup.managers[0].read().unwrap().presignatures_remaining();
+        let pool_after_second = setup.managers[0].presignatures_remaining();
         assert_eq!(
             pool_after_second, pool_after_first,
             "retry should NOT consume another presig"
@@ -1706,7 +1724,7 @@ mod tests {
         let req1 = Address::new([0x10; 32]);
         let req2 = Address::new([0x20; 32]);
 
-        let pool_before = setup.managers[0].read().unwrap().presignatures_remaining();
+        let pool_before = setup.managers[0].presignatures_remaining();
 
         // First request.
         setup.prepare_all(b"msg1", &beacon, req1, 0, Some(0));
@@ -1739,7 +1757,7 @@ mod tests {
         .await
         .unwrap();
 
-        let pool_after = setup.managers[0].read().unwrap().presignatures_remaining();
+        let pool_after = setup.managers[0].presignatures_remaining();
         assert_eq!(
             pool_after,
             pool_before - 2,

@@ -1015,16 +1015,15 @@ impl LeaderService {
             let num_inputs = approval.selected_utxos.len() as u64;
             let num_consumed = inner.onchain_state().state().hashi().num_consumed_presigs;
             let needed_end = num_consumed + num_inputs;
-            if let Some(sm) = inner.try_signing_manager() {
-                let mgr = sm.read().unwrap();
-                let available_end = mgr.available_presig_end_index();
+            if let Some(signing_manager) = inner.current_signing_manager() {
+                let available_end = signing_manager.available_presig_end_index();
                 if needed_end > available_end {
                     info!(
                         "Presig pool may be insufficient for this withdrawal: \
                          need index {needed_end}, pool ends at {available_end}. \
                          Triggering proactive refill.",
                     );
-                    mgr.trigger_refill();
+                    signing_manager.trigger_refill();
                 }
             }
         }

@@ -367,7 +367,7 @@ impl MpcService {
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
-        self.inner.set_or_init_signing_manager(signing_manager);
+        self.inner.store_signing_manager(signing_manager);
         Ok(())
     }
 
@@ -431,7 +431,7 @@ impl MpcService {
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
-        self.inner.set_or_init_signing_manager(signing_manager);
+        self.inner.store_signing_manager(signing_manager);
         info!(
             "Recovered presigning state: batch_index={batch_index}, \
              batch_start={batch_start}, batch_size={batch_size} \
@@ -442,15 +442,15 @@ impl MpcService {
 
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
         let epoch = self.inner.onchain_state().epoch();
+        let signing_manager = self
+            .inner
+            .signing_manager_for(epoch)
+            .ok_or_else(|| anyhow::anyhow!("SigningManager not available for epoch {epoch}"))?;
         let (_, presignatures) = self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {
             return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
         }
-        let signing_manager = self.inner.signing_manager();
-        signing_manager
-            .write()
-            .unwrap()
-            .set_next_batch(presignatures);
+        signing_manager.set_next_batch(presignatures);
         Ok(())
     }
 

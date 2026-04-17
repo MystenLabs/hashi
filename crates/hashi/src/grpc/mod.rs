@@ -137,12 +137,15 @@ impl HttpService {
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 
-    pub fn signing_manager(
+    pub fn signing_manager_for(
         &self,
-    ) -> Result<Arc<std::sync::RwLock<crate::mpc::SigningManager>>, tonic::Status> {
-        self.inner
-            .try_signing_manager()
-            .ok_or_else(|| tonic::Status::unavailable("SigningManager not yet initialized"))
+        epoch: u64,
+    ) -> Result<Arc<crate::mpc::SigningManager>, tonic::Status> {
+        self.inner.signing_manager_for(epoch).ok_or_else(|| {
+            tonic::Status::unavailable(format!(
+                "SigningManager not available for epoch {epoch}; retry"
+            ))
+        })
     }
 
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {

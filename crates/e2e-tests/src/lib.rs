@@ -639,7 +639,7 @@ mod tests {
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
             );
-            node.hashi().set_signing_manager(signing_manager);
+            node.hashi().store_signing_manager(signing_manager);
         }
         vk
     }
@@ -658,23 +658,26 @@ mod tests {
         let sign_futures: Vec<_> = nodes
             .iter()
             .map(|node| {
-                let signing_manager = node.hashi().signing_manager();
+                let signing_manager = node
+                    .hashi()
+                    .signing_manager_for(epoch)
+                    .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
                 let onchain_state = node.hashi().onchain_state().clone();
                 let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(onchain_state, epoch);
                 let beacon = beacon_value;
                 let message = message.to_vec();
                 async move {
-                    hashi::mpc::SigningManager::sign(
-                        &signing_manager,
-                        &p2p_channel,
-                        sui_request_id,
-                        &message,
-                        global_presig_index,
-                        &beacon,
-                        None,
-                        SIGNING_TIMEOUT,
-                    )
-                    .await
+                    signing_manager
+                        .sign(
+                            &p2p_channel,
+                            sui_request_id,
+                            &message,
+                            global_presig_index,
+                            &beacon,
+                            None,
+                            SIGNING_TIMEOUT,
+                        )
+                        .await
                 }
             })
             .collect();
@@ -1472,8 +1475,11 @@ mod tests {
 
         let epoch = nodes[0].hashi().onchain_state().epoch();
 
-        let signing_manager = nodes[0].hashi().signing_manager();
-        let pool_size = signing_manager.read().unwrap().initial_presig_count();
+        let signing_manager = nodes[0]
+            .hashi()
+            .signing_manager_for(epoch)
+            .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
+        let pool_size = signing_manager.initial_presig_count();
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
         let num_signings = pool_size + 1;
@@ -1490,7 +1496,7 @@ mod tests {
             // complete before we exhaust the pool.
             if i == wait_at {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-                while !signing_manager.read().unwrap().has_next_batch() {
+                while !signing_manager.has_next_batch() {
                     assert!(
                         tokio::time::Instant::now() < deadline,
                         "Timed out waiting for presignature refill"
@@ -1500,7 +1506,7 @@ mod tests {
             }
         }
 
-        assert_eq!(signing_manager.read().unwrap().batch_index(), 1);
+        assert_eq!(signing_manager.batch_index(), 1);
         Ok(())
     }
 
