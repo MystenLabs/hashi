@@ -9,7 +9,7 @@ use tracing::info;
 // Only needed in enclave builds (for NSM hardware interaction).
 // The `non-enclave-dev` feature and `cfg(test)` both route to the stub below.
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
-use crate::GuardianError;
+use hashi_types::guardian::GuardianError;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use nsm_api::api::Request as NsmRequest;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]

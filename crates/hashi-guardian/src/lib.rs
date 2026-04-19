@@ -8,4 +8,22 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
 pub const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 pub const MAX_HEARTBEAT_FAILURES_INTERVAL: Duration = Duration::from_mins(5);
 
+pub mod enclave;
+pub mod getters;
+pub mod heartbeat;
+pub mod init;
+pub mod rpc;
 pub mod s3_logger; // used by the monitor
+pub mod setup;
+pub mod withdraw;
+
+#[cfg(test)]
+pub mod test_utils;
+
+// Re-exports so submodules can keep writing `use crate::Enclave;` /
+// `use crate::S3Logger;` and stay agnostic to the exact layout.
+pub use enclave::Enclave;
+pub use s3_logger::S3Logger;
+
+#[cfg(test)]
+pub use test_utils::{mock_logger, OperatorInitTestArgs};
