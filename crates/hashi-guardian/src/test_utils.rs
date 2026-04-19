@@ -157,10 +157,9 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let enclave = create_operator_initialized_enclave(
-        OperatorInitTestArgs::default().with_network(network),
-    )
-    .await;
+    let enclave =
+        create_operator_initialized_enclave(OperatorInitTestArgs::default().with_network(network))
+            .await;
 
     // Fresh enclave BTC keypair. In the real flow this would come from
     // combined shares; for tests any valid secp256k1 keypair works.
@@ -184,13 +183,9 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         .set_withdrawal_config(withdrawal_config)
         .expect("fresh enclave should not have a withdrawal config set");
 
-    let init_state = ProvisionerInitState::new(
-        committee,
-        withdrawal_config,
-        limiter_state,
-        master_pubkey,
-    )
-    .expect("valid ProvisionerInitState");
+    let init_state =
+        ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)
+            .expect("valid ProvisionerInitState");
     enclave
         .state
         .init(init_state)

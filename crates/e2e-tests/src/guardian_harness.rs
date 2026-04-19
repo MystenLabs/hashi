@@ -21,10 +21,10 @@
 use anyhow::Context;
 use anyhow::Result;
 use bitcoin::Network;
-use hashi_guardian::create_operator_initialized_enclave;
-use hashi_guardian::rpc::GuardianGrpc;
 use hashi_guardian::Enclave;
 use hashi_guardian::OperatorInitTestArgs;
+use hashi_guardian::create_operator_initialized_enclave;
+use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::LimiterState;
@@ -115,8 +115,7 @@ impl GuardianHarness {
         rand::thread_rng().fill_bytes(&mut sk_bytes);
         let enclave_btc_keypair = Keypair::from_secret_key(
             &secp,
-            &SecretKey::from_slice(&sk_bytes)
-                .expect("random bytes form a valid secp256k1 key"),
+            &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
         );
         self.enclave
             .config
@@ -131,13 +130,9 @@ impl GuardianHarness {
             .set_withdrawal_config(withdrawal_config)
             .context("set withdrawal config")?;
 
-        let init_state = ProvisionerInitState::new(
-            committee,
-            withdrawal_config,
-            limiter_state,
-            master_pubkey,
-        )
-        .context("valid ProvisionerInitState")?;
+        let init_state =
+            ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)
+                .context("valid ProvisionerInitState")?;
         self.enclave
             .state
             .init(init_state)

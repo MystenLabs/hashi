@@ -101,9 +101,9 @@ pub struct TestNetworksBuilder {
     /// returns. Each entry is run through the full propose/vote/execute flow.
     onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
     /// If set, spin up an in-process `GuardianHarness`, configure every
-    /// hashi node with its endpoint, and finalize it with the committee
-    /// + BTC master pubkey once DKG completes. When `build()` returns,
-    /// the guardian is fully initialized.
+    /// hashi node with its endpoint, and finalize it with the committee +
+    /// BTC master pubkey once DKG completes. When `build()` returns, the
+    /// guardian is fully initialized.
     with_guardian: bool,
 }
 

@@ -26,7 +26,12 @@ pub use enclave::Enclave;
 pub use s3_logger::S3Logger;
 
 #[cfg(any(test, feature = "test-utils"))]
-pub use test_utils::{
-    create_fully_initialized_enclave, create_operator_initialized_enclave, mock_logger,
-    FullyInitializedArgs, OperatorInitTestArgs,
-};
+pub use test_utils::create_fully_initialized_enclave;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::create_operator_initialized_enclave;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::mock_logger;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::FullyInitializedArgs;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::OperatorInitTestArgs;

@@ -415,9 +415,7 @@ impl Hashi {
                 }
             }
         } else {
-            tracing::info!(
-                "No guardian endpoint configured; guardian integration disabled"
-            );
+            tracing::info!("No guardian endpoint configured; guardian integration disabled");
             None
         };
 
