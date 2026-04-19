@@ -27,6 +27,11 @@ aws-config = "1.1.7"
 aws-sdk-s3 = "1.12.0"
 aws-credential-types = "1"
 
+# Optional: pulled in by the `test-utils` feature so external crates
+# (e.g. e2e-tests) can construct enclaves via the mock S3 helpers.
+# Unit tests inside this crate get the same deps from dev-dependencies.
+aws-smithy-mocks = { version = "0.1", optional = true }
+
 [dev-dependencies]
 aws-sdk-s3 = { version = "1.12.0", features = ["test-util"] }
 aws-smithy-mocks = "0.1"
@@ -35,3 +40,8 @@ aws-smithy-mocks = "0.1"
 # Stubs out the AWS Nitro NSM attestation call so the guardian can run outside
 # a Nitro enclave (local dev, plain Kubernetes). Do not enable for prod builds.
 non-enclave-dev = []
+# Exposes `hashi_guardian::test_utils` (mock S3 logger, enclave factories)
+# to external crates. Internal unit tests use the same helpers via
+# `#[cfg(test)]`, so there's no reason to enable this for `cargo test`
+# of this crate directly.
+test-utils = ["dep:aws-smithy-mocks", "aws-sdk-s3/test-util"]

@@ -17,7 +17,7 @@ pub mod s3_logger; // used by the monitor
 pub mod setup;
 pub mod withdraw;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 // Re-exports so submodules can keep writing `use crate::Enclave;` /
@@ -25,5 +25,8 @@ pub mod test_utils;
 pub use enclave::Enclave;
 pub use s3_logger::S3Logger;
 
-#[cfg(test)]
-pub use test_utils::{mock_logger, OperatorInitTestArgs};
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::{
+    create_fully_initialized_enclave, create_operator_initialized_enclave, mock_logger,
+    FullyInitializedArgs, OperatorInitTestArgs,
+};

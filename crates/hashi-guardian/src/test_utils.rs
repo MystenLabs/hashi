@@ -3,15 +3,22 @@
 
 //! Shared test helpers for constructing enclaves at various init stages.
 //!
-//! Commit 1 keeps these gated on `#[cfg(test)]` so the internal unit tests
-//! keep working after the refactor. Commit 2 widens the gate to
-//! `#[cfg(any(test, feature = "test-utils"))]` so external crates
-//! (integration tests, harnesses) can reuse the same helpers.
+//! Gated on `#[cfg(any(test, feature = "test-utils"))]` at the module
+//! declaration in `lib.rs`:
+//!   - `cargo test -p hashi-guardian` picks these up automatically via
+//!     the `test` cfg.
+//!   - External crates (e.g. `e2e-tests`) pull in the `test-utils` cargo
+//!     feature to get the same helpers over real gRPC without having to
+//!     re-roll the mock S3 plumbing.
 
 use crate::enclave::Enclave;
 use crate::s3_logger::S3Logger;
+use bitcoin::secp256k1::Keypair;
+use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1::SecretKey;
 use bitcoin::Network;
 use hashi_types::guardian::*;
+use rand::RngCore;
 use std::sync::Arc;
 
 /// Mock S3 logger for use in API calls post operator_init,
@@ -110,4 +117,91 @@ impl Enclave {
 
         enclave
     }
+}
+
+/// Free-function alias exposed for external crates (the test harness in
+/// `e2e-tests` wants to construct an operator-init'd enclave without
+/// depending on inherent methods on `Enclave`).
+pub async fn create_operator_initialized_enclave(args: OperatorInitTestArgs) -> Arc<Enclave> {
+    Enclave::create_operator_initialized_with(args).await
+}
+
+/// Inputs needed to complete provisioner-init without running the real
+/// share crypto. Lets an integration test drive the enclave into a
+/// fully-initialized state given a committee + master pubkey that
+/// materialized somewhere else (e.g. hashi's on-chain DKG output).
+pub struct FullyInitializedArgs {
+    pub network: Network,
+    pub committee: HashiCommittee,
+    /// The hashi MPC BTC master pubkey. In prod this arrives via
+    /// `ProvisionerInitState`; the harness reads it from on-chain state.
+    pub master_pubkey: BitcoinPubkey,
+    pub withdrawal_config: WithdrawalConfig,
+    pub limiter_state: LimiterState,
+}
+
+/// Construct an enclave that is fully initialized — same end state as
+/// running `operator_init` then `THRESHOLD` `provisioner_init` calls,
+/// but without the share encryption / decryption round-trip.
+///
+/// The enclave gets a freshly-generated BTC keypair (the 2-of-2 taproot
+/// wiring would normally derive this from combined shares). That is
+/// sufficient for rate-limiter-focused integration tests, which do not
+/// currently validate the enclave's BTC witness on-chain.
+pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc<Enclave> {
+    let FullyInitializedArgs {
+        network,
+        committee,
+        master_pubkey,
+        withdrawal_config,
+        limiter_state,
+    } = args;
+
+    let enclave = create_operator_initialized_enclave(
+        OperatorInitTestArgs::default().with_network(network),
+    )
+    .await;
+
+    // Fresh enclave BTC keypair. In the real flow this would come from
+    // combined shares; for tests any valid secp256k1 keypair works.
+    let secp = Secp256k1::new();
+    let mut sk_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut sk_bytes);
+    let enclave_btc_keypair = Keypair::from_secret_key(
+        &secp,
+        &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
+    );
+    enclave
+        .config
+        .set_btc_keypair(enclave_btc_keypair)
+        .expect("fresh enclave should not have a btc keypair set");
+    enclave
+        .config
+        .set_hashi_btc_pk(master_pubkey)
+        .expect("fresh enclave should not have a master pubkey set");
+    enclave
+        .config
+        .set_withdrawal_config(withdrawal_config)
+        .expect("fresh enclave should not have a withdrawal config set");
+
+    let init_state = ProvisionerInitState::new(
+        committee,
+        withdrawal_config,
+        limiter_state,
+        master_pubkey,
+    )
+    .expect("valid ProvisionerInitState");
+    enclave
+        .state
+        .init(init_state)
+        .expect("provisioner state init should succeed on a fresh enclave");
+
+    enclave
+        .scratchpad
+        .provisioner_init_logging_complete
+        .set(())
+        .expect("provisioner_init_logging_complete should only be set once");
+
+    assert!(enclave.is_fully_initialized());
+    enclave
 }
