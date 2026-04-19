@@ -134,6 +134,14 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screener_endpoint: Option<String>,
 
+    /// URL of the `hashi-guardian` gRPC endpoint (e.g. `http://hashi-guardian:3000`).
+    /// When not set, the guardian integration is fully bypassed — hashi runs
+    /// identically to the pre-guardian baseline. Guardian RPC wrappers are
+    /// added incrementally by subsequent PRs in the stack; this crate just
+    /// holds a lazy gRPC channel for now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_endpoint: Option<String>,
+
     /// Maximum gRPC decoding message size in bytes.
     ///
     /// Defaults to 16 MiB if not specified. Tonic's built-in default is 4 MiB,
@@ -342,6 +350,10 @@ impl Config {
 
     pub fn screener_endpoint(&self) -> Option<&str> {
         self.screener_endpoint.as_deref()
+    }
+
+    pub fn guardian_endpoint(&self) -> Option<&str> {
+        self.guardian_endpoint.as_deref()
     }
 
     pub fn grpc_max_decoding_message_size(&self) -> usize {
